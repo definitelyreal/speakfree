@@ -35,13 +35,18 @@ class HotkeyManager {
     private func handleEvent(_ event: NSEvent) {
         if isModifierOnlyKey(keyCode) {
             guard event.type == .flagsChanged else { return }
-            let pressed = isModifierActive(event.modifierFlags)
-            if pressed && !modifierPressed {
-                modifierPressed = true
-                onKeyDown?()
-            } else if !pressed && modifierPressed {
+            guard event.keyCode == keyCode else { return }
+
+            if modifierPressed {
                 modifierPressed = false
                 onKeyUp?()
+            } else {
+                if requiredModifiers != 0 {
+                    let currentMods = UInt64(event.modifierFlags.rawValue) & 0x00FF0000
+                    guard currentMods & requiredModifiers == requiredModifiers else { return }
+                }
+                modifierPressed = true
+                onKeyDown?()
             }
         } else {
             guard event.keyCode == keyCode else { return }
@@ -54,17 +59,6 @@ class HotkeyManager {
             } else if event.type == .keyUp {
                 onKeyUp?()
             }
-        }
-    }
-
-    private func isModifierActive(_ flags: NSEvent.ModifierFlags) -> Bool {
-        switch keyCode {
-        case 54, 55: return flags.contains(.command)
-        case 56, 60: return flags.contains(.shift)
-        case 58, 61: return flags.contains(.option)
-        case 59, 62: return flags.contains(.control)
-        case 63: return flags.contains(.function)
-        default: return false
         }
     }
 

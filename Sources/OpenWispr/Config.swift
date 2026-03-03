@@ -25,13 +25,18 @@ struct Config: Codable {
     }
 
     static func load() -> Config {
-        guard let data = try? Data(contentsOf: configFile),
-              let config = try? JSONDecoder().decode(Config.self, from: data) else {
+        guard let data = try? Data(contentsOf: configFile) else {
             let config = Config.defaultConfig
             try? config.save()
             return config
         }
-        return config
+
+        do {
+            return try JSONDecoder().decode(Config.self, from: data)
+        } catch {
+            fputs("Warning: unable to parse \(configFile.path): \(error.localizedDescription)\n", stderr)
+            return Config.defaultConfig
+        }
     }
 
     func save() throws {
