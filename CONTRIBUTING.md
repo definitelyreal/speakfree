@@ -5,15 +5,18 @@ Thanks for your interest in contributing to open-wispr.
 ## Getting started
 
 1. Fork the repo and clone it
-2. Install dependencies:
+2. Run the dev script:
    ```bash
-   brew install whisper-cpp
+   bash scripts/dev.sh
    ```
-3. Build and run:
-   ```bash
-   swift build -c release
-   .build/release/open-wispr start
-   ```
+
+The dev script handles everything you need to build and run from source:
+
+1. **Configure** — prompts you to pick a Whisper model size (tiny through medium, English-only or multilingual), language, spoken punctuation, and hotkey. Press enter on any prompt to keep the current value from `~/.config/open-wispr/config.json`.
+2. **Clean up** — stops any running open-wispr instances and removes the Homebrew-installed version (if present) so it doesn't conflict with your local build. Installs `whisper-cpp` via Homebrew if needed.
+3. **Build** — runs `swift build -c release` from source.
+4. **Bundle** — packages the binary into a macOS app bundle (`OpenWispr.app`) and copies it to `~/Applications/` so macOS properly recognizes it for accessibility and microphone permissions.
+5. **Start** — launches the app directly so you can test immediately.
 
 ## Project structure
 
@@ -25,6 +28,7 @@ Sources/OpenWispr/
 ├── AudioRecorder.swift  # Microphone recording
 └── ...
 scripts/
+├── dev.sh               # Build & run from source
 ├── install.sh           # Guided installer
 ├── uninstall.sh         # Clean removal
 └── deploy.sh            # Release automation
@@ -34,7 +38,7 @@ scripts/
 
 1. Create a branch off `main`
 2. Make your changes
-3. Test locally with `swift build -c release && .build/release/open-wispr start`
+3. Test locally with `bash scripts/dev.sh`
 4. Open a pull request against `main`
 
 ## What to work on
