@@ -6,6 +6,7 @@ class StatusBarController: NSObject {
     private var animationFrame = 0
     private var animationFrames: [NSImage] = []
     private var downloadProgress: String?
+    private var copiedFeedback = false
 
     enum State {
         case idle
@@ -37,6 +38,12 @@ class StatusBarController: NSObject {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        copiedFeedback = true
+        buildMenu()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.copiedFeedback = false
+            self?.buildMenu()
+        }
     }
 
     func updateDownloadProgress(_ text: String?) {
@@ -88,9 +95,10 @@ class StatusBarController: NSObject {
         menu.addItem(NSMenuItem.separator())
 
         let lastText = (NSApplication.shared.delegate as? AppDelegate)?.lastTranscription
-        let copyItem = NSMenuItem(title: "Copy Last Dictation", action: lastText != nil ? #selector(copyLastTranscription) : nil, keyEquivalent: "")
+        let copyTitle = copiedFeedback ? "Copied!" : "Copy Last Dictation"
+        let copyItem = NSMenuItem(title: copyTitle, action: lastText != nil && !copiedFeedback ? #selector(copyLastTranscription) : nil, keyEquivalent: "")
         copyItem.target = self
-        if lastText == nil { copyItem.isEnabled = false }
+        if lastText == nil || copiedFeedback { copyItem.isEnabled = copiedFeedback }
         menu.addItem(copyItem)
 
         menu.addItem(NSMenuItem.separator())
