@@ -81,4 +81,4 @@ fi
 
 echo ""
 echo "==> Deployed ${TAG}"
-echo "Users can update with: brew update && brew upgrade open-wispr"
+echo "Users can update with: brew update && brew upgrade open-wispr && brew services restart open-wispr"
