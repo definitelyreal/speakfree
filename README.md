@@ -88,7 +88,7 @@ Click the menu bar icon to access **Copy Last Dictation** — recovers your most
 
 | | open-wispr | VoiceInk | Wispr Flow | Superwhisper | Apple Dictation |
 |---|---|---|---|---|---|
-| **Price** | **Free** | $39.99 | $10/mo | $249 | Free |
+| **Price** | **Free** | $39.99 | $15/mo | $8.49/mo | Free |
 | **Open source** | MIT | GPLv3 | No | No | No |
 | **100% on-device** | Yes | Yes | No | Yes | Partial |
 | **Push-to-talk** | Yes | Yes | Yes | Yes | No |
