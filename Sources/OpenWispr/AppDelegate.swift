@@ -133,12 +133,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let raw = try self.transcriber.transcribe(audioURL: audioURL)
                 let text = (self.config.spokenPunctuation?.value ?? false) ? TextPostProcessor.process(raw) : raw
                 DispatchQueue.main.async {
+                    self.statusBar.state = .idle
                     if !text.isEmpty {
                         self.lastTranscription = text
                         self.inserter.insert(text: text)
                         self.statusBar.buildMenu()
                     }
-                    self.statusBar.state = .idle
                 }
             } catch {
                 DispatchQueue.main.async {
