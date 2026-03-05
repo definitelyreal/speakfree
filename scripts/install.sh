@@ -133,7 +133,7 @@ fi
 step "Installing"
 
 start_spin "Tapping human37/open-wispr..."
-TAP_OUT=$(brew tap human37/open-wispr </dev/null 2>&1) || {
+TAP_OUT=$(brew tap human37/open-wispr --force </dev/null 2>&1) || {
     stop_spin
     fail "Failed to tap human37/open-wispr"
     info "$TAP_OUT"
@@ -141,11 +141,6 @@ TAP_OUT=$(brew tap human37/open-wispr </dev/null 2>&1) || {
 }
 stop_spin
 ok "Tapped ${DIM}human37/open-wispr${NC}"
-
-start_spin "Updating Homebrew..."
-brew update </dev/null >/dev/null 2>&1 || true
-stop_spin
-ok "Homebrew up to date"
 
 start_spin "Installing open-wispr..."
 brew install open-wispr </dev/null >/dev/null 2>&1 || true
