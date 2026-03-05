@@ -29,9 +29,9 @@ open-wispr is a lightweight macOS app that provides push-to-talk voice dictation
 
 ## Comparison to Alternatives
 
-| Feature | open-wispr | Whisper Flow | Superwhisper | MacWhisper |
+| Feature | open-wispr | Wispr Flow | Superwhisper | MacWhisper |
 |---|---|---|---|---|
-| Price | Free | $30 | $10/mo | $30+ |
+| Price | Free | $15/mo | $8.49/mo | $69 |
 | Open Source | Yes | No | No | No |
 | 100% Local | Yes | Yes | Yes | Yes |
 | Works in Any App | Yes | Yes | Yes | No (copy/paste) |
