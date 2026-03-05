@@ -94,6 +94,26 @@ printf "\n"
 printf "  ${BOLD}open-wispr${NC} ${DIM}— local voice dictation for macOS${NC}\n"
 printf "  ${DIM}────────────────────────────────────────────${NC}\n"
 
+# ── Prerequisites ────────────────────────────────────────────────────
+step "Checking prerequisites"
+
+if [[ "$(uname -m)" != "arm64" ]]; then
+    fail "Apple Silicon (M1 or later) is required."
+    die "open-wispr uses Metal GPU acceleration which is not available on Intel Macs."
+fi
+ok "Apple Silicon"
+
+if ! command -v brew &>/dev/null; then
+    fail "Homebrew is not installed."
+    printf "\n"
+    info "Install it by running:"
+    printf "\n"
+    printf "  ${BOLD}/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"${NC}\n"
+    printf "\n"
+    die "Then re-run this script."
+fi
+ok "Homebrew"
+
 # ── Step 1: Clean up ─────────────────────────────────────────────────
 if brew list open-wispr &>/dev/null || [ -d ~/Applications/OpenWispr.app ]; then
     step "Removing previous installation"
@@ -113,9 +133,12 @@ fi
 step "Installing"
 
 start_spin "Tapping human37/open-wispr..."
-if ! brew tap human37/open-wispr </dev/null >/dev/null 2>&1; then
-    die "Failed to tap. Check your internet connection."
-fi
+TAP_OUT=$(brew tap human37/open-wispr </dev/null 2>&1) || {
+    stop_spin
+    fail "Failed to tap human37/open-wispr"
+    info "$TAP_OUT"
+    die "Make sure git is installed."
+}
 stop_spin
 ok "Tapped ${DIM}human37/open-wispr${NC}"
 

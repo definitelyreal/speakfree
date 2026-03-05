@@ -53,11 +53,22 @@ Then restart: `brew services restart open-wispr`
 |---|---|---|
 | **hotkey** | `63` | Globe (`63`), Right Option (`61`), F5 (`96`), or any key code |
 | **modifiers** | `[]` | `"cmd"`, `"ctrl"`, `"shift"`, `"opt"` — combine for chords |
-| **modelSize** | `"base.en"` | `tiny.en` · `base.en` · `small.en` · `medium.en` (English-only) or `tiny` · `base` · `small` · `medium` (multilingual) |
+| **modelSize** | `"base.en"` | See model table below |
 | **language** | `"en"` | Any [ISO 639-1 code](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) — e.g. `it`, `fr`, `de`, `es` |
 | **spokenPunctuation** | `false` | Say "comma", "period", etc. to insert punctuation instead of auto-punctuation |
 
-> **Non-English languages:** Models ending in `.en` are English-only. To use another language, switch to the equivalent model without the `.en` suffix (e.g. `base.en` → `base`) and set the `language` field to your language code.
+### Models
+
+Larger models are more accurate but slower and use more memory. The default `base.en` is a good balance for most users.
+
+| Model | Size | Speed | Accuracy | Best for |
+|---|---|---|---|---|
+| `tiny.en` | 75 MB | Fastest | Lower | Quick notes, short phrases |
+| **`base.en`** | 142 MB | **Fast** | **Good** | **Most users (default)** |
+| `small.en` | 466 MB | Moderate | Better | Longer dictation, technical terms |
+| `medium.en` | 1.5 GB | Slower | Best | Maximum accuracy, complex speech |
+
+> **Non-English languages:** Models ending in `.en` are English-only. To use another language, switch to the equivalent model without the `.en` suffix (e.g. `base.en` → `base`) and set the `language` field to your language code. Multilingual models are slightly less accurate for English but support 99 languages.
 
 > **Modifier-only hotkeys:** Left and right modifier keys are matched by physical key. If you set `61` (`rightoption`), left Option (`58`) will not trigger it.
 
@@ -74,6 +85,8 @@ If the Globe key opens the emoji picker: **System Settings → Keyboard → "Pre
 | Transcribing | Wave dots |
 | Downloading model | Animated download arrow |
 | Waiting for permission | Lock |
+
+Click the menu bar icon to access **Copy Last Dictation** — recovers your most recent transcription if you dictated without a text field focused.
 
 ## Compare
 
