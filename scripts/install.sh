@@ -142,6 +142,11 @@ TAP_OUT=$(brew tap human37/open-wispr </dev/null 2>&1) || {
 stop_spin
 ok "Tapped ${DIM}human37/open-wispr${NC}"
 
+start_spin "Updating Homebrew..."
+brew update </dev/null >/dev/null 2>&1 || true
+stop_spin
+ok "Homebrew up to date"
+
 start_spin "Installing open-wispr..."
 brew install open-wispr </dev/null >/dev/null 2>&1 || true
 brew reinstall open-wispr </dev/null >/dev/null 2>&1 || true
