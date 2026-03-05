@@ -1,6 +1,6 @@
 import AppKit
 
-class StatusBarController {
+class StatusBarController: NSObject {
     private var statusItem: NSStatusItem
     private var animationTimer: Timer?
     private var animationFrame = 0
@@ -19,8 +19,9 @@ class StatusBarController {
         didSet { updateIcon() }
     }
 
-    init() {
+    override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
 
         if let button = statusItem.button {
             button.image = StatusBarController.drawLogo(active: false)
@@ -28,6 +29,14 @@ class StatusBarController {
         }
 
         buildMenu()
+    }
+
+    @objc private func copyLastTranscription() {
+        guard let delegate = NSApplication.shared.delegate as? AppDelegate,
+              let text = delegate.lastTranscription else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     func updateDownloadProgress(_ text: String?) {
@@ -75,6 +84,14 @@ class StatusBarController {
         let modelItem = NSMenuItem(title: "Model: \(config.modelSize)", action: nil, keyEquivalent: "")
         modelItem.isEnabled = false
         menu.addItem(modelItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let lastText = (NSApplication.shared.delegate as? AppDelegate)?.lastTranscription
+        let copyItem = NSMenuItem(title: "Copy Last Transcription", action: lastText != nil ? #selector(copyLastTranscription) : nil, keyEquivalent: "")
+        copyItem.target = self
+        if lastText == nil { copyItem.isEnabled = false }
+        menu.addItem(copyItem)
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
