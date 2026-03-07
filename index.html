@@ -887,7 +887,7 @@
     </details>
     <details class="faq-item">
       <summary>Does any audio or text leave my computer?</summary>
-      <p>No. Everything runs 100% on-device. By default (<code>maxRecordings</code> = 0): audio goes to a temp file, transcribed locally by Whisper, then deleted immediately. On startup, open-wispr also removes any previously retained recordings so privacy mode takes effect right away. Set <code>maxRecordings</code> to 1–100 to enable the Recent Recordings feature. There are zero network requests — no cloud, no accounts, no telemetry.</p>
+      <p>No. Everything runs 100% on-device. Audio goes to a temp file, transcribed locally by Whisper, then deleted immediately. There are zero network requests -- no cloud, no accounts, no telemetry. Optionally, you can configure open-wispr to store a number of past recordings locally via the <code>maxRecordings</code> setting. Those recordings stay private and on your machine, and we default to not storing anything.</p>
     </details>
     <details class="faq-item">
       <summary>How does this compare to VoiceInk, Whisper Flow, or Superwhisper?</summary>

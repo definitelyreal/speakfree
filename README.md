@@ -102,7 +102,7 @@ Click the menu bar icon to access **Copy Last Dictation** — recovers your most
 
 ## Privacy
 
-open-wispr is completely local. By default (`maxRecordings` = 0): audio is recorded to a temp file, transcribed by whisper.cpp on your CPU/GPU, and the file is deleted immediately. On startup, open-wispr also removes any previously retained recordings so privacy mode takes effect right away. Set `maxRecordings` to 1–100 to enable the Recent Recordings feature. No network requests are made except to download the Whisper model on first run. Uninstall removes all recordings.
+open-wispr is completely local. Audio is recorded to a temp file, transcribed by whisper.cpp on your CPU/GPU, and the temp file is deleted. No network requests are made except to download the Whisper model on first run. Optionally, you can configure open-wispr to store a number of past recordings locally via the `maxRecordings` setting. Those recordings stay private and on your machine, and we default to not storing anything.
 
 ## Build from source
 
