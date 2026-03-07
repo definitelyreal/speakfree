@@ -121,30 +121,32 @@ class StatusBarController: NSObject {
         if lastText == nil || copiedFeedback { copyItem.isEnabled = copiedFeedback }
         menu.addItem(copyItem)
 
-        let recordings = RecordingStore.listRecordings()
-        let reprocessItem = NSMenuItem(title: "Recent Recordings", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
+        if Config.effectiveMaxRecordings(config.maxRecordings) > 0 {
+            let recordings = RecordingStore.listRecordings()
+            let reprocessItem = NSMenuItem(title: "Recent Recordings", action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
 
-        if recordings.isEmpty {
-            let emptyItem = NSMenuItem(title: "No recordings", action: nil, keyEquivalent: "")
-            emptyItem.isEnabled = false
-            submenu.addItem(emptyItem)
-        } else {
-            for (index, recording) in recordings.enumerated() {
-                let dateStr = StatusBarController.displayDateFormatter.string(from: recording.date)
-                let label = "\(dateStr) (\(index + 1))"
-                let target = MenuItemTarget { [weak self] in
-                    self?.reprocessHandler?(recording.url)
+            if recordings.isEmpty {
+                let emptyItem = NSMenuItem(title: "No recordings", action: nil, keyEquivalent: "")
+                emptyItem.isEnabled = false
+                submenu.addItem(emptyItem)
+            } else {
+                for (index, recording) in recordings.enumerated() {
+                    let dateStr = StatusBarController.displayDateFormatter.string(from: recording.date)
+                    let label = "\(dateStr) (\(index + 1))"
+                    let target = MenuItemTarget { [weak self] in
+                        self?.reprocessHandler?(recording.url)
+                    }
+                    menuItemTargets.append(target)
+                    let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+                    item.target = target
+                    submenu.addItem(item)
                 }
-                menuItemTargets.append(target)
-                let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-                item.target = target
-                submenu.addItem(item)
             }
-        }
 
-        reprocessItem.submenu = submenu
-        menu.addItem(reprocessItem)
+            reprocessItem.submenu = submenu
+            menu.addItem(reprocessItem)
+        }
 
         menu.addItem(NSMenuItem.separator())
 
