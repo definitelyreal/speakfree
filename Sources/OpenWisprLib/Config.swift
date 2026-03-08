@@ -1,22 +1,22 @@
 import Foundation
 
-struct Config: Codable {
-    var hotkey: HotkeyConfig
-    var modelPath: String?
-    var modelSize: String
-    var language: String
-    var spokenPunctuation: FlexBool?
-    var maxRecordings: Int?
+public struct Config: Codable {
+    public var hotkey: HotkeyConfig
+    public var modelPath: String?
+    public var modelSize: String
+    public var language: String
+    public var spokenPunctuation: FlexBool?
+    public var maxRecordings: Int?
 
-    static let defaultMaxRecordings = 0
+    public static let defaultMaxRecordings = 0
 
-    static func effectiveMaxRecordings(_ value: Int?) -> Int {
+    public static func effectiveMaxRecordings(_ value: Int?) -> Int {
         let raw = value ?? Config.defaultMaxRecordings
         if raw == 0 { return 0 }
         return min(max(1, raw), 100)
     }
 
-    static let defaultConfig = Config(
+    public static let defaultConfig = Config(
         hotkey: HotkeyConfig(keyCode: 63, modifiers: []),
         modelPath: nil,
         modelSize: "base.en",
@@ -25,16 +25,16 @@ struct Config: Codable {
         maxRecordings: nil
     )
 
-    static var configDir: URL {
+    public static var configDir: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent(".config/open-wispr")
     }
 
-    static var configFile: URL {
+    public static var configFile: URL {
         configDir.appendingPathComponent("config.json")
     }
 
-    static func load() -> Config {
+    public static func load() -> Config {
         guard let data = try? Data(contentsOf: configFile) else {
             let config = Config.defaultConfig
             try? config.save()
@@ -49,7 +49,11 @@ struct Config: Codable {
         }
     }
 
-    func save() throws {
+    public static func decode(from data: Data) throws -> Config {
+        return try JSONDecoder().decode(Config.self, from: data)
+    }
+
+    public func save() throws {
         try FileManager.default.createDirectory(at: Config.configDir, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
@@ -58,12 +62,12 @@ struct Config: Codable {
     }
 }
 
-struct FlexBool: Codable {
-    let value: Bool
+public struct FlexBool: Codable {
+    public let value: Bool
 
-    init(_ value: Bool) { self.value = value }
+    public init(_ value: Bool) { self.value = value }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if let b = try? container.decode(Bool.self) {
             value = b
@@ -76,17 +80,22 @@ struct FlexBool: Codable {
         }
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(value)
     }
 }
 
-struct HotkeyConfig: Codable {
-    var keyCode: UInt16
-    var modifiers: [String]
+public struct HotkeyConfig: Codable {
+    public var keyCode: UInt16
+    public var modifiers: [String]
 
-    var modifierFlags: UInt64 {
+    public init(keyCode: UInt16, modifiers: [String]) {
+        self.keyCode = keyCode
+        self.modifiers = modifiers
+    }
+
+    public var modifierFlags: UInt64 {
         var flags: UInt64 = 0
         for mod in modifiers {
             switch mod.lowercased() {

@@ -1,6 +1,6 @@
 import AppKit
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+public class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBar: StatusBarController!
     var hotkeyManager: HotkeyManager?
     var recorder: AudioRecorder!
@@ -9,9 +9,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var config: Config!
     var isPressed = false
     var isReady = false
-    var lastTranscription: String?
+    public var lastTranscription: String?
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    public func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar = StatusBarController()
         recorder = AudioRecorder()
         inserter = TextInserter()
@@ -111,7 +111,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         print("Ready.")
     }
 
-    func reloadConfig() {
+    public func reloadConfig() {
         config = Config.load()
         transcriber = Transcriber(modelSize: config.modelSize, language: config.language)
         transcriber.spokenPunctuation = config.spokenPunctuation?.value ?? false
@@ -196,7 +196,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func reprocess(audioURL: URL) {
+    public func reprocess(audioURL: URL) {
         guard statusBar.state == .idle else { return }
 
         statusBar.state = .transcribing

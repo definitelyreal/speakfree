@@ -1,6 +1,6 @@
 import Foundation
 
-struct TextPostProcessor {
+public struct TextPostProcessor {
     private static let replacements: [(pattern: String, replacement: String)] = [
         ("\\bperiod\\b", "."),
         ("\\bfull stop\\b", "."),
@@ -24,7 +24,7 @@ struct TextPostProcessor {
         ("\\bnew paragraph\\b", "\n\n"),
     ]
 
-    static func process(_ text: String) -> String {
+    public static func process(_ text: String) -> String {
         var result = text
         for (pattern, replacement) in replacements {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }

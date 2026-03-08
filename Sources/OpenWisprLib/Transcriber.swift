@@ -1,16 +1,16 @@
 import Foundation
 
-class Transcriber {
+public class Transcriber {
     private let modelSize: String
     private let language: String
-    var spokenPunctuation: Bool = false
+    public var spokenPunctuation: Bool = false
 
-    init(modelSize: String = "base.en", language: String = "en") {
+    public init(modelSize: String = "base.en", language: String = "en") {
         self.modelSize = modelSize
         self.language = language
     }
 
-    func transcribe(audioURL: URL) throws -> String {
+    public func transcribe(audioURL: URL) throws -> String {
         guard let whisperPath = Transcriber.findWhisperBinary() else {
             throw TranscriberError.whisperNotFound
         }
@@ -61,7 +61,7 @@ class Transcriber {
         return output
     }
 
-    static func findWhisperBinary() -> String? {
+    public static func findWhisperBinary() -> String? {
         let candidates = [
             "/opt/homebrew/bin/whisper-cli",
             "/usr/local/bin/whisper-cli",
@@ -96,7 +96,7 @@ class Transcriber {
         return nil
     }
 
-    static func modelExists(modelSize: String) -> Bool {
+    public static func modelExists(modelSize: String) -> Bool {
         return findModel(modelSize: modelSize) != nil
     }
 

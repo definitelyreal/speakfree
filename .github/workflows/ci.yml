@@ -6,12 +6,6 @@ on:
 
 jobs:
   build:
-    if: >-
-      github.event.pull_request
-      && (
-        contains(join(github.event.pull_request.labels.*.name, ','), '') ||
-        true
-      )
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -31,3 +25,49 @@ jobs:
       - name: Build
         if: steps.filter.outputs.swift == 'true'
         run: swift build -c release
+
+  unit-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for Swift changes
+        id: filter
+        run: |
+          CHANGED=$(gh pr diff ${{ github.event.pull_request.number }} --name-only --repo ${{ github.repository }})
+          if echo "$CHANGED" | grep -qE '\.(swift)$|^Package\.swift$'; then
+            echo "swift=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "swift=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Unit tests
+        if: steps.filter.outputs.swift == 'true'
+        run: swift test
+
+  install-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: brew install shellcheck
+
+      - name: Install smoke test
+        run: bash scripts/test-install.sh
+
+  transcription-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install whisper-cpp
+        run: brew install whisper-cpp
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Transcription integration test
+        run: bash scripts/test-transcription.sh

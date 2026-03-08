@@ -57,7 +57,7 @@ Then restart: `brew services restart open-wispr`
 | **modelSize** | `"base.en"` | See model table below |
 | **language** | `"en"` | Any [ISO 639-1 code](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) — e.g. `it`, `fr`, `de`, `es` |
 | **spokenPunctuation** | `false` | Say "comma", "period", etc. to insert punctuation instead of auto-punctuation |
-| **maxRecordings** | `0` | Number of recent recordings to keep for reprocessing from the tray menu. Default `0` = privacy: temp file, deleted immediately, and any older retained recordings are removed when the app starts. Use 1–100 to enable the Recent Recordings feature. |
+| **maxRecordings** | `0` | Optionally store past recordings locally as `.wav` files for re-transcribing from the tray menu. `0` = nothing stored (default). Set 1-100 to keep that many recent recordings. |
 
 ### Models
 

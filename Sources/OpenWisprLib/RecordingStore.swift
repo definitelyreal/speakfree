@@ -1,23 +1,23 @@
 import Foundation
 
-struct Recording {
-    let url: URL
-    let date: Date
+public struct Recording {
+    public let url: URL
+    public let date: Date
 }
 
-class RecordingStore {
-    static let recordingsDir = Config.configDir.appendingPathComponent("recordings")
+public class RecordingStore {
+    public static var recordingsDir = Config.configDir.appendingPathComponent("recordings")
 
-    private static let filePrefix = "recording-"
-    private static let fileExtension = "wav"
-    private static let dateFormatter: DateFormatter = {
+    static let filePrefix = "recording-"
+    static let fileExtension = "wav"
+    static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd-HHmmss"
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
 
-    static func ensureDirectory() {
+    public static func ensureDirectory() {
         do {
             try FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
         } catch {
@@ -25,11 +25,11 @@ class RecordingStore {
         }
     }
 
-    static func tempRecordingURL() -> URL {
+    public static func tempRecordingURL() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("open-wispr-recording.wav")
     }
 
-    static func newRecordingURL() -> URL {
+    public static func newRecordingURL() -> URL {
         ensureDirectory()
         let timestamp = dateFormatter.string(from: Date())
         let unique = String(UUID().uuidString.prefix(8))
@@ -37,7 +37,7 @@ class RecordingStore {
         return recordingsDir.appendingPathComponent(filename)
     }
 
-    static func listRecordings() -> [Recording] {
+    public static func listRecordings() -> [Recording] {
         ensureDirectory()
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: recordingsDir, includingPropertiesForKeys: [.creationDateKey]) else {
@@ -56,7 +56,7 @@ class RecordingStore {
             .sorted { $0.date > $1.date }
     }
 
-    static func prune(maxCount: Int) {
+    public static func prune(maxCount: Int) {
         let recordings = listRecordings()
         guard recordings.count > maxCount else { return }
 
@@ -70,7 +70,7 @@ class RecordingStore {
         }
     }
 
-    static func deleteAllRecordings() {
+    public static func deleteAllRecordings() {
         for recording in listRecordings() {
             do {
                 try FileManager.default.removeItem(at: recording.url)

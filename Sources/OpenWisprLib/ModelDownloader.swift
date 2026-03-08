@@ -1,9 +1,9 @@
 import Foundation
 
-class ModelDownloader {
+public class ModelDownloader {
     static let baseURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 
-    static func download(modelSize: String) throws {
+    public static func download(modelSize: String) throws {
         let modelFileName = "ggml-\(modelSize).bin"
         let modelsDir = Config.configDir.appendingPathComponent("models")
         let destPath = modelsDir.appendingPathComponent(modelFileName)

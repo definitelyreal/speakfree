@@ -5,14 +5,24 @@ let package = Package(
     name: "open-wispr",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(
-            name: "open-wispr",
-            path: "Sources/OpenWispr",
+        .target(
+            name: "OpenWisprLib",
+            path: "Sources/OpenWisprLib",
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AppKit"),
             ]
+        ),
+        .executableTarget(
+            name: "open-wispr",
+            dependencies: ["OpenWisprLib"],
+            path: "Sources/OpenWispr"
+        ),
+        .testTarget(
+            name: "OpenWisprTests",
+            dependencies: ["OpenWisprLib"],
+            path: "Tests/OpenWisprTests"
         ),
     ]
 )

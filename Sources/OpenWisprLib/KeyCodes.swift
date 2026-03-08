@@ -1,7 +1,7 @@
 import Foundation
 
-struct KeyCodes {
-    static let nameToCode: [String: UInt16] = [
+public struct KeyCodes {
+    public static let nameToCode: [String: UInt16] = [
         "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
         "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
         "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22,
@@ -24,7 +24,7 @@ struct KeyCodes {
         "f13": 105, "f14": 107, "f15": 113,
     ]
 
-    static let codeToName: [UInt16: String] = {
+    public static let codeToName: [UInt16: String] = {
         var result: [UInt16: String] = [:]
         for (name, code) in nameToCode {
             if result[code] == nil {
@@ -34,7 +34,7 @@ struct KeyCodes {
         return result
     }()
 
-    static func parse(_ input: String) -> (keyCode: UInt16, modifiers: [String])? {
+    public static func parse(_ input: String) -> (keyCode: UInt16, modifiers: [String])? {
         let parts = input.lowercased().split(separator: "+").map { String($0).trimmingCharacters(in: .whitespaces) }
 
         guard let keyName = parts.last, let code = nameToCode[keyName] else {
@@ -45,7 +45,7 @@ struct KeyCodes {
         return (code, modifiers)
     }
 
-    static func describe(keyCode: UInt16, modifiers: [String]) -> String {
+    public static func describe(keyCode: UInt16, modifiers: [String]) -> String {
         let keyName = codeToName[keyCode] ?? "key(\(keyCode))"
         if modifiers.isEmpty {
             return keyName

@@ -862,7 +862,7 @@
     <tr>
       <td>maxRecordings</td>
       <td>0</td>
-      <td>Default 0 = privacy: temp file, deleted immediately, and any older retained recordings are removed when the app starts. Use 1–100 to keep recordings for reprocessing from the tray menu.</td>
+      <td>Optionally store past recordings locally as <code>.wav</code> files for re-transcribing from the tray menu. 0 = nothing stored (default). Set 1-100 to keep that many recent recordings.</td>
     </tr>
   </table>
   <p class="config-note">Edit <code>~/.config/open-wispr/config.json</code>, then restart: <code>brew services restart open-wispr</code></p>
