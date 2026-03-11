@@ -67,11 +67,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         if !AXIsProcessTrusted() {
             print("Accessibility: not granted")
-            if wasStale {
-                Permissions.openAccessibilitySettings()
-            } else {
-                Permissions.promptAccessibility()
-            }
+            Permissions.openAccessibilitySettings()
             print("Waiting for Accessibility permission...")
             while !AXIsProcessTrusted() {
                 Thread.sleep(forTimeInterval: 0.5)
