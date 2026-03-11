@@ -49,19 +49,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        Permissions.ensureMicrophone()
-
         if !AXIsProcessTrusted() {
             DispatchQueue.main.async {
                 self.statusBar.state = .waitingForPermission
                 self.statusBar.buildMenu()
             }
+        }
+
+        Permissions.ensureMicrophone()
+
+        if !AXIsProcessTrusted() {
             print("Accessibility: not granted")
             Permissions.promptAccessibility()
-            Permissions.openAccessibilitySettings()
             print("Waiting for Accessibility permission...")
             while !AXIsProcessTrusted() {
-                Thread.sleep(forTimeInterval: 2)
+                Thread.sleep(forTimeInterval: 0.5)
             }
             print("Accessibility: granted")
         } else {
