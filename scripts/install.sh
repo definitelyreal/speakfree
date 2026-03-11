@@ -89,6 +89,21 @@ die() {
     exit 1
 }
 
+# ── Parse arguments ──────────────────────────────────────────────────
+VERSION=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --version|-v)
+            VERSION="$2"
+            shift 2
+            ;;
+        *)
+            printf "Usage: install.sh [--version <version>]\n"
+            exit 1
+            ;;
+    esac
+done
+
 # ── Header ────────────────────────────────────────────────────────────
 printf "\n"
 printf "  ${BOLD}open-wispr${NC} ${DIM}— local voice dictation for macOS${NC}\n"
@@ -143,9 +158,21 @@ TAP_OUT=$(brew tap human37/open-wispr --force </dev/null 2>&1) || {
 stop_spin
 ok "Tapped ${DIM}human37/open-wispr${NC}"
 
-start_spin "Installing open-wispr..."
+TAP_DIR="$(brew --repository human37/open-wispr 2>/dev/null)"
+if [ -n "$VERSION" ]; then
+    FORMULA_COMMIT=$(git -C "$TAP_DIR" log --all --grep="v${VERSION}" --format=%H -1)
+    if [ -z "$FORMULA_COMMIT" ]; then
+        die "Version ${VERSION} not found in tap history"
+    fi
+    git -C "$TAP_DIR" checkout "$FORMULA_COMMIT" -- open-wispr.rb 2>/dev/null
+fi
+
+start_spin "Installing open-wispr${VERSION:+ v$VERSION}..."
 brew install open-wispr </dev/null >/dev/null 2>&1 || true
 brew reinstall open-wispr </dev/null >/dev/null 2>&1 || true
+if [ -n "$VERSION" ]; then
+    git -C "$TAP_DIR" checkout -- . 2>/dev/null || true
+fi
 stop_spin
 
 BREW_PREFIX="$(brew --prefix open-wispr 2>/dev/null)"
