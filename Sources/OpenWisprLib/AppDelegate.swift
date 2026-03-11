@@ -49,6 +49,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        if Permissions.isAccessibilityStale() {
+            print("Accessibility: stale permission detected, resetting...")
+            Permissions.resetAccessibility()
+        }
+
         if !AXIsProcessTrusted() {
             DispatchQueue.main.async {
                 self.statusBar.state = .waitingForPermission
