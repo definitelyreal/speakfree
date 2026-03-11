@@ -49,9 +49,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if Permissions.isAccessibilityStale() {
+        let wasStale = Permissions.isAccessibilityStale()
+        if wasStale {
             print("Accessibility: stale permission detected, resetting...")
             Permissions.resetAccessibility()
+            Thread.sleep(forTimeInterval: 1)
         }
 
         if !AXIsProcessTrusted() {
@@ -65,7 +67,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         if !AXIsProcessTrusted() {
             print("Accessibility: not granted")
-            Permissions.promptAccessibility()
+            if wasStale {
+                Permissions.openAccessibilitySettings()
+            } else {
+                Permissions.promptAccessibility()
+            }
             print("Waiting for Accessibility permission...")
             while !AXIsProcessTrusted() {
                 Thread.sleep(forTimeInterval: 0.5)
