@@ -14,10 +14,10 @@ TAP_DIR="/tmp/homebrew-open-wispr"
 
 echo "==> Deploying open-wispr ${TAG}"
 
-current=$(grep 'static let version' "${REPO_DIR}/Sources/OpenWispr/main.swift" | sed 's/.*"\(.*\)".*/\1/')
+current=$(grep 'static let version' "${REPO_DIR}/Sources/OpenWisprLib/Version.swift" | sed 's/.*"\(.*\)".*/\1/')
 if [ "$current" != "$VERSION" ]; then
-  echo "Error: main.swift version is ${current}, expected ${VERSION}"
-  echo "Update Sources/OpenWispr/main.swift first."
+  echo "Error: Version.swift version is ${current}, expected ${VERSION}"
+  echo "Update Sources/OpenWisprLib/Version.swift first."
   exit 1
 fi
 
