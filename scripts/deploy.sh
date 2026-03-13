@@ -54,7 +54,7 @@ NOTES=$(claude -p "You are writing release notes for open-wispr ${TAG}, a local 
 
 ${COMMITS}
 
-Write concise GitHub release notes in markdown. Use these sections only if relevant: ### What's New, ### Bug Fixes, ### Other Changes. Use bullet points. Don't include commit hashes. Keep it short and user-facing — skip internal/dev-only changes. End with a one-liner upgrade instruction: brew update && brew upgrade open-wispr")
+Write concise GitHub release notes in markdown. Use these sections only if relevant: ### What's New, ### Bug Fixes, ### Other Changes. Use bullet points. Don't include commit hashes. Keep it short and user-facing -- skip internal/dev-only changes. Always end with an ### Upgrade section containing a code block with: brew update && brew upgrade open-wispr && brew services restart open-wispr")
 
 echo "==> Creating GitHub Release..."
 gh release create "${TAG}" --repo human37/open-wispr --notes "${NOTES}"
