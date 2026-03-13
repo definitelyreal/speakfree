@@ -1,3 +1,3 @@
 public enum OpenWispr {
-    public static let version = "0.23.0"
+    public static let version = "0.24.0"
 }
