@@ -131,6 +131,8 @@ if brew list open-wispr &>/dev/null || [ -d ~/Applications/OpenWispr.app ]; then
     brew services stop open-wispr </dev/null >/dev/null 2>&1 || true
     brew uninstall --force open-wispr </dev/null >/dev/null 2>&1 || true
     brew untap human37/open-wispr </dev/null >/dev/null 2>&1 || true
+    tccutil reset Accessibility com.human37.open-wispr </dev/null >/dev/null 2>&1 || true
+    tccutil reset Microphone com.human37.open-wispr </dev/null >/dev/null 2>&1 || true
     rm -rf ~/Applications/OpenWispr.app
 
     stop_spin
