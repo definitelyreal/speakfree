@@ -11,16 +11,10 @@ NC='\033[0m'
 
 SPINNER_FRAMES=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
 SPIN_PID=""
-LOG=$(mktemp /tmp/open-wispr-install.XXXXXX)
-APP_PID=""
+LOG=/opt/homebrew/var/log/open-wispr.log
 
 cleanup() {
     stop_spin
-    if [ -n "$APP_PID" ]; then
-        kill "$APP_PID" 2>/dev/null
-        wait "$APP_PID" 2>/dev/null
-    fi
-    rm -f "$LOG"
 }
 trap cleanup EXIT
 
@@ -190,13 +184,13 @@ APP_BIN=~/Applications/OpenWispr.app/Contents/MacOS/open-wispr
 step "Setting up permissions"
 info "Starting app to request permissions...\n"
 
-"$APP_BIN" start </dev/null > "$LOG" 2>&1 &
-APP_PID=$!
+true > "$LOG" 2>/dev/null || true
+brew services start open-wispr </dev/null >/dev/null 2>&1 || true
 
-sleep 1
-if ! kill -0 "$APP_PID" 2>/dev/null; then
-    fail "App crashed on startup"
-    die "Check: $APP_BIN start"
+sleep 2
+if ! brew services list 2>/dev/null | grep -q "open-wispr.*started"; then
+    fail "Service failed to start"
+    die "Check: brew services start open-wispr"
 fi
 
 if ! wait_for_log "Microphone:" 30 "Requesting microphone access..."; then
@@ -244,22 +238,14 @@ if ! grep -q "Ready\." "$LOG" 2>/dev/null; then
     fi
 fi
 
-# ── Step 6: Switch to service ────────────────────────────────────────
-kill "$APP_PID" 2>/dev/null
-wait "$APP_PID" 2>/dev/null
-APP_PID=""
-
-step "Starting background service"
-start_spin "Starting..."
-brew services start open-wispr </dev/null >/dev/null 2>&1 || true
-stop_spin
-
-sleep 1
+# ── Step 6: Verify service ───────────────────────────────────────────
 if brew services list 2>/dev/null | grep -q "open-wispr.*started"; then
     ok "Running as background service"
 else
-    ok "Service registered"
-    info "If not running, start manually: brew services start open-wispr"
+    start_spin "Restarting service..."
+    brew services restart open-wispr </dev/null >/dev/null 2>&1 || true
+    stop_spin
+    ok "Service restarted"
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────
