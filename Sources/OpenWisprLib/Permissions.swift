@@ -48,7 +48,7 @@ struct Permissions {
 
         try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
         try? current.write(to: versionFile, atomically: true, encoding: .utf8)
-        return previous != nil
+        return true
     }
 
     static func openAccessibilitySettings() {
