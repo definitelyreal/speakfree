@@ -34,9 +34,21 @@ struct Permissions {
         process.waitUntilExit()
     }
 
-    static func isAccessibilityStale() -> Bool {
-        guard AXIsProcessTrusted() else { return false }
-        return CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) == nil
+    static func didUpgrade() -> Bool {
+        let configDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/open-wispr")
+        let versionFile = configDir.appendingPathComponent(".last-version")
+        let current = OpenWispr.version
+        let previous = try? String(contentsOf: versionFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if previous == current {
+            return false
+        }
+
+        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        try? current.write(to: versionFile, atomically: true, encoding: .utf8)
+        return previous != nil
     }
 
     static func openAccessibilitySettings() {

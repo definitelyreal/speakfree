@@ -49,8 +49,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if Permissions.isAccessibilityStale() {
-            print("Accessibility: stale permission detected, resetting...")
+        if Permissions.didUpgrade() {
+            print("Accessibility: upgrade detected, resetting permissions...")
             Permissions.resetAccessibility()
             Thread.sleep(forTimeInterval: 1)
         }
