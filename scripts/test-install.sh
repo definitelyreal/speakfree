@@ -97,8 +97,7 @@ rm -rf /tmp/OpenWisprTest.app
 if command -v shellcheck &>/dev/null; then
     echo ""
     echo "Shellcheck..."
-    SCRIPTS=(scripts/install.sh scripts/uninstall.sh scripts/deploy.sh scripts/dev.sh scripts/bundle-app.sh)
-    for script in "${SCRIPTS[@]}"; do
+    for script in scripts/*.sh; do
         if [ -f "$script" ]; then
             if shellcheck --severity=warning "$script" 2>&1; then
                 pass "shellcheck $script"

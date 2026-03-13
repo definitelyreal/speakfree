@@ -15,7 +15,7 @@
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/human37/open-wispr/main/scripts/install.sh | bash -s -- --version 0.14.0
+curl -fsSL https://raw.githubusercontent.com/human37/open-wispr/main/scripts/install.sh | bash
 ```
 
 The script handles everything: installs via Homebrew, walks you through granting permissions, downloads the Whisper model, and starts the service. You'll see live feedback as each step completes.
