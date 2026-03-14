@@ -165,7 +165,7 @@ start_spin "Installing open-wispr${VERSION:+ v$VERSION}..."
 brew install open-wispr </dev/null >/dev/null 2>&1 || true
 brew reinstall open-wispr </dev/null >/dev/null 2>&1 || true
 if [ -n "$VERSION" ]; then
-    git -C "$TAP_DIR" checkout -- . 2>/dev/null || true
+    git -C "$TAP_DIR" checkout main -- open-wispr.rb 2>/dev/null || true
 fi
 stop_spin
 
