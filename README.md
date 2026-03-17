@@ -104,6 +104,10 @@ Click the menu bar icon to access **Copy Last Dictation** — recovers your most
 
 open-wispr is completely local. Audio is recorded to a temp file, transcribed by whisper.cpp on your CPU/GPU, and the temp file is deleted. No network requests are made except to download the Whisper model on first run. Optionally, you can configure open-wispr to store a number of past recordings locally via the `maxRecordings` setting. Those recordings stay private and on your machine, and we default to not storing anything.
 
+## Roadmap
+
+See what's planned and in progress on the [public roadmap](https://github.com/users/human37/projects/2). Feature requests and ideas are welcome as [issues](https://github.com/human37/open-wispr/issues).
+
 ## Build from source
 
 ```bash

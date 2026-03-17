@@ -127,7 +127,7 @@ CI runs automatically on pull requests via GitHub Actions (`.github/workflows/ci
 
 ## What to work on
 
-Check the [open issues](https://github.com/human37/open-wispr/issues) for bugs and feature requests. If you want to work on something not listed, open an issue first to discuss it.
+Check the [open issues](https://github.com/human37/open-wispr/issues) for bugs and feature requests. The [roadmap](https://github.com/users/human37/projects/2) shows what's planned or in progress. If you want to work on something not listed, open an issue first to discuss it.
 
 ## Guidelines
 
