@@ -1,0 +1,15 @@
+name: Add to Roadmap
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  add-to-roadmap:
+    if: github.event.label.name == 'roadmap'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@v1
+        with:
+          project-url: https://github.com/users/human37/projects/2
+          github-token: ${{ secrets.PROJECT_TOKEN }}
