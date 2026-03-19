@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>speakfree</title>
+  <meta name="description" content="local whisper, private text to speech" />
+  <meta property="og:title" content="speakfree" />
+  <meta property="og:description" content="local whisper, private text to speech" />
+  <meta property="og:image" content="logo.png" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0c0c0e;
+      --surface: #141418;
+      --border: rgba(255,255,255,0.07);
+      --text: #f0f0f2;
+      --muted: rgba(240,240,242,0.45);
+      --accent: #9b6dff;
+      --accent-dim: rgba(155,109,255,0.15);
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      font-size: 17px;
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 80px 24px 64px;
+      gap: 0;
+    }
+
+    .logo {
+      width: 110px;
+      height: 110px;
+      border-radius: 26px;
+      margin-bottom: 36px;
+      box-shadow: 0 8px 40px rgba(155,109,255,0.25);
+    }
+
+    .wordmark {
+      font-size: clamp(52px, 10vw, 88px);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1;
+      color: #fff;
+      margin-bottom: 16px;
+    }
+
+    .slogan {
+      font-size: clamp(16px, 2.5vw, 20px);
+      color: var(--muted);
+      font-weight: 400;
+      letter-spacing: 0.01em;
+      margin-bottom: 44px;
+    }
+
+    .cta-row {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 13px 28px;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: opacity 0.15s, transform 0.15s;
+      white-space: nowrap;
+    }
+    .btn:hover { opacity: 0.85; transform: translateY(-1px); }
+    .btn:active { transform: translateY(0); opacity: 1; }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    /* ── How it works ── */
+    .steps {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0 24px 80px;
+      gap: 0;
+    }
+
+    .steps-inner {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: 720px;
+      width: 100%;
+    }
+
+    .step {
+      flex: 1;
+      min-width: 180px;
+      max-width: 220px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px 24px;
+      text-align: center;
+    }
+
+    .step-icon {
+      font-size: 32px;
+      margin-bottom: 12px;
+      display: block;
+    }
+
+    .step-label {
+      font-size: 15px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    /* ── Features ── */
+    .features {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0 24px 96px;
+    }
+
+    .features-inner {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+      max-width: 880px;
+      width: 100%;
+    }
+
+    .feature {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px 28px;
+    }
+
+    .feature-title {
+      font-size: 17px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+
+    .feature-body {
+      font-size: 15px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .feature-icon {
+      font-size: 28px;
+      margin-bottom: 14px;
+      display: block;
+    }
+
+    /* ── Divider ── */
+    .divider {
+      width: 100%;
+      max-width: 880px;
+      margin: 0 auto 64px;
+      border: none;
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── Footer ── */
+    footer {
+      text-align: center;
+      padding: 32px 24px;
+      color: var(--muted);
+      font-size: 14px;
+      border-top: 1px solid var(--border);
+    }
+
+    footer a { color: var(--muted); text-underline-offset: 3px; }
+    footer a:hover { color: var(--text); }
+
+    /* ── Noise texture overlay ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+      opacity: 0.022;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .hero, .steps, .features, footer { position: relative; z-index: 1; }
+  </style>
+</head>
+<body>
+
+  <section class="hero">
+    <img class="logo" src="logo.png" alt="speakfree logo" />
+    <h1 class="wordmark">speakfree</h1>
+    <p class="slogan">local whisper &nbsp;·&nbsp; private text to speech</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest">
+        ↓ &nbsp;Download for Mac
+      </a>
+      <a class="btn btn-secondary" href="https://github.com/definitelyreal/speakfree">
+        View source
+      </a>
+    </div>
+  </section>
+
+  <section class="steps">
+    <div class="steps-inner">
+      <div class="step">
+        <span class="step-icon">🎙️</span>
+        <div class="step-label">Hold the <strong>Globe key</strong></div>
+      </div>
+      <div class="step">
+        <span class="step-icon">💬</span>
+        <div class="step-label">Speak naturally</div>
+      </div>
+      <div class="step">
+        <span class="step-icon">⌨️</span>
+        <div class="step-label">Words appear at your cursor</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="features-inner">
+
+      <div class="feature">
+        <span class="feature-icon">🔒</span>
+        <div class="feature-title">Completely private</div>
+        <div class="feature-body">Audio is transcribed on your device using <a href="https://github.com/openai/whisper" style="color:inherit">Whisper</a> by OpenAI. Nothing leaves your Mac. No cloud, no account, no data collection — ever.</div>
+      </div>
+
+      <div class="feature">
+        <span class="feature-icon">⚡</span>
+        <div class="feature-title">Works anywhere</div>
+        <div class="feature-body">Dictate into any app — notes, email, Slack, code editors, documents. Wherever your cursor is, your words go.</div>
+      </div>
+
+      <div class="feature">
+        <span class="feature-icon">🍎</span>
+        <div class="feature-title">Native Mac app</div>
+        <div class="feature-body">Drag to Applications, right-click → Open. No terminal, no Homebrew, no configuration files. Whisper runs fully offline, included in the download.</div>
+      </div>
+
+      <div class="feature">
+        <span class="feature-icon">🆓</span>
+        <div class="feature-title">Free &amp; open source</div>
+        <div class="feature-body">speakfree is free forever, MIT licensed. Forked from <a href="https://github.com/human37/open-wispr" style="color:inherit">open-wispr</a> by human37.</div>
+      </div>
+
+    </div>
+  </section>
+
+  <footer>
+    <p>speakfree &nbsp;·&nbsp; <a href="https://github.com/definitelyreal/speakfree">github.com/definitelyreal/speakfree</a> &nbsp;·&nbsp; MIT License</p>
+    <p style="margin-top:6px">Forked from <a href="https://github.com/human37/open-wispr">open-wispr</a> by human37</p>
+  </footer>
+
+</body>
+</html>
