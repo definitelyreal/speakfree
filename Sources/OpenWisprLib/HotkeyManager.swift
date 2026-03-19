@@ -52,7 +52,11 @@ class HotkeyManager {
     // MARK: - CGEventTap (modifier keys — suppresses default system action)
 
     private func startEventTap() {
-        let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+        let mask = CGEventMask(
+            (1 << CGEventType.flagsChanged.rawValue) |
+            (1 << CGEventType.tapDisabledByTimeout.rawValue) |
+            (1 << CGEventType.tapDisabledByUserInput.rawValue)
+        )
 
         // passUnretained: Swift already holds a strong reference via the HotkeyManager ivar.
         // The tap callback doesn't outlive HotkeyManager because stop() disables it in deinit.
@@ -66,6 +70,13 @@ class HotkeyManager {
             callback: { proxy, type, event, userInfo -> Unmanaged<CGEvent>? in
                 guard let userInfo = userInfo else { return Unmanaged.passRetained(event) }
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(userInfo).takeUnretainedValue()
+                // macOS disables taps that stall — re-enable immediately when notified
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    if let tap = manager.eventTap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                    return nil
+                }
                 return manager.handleCGEvent(proxy: proxy, type: type, event: event)
             },
             userInfo: selfPtr.toOpaque()
