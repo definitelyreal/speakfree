@@ -6,7 +6,7 @@
   <title>speakfree — Private Dictation for Mac</title>
   <meta name="description" content="Local, private speech-to-text for macOS using OpenAI Whisper. No cloud, no account. Works in any app." />
   <meta property="og:title" content="speakfree" />
-  <meta property="og:description" content="local whisper · private speech to text" />
+  <meta property="og:description" content="private speech to text · free and open source" />
   <meta property="og:image" content="logo.png" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -35,7 +35,6 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    /* ── Glow (outside hero so it isn't clipped) ── */
     .page-glow {
       position: fixed;
       top: -100px;
@@ -77,10 +76,10 @@
     }
 
     .slogan {
-      font-size: clamp(16px, 2.4vw, 20px);
-      color: var(--muted);
+      font-size: clamp(13px, 1.8vw, 16px);
+      color: var(--dim);
       font-weight: 400;
-      letter-spacing: 0.01em;
+      letter-spacing: 0.02em;
       margin-bottom: 40px;
     }
 
@@ -101,16 +100,18 @@
 
     .btn {
       display: inline-flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      padding: 14px 30px;
+      gap: 2px;
+      padding: 12px 28px;
       border-radius: 12px;
       font-size: 16px;
       font-weight: 600;
       text-decoration: none;
       transition: opacity 0.15s, transform 0.12s;
       white-space: nowrap;
+      line-height: 1.2;
     }
     .btn:hover { opacity: 0.82; transform: translateY(-1px); }
     .btn:active { transform: translateY(0); opacity: 1; }
@@ -120,16 +121,27 @@
       color: #fff;
       box-shadow: 0 4px 28px rgba(140,90,255,0.4);
     }
+
+    .btn-sub {
+      display: block;
+      font-size: 11px;
+      font-weight: 400;
+      opacity: 0.7;
+      letter-spacing: 0.01em;
+    }
+
     .btn-secondary {
       background: var(--surface);
       color: var(--muted);
       border: 1px solid var(--border);
+      flex-direction: row;
+      gap: 6px;
     }
 
     .cta-meta {
-      font-size: 13px;
-      color: var(--dim);
-      letter-spacing: 0.01em;
+      font-size: 12px;
+      color: rgba(238,238,242,0.25);
+      letter-spacing: 0.04em;
     }
 
     /* ── Privacy callout ── */
@@ -140,19 +152,41 @@
       padding: 0 24px 80px;
     }
 
-    .privacy-callout p {
-      font-size: clamp(19px, 3vw, 27px);
+    .privacy-callout .main-line {
+      font-size: clamp(20px, 3.2vw, 28px);
       color: var(--muted);
-      max-width: 600px;
-      margin: 0 auto;
-      line-height: 1.5;
+      line-height: 1.4;
       font-weight: 400;
+      margin-bottom: 8px;
     }
 
-    .privacy-callout strong {
-      color: var(--text);
-      font-weight: 600;
+    .privacy-callout .main-line strong {
+      color: #fff;
+      font-weight: 700;
     }
+
+    .privacy-callout .sub-line {
+      font-size: clamp(15px, 2vw, 18px);
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .privacy-callout .no-line {
+      font-size: clamp(14px, 1.8vw, 16px);
+      color: var(--dim);
+      margin-bottom: 20px;
+    }
+
+    .privacy-callout .by-line {
+      font-size: 13px;
+      color: var(--dim);
+    }
+
+    .privacy-callout .by-line a {
+      color: var(--dim);
+      text-underline-offset: 3px;
+    }
+    .privacy-callout .by-line a:hover { color: var(--muted); }
 
     /* ── Steps ── */
     .steps {
@@ -166,26 +200,25 @@
     .steps-inner {
       display: flex;
       flex-direction: column;
-      gap: 32px;
+      gap: 28px;
       width: 100%;
-      max-width: 560px;
+      max-width: 520px;
     }
 
     .step {
       display: grid;
-      grid-template-columns: 52px 1fr;
+      grid-template-columns: 36px 1fr;
       align-items: start;
       gap: 0 16px;
     }
 
-    .step-icon {
-      font-size: 34px;
-      line-height: 1;
-      text-align: center;
-      padding-top: 2px;
+    .step-num {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--accent);
+      line-height: 1.3;
+      text-align: right;
     }
-
-    .step-text { }
 
     .step-label {
       font-size: 20px;
@@ -226,11 +259,7 @@
       padding: 30px 26px;
     }
 
-    .feature-icon {
-      font-size: 26px;
-      margin-bottom: 14px;
-      display: block;
-    }
+    .feature-icon { font-size: 26px; margin-bottom: 14px; display: block; }
 
     .feature-title {
       font-size: 17px;
@@ -265,9 +294,9 @@
 
     @media (max-width: 500px) {
       .logo { width: 200px; height: 200px; }
-      .step { grid-template-columns: 44px 1fr; }
-      .step-icon { font-size: 28px; }
-      .step-label { font-size: 18px; }
+      .step { grid-template-columns: 28px 1fr; }
+      .step-num { font-size: 17px; }
+      .step-label { font-size: 17px; }
     }
   </style>
 </head>
@@ -278,46 +307,50 @@
   <section class="hero">
     <img class="logo" src="logo.png" alt="speakfree" />
     <h1 class="wordmark">speakfree</h1>
-    <p class="slogan">local whisper &nbsp;·&nbsp; private speech to text</p>
+    <p class="slogan">private speech to text &nbsp;•&nbsp; free and open source</p>
     <div class="cta-wrap">
       <div class="cta-row">
         <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.0.5.zip">
           ↓&nbsp; Download for Mac
+          <span class="btn-sub">v1.0.5 &nbsp;•&nbsp; 2.2 MB</span>
         </a>
         <a class="btn btn-secondary" href="https://github.com/definitelyreal/speakfree">
-          Open source ↗
+          View on GitHub ↗
         </a>
       </div>
-      <p class="cta-meta">v1.0.5 &nbsp;·&nbsp; 2.2 MB &nbsp;·&nbsp; Free &nbsp;·&nbsp; macOS 13+</p>
+      <p class="cta-meta">macOS 13+ &nbsp;•&nbsp; Apple Silicon</p>
     </div>
   </section>
 
   <section class="privacy-callout">
-    <p>Audio <strong>never leaves your machine.</strong> No cloud, no account, no subscription — just Whisper running locally on your Mac.</p>
+    <p class="main-line">Audio <strong>never leaves your machine.</strong></p>
+    <p class="sub-line">Just OpenAI's Whisper running locally on your Mac.</p>
+    <p class="no-line">No cloud, no account, no subscription.</p>
+    <p class="by-line">By <a href="https://definitelyreal.com">Michael Morgenstern</a></p>
   </section>
 
   <section class="steps">
     <div class="steps-inner">
 
       <div class="step">
-        <span class="step-icon">🎙️</span>
-        <div class="step-text">
+        <span class="step-num">1.</span>
+        <div>
           <div class="step-label">Hold the Globe key</div>
           <div class="step-sub">Replaces the built-in macOS dictation shortcut</div>
         </div>
       </div>
 
       <div class="step">
-        <span class="step-icon">💬</span>
-        <div class="step-text">
+        <span class="step-num">2.</span>
+        <div>
           <div class="step-label">Speak naturally</div>
           <div class="step-sub">speakfree listens and transcribes in real time</div>
         </div>
       </div>
 
       <div class="step">
-        <span class="step-icon">⌨️</span>
-        <div class="step-text">
+        <span class="step-num">3.</span>
+        <div>
           <div class="step-label">Release — your words appear</div>
           <div class="step-sub">Text is typed at your cursor, in any app</div>
         </div>
