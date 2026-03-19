@@ -69,25 +69,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if Permissions.didUpgrade() {
-            print("Accessibility: upgrade detected, resetting permissions...")
-            Permissions.resetAccessibility()
-            Thread.sleep(forTimeInterval: 1)
-        }
+        Permissions.ensureMicrophone()
 
         if !AXIsProcessTrusted() {
+            print("Accessibility: not granted — prompting...")
             DispatchQueue.main.async {
                 self.statusBar.state = .waitingForPermission
                 self.statusBar.buildMenu()
             }
-        }
-
-        Permissions.ensureMicrophone()
-
-        if !AXIsProcessTrusted() {
-            print("Accessibility: not granted — clearing stale entry and re-prompting")
-            Permissions.resetAccessibility()
-            Thread.sleep(forTimeInterval: 0.5)
             Permissions.promptAccessibility()
             print("Waiting for Accessibility permission...")
             while !AXIsProcessTrusted() {
