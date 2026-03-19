@@ -20,7 +20,7 @@ class ModelPickerController: NSWindowController {
     override func loadWindow() {
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 330),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled],
             backing: .buffered,
             defer: false
         )
