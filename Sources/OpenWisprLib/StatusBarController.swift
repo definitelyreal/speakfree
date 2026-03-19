@@ -294,6 +294,11 @@ class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(settingsItem)
 
         menu.addItem(NSMenuItem.separator())
+        let helpTarget = MenuItemTarget { HelpController.show() }
+        menuItemTargets.append(helpTarget)
+        let helpItem = NSMenuItem(title: "Help", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+        helpItem.target = helpTarget
+        menu.addItem(helpItem)
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
         menu.delegate = self
