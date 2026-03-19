@@ -103,23 +103,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if !Transcriber.modelExists(modelSize: config.modelSize) {
-            // Show model picker on main thread; block background setup thread until user picks and downloads
-            let semaphore = DispatchSemaphore(value: 0)
-            var chosenModel = config.modelSize
-            DispatchQueue.main.async {
-                ModelPickerController.show { selected in
-                    var updated = Config.load()
-                    updated.modelSize = selected
-                    try? updated.save()
-                    chosenModel = selected
-                    semaphore.signal()
-                }
+            // Auto-download the default model silently — show progress in the menu bar
+            DispatchQueue.main.async { self.statusBar.state = .downloading }
+            do {
+                try ModelDownloader.download(modelSize: config.modelSize)
+            } catch {
+                print("Model download failed: \(error.localizedDescription)")
+                // Not fatal — user can try again via Settings
             }
-            semaphore.wait()
-            // Reload with the chosen model
-            config = Config.load()
-            transcriber = Transcriber(modelSize: config.modelSize, language: config.language)
-            transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
+            DispatchQueue.main.async { self.statusBar.state = .idle }
         }
 
         // Warm up the audio engine now so first recording starts instantly
