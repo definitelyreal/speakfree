@@ -1,7 +1,10 @@
 import AppKit
 import Foundation
+import CoreGraphics
 
 class HotkeyManager {
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
     private var globalMonitor: Any?
     private let keyCode: UInt16
     private let requiredModifiers: UInt64
@@ -18,47 +21,116 @@ class HotkeyManager {
         self.onKeyDown = onKeyDown
         self.onKeyUp = onKeyUp
 
-        let mask: NSEvent.EventTypeMask = [.keyDown, .keyUp, .flagsChanged]
-
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
-            self?.handleEvent(event)
+        // For modifier-only keys (like Fn), use a CGEventTap so we can suppress
+        // the default system action (e.g. the emoji drawer that Fn normally opens).
+        if isModifierOnlyKey(keyCode) {
+            startEventTap()
+        } else {
+            startGlobalMonitor()
         }
     }
 
     func stop() {
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            eventTap = nil
+        }
+        if let src = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
+            runLoopSource = nil
+        }
         if let monitor = globalMonitor {
             NSEvent.removeMonitor(monitor)
+            globalMonitor = nil
         }
-        globalMonitor = nil
     }
 
-    private func handleEvent(_ event: NSEvent) {
-        if isModifierOnlyKey(keyCode) {
-            guard event.type == .flagsChanged else { return }
-            guard event.keyCode == keyCode else { return }
+    deinit {
+        stop()
+    }
 
-            if modifierPressed {
-                modifierPressed = false
-                onKeyUp?()
-            } else {
-                if requiredModifiers != 0 {
-                    let currentMods = UInt64(event.modifierFlags.rawValue) & 0x00FF0000
-                    guard currentMods & requiredModifiers == requiredModifiers else { return }
-                }
-                modifierPressed = true
-                onKeyDown?()
-            }
-        } else {
-            guard event.keyCode == keyCode else { return }
+    // MARK: - CGEventTap (modifier keys — suppresses default system action)
+
+    private func startEventTap() {
+        let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+
+        // passUnretained: Swift already holds a strong reference via the HotkeyManager ivar.
+        // The tap callback doesn't outlive HotkeyManager because stop() disables it in deinit.
+        let selfPtr = Unmanaged.passUnretained(self)
+
+        let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { proxy, type, event, userInfo -> Unmanaged<CGEvent>? in
+                guard let userInfo = userInfo else { return Unmanaged.passRetained(event) }
+                let manager = Unmanaged<HotkeyManager>.fromOpaque(userInfo).takeUnretainedValue()
+                return manager.handleCGEvent(proxy: proxy, type: type, event: event)
+            },
+            userInfo: selfPtr.toOpaque()
+        )
+
+        guard let tap = tap else {
+            startGlobalMonitor()
+            return
+        }
+
+        eventTap = tap
+        let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        runLoopSource = src
+        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        guard type == .flagsChanged else { return Unmanaged.passRetained(event) }
+        guard event.getIntegerValueField(.keyboardEventKeycode) == Int64(keyCode) else {
+            return Unmanaged.passRetained(event)
+        }
+
+        let flags = event.flags
+        let fnDown = flags.contains(.maskSecondaryFn)
+
+        if fnDown && !modifierPressed {
+            // Check required modifiers if any
             if requiredModifiers != 0 {
-                let currentMods = UInt64(event.modifierFlags.rawValue) & 0x00FF0000
-                guard currentMods & requiredModifiers == requiredModifiers else { return }
+                let currentMods = UInt64(flags.rawValue) & 0x00FF0000
+                guard currentMods & requiredModifiers == requiredModifiers else {
+                    return Unmanaged.passRetained(event)
+                }
             }
-            if event.type == .keyDown {
-                onKeyDown?()
-            } else if event.type == .keyUp {
-                onKeyUp?()
-            }
+            modifierPressed = true
+            DispatchQueue.main.async { self.onKeyDown?() }
+            return nil  // consume — suppresses emoji drawer
+        } else if !fnDown && modifierPressed {
+            modifierPressed = false
+            DispatchQueue.main.async { self.onKeyUp?() }
+            return nil  // consume
+        }
+
+        return Unmanaged.passRetained(event)
+    }
+
+    // MARK: - NSEvent global monitor (non-modifier keys)
+
+    private func startGlobalMonitor() {
+        let mask: NSEvent.EventTypeMask = [.keyDown, .keyUp]
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            self?.handleNSEvent(event)
+        }
+    }
+
+    private func handleNSEvent(_ event: NSEvent) {
+        guard event.keyCode == keyCode else { return }
+        if requiredModifiers != 0 {
+            let currentMods = UInt64(event.modifierFlags.rawValue) & 0x00FF0000
+            guard currentMods & requiredModifiers == requiredModifiers else { return }
+        }
+        if event.type == .keyDown {
+            onKeyDown?()
+        } else if event.type == .keyUp {
+            onKeyUp?()
         }
     }
 

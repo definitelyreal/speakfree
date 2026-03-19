@@ -9,22 +9,22 @@ let version = OpenWispr.version
 
 func printUsage() {
     print("""
-    open-wispr v\(version) — Push-to-talk voice dictation for macOS
+    speakfree v\(version) — Push-to-talk voice dictation for macOS
 
     USAGE:
-        open-wispr start              Start the dictation daemon
-        open-wispr set-hotkey <key>   Set the push-to-talk hotkey
-        open-wispr get-hotkey         Show current hotkey
-        open-wispr set-model <size>   Set the Whisper model
-        open-wispr download-model [size]  Download a Whisper model
-        open-wispr status             Show configuration and status
-        open-wispr --help             Show this help message
+        speakfree start              Start the dictation daemon
+        speakfree set-hotkey <key>   Set the push-to-talk hotkey
+        speakfree get-hotkey         Show current hotkey
+        speakfree set-model <size>   Set the Whisper model
+        speakfree download-model [size]  Download a Whisper model
+        speakfree status             Show configuration and status
+        speakfree --help             Show this help message
 
     HOTKEY EXAMPLES:
-        open-wispr set-hotkey globe             Globe/fn key (default)
-        open-wispr set-hotkey rightoption        Right Option key
-        open-wispr set-hotkey f5                 F5 key
-        open-wispr set-hotkey ctrl+space         Ctrl + Space
+        speakfree set-hotkey globe             Globe/fn key (default)
+        speakfree set-hotkey rightoption        Right Option key
+        speakfree set-hotkey f5                 F5 key
+        speakfree set-hotkey ctrl+space         Ctrl + Space
 
     AVAILABLE MODELS:
         tiny.en, tiny, base.en, base, small.en, small, medium.en, medium, large
@@ -39,7 +39,7 @@ func cmdStart() {
     app.delegate = delegate
 
     signal(SIGINT) { _ in
-        print("\nStopping open-wispr...")
+        print("\nStopping speakfree...")
         exit(0)
     }
 
@@ -49,7 +49,7 @@ func cmdStart() {
 func cmdSetHotkey(_ keyString: String) {
     guard let parsed = KeyCodes.parse(keyString) else {
         print("Error: Unknown key '\(keyString)'")
-        print("Run 'open-wispr --help' for examples")
+        print("Run 'speakfree --help' for examples")
         exit(1)
     }
 
@@ -108,7 +108,7 @@ func cmdStatus() {
     let config = Config.load()
     let hotkeyDesc = KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)
 
-    print("open-wispr v\(version)")
+    print("speakfree v\(version)")
     print("Config:      \(Config.configFile.path)")
     print("Hotkey:      \(hotkeyDesc)")
     print("Model:       \(config.modelSize)")
@@ -126,13 +126,13 @@ case "start":
     cmdStart()
 case "set-hotkey":
     guard args.count > 2 else {
-        print("Usage: open-wispr set-hotkey <key>")
+        print("Usage: speakfree set-hotkey <key>")
         exit(1)
     }
     cmdSetHotkey(args[2])
 case "set-model":
     guard args.count > 2 else {
-        print("Usage: open-wispr set-model <size>")
+        print("Usage: speakfree set-model <size>")
         exit(1)
     }
     cmdSetModel(args[2])
@@ -146,7 +146,8 @@ case "status":
 case "--help", "-h", "help":
     printUsage()
 case nil:
-    printUsage()
+    // Launched as app bundle (no arguments) — start the daemon
+    cmdStart()
 default:
     print("Unknown command: \(command!)")
     printUsage()

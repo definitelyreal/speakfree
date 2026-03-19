@@ -5,7 +5,7 @@ public struct Config: Codable {
     public var modelPath: String?
     public var modelSize: String
     public var language: String
-    public var spokenPunctuation: FlexBool?
+    public var spokenPunctuation: PunctuationMode?
     public var maxRecordings: Int?
     public var toggleMode: FlexBool?
 
@@ -22,14 +22,14 @@ public struct Config: Codable {
         modelPath: nil,
         modelSize: "base.en",
         language: "en",
-        spokenPunctuation: FlexBool(false),
-        maxRecordings: nil,
+        spokenPunctuation: .hybrid,
+        maxRecordings: 30,
         toggleMode: FlexBool(false)
     )
 
     public static var configDir: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".config/open-wispr")
+        return home.appendingPathComponent(".config/speakfree")
     }
 
     public static var configFile: URL {
@@ -61,6 +61,40 @@ public struct Config: Codable {
         encoder.outputFormatting = .prettyPrinted
         let data = try encoder.encode(self)
         try data.write(to: Config.configFile)
+    }
+}
+
+/// Punctuation mode:
+///   .off     — whisper auto-punct only, no spoken word conversion  (spokenPunctuation: false)
+///   .spoken  — suppress whisper auto-punct, convert spoken words   (spokenPunctuation: true)
+///   .hybrid  — whisper auto-punct + convert spoken words           (spokenPunctuation: "hybrid")
+public enum PunctuationMode: Codable, Equatable {
+    case off
+    case spoken
+    case hybrid
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let b = try? c.decode(Bool.self) {
+            self = b ? .spoken : .off
+        } else if let s = try? c.decode(String.self) {
+            switch s.lowercased() {
+            case "hybrid": self = .hybrid
+            case "true", "on", "yes", "1", "spoken": self = .spoken
+            default: self = .off
+            }
+        } else {
+            self = .off
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .off:    try c.encode(false)
+        case .spoken: try c.encode(true)
+        case .hybrid: try c.encode("hybrid")
+        }
     }
 }
 
