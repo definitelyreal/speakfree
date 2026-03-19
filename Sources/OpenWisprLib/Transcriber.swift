@@ -3,14 +3,14 @@ import Foundation
 public class Transcriber {
     private let modelSize: String
     private let language: String
-    public var spokenPunctuation: Bool = false
+    public var suppressAutoPunctuation: Bool = false
 
     public init(modelSize: String = "base.en", language: String = "en") {
         self.modelSize = modelSize
         self.language = language
     }
 
-    public func transcribe(audioURL: URL) throws -> String {
+    public func transcribe(audioURL: URL, prompt: String? = nil) throws -> String {
         guard let whisperPath = Transcriber.findWhisperBinary() else {
             throw TranscriberError.whisperNotFound
         }
@@ -28,8 +28,13 @@ public class Transcriber {
             "--no-timestamps",
             "-nt",
         ]
-        if spokenPunctuation {
+        // Spoken mode: suppress whisper's auto-punctuation so only spoken words produce symbols
+        if suppressAutoPunctuation {
             args += ["--suppress-regex", "[,\\.\\?!;:\\-—]"]
+        }
+        // Pass context from text field so whisper can match style/terminology
+        if let prompt = prompt, !prompt.isEmpty {
+            args += ["--prompt", prompt]
         }
         process.arguments = args
 
@@ -40,14 +45,17 @@ public class Transcriber {
 
         try process.run()
 
+        let group = DispatchGroup()
         var stderrData = Data()
-        let stderrThread = Thread {
+
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
             stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
         }
-        stderrThread.start()
 
         let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        while !stderrThread.isFinished { Thread.sleep(forTimeInterval: 0.01) }
+        group.wait()
         process.waitUntilExit()
 
         let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -62,6 +70,14 @@ public class Transcriber {
     }
 
     public static func findWhisperBinary() -> String? {
+        // Check bundle first — self-contained app, no Homebrew required
+        if let bundlePath = Bundle.main.bundlePath as String? {
+            let bundled = bundlePath + "/Contents/MacOS/whisper-cli"
+            if FileManager.default.fileExists(atPath: bundled) {
+                return bundled
+            }
+        }
+
         let candidates = [
             "/opt/homebrew/bin/whisper-cli",
             "/usr/local/bin/whisper-cli",
