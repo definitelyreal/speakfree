@@ -6,7 +6,7 @@ class MenuItemTarget: NSObject {
     @objc func invoke() { handler() }
 }
 
-class StatusBarController: NSObject {
+class StatusBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem
     private var animationTimer: Timer?
     private var animationFrame = 0
@@ -16,6 +16,17 @@ class StatusBarController: NSObject {
     private var menuItemTargets: [MenuItemTarget] = []
 
     var reprocessHandler: ((URL) -> Void)?
+    private var crashRecoveryURL: URL?
+    private var crashRecoveryHandler: ((URL) -> Void)?
+
+    // Captured before the menu opens — so reprocess can type without any delay
+    var elementBeforeMenuOpen: AXUIElement?
+
+    func showCrashRecovery(url: URL, handler: @escaping (URL) -> Void) {
+        crashRecoveryURL = url
+        crashRecoveryHandler = handler
+        buildMenu()
+    }
 
     enum State {
         case idle
@@ -42,6 +53,18 @@ class StatusBarController: NSObject {
         buildMenu()
     }
 
+    // Called by AppKit before the menu appears — capture focus before menu steals it
+    func menuWillOpen(_ menu: NSMenu) {
+        let systemWide = AXUIElementCreateSystemWide()
+        var elementRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef) == .success,
+           let element = elementRef {
+            elementBeforeMenuOpen = (element as! AXUIElement)
+        } else {
+            elementBeforeMenuOpen = nil
+        }
+    }
+
     @objc private func copyLastTranscription() {
         guard let delegate = NSApplication.shared.delegate as? AppDelegate,
               let text = delegate.lastTranscription else { return }
@@ -61,22 +84,21 @@ class StatusBarController: NSObject {
         buildMenu()
     }
 
-    private static let displayDateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return f
-    }()
+    private static func relativeTime(from date: Date) -> String {
+        let seconds = Int(Date().timeIntervalSince(date))
+        if seconds < 60 { return "now" }
+        if seconds < 3600 { return "\(seconds / 60)m" }
+        if seconds < 86400 { return "\(seconds / 3600)h" }
+        return "\(seconds / 86400)d"
+    }
 
     func buildMenu() {
         menuItemTargets = []
 
         let config = Config.load()
-        let hotkeyDesc = KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)
-
         let menu = NSMenu()
 
-        let titleItem = NSMenuItem(title: "OpenWispr v\(OpenWispr.version)", action: nil, keyEquivalent: "")
+        let titleItem = NSMenuItem(title: "speakfree v\(OpenWispr.version)", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
         menu.addItem(titleItem)
 
@@ -95,72 +117,186 @@ class StatusBarController: NSObject {
         case .recording: stateText = "Recording..."
         case .transcribing: stateText = "Transcribing..."
         case .downloading: stateText = "Downloading model..."
-        case .waitingForPermission: stateText = "Waiting for Accessibility permission..."
+        case .waitingForPermission: stateText = "⚠️ Grant Accessibility Permission →"
         case .copiedToClipboard: stateText = "Copied to clipboard"
         }
-        let stateItem = NSMenuItem(title: stateText, action: nil, keyEquivalent: "")
-        stateItem.isEnabled = false
-        menu.addItem(stateItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        let hotkeyItem = NSMenuItem(title: "Hotkey: \(hotkeyDesc)", action: nil, keyEquivalent: "")
-        hotkeyItem.isEnabled = false
-        menu.addItem(hotkeyItem)
-
-        let modelItem = NSMenuItem(title: "Model: \(config.modelSize)", action: nil, keyEquivalent: "")
-        modelItem.isEnabled = false
-        menu.addItem(modelItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        let lastText = (NSApplication.shared.delegate as? AppDelegate)?.lastTranscription
-        let copyTitle = copiedFeedback ? "Copied!" : "Copy Last Dictation"
-        let copyItem = NSMenuItem(title: copyTitle, action: lastText != nil && !copiedFeedback ? #selector(copyLastTranscription) : nil, keyEquivalent: "c")
-        copyItem.target = self
-        if lastText == nil || copiedFeedback { copyItem.isEnabled = copiedFeedback }
-        menu.addItem(copyItem)
-
-        if Config.effectiveMaxRecordings(config.maxRecordings) > 0 {
-            let recordings = RecordingStore.listRecordings()
-            let reprocessItem = NSMenuItem(title: "Recent Recordings", action: nil, keyEquivalent: "")
-            let submenu = NSMenu()
-
-            if recordings.isEmpty {
-                let emptyItem = NSMenuItem(title: "No recordings", action: nil, keyEquivalent: "")
-                emptyItem.isEnabled = false
-                submenu.addItem(emptyItem)
-            } else {
-                for (index, recording) in recordings.enumerated() {
-                    let dateStr = StatusBarController.displayDateFormatter.string(from: recording.date)
-                    let label = "\(dateStr) (\(index + 1))"
-                    let target = MenuItemTarget { [weak self] in
-                        self?.reprocessHandler?(recording.url)
-                    }
-                    menuItemTargets.append(target)
-                    let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-                    item.target = target
-                    submenu.addItem(item)
-                }
+        if case .waitingForPermission = state {
+            let target = MenuItemTarget {
+                // Clear the stale TCC entry then re-prompt
+                let task = Process()
+                task.launchPath = "/usr/bin/tccutil"
+                task.arguments = ["reset", "Accessibility", "com.definitelyreal.speakfree"]
+                try? task.run()
+                task.waitUntilExit()
+                let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true]
+                AXIsProcessTrustedWithOptions(options)
             }
-
-            reprocessItem.submenu = submenu
-            menu.addItem(reprocessItem)
+            menuItemTargets.append(target)
+            let stateItem = NSMenuItem(title: stateText, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            stateItem.target = target
+            menu.addItem(stateItem)
+        } else {
+            let stateItem = NSMenuItem(title: stateText, action: nil, keyEquivalent: "")
+            stateItem.isEnabled = false
+            menu.addItem(stateItem)
         }
 
         menu.addItem(NSMenuItem.separator())
 
-        let reloadItem = NSMenuItem(title: "Reload Configuration", action: #selector(reloadConfiguration), keyEquivalent: "r")
-        reloadItem.target = self
-        menu.addItem(reloadItem)
+        // Recent Dictations submenu — crash recovery, last dictation, then older recordings
+        let recentParent = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
+        let recentMenu = NSMenu()
 
-        let openItem = NSMenuItem(title: "Open Configuration", action: #selector(openConfiguration), keyEquivalent: "o")
-        openItem.target = self
-        menu.addItem(openItem)
+        // Crash recovery at top if pending
+        if let recoveryURL = crashRecoveryURL, let recoveryHandler = crashRecoveryHandler {
+            let target = MenuItemTarget { [weak self] in
+                self?.crashRecoveryURL = nil
+                self?.crashRecoveryHandler = nil
+                recoveryHandler(recoveryURL)
+            }
+            menuItemTargets.append(target)
+            let recoveryItem = NSMenuItem(title: "⚠️ Recover Unsaved Recording", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            recoveryItem.target = target
+            recentMenu.addItem(recoveryItem)
+            recentMenu.addItem(NSMenuItem.separator())
+        }
+
+        let recordings = RecordingStore.listRecordings()
+
+        if recordings.isEmpty && crashRecoveryURL == nil {
+            let emptyItem = NSMenuItem(title: "No recordings yet", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            recentMenu.addItem(emptyItem)
+        } else {
+            for (index, recording) in recordings.enumerated() {
+                let age = StatusBarController.relativeTime(from: recording.date)
+                let preview: String
+                if let t = recording.text, !t.isEmpty {
+                    let short = t.prefix(50).replacingOccurrences(of: "\n", with: " ")
+                    preview = t.count > 50 ? "\(short)…" : String(short)
+                } else {
+                    preview = "(no transcript)"
+                }
+                let label = "\(age) — \(preview)"
+                let target = MenuItemTarget { [weak self] in
+                    self?.reprocessHandler?(recording.url)
+                }
+                menuItemTargets.append(target)
+                let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+                item.target = target
+                recentMenu.addItem(item)
+                // Separator after the first (most recent) recording
+                if index == 0 && recordings.count > 1 {
+                    recentMenu.addItem(NSMenuItem.separator())
+                }
+            }
+        }
+
+        recentParent.submenu = recentMenu
+        menu.addItem(recentParent)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Settings submenu
+        let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        let settingsMenu = NSMenu()
+
+        // Hotkey picker
+        let hotkeyParent = NSMenuItem(title: "Hotkey", action: nil, keyEquivalent: "")
+        let hotkeyMenu = NSMenu()
+        let hotkeyOptions: [(String, UInt16)] = [
+            ("🌐  Globe / fn",       63),
+            ("⌘  Left Command",     55),
+            ("⌘  Right Command",    54),
+            ("⌥  Left Option",      58),
+            ("⌥  Right Option",     61),
+            ("⌃  Left Control",     59),
+        ]
+        for (label, keyCode) in hotkeyOptions {
+            let target = MenuItemTarget { [weak self] in self?.setHotkey(keyCode: keyCode) }
+            menuItemTargets.append(target)
+            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
+            item.state = config.hotkey.keyCode == keyCode ? .on : .off
+            hotkeyMenu.addItem(item)
+        }
+        hotkeyParent.submenu = hotkeyMenu
+        settingsMenu.addItem(hotkeyParent)
+        settingsMenu.addItem(NSMenuItem.separator())
+
+        // Model
+        let modelParent = NSMenuItem(title: "Model", action: nil, keyEquivalent: "")
+        let modelMenu = NSMenu()
+        for size in ["tiny.en", "base.en", "small.en", "medium.en", "large"] {
+            let target = MenuItemTarget { [weak self] in self?.setModel(size) }
+            menuItemTargets.append(target)
+            let item = NSMenuItem(title: size, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
+            item.state = config.modelSize == size ? .on : .off
+            modelMenu.addItem(item)
+        }
+        modelParent.submenu = modelMenu
+        settingsMenu.addItem(modelParent)
+
+        // Punctuation
+        let punctParent = NSMenuItem(title: "Punctuation", action: nil, keyEquivalent: "")
+        let punctMenu = NSMenu()
+        let punctOptions: [(String, PunctuationMode)] = [
+            ("Off", .off),
+            ("Spoken words", .spoken),
+            ("Hybrid (auto + spoken)", .hybrid),
+        ]
+        let currentPunct = config.spokenPunctuation ?? .off
+        for (label, mode) in punctOptions {
+            let target = MenuItemTarget { [weak self] in self?.setPunctuation(mode) }
+            menuItemTargets.append(target)
+            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
+            item.state = currentPunct == mode ? .on : .off
+            punctMenu.addItem(item)
+        }
+        punctParent.submenu = punctMenu
+        settingsMenu.addItem(punctParent)
+
+        // Key Mode
+        let keyModeParent = NSMenuItem(title: "Key Mode", action: nil, keyEquivalent: "")
+        let keyModeMenu = NSMenu()
+        let isToggle = config.toggleMode?.value == true
+        for (label, isToggleMode) in [("Hold fn", false), ("Toggle fn", true)] {
+            let target = MenuItemTarget { [weak self] in self?.setToggleMode(isToggleMode) }
+            menuItemTargets.append(target)
+            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
+            item.state = isToggle == isToggleMode ? .on : .off
+            keyModeMenu.addItem(item)
+        }
+        keyModeParent.submenu = keyModeMenu
+        settingsMenu.addItem(keyModeParent)
+
+        // Max recordings
+        let recParent = NSMenuItem(title: "Max Recordings", action: nil, keyEquivalent: "")
+        let recMenu = NSMenu()
+        let recOptions = [0, 10, 20, 30, 50, 100]
+        let currentMax = config.maxRecordings ?? 0
+        for count in recOptions {
+            let label = count == 0 ? "Off" : "\(count)"
+            let target = MenuItemTarget { [weak self] in self?.setMaxRecordings(count) }
+            menuItemTargets.append(target)
+            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
+            item.state = currentMax == count ? .on : .off
+            recMenu.addItem(item)
+        }
+        recParent.submenu = recMenu
+        settingsMenu.addItem(recParent)
+
+        settingsItem.submenu = settingsMenu
+        menu.addItem(settingsItem)
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
+        menu.delegate = self
         statusItem.menu = menu
     }
 
@@ -169,13 +305,32 @@ class StatusBarController: NSObject {
         delegate.reloadConfig()
     }
 
-    @objc private func openConfiguration() {
-        let configFile = Config.configFile
-        if !FileManager.default.fileExists(atPath: configFile.path) {
-            let config = Config.defaultConfig
-            try? config.save()
-        }
-        NSWorkspace.shared.open(configFile)
+    private func applyConfig(_ block: (inout Config) -> Void) {
+        var config = Config.load()
+        block(&config)
+        try? config.save()
+        guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
+        delegate.reloadConfig()
+    }
+
+    private func setHotkey(keyCode: UInt16) {
+        applyConfig { $0.hotkey = HotkeyConfig(keyCode: keyCode, modifiers: []) }
+    }
+
+    private func setModel(_ size: String) {
+        applyConfig { $0.modelSize = size }
+    }
+
+    private func setPunctuation(_ mode: PunctuationMode) {
+        applyConfig { $0.spokenPunctuation = mode }
+    }
+
+    private func setToggleMode(_ enabled: Bool) {
+        applyConfig { $0.toggleMode = FlexBool(enabled) }
+    }
+
+    private func setMaxRecordings(_ count: Int) {
+        applyConfig { $0.maxRecordings = count }
     }
 
     private func updateIcon() {

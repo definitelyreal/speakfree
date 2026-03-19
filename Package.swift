@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "open-wispr",
+    name: "speakfree",
     platforms: [.macOS(.v13)],
     targets: [
         .target(
@@ -15,9 +15,9 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "open-wispr",
+            name: "speakfree",
             dependencies: ["OpenWisprLib"],
-            path: "Sources/OpenWispr"
+            path: "Sources/SpeakFree"
         ),
         .testTarget(
             name: "OpenWisprTests",
