@@ -1,129 +1,89 @@
 <p align="center">
-  <img src="logo.svg" width="80" alt="open-wispr logo">
+  <img src="logo.png" width="100" alt="speakfree logo">
 </p>
 
-<h1 align="center">open-wispr</h1>
+<h1 align="center">speakfree</h1>
 
 <p align="center">
-  <strong><a href="https://open-wispr.com">open-wispr.com</a></strong><br>
-  Local, private voice dictation for macOS. Hold a key, speak, release — your words appear at the cursor.<br>
-  Everything runs on-device. No audio or text ever leaves your machine.
+  Hold a key, speak, release — your words appear at the cursor.<br>
+  100% local. No internet. No account. Free forever.
 </p>
 
-<p align="center">Powered by <a href="https://github.com/ggml-org/whisper.cpp">whisper.cpp</a> with Metal acceleration on Apple Silicon.</p>
+<p align="center">
+  <a href="https://github.com/definitelyreal/speakfree/releases/latest"><img src="https://img.shields.io/github/v/release/definitelyreal/speakfree?label=download&style=flat-square" alt="Download"></a>
+  <img src="https://img.shields.io/badge/macOS-13%2B-blue?style=flat-square" alt="macOS 13+">
+  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT">
+</p>
+
+---
 
 ## Install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/human37/open-wispr/main/scripts/install.sh | bash
-```
+1. Download **[speakfree.zip](https://github.com/definitelyreal/speakfree/releases/latest)** and unzip it
+2. Drag **speakfree.app** to your Applications folder
+3. Open it — **right-click → Open** on the first launch (macOS security step, required once)
+4. Grant **Microphone** and **Accessibility** permissions when prompted
+5. On first launch, a window appears to choose and download a Whisper model (~142 MB for the default)
 
-The script handles everything: installs via Homebrew, walks you through granting permissions, downloads the Whisper model, and starts the service. You'll see live feedback as each step completes.
+The speakfree icon appears in your menu bar when it's running.
 
-A waveform icon appears in your menu bar when it's running.
+## Usage
 
-The default hotkey is the **Globe key** (🌐, bottom-left). Hold it, speak, release.
+**Hold** the Globe key (🌐, bottom-left of keyboard), **speak**, then **release**.
 
-> **[Full installation guide](docs/install-guide.md)** — permissions walkthrough with screenshots, non-English macOS instructions, and troubleshooting.
+Your words are typed wherever your cursor is. If no text field is focused, the transcription is copied to your clipboard instead.
 
-## Uninstall
+## Settings
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/human37/open-wispr/main/scripts/uninstall.sh | bash
-```
+Click the menu bar icon → **Settings** to change everything in-app:
 
-This stops the service, removes the formula, tap, config, models, app bundle, logs, and permissions.
-
-## Configuration
-
-Edit `~/.config/open-wispr/config.json`:
-
-```json
-{
-  "hotkey": { "keyCode": 63, "modifiers": [] },
-  "modelSize": "base.en",
-  "language": "en",
-  "spokenPunctuation": false,
-  "maxRecordings": 0,
-  "toggleMode": false
-}
-```
-
-Then restart: `brew services restart open-wispr`
-
-| Option | Default | Values |
-|---|---|---|
-| **hotkey** | `63` | Globe (`63`), Right Option (`61`), F5 (`96`), or any key code |
-| **modifiers** | `[]` | `"cmd"`, `"ctrl"`, `"shift"`, `"opt"` — combine for chords |
-| **modelSize** | `"base.en"` | See model table below |
-| **language** | `"en"` | Any [ISO 639-1 code](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) — e.g. `it`, `fr`, `de`, `es` |
-| **spokenPunctuation** | `false` | Say "comma", "period", etc. to insert punctuation instead of auto-punctuation |
-| **maxRecordings** | `0` | Optionally store past recordings locally as `.wav` files for re-transcribing from the tray menu. `0` = nothing stored (default). Set 1-100 to keep that many recent recordings. |
-| **toggleMode** | `false` | Press hotkey once to start recording, press again to stop. Default is hold-to-talk. |
-
-### Models
-
-Larger models are more accurate but slower and use more memory. The default `base.en` is a good balance for most users.
-
-| Model | Size | Speed | Accuracy | Best for |
-|---|---|---|---|---|
-| `tiny.en` | 75 MB | Fastest | Lower | Quick notes, short phrases |
-| **`base.en`** | 142 MB | **Fast** | **Good** | **Most users (default)** |
-| `small.en` | 466 MB | Moderate | Better | Longer dictation, technical terms |
-| `medium.en` | 1.5 GB | Slower | Great | Maximum accuracy, complex speech |
-| `large` | 3 GB | Slowest | Best | Multilingual, highest accuracy (M1 Pro+ recommended) |
-
-> **Non-English languages:** Models ending in `.en` are English-only. To use another language, switch to the equivalent model without the `.en` suffix (e.g. `base.en` → `base`) and set the `language` field to your language code. Multilingual models are slightly less accurate for English but support 99 languages.
-
-If the Globe key opens the emoji picker: **System Settings → Keyboard → "Press 🌐 key to" → "Do Nothing"**
-
-## Menu bar
-
-Click the waveform icon for status and options. **Recent Recordings** lists your last recordings; click one to re-transcribe and copy the result to the clipboard.
-
-| State | Icon |
+| Setting | Options |
 |---|---|
-| Idle | Waveform outline |
-| Recording | Bouncing waveform |
-| Transcribing | Wave dots |
-| Downloading model | Animated download arrow |
-| Waiting for permission | Lock |
+| **Hotkey** | Globe 🌐, Left/Right Command ⌘, Left/Right Option ⌥, Left Control ⌃ |
+| **Model** | tiny.en → large (see table below) |
+| **Punctuation** | Hybrid (default), Off, Spoken words |
+| **Key Mode** | Hold (default), Toggle |
+| **Max Recordings** | Off (default), 10–100 |
 
-Click the menu bar icon to access **Copy Last Dictation** — recovers your most recent transcription if you dictated without a text field focused.
+Click **Help** in the menu for plain-English explanations of every setting.
 
-## Compare
+## Models
 
-| | open-wispr | VoiceInk | Wispr Flow | Superwhisper | Apple Dictation |
-|---|---|---|---|---|---|
-| **Price** | **Free** | $39.99 | $15/mo | $8.49/mo | Free |
-| **Open source** | MIT | GPLv3 | No | No | No |
-| **100% on-device** | Yes | Yes | No | Yes | Partial |
-| **Push-to-talk** | Yes | Yes | Yes | Yes | No |
-| **AI features** | No | AI assistant | AI rewriting | AI formatting | No |
-| **Account required** | No | No | Yes | Yes | Apple ID |
+Larger models are more accurate but take longer to transcribe.
+
+| Model | Size | Speed | Best for |
+|---|---|---|---|
+| tiny.en | 75 MB | Fastest | Quick notes, short phrases |
+| **base.en** | **142 MB** | **Fast** | **Most people (default)** |
+| small.en | 466 MB | Moderate | Technical terms, longer dictation |
+| medium.en | 1.5 GB | Slower | High accuracy |
+| large | 3 GB | Slowest | Best accuracy (M1 Pro+ recommended) |
+
+Switching models downloads automatically if needed.
 
 ## Privacy
 
-open-wispr is completely local. Audio is recorded to a temp file, transcribed by whisper.cpp on your CPU/GPU, and the temp file is deleted. No network requests are made except to download the Whisper model on first run. Optionally, you can configure open-wispr to store a number of past recordings locally via the `maxRecordings` setting. Those recordings stay private and on your machine, and we default to not storing anything.
+speakfree runs entirely on your Mac.
 
-## Roadmap
-
-See what's planned and in progress on the [public roadmap](https://github.com/users/human37/projects/2). Feature requests and ideas are welcome as [issues](https://github.com/human37/open-wispr/issues).
+- No audio or text ever leaves your computer
+- No servers, no accounts, no subscriptions
+- Internet is only needed once — to download the Whisper model on first launch
+- Audio is transcribed locally and deleted immediately
 
 ## Build from source
 
 ```bash
-git clone https://github.com/human37/open-wispr.git
-cd open-wispr
+git clone https://github.com/definitelyreal/speakfree.git
+cd speakfree
 brew install whisper-cpp
 swift build -c release
-.build/release/open-wispr start
+open speakfree.app
 ```
 
-## Support
+## Credits
 
-open-wispr is free and always will be. If you find it useful, you can [leave a tip](https://buy.stripe.com/4gM5kC2AU0Ssd4l6Hqd7q00).
+Forked from [open-wispr](https://github.com/human37/open-wispr) by [human37](https://github.com/human37). Powered by [whisper.cpp](https://github.com/ggml-org/whisper.cpp).
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
