@@ -103,15 +103,28 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if !Transcriber.modelExists(modelSize: config.modelSize) {
-            // Auto-download the default model silently — show progress in the menu bar
-            DispatchQueue.main.async { self.statusBar.state = .downloading }
-            do {
-                try ModelDownloader.download(modelSize: config.modelSize)
-            } catch {
-                print("Model download failed: \(error.localizedDescription)")
-                // Not fatal — user can try again via Settings
+            // If another model is already on disk, switch to it rather than downloading
+            let modelsDir = Config.configDir.appendingPathComponent("models")
+            let existing = (try? FileManager.default.contentsOfDirectory(atPath: modelsDir.path))?
+                .first(where: { $0.hasPrefix("ggml-") && $0.hasSuffix(".bin") })
+                .map { String($0.dropFirst(5).dropLast(4)) }  // "ggml-base.en.bin" → "base.en"
+
+            if let existingModel = existing {
+                print("Model mismatch: config has \(config.modelSize) but found \(existingModel) — using existing")
+                config.modelSize = existingModel
+                try? config.save()
+                transcriber = Transcriber(modelSize: config.modelSize, language: config.language)
+                transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
+            } else {
+                // No model at all — auto-download the configured default silently
+                DispatchQueue.main.async { self.statusBar.state = .downloading }
+                do {
+                    try ModelDownloader.download(modelSize: config.modelSize)
+                } catch {
+                    print("Model download failed: \(error.localizedDescription)")
+                }
+                DispatchQueue.main.async { self.statusBar.state = .idle }
             }
-            DispatchQueue.main.async { self.statusBar.state = .idle }
         }
 
         // Warm up the audio engine now so first recording starts instantly
