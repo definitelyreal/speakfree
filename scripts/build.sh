@@ -53,6 +53,7 @@ create-dmg \
     --volname "speakfree" \
     --window-pos 200 120 \
     --window-size 560 340 \
+    --background "scripts/dmg-background.png" \
     --icon-size 128 \
     --icon "speakfree.app" 140 170 \
     --hide-extension "speakfree.app" \
