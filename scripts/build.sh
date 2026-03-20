@@ -2,11 +2,15 @@
 set -e
 
 APP="speakfree.app"
+VERSION=$(grep 'let version' Sources/OpenWisprLib/Version.swift | sed 's/.*"\(.*\)".*/\1/')
+DMG="speakfree-${VERSION}.dmg"
+SIGN_ID="Developer ID Application: Michael Morgenstern (AZ53Y7V4UZ)"
+
 # Find the real binary path
 WHISPER_BIN=$(python3 -c "import os; print(os.path.realpath('/opt/homebrew/bin/whisper-cli'))")
 WHISPER_LIB_DIR=$(dirname "$WHISPER_BIN")/../lib
 
-echo "Building speakfree..."
+echo "Building speakfree v${VERSION}..."
 swift build -c release
 
 echo "Copying main binary..."
@@ -24,10 +28,8 @@ for dylib in "$WHISPER_LIB_DIR"/*.dylib; do
 done
 
 # Create versioned symlinks so whisper-cli can find its dylibs by soname
-# (binary links against e.g. libwhisper.1.dylib, we ship libwhisper.1.8.3.dylib)
 for real_dylib in "$APP/Contents/Frameworks"/*.dylib; do
     basename=$(basename "$real_dylib")
-    # Strip the patch version: libfoo.1.8.3.dylib -> libfoo.1.dylib
     soname=$(echo "$basename" | sed 's/\([^0-9]*[0-9]*\)\.[0-9]*\.[0-9]*\.dylib$/\1.dylib/')
     if [ "$soname" != "$basename" ]; then
         ln -sf "$basename" "$APP/Contents/Frameworks/$soname"
@@ -40,6 +42,31 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" \
 
 echo "Signing..."
 xattr -cr "$APP"
-codesign --force --deep --sign - "$APP"
+# Sign dylibs and whisper-cli first, then the app bundle
+codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/"*.dylib
+codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/MacOS/whisper-cli"
+codesign --force --deep --options runtime --sign "$SIGN_ID" "$APP"
+
+echo "Building DMG..."
+rm -f "$DMG"
+create-dmg \
+    --volname "speakfree" \
+    --window-pos 200 120 \
+    --window-size 560 340 \
+    --icon-size 128 \
+    --icon "speakfree.app" 140 170 \
+    --hide-extension "speakfree.app" \
+    --app-drop-link 420 170 \
+    "$DMG" \
+    "$APP"
+
+echo "Notarizing..."
+xcrun notarytool submit "$DMG" \
+    --keychain-profile "speakfree-notary" \
+    --wait
+
+echo "Stapling..."
+xcrun stapler staple "$DMG"
 
 echo "Done: $APP"
+echo "Done: $DMG (signed, notarized, stapled)"
