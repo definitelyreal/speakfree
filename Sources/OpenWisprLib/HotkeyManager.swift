@@ -10,16 +10,20 @@ class HotkeyManager {
     private let requiredModifiers: UInt64
     private var onKeyDown: (() -> Void)?
     private var onKeyUp: (() -> Void)?
+    private var onAbort: (() -> Void)?
     private var modifierPressed = false
+    /// When fn was pressed — used to distinguish keyboard shortcuts (key within 300ms) from dictation
+    private var modifierPressedAt: UInt64 = 0
 
     init(keyCode: UInt16, modifiers: UInt64 = 0) {
         self.keyCode = keyCode
         self.requiredModifiers = modifiers
     }
 
-    func start(onKeyDown: @escaping () -> Void, onKeyUp: @escaping () -> Void) {
+    func start(onKeyDown: @escaping () -> Void, onKeyUp: @escaping () -> Void, onAbort: (() -> Void)? = nil) {
         self.onKeyDown = onKeyDown
         self.onKeyUp = onKeyUp
+        self.onAbort = onAbort
 
         // For modifier-only keys (like Fn), use a CGEventTap so we can suppress
         // the default system action (e.g. the emoji drawer that Fn normally opens).
@@ -54,6 +58,7 @@ class HotkeyManager {
     private func startEventTap() {
         let mask = CGEventMask(
             (1 << CGEventType.flagsChanged.rawValue) |
+            (1 << CGEventType.keyDown.rawValue) |
             (1 << CGEventType.tapDisabledByTimeout.rawValue) |
             (1 << CGEventType.tapDisabledByUserInput.rawValue)
         )
@@ -95,6 +100,22 @@ class HotkeyManager {
     }
 
     private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // If a real key is pressed shortly after fn (within 300ms), this is a keyboard shortcut
+        // (e.g. fn+shift+F5), not dictation. Abort recording and let the key pass through.
+        // After 300ms we're definitely in dictation mode — ignore stray keyDown events.
+        if type == .keyDown && modifierPressed {
+            let elapsed = mach_absolute_time() - modifierPressedAt
+            var timebaseInfo = mach_timebase_info_data_t()
+            mach_timebase_info(&timebaseInfo)
+            let elapsedMs = (elapsed * UInt64(timebaseInfo.numer)) / (UInt64(timebaseInfo.denom) * 1_000_000)
+            if elapsedMs < 300 {
+                modifierPressed = false
+                DispatchQueue.main.async { self.onAbort?() }
+                return Unmanaged.passRetained(event)  // pass through so the shortcut works
+            }
+            return Unmanaged.passRetained(event)  // in dictation mode — ignore
+        }
+
         guard type == .flagsChanged else { return Unmanaged.passRetained(event) }
         guard event.getIntegerValueField(.keyboardEventKeycode) == Int64(keyCode) else {
             return Unmanaged.passRetained(event)
@@ -112,6 +133,7 @@ class HotkeyManager {
                 }
             }
             modifierPressed = true
+            modifierPressedAt = mach_absolute_time()
             DispatchQueue.main.async { self.onKeyDown?() }
             return nil  // consume — suppresses emoji drawer
         } else if !fnDown && modifierPressed {

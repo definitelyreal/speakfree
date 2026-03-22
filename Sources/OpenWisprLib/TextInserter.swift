@@ -20,7 +20,7 @@ class TextInserter {
             if !sameElement {
                 let refocused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
                 if refocused {
-                    Thread.sleep(forTimeInterval: 0.08)
+                    Thread.sleep(forTimeInterval: 0.15)
                     pasteText(text)
                     return true
                 } else {
@@ -56,8 +56,9 @@ class TextInserter {
 
         simulatePaste()
 
-        // Restore after a short delay to let the target app consume the paste
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        // Restore after a generous delay to let the target app consume the paste.
+        // Electron apps, browsers, and heavy editors can take 500ms+ to process Cmd+V.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             self.restorePasteboard(pasteboard, items: savedItems)
         }
     }
@@ -103,6 +104,8 @@ class TextInserter {
         keyUp.flags = .maskCommand
 
         keyDown.post(tap: .cghidEventTap)
+        // Small delay between key down and up — some apps need time to register the paste command
+        usleep(50_000)  // 50ms
         keyUp.post(tap: .cghidEventTap)
     }
 
