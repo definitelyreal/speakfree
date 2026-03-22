@@ -9,7 +9,7 @@ class AudioRecorder {
     // Serial queue protects audioFile from concurrent access between audio thread and main thread
     private let writeQueue = DispatchQueue(label: "com.openwisprmod.audiowrite")
 
-    /// No-op — kept for API compatibility. Engine is created fresh per recording session.
+    /// No-op — engine is created fresh per recording session to avoid stale-tap crashes.
     func warmUp() {}
 
     func startRecording(to outputURL: URL) throws {

@@ -71,6 +71,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         Permissions.ensureMicrophone()
 
+        // On upgrade, the binary changes so macOS invalidates the accessibility trust.
+        // Reset the stale entry so the prompt appears fresh instead of silently failing.
+        if Permissions.didUpgrade() {
+            print("Upgrade detected — resetting Accessibility trust")
+            Permissions.resetAccessibility()
+        }
+
         if !AXIsProcessTrusted() {
             print("Accessibility: not granted — prompting...")
             DispatchQueue.main.async {
@@ -136,6 +143,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onKeyUp: { [weak self] in
                 self?.handleKeyUp()
+            },
+            onAbort: { [weak self] in
+                self?.handleRecordingAbort()
             }
         )
 
@@ -162,7 +172,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         )
         hotkeyManager?.start(
             onKeyDown: { [weak self] in self?.handleKeyDown() },
-            onKeyUp: { [weak self] in self?.handleKeyUp() }
+            onKeyUp: { [weak self] in self?.handleKeyUp() },
+            onAbort: { [weak self] in self?.handleRecordingAbort() }
         )
 
         statusBar.buildMenu()
@@ -266,6 +277,22 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             recordingSourceElement = nil
             statusBar.state = .idle
         }
+    }
+
+    /// A real key was pressed while fn was held — this is a keyboard shortcut, not dictation.
+    /// Cancel recording silently and let the shortcut pass through.
+    private func handleRecordingAbort() {
+        guard isPressed else { return }
+        isPressed = false
+
+        if let audioURL = recorder.stopRecording() {
+            try? FileManager.default.removeItem(at: audioURL)
+        }
+        RecordingStore.clearSentinel()
+        recordingSourceElement = nil
+        recordingContextText = nil
+        statusBar.state = .idle
+        statusBar.buildMenu()
     }
 
     private func handleRecordingStop() {
