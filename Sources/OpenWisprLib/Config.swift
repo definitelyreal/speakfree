@@ -47,6 +47,10 @@ public struct Config: Codable {
             return try JSONDecoder().decode(Config.self, from: data)
         } catch {
             fputs("Warning: unable to parse \(configFile.path): \(error.localizedDescription)\n", stderr)
+            // Back up the corrupted file so user can recover it
+            let backupFile = configDir.appendingPathComponent("config.json.bak")
+            try? FileManager.default.removeItem(at: backupFile)
+            try? FileManager.default.copyItem(at: configFile, to: backupFile)
             return Config.defaultConfig
         }
     }

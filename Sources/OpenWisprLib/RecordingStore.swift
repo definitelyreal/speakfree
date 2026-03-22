@@ -125,6 +125,7 @@ public class RecordingStore {
         for recording in listRecordings() {
             do {
                 try FileManager.default.removeItem(at: recording.url)
+                try? FileManager.default.removeItem(at: sidecarURL(for: recording.url))
             } catch {
                 fputs("Warning: could not remove recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
             }

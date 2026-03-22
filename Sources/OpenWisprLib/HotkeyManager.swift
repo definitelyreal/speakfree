@@ -6,6 +6,7 @@ class HotkeyManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var globalMonitor: Any?
+    private var keyDownMonitor: Any?
     private let keyCode: UInt16
     private let requiredModifiers: UInt64
     private var onKeyDown: (() -> Void)?
@@ -47,6 +48,7 @@ class HotkeyManager {
             NSEvent.removeMonitor(monitor)
             globalMonitor = nil
         }
+        stopKeyDownMonitor()
     }
 
     deinit {
@@ -56,9 +58,11 @@ class HotkeyManager {
     // MARK: - CGEventTap (modifier keys — suppresses default system action)
 
     private func startEventTap() {
+        // Only listen for flagsChanged + tap-disabled events.
+        // keyDown is NOT included here — intercepting every keyDown system-wide
+        // breaks modifier handling (e.g. option+delete deletes by char instead of word).
         let mask = CGEventMask(
             (1 << CGEventType.flagsChanged.rawValue) |
-            (1 << CGEventType.keyDown.rawValue) |
             (1 << CGEventType.tapDisabledByTimeout.rawValue) |
             (1 << CGEventType.tapDisabledByUserInput.rawValue)
         )
@@ -73,7 +77,7 @@ class HotkeyManager {
             options: .defaultTap,
             eventsOfInterest: mask,
             callback: { proxy, type, event, userInfo -> Unmanaged<CGEvent>? in
-                guard let userInfo = userInfo else { return Unmanaged.passRetained(event) }
+                guard let userInfo = userInfo else { return Unmanaged.passUnretained(event) }
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(userInfo).takeUnretainedValue()
                 // macOS disables taps that stall — re-enable immediately when notified
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
@@ -100,25 +104,9 @@ class HotkeyManager {
     }
 
     private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        // If a real key is pressed shortly after fn (within 300ms), this is a keyboard shortcut
-        // (e.g. fn+shift+F5), not dictation. Abort recording and let the key pass through.
-        // After 300ms we're definitely in dictation mode — ignore stray keyDown events.
-        if type == .keyDown && modifierPressed {
-            let elapsed = mach_absolute_time() - modifierPressedAt
-            var timebaseInfo = mach_timebase_info_data_t()
-            mach_timebase_info(&timebaseInfo)
-            let elapsedMs = (elapsed * UInt64(timebaseInfo.numer)) / (UInt64(timebaseInfo.denom) * 1_000_000)
-            if elapsedMs < 300 {
-                modifierPressed = false
-                DispatchQueue.main.async { self.onAbort?() }
-                return Unmanaged.passRetained(event)  // pass through so the shortcut works
-            }
-            return Unmanaged.passRetained(event)  // in dictation mode — ignore
-        }
-
-        guard type == .flagsChanged else { return Unmanaged.passRetained(event) }
+        guard type == .flagsChanged else { return Unmanaged.passUnretained(event) }
         guard event.getIntegerValueField(.keyboardEventKeycode) == Int64(keyCode) else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         let flags = event.flags
@@ -129,20 +117,53 @@ class HotkeyManager {
             if requiredModifiers != 0 {
                 let currentMods = UInt64(flags.rawValue) & 0x00FF0000
                 guard currentMods & requiredModifiers == requiredModifiers else {
-                    return Unmanaged.passRetained(event)
+                    return Unmanaged.passUnretained(event)
                 }
             }
             modifierPressed = true
             modifierPressedAt = mach_absolute_time()
-            DispatchQueue.main.async { self.onKeyDown?() }
+            // Start a temporary keyDown monitor to detect fn+key shortcuts
+            DispatchQueue.main.async {
+                self.startKeyDownMonitor()
+                self.onKeyDown?()
+            }
             return nil  // consume — suppresses emoji drawer
         } else if !fnDown && modifierPressed {
             modifierPressed = false
-            DispatchQueue.main.async { self.onKeyUp?() }
+            DispatchQueue.main.async {
+                self.stopKeyDownMonitor()
+                self.onKeyUp?()
+            }
             return nil  // consume
         }
 
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
+    }
+
+    // MARK: - KeyDown monitor (only active while fn is held)
+
+    private func startKeyDownMonitor() {
+        guard keyDownMonitor == nil else { return }
+        keyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self, self.modifierPressed else { return }
+            let elapsed = mach_absolute_time() - self.modifierPressedAt
+            var timebaseInfo = mach_timebase_info_data_t()
+            mach_timebase_info(&timebaseInfo)
+            let elapsedMs = (elapsed * UInt64(timebaseInfo.numer)) / (UInt64(timebaseInfo.denom) * 1_000_000)
+            // If a key arrives within 300ms of fn press, it's a keyboard shortcut — abort
+            if elapsedMs < 300 {
+                self.modifierPressed = false
+                self.stopKeyDownMonitor()
+                self.onAbort?()
+            }
+        }
+    }
+
+    private func stopKeyDownMonitor() {
+        if let monitor = keyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyDownMonitor = nil
+        }
     }
 
     // MARK: - NSEvent global monitor (non-modifier keys)

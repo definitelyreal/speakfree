@@ -92,10 +92,13 @@ class StatusBarController: NSObject, NSMenuDelegate {
         return "\(seconds / 86400)d"
     }
 
+    /// Cached config for menu building — avoids reading disk on every buildMenu() call
+    private var cachedConfig: Config?
+
     func buildMenu() {
         menuItemTargets = []
 
-        let config = Config.load()
+        let config = cachedConfig ?? Config.load()
         let menu = NSMenu()
 
         let titleItem = NSMenuItem(title: "speakfree v\(OpenWispr.version)", action: nil, keyEquivalent: "")
@@ -299,6 +302,18 @@ class StatusBarController: NSObject, NSMenuDelegate {
         let helpItem = NSMenuItem(title: "Help", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
         helpItem.target = helpTarget
         menu.addItem(helpItem)
+
+        // Check for Updates — wired to Sparkle's updater
+        if let delegate = NSApplication.shared.delegate as? AppDelegate {
+            let updateTarget = MenuItemTarget {
+                delegate.updaterController.checkForUpdates(nil)
+            }
+            menuItemTargets.append(updateTarget)
+            let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            updateItem.target = updateTarget
+            menu.addItem(updateItem)
+        }
+
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
         menu.delegate = self
@@ -306,6 +321,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func reloadConfiguration() {
+        cachedConfig = nil  // Force reload from disk
         guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
         delegate.reloadConfig()
     }
@@ -314,6 +330,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         var config = Config.load()
         block(&config)
         try? config.save()
+        cachedConfig = config
         guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
         delegate.reloadConfig()
     }

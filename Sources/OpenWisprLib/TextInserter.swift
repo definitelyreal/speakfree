@@ -20,8 +20,10 @@ class TextInserter {
             if !sameElement {
                 let refocused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
                 if refocused {
-                    Thread.sleep(forTimeInterval: 0.15)
-                    pasteText(text)
+                    // Use non-blocking delay for focus to settle, then paste
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        self.pasteText(text)
+                    }
                     return true
                 } else {
                     copyToClipboard(text)
@@ -50,6 +52,7 @@ class TextInserter {
     private func pasteText(_ text: String) {
         let pasteboard = NSPasteboard.general
         let savedItems = savePasteboard(pasteboard)
+        let changeCountBeforePaste = pasteboard.changeCount
 
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
@@ -57,9 +60,14 @@ class TextInserter {
         simulatePaste()
 
         // Restore after a generous delay to let the target app consume the paste.
-        // Electron apps, browsers, and heavy editors can take 500ms+ to process Cmd+V.
+        // Check changeCount before restoring — if user copied something new, don't overwrite it.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            self.restorePasteboard(pasteboard, items: savedItems)
+            // changeCount increments on every clipboard change. We set it once (clearContents + setString).
+            // If it changed again since then, the user or another app wrote to the clipboard — don't restore.
+            let expectedChangeCount = changeCountBeforePaste + 2  // clearContents + setString
+            if pasteboard.changeCount == expectedChangeCount {
+                self.restorePasteboard(pasteboard, items: savedItems)
+            }
         }
     }
 
@@ -104,9 +112,10 @@ class TextInserter {
         keyUp.flags = .maskCommand
 
         keyDown.post(tap: .cghidEventTap)
-        // Small delay between key down and up — some apps need time to register the paste command
-        usleep(50_000)  // 50ms
-        keyUp.post(tap: .cghidEventTap)
+        // Non-blocking delay between key down and up — some apps need time to register the paste command
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            keyUp.post(tap: .cghidEventTap)
+        }
     }
 
     /// Returns the key code for 'v', using a cached value when the input source hasn't changed.
