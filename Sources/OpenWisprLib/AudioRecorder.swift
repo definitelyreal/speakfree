@@ -9,6 +9,9 @@ class AudioRecorder {
     // Serial queue protects audioFile from concurrent access between audio thread and main thread
     private let writeQueue = DispatchQueue(label: "com.openwisprmod.audiowrite")
 
+    /// Current RMS audio level (0.0–1.0), updated from the audio tap.
+    private(set) var currentLevel: Float = 0
+
     /// No-op — engine is created fresh per recording session to avoid stale-tap crashes.
     func warmUp() {}
 
@@ -57,6 +60,16 @@ class AudioRecorder {
             }
 
             if error == nil && convertedBuffer.frameLength > 0 {
+                // Compute RMS level for the overlay visualizer
+                if let channelData = convertedBuffer.floatChannelData?[0] {
+                    let count = Int(convertedBuffer.frameLength)
+                    var sum: Float = 0
+                    for i in 0..<count { sum += channelData[i] * channelData[i] }
+                    let rms = sqrtf(sum / Float(max(count, 1)))
+                    // Map to 0–1 with a reasonable speech ceiling
+                    self.currentLevel = min(rms / 0.15, 1.0)
+                }
+
                 self.writeQueue.async {
                     do {
                         try self.audioFile?.write(from: convertedBuffer)

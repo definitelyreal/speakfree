@@ -12,6 +12,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var isPressed = false
     var isReady = false
     public var lastTranscription: String?
+    private var recordingOverlay = RecordingOverlay()
 
     // Sparkle auto-updater — checks for updates on launch and periodically
     let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
@@ -269,6 +270,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         captureFocusedElement()
 
         statusBar.state = .recording
+        recordingOverlay.show(state: .recording, recorder: recorder)
         do {
             // Always write to recordings dir — crash recovery works regardless of maxRecordings
             let outputURL = RecordingStore.newRecordingURL()
@@ -280,6 +282,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             isPressed = false
             recordingSourceElement = nil
             statusBar.state = .idle
+            recordingOverlay.hide()
         }
     }
 
@@ -296,6 +299,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         recordingSourceElement = nil
         recordingContextText = nil
         statusBar.state = .idle
+        recordingOverlay.hide()
         statusBar.buildMenu()
     }
 
@@ -307,10 +311,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             RecordingStore.clearSentinel()
             recordingSourceElement = nil
             statusBar.state = .idle
+            recordingOverlay.hide()
             return
         }
 
         statusBar.state = .transcribing
+        recordingOverlay.update(state: .transcribing)
 
         let capturedElement = recordingSourceElement
         let capturedContext = recordingContextText
@@ -337,6 +343,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 }
 
                 DispatchQueue.main.async {
+                    self.recordingOverlay.hide()
                     if !text.isEmpty {
                         self.lastTranscription = text
                         let pasted = self.inserter.insert(text: text, refocusing: capturedElement, onFocusLost: {
@@ -362,6 +369,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     RecordingStore.prune(maxCount: maxRecordings)
                 }
                 DispatchQueue.main.async {
+                    self.recordingOverlay.hide()
                     print("Error: Transcription failed")
                     self.statusBar.state = .idle
                     self.statusBar.buildMenu()
