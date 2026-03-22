@@ -298,6 +298,78 @@
     footer a { color: var(--dim); text-underline-offset: 3px; }
     footer a:hover { color: var(--muted); }
 
+    /* ── Changes section ── */
+    .changes {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0 24px 80px;
+    }
+
+    .changes-inner {
+      max-width: 620px;
+      width: 100%;
+    }
+
+    .changes-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 500;
+      padding: 10px 20px;
+      cursor: pointer;
+      width: 100%;
+      transition: color 0.15s, border-color 0.15s;
+      font-family: inherit;
+    }
+    .changes-toggle:hover { color: var(--text); border-color: rgba(255,255,255,0.15); }
+    .changes-toggle .arrow { transition: transform 0.2s; font-size: 11px; }
+    .changes-toggle.open .arrow { transform: rotate(90deg); }
+
+    .changes-body {
+      display: none;
+      padding-top: 24px;
+    }
+    .changes-body.open { display: block; }
+
+    .changes-body h3 {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--muted);
+      margin: 20px 0 8px;
+      letter-spacing: 0.02em;
+    }
+    .changes-body h3:first-child { margin-top: 0; }
+
+    .changes-body ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+
+    .changes-body li {
+      font-size: 14px;
+      color: var(--dim);
+      line-height: 1.6;
+      padding-left: 16px;
+      position: relative;
+    }
+    .changes-body li::before {
+      content: "·";
+      position: absolute;
+      left: 4px;
+      color: var(--accent);
+      font-weight: 700;
+    }
+
     @media (max-width: 500px) {
       .logo { width: 200px; height: 200px; }
       .step { grid-template-columns: 28px 28px 1fr; }
@@ -389,6 +461,49 @@
         <div class="feature-body">Dictate into any app — notes, email, Slack, code editors, documents. Wherever your cursor is, your words go. Blazing fast on Apple Silicon (M1/M2/M3); also runs on Intel Macs.</div>
       </div>
 
+    </div>
+  </section>
+
+  <section class="changes">
+    <div class="changes-inner">
+      <button class="changes-toggle" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+        <span class="arrow">▶</span> Changes from open-wispr
+      </button>
+      <div class="changes-body">
+        <h3>Self-contained app</h3>
+        <ul>
+          <li>No Homebrew or terminal needed — just drag to Applications</li>
+          <li>Whisper is bundled in the download</li>
+          <li>Signed and notarized by Apple</li>
+          <li>Automatic updates</li>
+        </ul>
+        <h3>Reliability</h3>
+        <ul>
+          <li>Globe key works reliably even after long sessions</li>
+          <li>Keyboard shortcuts like fn+F5 no longer trigger accidental recordings</li>
+          <li>Paste works consistently across all apps including Electron-based ones</li>
+          <li>Recovers gracefully if the configured model is missing</li>
+        </ul>
+        <h3>Smarter punctuation</h3>
+        <ul>
+          <li>Hybrid mode: Whisper auto-punctuates and you can say "period", "comma", etc.</li>
+          <li>No duplicate punctuation when spoken and auto-punctuation overlap</li>
+          <li>Won't accidentally replace words like "karma" or "comma-separated"</li>
+        </ul>
+        <h3>Better defaults</h3>
+        <ul>
+          <li>Globe/fn key instead of Right Option</li>
+          <li>Hybrid punctuation on by default</li>
+          <li>Settings accessible from the menu bar — no config files to edit</li>
+        </ul>
+        <h3>Quality of life</h3>
+        <ul>
+          <li>Context-aware: reads text before your cursor so Whisper matches your writing style</li>
+          <li>Help window with plain-English documentation</li>
+          <li>Animated menu bar icon shows recording, transcribing, and downloading state</li>
+          <li>"Copied to clipboard" fallback when the original text field can't be refocused</li>
+        </ul>
+      </div>
     </div>
   </section>
 

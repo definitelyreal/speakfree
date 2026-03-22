@@ -42,12 +42,17 @@ struct Permissions {
         let previous = try? String(contentsOf: versionFile, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Always write the current version
+        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        try? current.write(to: versionFile, atomically: true, encoding: .utf8)
+
         if previous == current {
             return false
         }
 
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        try? current.write(to: versionFile, atomically: true, encoding: .utf8)
+        // First launch (no previous version file) is not an upgrade
+        guard previous != nil else { return false }
+
         return true
     }
 

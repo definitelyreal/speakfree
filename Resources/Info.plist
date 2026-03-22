@@ -24,5 +24,11 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>speakfree needs microphone access to record your voice.</string>
+    <key>SUFeedURL</key>
+    <string>https://definitelyreal.github.io/speakfree/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>TNntzjYy93kcEN80zmT8Hp6PPD0BfluqSDl6PmxQArQ=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
 </dict>
 </plist>

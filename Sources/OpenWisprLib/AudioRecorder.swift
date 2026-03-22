@@ -57,9 +57,11 @@ class AudioRecorder {
             }
 
             if error == nil && convertedBuffer.frameLength > 0 {
-                self.writeQueue.sync {
-                    if let err = (try? self.audioFile?.write(from: convertedBuffer)) as? Error {
-                        fputs("AudioRecorder write error: \(err.localizedDescription)\n", stderr)
+                self.writeQueue.async {
+                    do {
+                        try self.audioFile?.write(from: convertedBuffer)
+                    } catch {
+                        fputs("AudioRecorder write error: \(error.localizedDescription)\n", stderr)
                     }
                 }
             }

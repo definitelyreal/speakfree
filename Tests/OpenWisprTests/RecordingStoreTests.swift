@@ -32,9 +32,10 @@ final class RecordingStoreTests: XCTestCase {
         XCTAssertNotEqual(url1, url2)
     }
 
-    func testTempRecordingURL() {
-        let url = RecordingStore.tempRecordingURL()
-        XCTAssertEqual(url.lastPathComponent, "open-wispr-recording.wav")
+    func testNewRecordingURLFormat() {
+        let url = RecordingStore.newRecordingURL()
+        XCTAssertTrue(url.lastPathComponent.hasPrefix("recording-"))
+        XCTAssertEqual(url.pathExtension, "wav")
     }
 
     func testListRecordingsEmpty() {

@@ -69,5 +69,39 @@ xcrun notarytool submit "$DMG" \
 echo "Stapling..."
 xcrun stapler staple "$DMG"
 
+echo "Updating Sparkle appcast..."
+SPARKLE_BIN="/opt/homebrew/Caskroom/sparkle/2.9.0/bin"
+APPCAST="docs/appcast.xml"
+DOWNLOAD_URL="https://github.com/definitelyreal/speakfree/releases/download/v${VERSION}/${DMG}"
+DMG_SIZE=$(stat -f%z "$DMG")
+SIGNATURE=$("$SPARKLE_BIN/sign_update" "$DMG" 2>/dev/null | grep "sparkle:edSignature" | sed 's/.*"\(.*\)".*/\1/')
+PUB_DATE=$(date -u "+%a, %d %b %Y %H:%M:%S %z")
+
+# Build new appcast with this release at the top
+cat > "$APPCAST" << APPCAST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>speakfree Updates</title>
+    <link>https://definitelyreal.github.io/speakfree/</link>
+    <description>Updates for speakfree</description>
+    <language>en</language>
+    <item>
+      <title>speakfree v${VERSION}</title>
+      <pubDate>${PUB_DATE}</pubDate>
+      <sparkle:version>${VERSION}</sparkle:version>
+      <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <enclosure
+        url="${DOWNLOAD_URL}"
+        type="application/octet-stream"
+        sparkle:edSignature="${SIGNATURE}"
+        length="${DMG_SIZE}" />
+    </item>
+  </channel>
+</rss>
+APPCAST_EOF
+
 echo "Done: $APP"
 echo "Done: $DMG (signed, notarized, stapled)"
+echo "Done: $APPCAST (Sparkle appcast updated)"

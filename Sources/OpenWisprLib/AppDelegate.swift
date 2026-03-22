@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Sparkle
 
 public class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBar: StatusBarController!
@@ -11,6 +12,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var isPressed = false
     var isReady = false
     public var lastTranscription: String?
+
+    // Sparkle auto-updater — checks for updates on launch and periodically
+    let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
     // The AXUIElement focused when recording started — used to refocus before pasting
     private var recordingSourceElement: AXUIElement?
