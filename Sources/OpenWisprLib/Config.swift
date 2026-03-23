@@ -47,7 +47,14 @@ public struct Config: Codable {
     public static func loadVocabulary() -> String? {
         guard let content = try? String(contentsOf: vocabularyFile, encoding: .utf8) else { return nil }
         let words = content.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { line -> String in
+                var l = line.trimmingCharacters(in: .whitespaces)
+                // Strip "# auto" suffix from auto-learned entries
+                if let range = l.range(of: " # auto", options: .backwards) {
+                    l = String(l[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+                }
+                return l
+            }
             .filter { !$0.isEmpty && !$0.hasPrefix("#") }
         guard !words.isEmpty else { return nil }
         return words.joined(separator: ", ")

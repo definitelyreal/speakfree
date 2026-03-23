@@ -65,6 +65,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
+    // Called before the menu is displayed — rebuild items so vocabulary.txt edits are reflected
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        cachedConfig = nil
+        rebuildMenuItems(menu)
+    }
+
     @objc private func copyLastTranscription() {
         guard let delegate = NSApplication.shared.delegate as? AppDelegate,
               let text = delegate.lastTranscription else { return }
@@ -95,11 +101,24 @@ class StatusBarController: NSObject, NSMenuDelegate {
     /// Cached config for menu building — avoids reading disk on every buildMenu() call
     private var cachedConfig: Config?
 
-    func buildMenu() {
+    private func rebuildMenuItems(_ menu: NSMenu) {
         menuItemTargets = []
-
+        menu.removeAllItems()
         let config = cachedConfig ?? Config.load()
-        let menu = NSMenu()
+        buildMenuItems(into: menu, config: config)
+    }
+
+    func buildMenu() {
+        let config = cachedConfig ?? Config.load()
+        let menu = statusItem.menu ?? NSMenu()
+        menuItemTargets = []
+        menu.removeAllItems()
+        buildMenuItems(into: menu, config: config)
+        menu.delegate = self
+        statusItem.menu = menu
+    }
+
+    private func buildMenuItems(into menu: NSMenu, config: Config) {
 
         let titleItem = NSMenuItem(title: "speakfree v\(OpenWispr.version)", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
@@ -308,73 +327,71 @@ class StatusBarController: NSObject, NSMenuDelegate {
         screenCtxParent.submenu = screenCtxMenu
         settingsMenu.addItem(screenCtxParent)
 
-        // Remembered Words
-        let wordsParent = NSMenuItem(title: "Remembered Words", action: nil, keyEquivalent: "")
-        let wordsMenu = NSMenu()
+        settingsMenu.addItem(NSMenuItem.separator())
+
+        // Vocabulary — unified menu for manual words + auto-learned corrections
+        let vocabParent = NSMenuItem(title: "Vocabulary", action: nil, keyEquivalent: "")
+        let vocabMenu = NSMenu()
+
+        // Auto-learn toggle
         let rememberEnabled = config.rememberWords?.value == true
-        for (label, enabled) in [("Off", false), ("On (detect corrections)", true)] {
+        for (label, enabled) in [("Auto-learn: Off", false), ("Auto-learn: On", true)] {
             let target = MenuItemTarget { [weak self] in self?.setRememberWords(enabled) }
             menuItemTargets.append(target)
             let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
             item.target = target
             item.state = rememberEnabled == enabled ? .on : .off
-            wordsMenu.addItem(item)
+            vocabMenu.addItem(item)
         }
-        let rememberedWords = WordMemory.load()
-        if !rememberedWords.isEmpty {
-            wordsMenu.addItem(NSMenuItem.separator())
-            for (wrong, right) in rememberedWords.sorted(by: { $0.value < $1.value }) {
-                let label = "\(right)  (was: \(wrong))"
+
+        // Word list: all vocabulary words, with auto-learned ones annotated
+        let entries = WordMemory.loadVocabularyEntries()
+        let corrections = WordMemory.load()  // wrong → right
+
+        if !entries.isEmpty {
+            vocabMenu.addItem(NSMenuItem.separator())
+            for entry in entries {
+                let wrongKey = entry.isAuto ? corrections.first(where: { $0.value.lowercased() == entry.word.lowercased() })?.key : nil
+                let label = entry.isAuto ? "\(entry.word)  (auto)" : entry.word
+
                 let target = MenuItemTarget { [weak self] in
-                    WordMemory.forget(wrong)
+                    if let wrong = wrongKey {
+                        WordMemory.forget(wrong)
+                    } else {
+                        WordMemory.removeFromVocab(entry.word)
+                    }
                     self?.buildMenu()
                 }
                 menuItemTargets.append(target)
                 let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
                 item.target = target
-                wordsMenu.addItem(item)
+                vocabMenu.addItem(item)
             }
-            wordsMenu.addItem(NSMenuItem.separator())
-            let resetTarget = MenuItemTarget { [weak self] in
-                WordMemory.resetAll()
-                self?.buildMenu()
-            }
-            menuItemTargets.append(resetTarget)
-            let resetItem = NSMenuItem(title: "Reset All", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            resetItem.target = resetTarget
-            wordsMenu.addItem(resetItem)
         }
-        wordsParent.submenu = wordsMenu
-        settingsMenu.addItem(wordsParent)
 
-        settingsMenu.addItem(NSMenuItem.separator())
+        vocabMenu.addItem(NSMenuItem.separator())
 
-        // Custom Vocabulary
-        let vocabTarget = MenuItemTarget {
+        // Edit File…
+        let editTarget = MenuItemTarget {
             let vocabURL = Config.vocabularyFile
-            // Create template file if it doesn't exist
             if !FileManager.default.fileExists(atPath: vocabURL.path) {
                 try? FileManager.default.createDirectory(at: Config.configDir, withIntermediateDirectories: true)
                 let template = """
-                # Custom Vocabulary for speakfree
-                # Add one word or phrase per line.
-                # These prime Whisper to recognize your specific terms.
+                # Vocabulary for speakfree
+                # One word or phrase per line — primes Whisper to recognize your terms.
                 # Lines starting with # are ignored.
-                #
-                # Examples:
-                # Claude
-                # CLAUDE.md
-                # Anthropic
-                # GPT-4
                 """
                 try? template.write(to: vocabURL, atomically: true, encoding: .utf8)
             }
             NSWorkspace.shared.open(vocabURL)
         }
-        menuItemTargets.append(vocabTarget)
-        let vocabItem = NSMenuItem(title: "Edit Vocabulary…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-        vocabItem.target = vocabTarget
-        settingsMenu.addItem(vocabItem)
+        menuItemTargets.append(editTarget)
+        let editItem = NSMenuItem(title: "Edit File…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+        editItem.target = editTarget
+        vocabMenu.addItem(editItem)
+
+        vocabParent.submenu = vocabMenu
+        settingsMenu.addItem(vocabParent)
 
         settingsItem.submenu = settingsMenu
         menu.addItem(settingsItem)
@@ -398,9 +415,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-
-        menu.delegate = self
-        statusItem.menu = menu
     }
 
     @objc private func reloadConfiguration() {

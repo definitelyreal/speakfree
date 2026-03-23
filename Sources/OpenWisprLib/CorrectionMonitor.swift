@@ -5,7 +5,7 @@ class CorrectionMonitor {
     private var timer: Timer?
     private var element: AXUIElement?
     private var originalWords: [String] = []
-    private var originalText: String = ""
+    private var snapshotText: String = ""
     private var startTime: Date?
     private var offerCallback: ((String, String) -> Void)?
     private var lastCursorWordIndex: Int?
@@ -18,8 +18,9 @@ class CorrectionMonitor {
         stop()
 
         self.element = element
-        self.originalText = pastedText
-        self.originalWords = tokenize(pastedText)
+        // Snapshot the full field text so word indices align with future reads
+        self.snapshotText = readText(from: element) ?? pastedText
+        self.originalWords = tokenize(snapshotText)
         self.startTime = Date()
         self.offerCallback = onCorrectionFound
         self.lastCursorWordIndex = nil
@@ -34,7 +35,7 @@ class CorrectionMonitor {
         timer = nil
         element = nil
         originalWords = []
-        originalText = ""
+        snapshotText = ""
         startTime = nil
         offerCallback = nil
         lastCursorWordIndex = nil
@@ -43,7 +44,6 @@ class CorrectionMonitor {
     private func poll() {
         guard let start = startTime else { stop(); return }
 
-        // Stop after monitor duration
         if Date().timeIntervalSince(start) > Self.monitorDuration {
             stop()
             return
@@ -51,24 +51,22 @@ class CorrectionMonitor {
 
         guard let element = element else { stop(); return }
 
-        // Read current text and cursor position
         guard let currentText = readText(from: element),
               let cursorPos = readCursorPosition(from: element) else { return }
 
         let currentWords = tokenize(currentText)
 
-        // Find the word the cursor is currently in
         let cursorWordIndex = wordIndexAtPosition(cursorPos, in: currentText)
 
         // Check if cursor moved away from a previously edited word
         if let lastIdx = lastCursorWordIndex, cursorWordIndex != lastIdx {
-            // Cursor moved — check if the word at lastIdx was changed
             if lastIdx < originalWords.count && lastIdx < currentWords.count {
                 let original = originalWords[lastIdx]
                 let current = currentWords[lastIdx]
-                if original.lowercased() != current.lowercased() && !current.isEmpty {
-                    offerCallback?(original, current)
-                    // Update original so we don't re-trigger
+                let origNorm = stripPunctuation(original).lowercased()
+                let currNorm = stripPunctuation(current).lowercased()
+                if origNorm != currNorm && !origNorm.isEmpty && !currNorm.isEmpty {
+                    offerCallback?(stripPunctuation(original), stripPunctuation(current))
                     originalWords[lastIdx] = current
                 }
             }
@@ -94,8 +92,12 @@ class CorrectionMonitor {
     }
 
     private func tokenize(_ text: String) -> [String] {
-        // Split on whitespace, preserving positions
         text.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+    }
+
+    /// Strip leading/trailing punctuation from a word for comparison
+    private func stripPunctuation(_ word: String) -> String {
+        word.trimmingCharacters(in: .punctuationCharacters)
     }
 
     private func wordIndexAtPosition(_ pos: Int, in text: String) -> Int? {
@@ -107,9 +109,8 @@ class CorrectionMonitor {
             if pos >= wordStart && pos <= wordEnd {
                 return i
             }
-            charCount = wordEnd + 1 // +1 for the space
+            charCount = wordEnd + 1
         }
-        // Cursor is past the last word — not in any word
         return nil
     }
 }

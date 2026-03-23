@@ -58,7 +58,13 @@ public class Transcriber {
         group.wait()
         process.waitUntilExit()
 
-        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // Whisper outputs one line per segment with leading spaces — clean up but preserve line breaks.
+        let rawOutput = String(data: data, encoding: .utf8) ?? ""
+        let output = rawOutput
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
 
         if process.terminationStatus != 0 {
             let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
