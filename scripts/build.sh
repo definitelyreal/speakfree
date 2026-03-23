@@ -20,6 +20,14 @@ echo "Bundling whisper-cli..."
 mkdir -p "$APP/Contents/Frameworks"
 cp "$WHISPER_BIN" "$APP/Contents/MacOS/whisper-cli"
 
+echo "Bundling Sparkle.framework..."
+SPARKLE_FW=".build/arm64-apple-macosx/release/Sparkle.framework"
+if [ ! -d "$SPARKLE_FW" ]; then
+    SPARKLE_FW=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+fi
+rm -rf "$APP/Contents/Frameworks/Sparkle.framework"
+cp -a "$SPARKLE_FW" "$APP/Contents/Frameworks/Sparkle.framework"
+
 # Copy real dylibs (not symlinks)
 for dylib in "$WHISPER_LIB_DIR"/*.dylib; do
     if [ ! -L "$dylib" ]; then
@@ -36,7 +44,9 @@ for real_dylib in "$APP/Contents/Frameworks"/*.dylib; do
     fi
 done
 
-# Fix rpath so whisper-cli finds its dylibs inside the bundle
+# Fix rpaths so binaries find frameworks/dylibs inside the bundle
+install_name_tool -add_rpath "@executable_path/../Frameworks" \
+    "$APP/Contents/MacOS/speakfree" 2>/dev/null || true
 install_name_tool -add_rpath "@executable_path/../Frameworks" \
     "$APP/Contents/MacOS/whisper-cli" 2>/dev/null || true
 
@@ -44,6 +54,8 @@ echo "Signing..."
 xattr -cr "$APP"
 # Sign dylibs and whisper-cli first, then the app bundle
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/"*.dylib
+codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
+codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/Sparkle.framework"
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/MacOS/whisper-cli"
 codesign --force --deep --options runtime --sign "$SIGN_ID" "$APP"
 
@@ -101,6 +113,9 @@ cat > "$APPCAST" << APPCAST_EOF
   </channel>
 </rss>
 APPCAST_EOF
+
+echo "Installing to /Applications..."
+cp -a "$APP" /Applications/
 
 echo "Done: $APP"
 echo "Done: $DMG (signed, notarized, stapled)"

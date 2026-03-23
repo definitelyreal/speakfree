@@ -84,7 +84,7 @@ final class TextPostProcessorTests: XCTestCase {
     }
 
     func testSemiColonTwoWords() {
-        XCTAssertEqual(TextPostProcessor.process("first semi colon second"), "first semi: second")
+        XCTAssertEqual(TextPostProcessor.process("first semi colon second"), "first; second")
     }
 
     func testNewlineSingleWord() {

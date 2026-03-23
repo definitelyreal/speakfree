@@ -293,6 +293,35 @@ class StatusBarController: NSObject, NSMenuDelegate {
         recParent.submenu = recMenu
         settingsMenu.addItem(recParent)
 
+        settingsMenu.addItem(NSMenuItem.separator())
+
+        // Custom Vocabulary
+        let vocabTarget = MenuItemTarget {
+            let vocabURL = Config.vocabularyFile
+            // Create template file if it doesn't exist
+            if !FileManager.default.fileExists(atPath: vocabURL.path) {
+                try? FileManager.default.createDirectory(at: Config.configDir, withIntermediateDirectories: true)
+                let template = """
+                # Custom Vocabulary for speakfree
+                # Add one word or phrase per line.
+                # These prime Whisper to recognize your specific terms.
+                # Lines starting with # are ignored.
+                #
+                # Examples:
+                # Claude
+                # CLAUDE.md
+                # Anthropic
+                # GPT-4
+                """
+                try? template.write(to: vocabURL, atomically: true, encoding: .utf8)
+            }
+            NSWorkspace.shared.open(vocabURL)
+        }
+        menuItemTargets.append(vocabTarget)
+        let vocabItem = NSMenuItem(title: "Edit Vocabulary…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+        vocabItem.target = vocabTarget
+        settingsMenu.addItem(vocabItem)
+
         settingsItem.submenu = settingsMenu
         menu.addItem(settingsItem)
 

@@ -321,9 +321,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             let maxRecordings = Config.effectiveMaxRecordings(self.config.maxRecordings)
             do {
-                let raw = try self.transcriber.transcribe(audioURL: audioURL, prompt: capturedContext)
+                // Prepend custom vocabulary so whisper recognises user-specific words
+                var prompt = capturedContext
+                if let vocab = Config.loadVocabulary() {
+                    prompt = prompt.map { vocab + ". " + $0 } ?? vocab
+                }
+                let raw = try self.transcriber.transcribe(audioURL: audioURL, prompt: prompt)
                 let mode = self.config.spokenPunctuation ?? .off
-                let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw) : raw
+                let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
                 RecordingStore.saveTranscription(text: text, for: audioURL)
 
                 RecordingStore.clearSentinel()
@@ -378,7 +383,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let raw = try self.transcriber.transcribe(audioURL: audioURL)
                 let mode = self.config.spokenPunctuation ?? .off
-                let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw) : raw
+                let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
                 DispatchQueue.main.async {
                     if !text.isEmpty {
                         self.lastTranscription = text
