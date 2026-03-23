@@ -8,6 +8,7 @@ public struct Config: Codable {
     public var spokenPunctuation: PunctuationMode?
     public var maxRecordings: Int?
     public var toggleMode: FlexBool?
+    public var screenContext: FlexBool?
 
     public static let defaultMaxRecordings = 0
 
