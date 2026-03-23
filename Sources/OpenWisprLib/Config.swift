@@ -36,6 +36,21 @@ public struct Config: Codable {
         configDir.appendingPathComponent("config.json")
     }
 
+    public static var vocabularyFile: URL {
+        configDir.appendingPathComponent("vocabulary.txt")
+    }
+
+    /// Load custom vocabulary words from ~/.config/speakfree/vocabulary.txt
+    /// One word or phrase per line. Prepended to whisper's prompt to prime recognition.
+    public static func loadVocabulary() -> String? {
+        guard let content = try? String(contentsOf: vocabularyFile, encoding: .utf8) else { return nil }
+        let words = content.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        guard !words.isEmpty else { return nil }
+        return words.joined(separator: ", ")
+    }
+
     public static func load() -> Config {
         guard let data = try? Data(contentsOf: configFile) else {
             let config = Config.defaultConfig
