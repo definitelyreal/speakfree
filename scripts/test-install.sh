@@ -20,12 +20,12 @@ check_output() {
     fi
 }
 
-CONFIG_FILE="$HOME/.config/open-wispr/config.json"
+CONFIG_FILE="$HOME/.config/speakfree/config.json"
 CONFIG_BACKUP=""
 
 backup_config() {
     if [ -f "$CONFIG_FILE" ]; then
-        CONFIG_BACKUP=$(mktemp /tmp/open-wispr-config-backup.XXXXXX)
+        CONFIG_BACKUP=$(mktemp /tmp/speakfree-config-backup.XXXXXX)
         cp "$CONFIG_FILE" "$CONFIG_BACKUP"
     fi
 }
@@ -37,14 +37,14 @@ restore_config() {
     fi
 }
 
-echo "open-wispr install smoke tests"
+echo "speakfree install smoke tests"
 echo "-------------------------------"
 
 echo ""
 echo "Building..."
 swift build -c release 2>&1 | tail -1
 
-BIN=".build/release/open-wispr"
+BIN=".build/release/speakfree"
 
 if [ -x "$BIN" ]; then
     pass "Binary is executable"
@@ -54,7 +54,7 @@ else
 fi
 
 check_output "--help shows usage" "Push-to-talk" "$BIN" --help
-check_output "status shows version" "open-wispr v" "$BIN" status
+check_output "status shows version" "speakfree v" "$BIN" status
 check_output "status shows config path" "Config:" "$BIN" status
 check_output "status shows toggle mode" "Toggle:" "$BIN" status
 check_output "get-hotkey works" "Current hotkey:" "$BIN" get-hotkey
@@ -73,27 +73,27 @@ trap - EXIT
 
 echo ""
 echo "Testing app bundle..."
-bash scripts/bundle-app.sh "$BIN" /tmp/OpenWisprTest.app 0.0.0-test
+bash scripts/bundle-app.sh "$BIN" /tmp/SpeakfreeTest.app 0.0.0-test
 
-if [ -x "/tmp/OpenWisprTest.app/Contents/MacOS/open-wispr" ]; then
+if [ -x "/tmp/SpeakfreeTest.app/Contents/MacOS/speakfree" ]; then
     pass "App bundle has executable"
 else
     fail "App bundle missing executable"
 fi
 
-if [ -f "/tmp/OpenWisprTest.app/Contents/Info.plist" ]; then
+if [ -f "/tmp/SpeakfreeTest.app/Contents/Info.plist" ]; then
     pass "App bundle has Info.plist"
 else
     fail "App bundle missing Info.plist"
 fi
 
-if grep -q "com.human37.open-wispr" /tmp/OpenWisprTest.app/Contents/Info.plist; then
+if grep -q "com.definitelyreal.speakfree" /tmp/SpeakfreeTest.app/Contents/Info.plist; then
     pass "Info.plist has correct bundle ID"
 else
     fail "Info.plist wrong bundle ID"
 fi
 
-rm -rf /tmp/OpenWisprTest.app
+rm -rf /tmp/SpeakfreeTest.app
 
 if command -v shellcheck &>/dev/null; then
     echo ""
