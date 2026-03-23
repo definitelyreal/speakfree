@@ -21,6 +21,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordingSourceElement: AXUIElement?
     // Text before cursor at recording start — passed to whisper as context prompt
     private var recordingContextText: String?
+    // Screen OCR text captured at recording start (opt-in)
+    private var screenContextText: String?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar = StatusBarController()
@@ -269,6 +271,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Capture focused element before anything else changes
         captureFocusedElement()
 
+        // Capture screen context in background if enabled
+        if config.screenContext?.value == true {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.screenContextText = ScreenContext.captureAndRecognize()
+            }
+        }
+
         statusBar.state = .recording
         recordingOverlay.show(state: .recording, recorder: recorder)
         do {
@@ -298,6 +307,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         RecordingStore.clearSentinel()
         recordingSourceElement = nil
         recordingContextText = nil
+        screenContextText = nil
         statusBar.state = .idle
         recordingOverlay.hide()
         statusBar.buildMenu()
@@ -319,9 +329,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         recordingOverlay.update(state: .transcribing)
 
         let capturedElement = recordingSourceElement
-        let capturedContext = recordingContextText
+        // Prefer accessibility text, fall back to screen OCR
+        let capturedContext = recordingContextText ?? screenContextText
         recordingSourceElement = nil
         recordingContextText = nil
+        screenContextText = nil
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }

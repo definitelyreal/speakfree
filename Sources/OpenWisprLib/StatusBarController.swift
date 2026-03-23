@@ -293,6 +293,21 @@ class StatusBarController: NSObject, NSMenuDelegate {
         recParent.submenu = recMenu
         settingsMenu.addItem(recParent)
 
+        // Screen Context
+        let screenCtxParent = NSMenuItem(title: "Screen Context", action: nil, keyEquivalent: "")
+        let screenCtxMenu = NSMenu()
+        let screenContextEnabled = config.screenContext?.value == true
+        for (label, enabled) in [("Off", false), ("On (local OCR)", true)] {
+            let target = MenuItemTarget { [weak self] in self?.setScreenContext(enabled) }
+            menuItemTargets.append(target)
+            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
+            item.state = screenContextEnabled == enabled ? .on : .off
+            screenCtxMenu.addItem(item)
+        }
+        screenCtxParent.submenu = screenCtxMenu
+        settingsMenu.addItem(screenCtxParent)
+
         settingsMenu.addItem(NSMenuItem.separator())
 
         // Custom Vocabulary
@@ -382,6 +397,21 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     private func setMaxRecordings(_ count: Int) {
         applyConfig { $0.maxRecordings = count }
+    }
+
+    private func setScreenContext(_ enabled: Bool) {
+        if enabled && !ScreenContext.hasPermission {
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = ScreenContext.requestPermission()
+            }
+        }
+        // Light config save — no need to restart hotkey manager or transcriber
+        var config = Config.load()
+        config.screenContext = FlexBool(enabled)
+        try? config.save()
+        guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
+        delegate.config = config
+        buildMenu()
     }
 
     private func updateIcon() {

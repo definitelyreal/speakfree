@@ -7,7 +7,12 @@ class RecordingOverlay {
     private weak var recorder: AudioRecorder?
 
     func show(state: OverlayState, recorder: AudioRecorder? = nil) {
-        hide()
+        // Hard kill any existing window (no animation)
+        animationTimer?.invalidate()
+        animationTimer = nil
+        window?.orderOut(nil)
+        window = nil
+        contentView = nil
         self.recorder = recorder
 
         guard let screen = NSScreen.main else { return }
@@ -72,9 +77,15 @@ class RecordingOverlay {
 
     func hide() {
         guard let win = window, let view = contentView else { return }
+
+        // Immediately detach references so show() won't see a stale window
+        let animTimer = animationTimer
+        animationTimer = nil
+        window = nil
+        contentView = nil
         recorder = nil
 
-        // Immediately hide bars, spinner, and border
+        // Hide bars, spinner, and border
         view.hideContents = true
         view.borderWidth = 0
 
@@ -94,12 +105,9 @@ class RecordingOverlay {
                 height: originalFrame.height - shrinkH * 2
             )
             win.animator().setFrame(newFrame, display: true)
-        }, completionHandler: { [weak self] in
-            self?.animationTimer?.invalidate()
-            self?.animationTimer = nil
+        }, completionHandler: {
+            animTimer?.invalidate()
             win.orderOut(nil)
-            self?.window = nil
-            self?.contentView = nil
         })
     }
 
