@@ -308,6 +308,45 @@ class StatusBarController: NSObject, NSMenuDelegate {
         screenCtxParent.submenu = screenCtxMenu
         settingsMenu.addItem(screenCtxParent)
 
+        // Remembered Words
+        let wordsParent = NSMenuItem(title: "Remembered Words", action: nil, keyEquivalent: "")
+        let wordsMenu = NSMenu()
+        let rememberEnabled = config.rememberWords?.value == true
+        for (label, enabled) in [("Off", false), ("On (detect corrections)", true)] {
+            let target = MenuItemTarget { [weak self] in self?.setRememberWords(enabled) }
+            menuItemTargets.append(target)
+            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
+            item.state = rememberEnabled == enabled ? .on : .off
+            wordsMenu.addItem(item)
+        }
+        let rememberedWords = WordMemory.load()
+        if !rememberedWords.isEmpty {
+            wordsMenu.addItem(NSMenuItem.separator())
+            for (wrong, right) in rememberedWords.sorted(by: { $0.value < $1.value }) {
+                let label = "\(right)  (was: \(wrong))"
+                let target = MenuItemTarget { [weak self] in
+                    WordMemory.forget(wrong)
+                    self?.buildMenu()
+                }
+                menuItemTargets.append(target)
+                let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+                item.target = target
+                wordsMenu.addItem(item)
+            }
+            wordsMenu.addItem(NSMenuItem.separator())
+            let resetTarget = MenuItemTarget { [weak self] in
+                WordMemory.resetAll()
+                self?.buildMenu()
+            }
+            menuItemTargets.append(resetTarget)
+            let resetItem = NSMenuItem(title: "Reset All", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            resetItem.target = resetTarget
+            wordsMenu.addItem(resetItem)
+        }
+        wordsParent.submenu = wordsMenu
+        settingsMenu.addItem(wordsParent)
+
         settingsMenu.addItem(NSMenuItem.separator())
 
         // Custom Vocabulary
@@ -397,6 +436,15 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     private func setMaxRecordings(_ count: Int) {
         applyConfig { $0.maxRecordings = count }
+    }
+
+    private func setRememberWords(_ enabled: Bool) {
+        var config = Config.load()
+        config.rememberWords = FlexBool(enabled)
+        try? config.save()
+        guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
+        delegate.config = config
+        buildMenu()
     }
 
     private func setScreenContext(_ enabled: Bool) {
