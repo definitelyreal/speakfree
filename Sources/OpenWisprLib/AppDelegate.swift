@@ -13,6 +13,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var isReady = false
     public var lastTranscription: String?
     private var recordingOverlay = RecordingOverlay()
+    private var correctionMonitor = CorrectionMonitor()
 
     // Sparkle auto-updater — checks for updates on launch and periodically
     let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
@@ -329,8 +330,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         recordingOverlay.update(state: .transcribing)
 
         let capturedElement = recordingSourceElement
-        // Prefer accessibility text, fall back to screen OCR
-        let capturedContext = recordingContextText ?? screenContextText
+        let capturedInputText = recordingContextText
+        let capturedScreenText = screenContextText
         recordingSourceElement = nil
         recordingContextText = nil
         screenContextText = nil
@@ -339,11 +340,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             let maxRecordings = Config.effectiveMaxRecordings(self.config.maxRecordings)
             do {
-                // Prepend custom vocabulary so whisper recognises user-specific words
-                var prompt = capturedContext
-                if let vocab = Config.loadVocabulary() {
-                    prompt = prompt.map { vocab + ". " + $0 } ?? vocab
-                }
+                // Combine all context sources: vocabulary, input text, screen OCR, remembered words
+                let prompt: String? = {
+                    let vocab = Config.loadVocabulary()
+                    let wordHint = (self.config.rememberWords?.value == true) ? WordMemory.promptHint() : nil
+                    let parts = [vocab, capturedInputText, capturedScreenText, wordHint].compactMap { $0 }
+                    return parts.isEmpty ? nil : parts.joined(separator: " ")
+                }()
                 let raw = try self.transcriber.transcribe(audioURL: audioURL, prompt: prompt)
                 let mode = self.config.spokenPunctuation ?? .off
                 let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
@@ -369,6 +372,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         if pasted {
                             self.statusBar.state = .idle
                             self.statusBar.buildMenu()
+                            // Monitor for word corrections for 10 seconds (opt-in)
+                            if self.config.rememberWords?.value == true, let el = capturedElement {
+                                self.correctionMonitor.start(element: el, pastedText: text) { wrong, right in
+                                    self.offerCorrection(wrong: wrong, right: right)
+                                }
+                            }
                         }
                     } else {
                         self.statusBar.state = .idle
@@ -431,6 +440,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     self.statusBar.buildMenu()
                 }
             }
+        }
+    }
+
+    private func offerCorrection(wrong: String, right: String) {
+        let alert = NSAlert()
+        alert.messageText = "Remember this word?"
+        alert.informativeText = "You corrected \"\(wrong)\" to \"\(right)\". Remember this for future dictation?"
+        alert.addButton(withTitle: "Remember")
+        alert.addButton(withTitle: "Ignore")
+        alert.alertStyle = .informational
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            WordMemory.remember(wrong: wrong, right: right)
+            print("Remembered: \(wrong) → \(right)")
+            statusBar.buildMenu()
         }
     }
 }
