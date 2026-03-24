@@ -24,6 +24,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordingContextText: String?
     // Screen OCR text captured at recording start (opt-in)
     private var screenContextText: String?
+    private let screenContextLock = NSLock()
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar = StatusBarController()
@@ -275,7 +276,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Capture screen context in background if enabled
         if config.screenContext?.value == true {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.screenContextText = ScreenContext.captureAndRecognize()
+                let text = ScreenContext.captureAndRecognize()
+                self?.screenContextLock.lock()
+                self?.screenContextText = text
+                self?.screenContextLock.unlock()
             }
         }
 
@@ -308,7 +312,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         RecordingStore.clearSentinel()
         recordingSourceElement = nil
         recordingContextText = nil
+        screenContextLock.lock()
         screenContextText = nil
+        screenContextLock.unlock()
         statusBar.state = .idle
         recordingOverlay.hide()
         statusBar.buildMenu()
@@ -331,10 +337,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         let capturedElement = recordingSourceElement
         let capturedInputText = recordingContextText
+        screenContextLock.lock()
         let capturedScreenText = screenContextText
+        screenContextText = nil
+        screenContextLock.unlock()
         recordingSourceElement = nil
         recordingContextText = nil
-        screenContextText = nil
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
