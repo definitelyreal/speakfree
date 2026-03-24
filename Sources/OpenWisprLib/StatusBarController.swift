@@ -463,11 +463,9 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     private func setScreenContext(_ enabled: Bool) {
         if enabled && !ScreenContext.hasPermission {
-            DispatchQueue.global(qos: .userInitiated).async {
-                _ = ScreenContext.requestPermission()
-            }
+            // Opens System Preferences — must be called on main thread
+            _ = ScreenContext.requestPermission()
         }
-        // Light config save — no need to restart hotkey manager or transcriber
         var config = Config.load()
         config.screenContext = FlexBool(enabled)
         try? config.save()
