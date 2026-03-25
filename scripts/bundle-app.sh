@@ -10,6 +10,9 @@ mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$BINARY" "$APP_DIR/Contents/MacOS/speakfree"
+# swift build doesn't set @executable_path/../Frameworks rpath — add it so
+# bundled frameworks (Sparkle, whisper dylibs) are found at runtime.
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_DIR/Contents/MacOS/speakfree" 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
