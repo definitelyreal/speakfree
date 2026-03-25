@@ -36,14 +36,7 @@ class HotkeyManager {
     }
 
     func stop() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            eventTap = nil
-        }
-        if let src = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
-            runLoopSource = nil
-        }
+        tearDownEventTap()
         if let monitor = globalMonitor {
             NSEvent.removeMonitor(monitor)
             globalMonitor = nil
@@ -58,6 +51,7 @@ class HotkeyManager {
     // MARK: - CGEventTap (modifier keys — suppresses default system action)
 
     private func startEventTap() {
+        tearDownEventTap()
         // Only listen for flagsChanged + tap-disabled events.
         // keyDown is NOT included here — intercepting every keyDown system-wide
         // breaks modifier handling (e.g. option+delete deletes by char instead of word).
@@ -67,8 +61,6 @@ class HotkeyManager {
             (1 << CGEventType.tapDisabledByUserInput.rawValue)
         )
 
-        // passUnretained: Swift already holds a strong reference via the HotkeyManager ivar.
-        // The tap callback doesn't outlive HotkeyManager because stop() disables it in deinit.
         let selfPtr = Unmanaged.passUnretained(self)
 
         let tap = CGEvent.tapCreate(
@@ -79,11 +71,10 @@ class HotkeyManager {
             callback: { proxy, type, event, userInfo -> Unmanaged<CGEvent>? in
                 guard let userInfo = userInfo else { return Unmanaged.passUnretained(event) }
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(userInfo).takeUnretainedValue()
-                // macOS disables taps that stall — re-enable immediately when notified
+                // macOS disables taps that stall — destroy and recreate from scratch
+                // to prevent degraded event delivery over time (affects option+delete etc.)
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    if let tap = manager.eventTap {
-                        CGEvent.tapEnable(tap: tap, enable: true)
-                    }
+                    DispatchQueue.main.async { manager.startEventTap() }
                     return nil
                 }
                 return manager.handleCGEvent(proxy: proxy, type: type, event: event)
@@ -101,6 +92,17 @@ class HotkeyManager {
         runLoopSource = src
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func tearDownEventTap() {
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            eventTap = nil
+        }
+        if let src = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
+            runLoopSource = nil
+        }
     }
 
     private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
