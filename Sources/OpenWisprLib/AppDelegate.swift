@@ -349,9 +349,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             let maxRecordings = Config.effectiveMaxRecordings(self.config.maxRecordings)
             do {
                 // Build Whisper prompt. Only the final 224 tokens (~800 chars) matter,
-                // so order by importance: glossary first, screen context middle, input text last.
-                // Input text goes last because it's the most transcript-like context and
-                // Whisper follows the style of whatever appears at the end of the prompt.
+                // so order by importance: glossary first, screen context middle, input text next,
+                // punctuation hint last. Whisper follows the style of whatever ends the prompt.
                 let prompt: String? = {
                     var parts: [String] = []
                     if let vocab = Config.loadVocabulary() {
@@ -362,6 +361,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     if let input = capturedInputText {
                         parts.append(input)
+                    }
+                    // In spoken/hybrid mode, prime Whisper to correctly recognise spoken
+                    // punctuation words rather than mishearing them as similar-sounding tokens.
+                    let mode = self.config.spokenPunctuation ?? .off
+                    if mode == .spoken || mode == .hybrid {
+                        parts.append("Spoken punctuation: comma, period, question mark, exclamation mark, semicolon, colon, dash, hyphen, ellipsis, new line.")
                     }
                     return parts.isEmpty ? nil : parts.joined(separator: " ")
                 }()
@@ -428,8 +433,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
-                let raw = try self.transcriber.transcribe(audioURL: audioURL)
                 let mode = self.config.spokenPunctuation ?? .off
+                let reprocessPrompt: String? = (mode == .spoken || mode == .hybrid)
+                    ? "Spoken punctuation: comma, period, question mark, exclamation mark, semicolon, colon, dash, hyphen, ellipsis, new line."
+                    : nil
+                let raw = try self.transcriber.transcribe(audioURL: audioURL, prompt: reprocessPrompt)
                 let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
                 DispatchQueue.main.async {
                     if !text.isEmpty {

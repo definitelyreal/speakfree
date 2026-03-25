@@ -33,7 +33,7 @@ public struct TextPostProcessor {
         // Require punctuation immediately before (after optional whitespace):
         // "hello, comma how" → replace ("," before "comma" = whisper saw a break)
         // "comma separating" → skip (no punctuation before = regular word)
-        ("(?<=[.,!?;:])\\s*[ck]omma\(we)", ","),
+        ("(?<=[.,!?;:])\\s*(?:[ck]omma|kana)\(we)", ","),
         ("(?<=[.,!?;:])\\s*period\(we)", "."),
         ("(?<=[.,!?;:])\\s*colon\(we)", ":"),
         ("(?<=[.,!?;:])\\s*dash\(we)", " —"),
@@ -46,7 +46,7 @@ public struct TextPostProcessor {
     // Fallback replacements for spoken mode (no whisper auto-punct, so no context to read).
     // These use the same boundaries as alwaysReplace — replace regardless of surrounding punct.
     private static var spokenFallback: [(pattern: String, replacement: String)] {[
-        ("\(ws)[ck]omma\(we)", ","),
+        ("\(ws)(?:[ck]omma|kana)\(we)", ","),
         ("\(ws)period\(we)", "."),
         ("\(ws)colon\(we)", ":"),
         ("\(ws)dash\(we)", " —"),
