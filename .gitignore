@@ -4,7 +4,12 @@
 *.app
 .DS_Store
 .beads
-.claude/ralph-loop.local.md
+.claude/
+*.zip
+*.dmg
+*.psd
+*.png
+*conflicted*
 .playwright-mcp/
 .vscode/
 docs/superpowers/
