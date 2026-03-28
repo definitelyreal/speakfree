@@ -1,0 +1,23 @@
+{
+  "planPath": "docs/plans/2026-03-28-speakfree-v2-impl.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Create SettingsViewModel", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Create SettingsWindow shell", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Implement General section", "status": "pending", "blockedBy": [2]},
+    {"id": 4, "subject": "Task 4: Implement Transcription section + language list", "status": "pending", "blockedBy": [2]},
+    {"id": 5, "subject": "Task 5: Implement Vocabulary, Privacy & Storage sections", "status": "pending", "blockedBy": [2]},
+    {"id": 6, "subject": "Task 6: Simplify menu bar", "status": "pending", "blockedBy": [2]},
+    {"id": 7, "subject": "Task 7: Default to small.en + optimization flags", "status": "pending"},
+    {"id": 8, "subject": "Task 8: Language support in Transcriber", "status": "pending", "blockedBy": [4]},
+    {"id": 9, "subject": "Task 9: Launch at Login", "status": "pending", "blockedBy": [3]},
+    {"id": 10, "subject": "Task 10: Add whisper.cpp C library as SPM dependency", "status": "pending", "blockedBy": [8]},
+    {"id": 11, "subject": "Task 11: Replace CLI subprocess with library calls", "status": "pending", "blockedBy": [10]},
+    {"id": 12, "subject": "Task 12: Smart model loading", "status": "pending", "blockedBy": [11]},
+    {"id": 13, "subject": "Task 13: Auto-recommend model based on RAM", "status": "pending", "blockedBy": [12]},
+    {"id": 14, "subject": "Task 14: VAD (Voice Activity Detection)", "status": "pending", "blockedBy": [11]},
+    {"id": 15, "subject": "Task 15: Audio input selection", "status": "pending", "blockedBy": [5]},
+    {"id": 16, "subject": "Task 16: Streaming transcription", "status": "pending", "blockedBy": [11]},
+    {"id": 17, "subject": "Task 17: Multi-language auto-detect polish", "status": "pending", "blockedBy": [8]}
+  ],
+  "lastUpdated": "2026-03-28T03:15:00Z"
+}
