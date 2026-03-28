@@ -15,14 +15,12 @@ class SettingsWindowController: NSWindowController {
 
     convenience init(viewModel: SettingsViewModel) {
         let hostingController = NSHostingController(rootView: SettingsView(viewModel: viewModel))
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 580),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
+        // Set preferred content size so the hosting controller knows its bounds
+        hostingController.preferredContentSize = NSSize(width: 460, height: 580)
+        let window = NSWindow(contentViewController: hostingController)
         window.title = "speakfree Settings"
-        window.contentViewController = hostingController
+        window.styleMask = [.titled, .closable]
+        window.setContentSize(NSSize(width: 460, height: 580))
         window.center()
         window.isReleasedWhenClosed = false
         self.init(window: window)

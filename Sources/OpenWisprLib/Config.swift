@@ -96,7 +96,7 @@ public struct Config: Codable {
 ///   .off     — whisper auto-punct only, no spoken word conversion  (spokenPunctuation: false)
 ///   .spoken  — suppress whisper auto-punct, convert spoken words   (spokenPunctuation: true)
 ///   .hybrid  — whisper auto-punct + convert spoken words           (spokenPunctuation: "hybrid")
-public enum PunctuationMode: Codable, Equatable {
+public enum PunctuationMode: Codable, Equatable, Hashable {
     case off
     case spoken
     case hybrid
