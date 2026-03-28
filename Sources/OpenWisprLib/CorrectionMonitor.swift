@@ -74,18 +74,36 @@ class CorrectionMonitor {
         lastCursorPos = cursorPos
     }
 
+    /// Minimum character length for a word to qualify as a correction candidate.
+    private static let minWordLength = 4
+
     /// Find exactly one word that differs between original and current.
     /// Returns nil if zero or more than one word changed.
+    ///
+    /// Filters applied to avoid false positives:
+    /// - Both words must be at least `minWordLength` characters (ignoring punctuation).
+    /// - The Levenshtein distance must be less than 40 % of the longer word's length
+    ///   (i.e. the two words must look like a plausible typo correction).
     private func findSingleCorrection(original: [String], current: [String]) -> (String, String)? {
         guard original.count == current.count else { return nil }
         var result: (String, String)?
         for i in 0..<original.count {
-            let origNorm = stripPunctuation(original[i]).lowercased()
-            let currNorm = stripPunctuation(current[i]).lowercased()
-            if origNorm != currNorm && !origNorm.isEmpty && !currNorm.isEmpty {
-                if result != nil { return nil }  // more than one change — ambiguous
-                result = (stripPunctuation(original[i]), stripPunctuation(current[i]))
-            }
+            let origStripped = stripPunctuation(original[i])
+            let currStripped = stripPunctuation(current[i])
+            let origNorm = origStripped.lowercased()
+            let currNorm = currStripped.lowercased()
+
+            guard origNorm != currNorm, !origNorm.isEmpty, !currNorm.isEmpty else { continue }
+
+            // Both words must be long enough to be meaningful.
+            guard origNorm.count >= Self.minWordLength,
+                  currNorm.count >= Self.minWordLength else { continue }
+
+            // The two words must be close in edit distance (plausible typo).
+            guard LevenshteinDistance.isSimilar(origNorm, currNorm) else { continue }
+
+            if result != nil { return nil }  // more than one change — ambiguous
+            result = (origStripped, currStripped)
         }
         return result
     }
