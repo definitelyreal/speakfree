@@ -65,9 +65,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    // Called before the menu is displayed — rebuild items so vocabulary.txt edits are reflected
+    // Called before the menu is displayed — rebuild items so state changes are reflected
     func menuNeedsUpdate(_ menu: NSMenu) {
-        cachedConfig = nil
         rebuildMenuItems(menu)
     }
 
@@ -98,27 +97,22 @@ class StatusBarController: NSObject, NSMenuDelegate {
         return "\(seconds / 86400)d"
     }
 
-    /// Cached config for menu building — avoids reading disk on every buildMenu() call
-    private var cachedConfig: Config?
-
     private func rebuildMenuItems(_ menu: NSMenu) {
         menuItemTargets = []
         menu.removeAllItems()
-        let config = cachedConfig ?? Config.load()
-        buildMenuItems(into: menu, config: config)
+        buildMenuItems(into: menu)
     }
 
     func buildMenu() {
-        let config = cachedConfig ?? Config.load()
         let menu = statusItem.menu ?? NSMenu()
         menuItemTargets = []
         menu.removeAllItems()
-        buildMenuItems(into: menu, config: config)
+        buildMenuItems(into: menu)
         menu.delegate = self
         statusItem.menu = menu
     }
 
-    private func buildMenuItems(into menu: NSMenu, config: Config) {
+    private func buildMenuItems(into menu: NSMenu) {
 
         let titleItem = NSMenuItem(title: "speakfree v\(OpenWispr.version)", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
@@ -219,189 +213,16 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // Settings submenu
-        let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
-        let settingsMenu = NSMenu()
-
-        // Hotkey picker
-        let hotkeyParent = NSMenuItem(title: "Hotkey", action: nil, keyEquivalent: "")
-        let hotkeyMenu = NSMenu()
-        let hotkeyOptions: [(String, UInt16)] = [
-            ("🌐  Globe / fn",       63),
-            ("⌘  Left Command",     55),
-            ("⌘  Right Command",    54),
-            ("⌥  Left Option",      58),
-            ("⌥  Right Option",     61),
-            ("⌃  Left Control",     59),
-        ]
-        for (label, keyCode) in hotkeyOptions {
-            let target = MenuItemTarget { [weak self] in self?.setHotkey(keyCode: keyCode) }
-            menuItemTargets.append(target)
-            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            item.target = target
-            item.state = config.hotkey.keyCode == keyCode ? .on : .off
-            hotkeyMenu.addItem(item)
+        // Settings — opens the SwiftUI Settings window
+        let settingsTarget = MenuItemTarget {
+            guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
+            delegate.showSettings()
         }
-        hotkeyParent.submenu = hotkeyMenu
-        settingsMenu.addItem(hotkeyParent)
-        settingsMenu.addItem(NSMenuItem.separator())
-
-        // Model
-        let modelParent = NSMenuItem(title: "Model", action: nil, keyEquivalent: "")
-        let modelMenu = NSMenu()
-        for size in ["tiny.en", "base.en", "small.en", "medium.en", "large"] {
-            let target = MenuItemTarget { [weak self] in self?.setModel(size) }
-            menuItemTargets.append(target)
-            let item = NSMenuItem(title: size, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            item.target = target
-            item.state = config.modelSize == size ? .on : .off
-            modelMenu.addItem(item)
-        }
-        modelParent.submenu = modelMenu
-        settingsMenu.addItem(modelParent)
-
-        // Punctuation
-        let punctParent = NSMenuItem(title: "Punctuation", action: nil, keyEquivalent: "")
-        let punctMenu = NSMenu()
-        let punctOptions: [(String, PunctuationMode)] = [
-            ("Off", .off),
-            ("Spoken words", .spoken),
-            ("Hybrid (auto + spoken)", .hybrid),
-        ]
-        let currentPunct = config.spokenPunctuation ?? .off
-        for (label, mode) in punctOptions {
-            let target = MenuItemTarget { [weak self] in self?.setPunctuation(mode) }
-            menuItemTargets.append(target)
-            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            item.target = target
-            item.state = currentPunct == mode ? .on : .off
-            punctMenu.addItem(item)
-        }
-        punctParent.submenu = punctMenu
-        settingsMenu.addItem(punctParent)
-
-        // Key Mode
-        let keyModeParent = NSMenuItem(title: "Key Mode", action: nil, keyEquivalent: "")
-        let keyModeMenu = NSMenu()
-        let isToggle = config.toggleMode?.value == true
-        for (label, isToggleMode) in [("Hold fn", false), ("Toggle fn", true)] {
-            let target = MenuItemTarget { [weak self] in self?.setToggleMode(isToggleMode) }
-            menuItemTargets.append(target)
-            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            item.target = target
-            item.state = isToggle == isToggleMode ? .on : .off
-            keyModeMenu.addItem(item)
-        }
-        keyModeParent.submenu = keyModeMenu
-        settingsMenu.addItem(keyModeParent)
-
-        // Max recordings
-        let recParent = NSMenuItem(title: "Max Recordings", action: nil, keyEquivalent: "")
-        let recMenu = NSMenu()
-        let recOptions = [0, 10, 20, 30, 50, 100]
-        let currentMax = config.maxRecordings ?? 0
-        for count in recOptions {
-            let label = count == 0 ? "Off" : "\(count)"
-            let target = MenuItemTarget { [weak self] in self?.setMaxRecordings(count) }
-            menuItemTargets.append(target)
-            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            item.target = target
-            item.state = currentMax == count ? .on : .off
-            recMenu.addItem(item)
-        }
-        recParent.submenu = recMenu
-        settingsMenu.addItem(recParent)
-
-        // Screen Context
-        let screenCtxParent = NSMenuItem(title: "Screen Context", action: nil, keyEquivalent: "")
-        let screenCtxMenu = NSMenu()
-        let screenContextEnabled = config.screenContext?.value == true
-        for (label, enabled) in [("Off", false), ("On (local OCR)", true)] {
-            let target = MenuItemTarget { [weak self] in self?.setScreenContext(enabled) }
-            menuItemTargets.append(target)
-            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            item.target = target
-            item.state = screenContextEnabled == enabled ? .on : .off
-            screenCtxMenu.addItem(item)
-        }
-        screenCtxParent.submenu = screenCtxMenu
-        settingsMenu.addItem(screenCtxParent)
-
-        settingsMenu.addItem(NSMenuItem.separator())
-
-        // Vocabulary — unified menu for manual words + auto-learned corrections
-        let vocabParent = NSMenuItem(title: "Vocabulary", action: nil, keyEquivalent: "")
-        let vocabMenu = NSMenu()
-
-        // Auto-learn toggle
-        let rememberEnabled = config.rememberWords?.value == true
-        for (label, enabled) in [("Auto-learn: Off", false), ("Auto-learn: On", true)] {
-            let target = MenuItemTarget { [weak self] in self?.setRememberWords(enabled) }
-            menuItemTargets.append(target)
-            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            item.target = target
-            item.state = rememberEnabled == enabled ? .on : .off
-            vocabMenu.addItem(item)
-        }
-
-        // Word list: all vocabulary words, with auto-learned ones annotated
-        let entries = WordMemory.loadVocabularyEntries()
-        let corrections = WordMemory.load()  // wrong → right
-
-        if !entries.isEmpty {
-            vocabMenu.addItem(NSMenuItem.separator())
-            for entry in entries {
-                let wrongKey = entry.isAuto ? corrections.first(where: { $0.value.lowercased() == entry.word.lowercased() })?.key : nil
-                let label = entry.isAuto ? "\(entry.word)  (auto)" : entry.word
-
-                let target = MenuItemTarget { [weak self] in
-                    if let wrong = wrongKey {
-                        WordMemory.forget(wrong)
-                    } else {
-                        WordMemory.removeFromVocab(entry.word)
-                    }
-                    self?.buildMenu()
-                }
-                menuItemTargets.append(target)
-                let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-                item.target = target
-                vocabMenu.addItem(item)
-            }
-        }
-
-        vocabMenu.addItem(NSMenuItem.separator())
-
-        // Edit File…
-        let editTarget = MenuItemTarget {
-            let vocabURL = Config.vocabularyFile
-            if !FileManager.default.fileExists(atPath: vocabURL.path) {
-                try? FileManager.default.createDirectory(at: Config.configDir, withIntermediateDirectories: true)
-                let template = """
-                # Vocabulary for speakfree
-                # One word or phrase per line — primes Whisper to recognize your terms.
-                # Lines starting with # are ignored.
-                """
-                try? template.write(to: vocabURL, atomically: true, encoding: .utf8)
-            }
-            NSWorkspace.shared.open(vocabURL)
-        }
-        menuItemTargets.append(editTarget)
-        let editItem = NSMenuItem(title: "Edit File…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-        editItem.target = editTarget
-        vocabMenu.addItem(editItem)
-
-        vocabParent.submenu = vocabMenu
-        settingsMenu.addItem(vocabParent)
-
-        settingsItem.submenu = settingsMenu
+        menuItemTargets.append(settingsTarget)
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(MenuItemTarget.invoke), keyEquivalent: ",")
+        settingsItem.target = settingsTarget
+        settingsItem.keyEquivalentModifierMask = .command
         menu.addItem(settingsItem)
-
-        menu.addItem(NSMenuItem.separator())
-        let helpTarget = MenuItemTarget { HelpController.show() }
-        menuItemTargets.append(helpTarget)
-        let helpItem = NSMenuItem(title: "Help", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-        helpItem.target = helpTarget
-        menu.addItem(helpItem)
 
         // Check for Updates — wired to Sparkle's updater
         if let delegate = NSApplication.shared.delegate as? AppDelegate {
@@ -414,64 +235,18 @@ class StatusBarController: NSObject, NSMenuDelegate {
             menu.addItem(updateItem)
         }
 
+        let helpTarget = MenuItemTarget { HelpController.show() }
+        menuItemTargets.append(helpTarget)
+        let helpItem = NSMenuItem(title: "Help", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+        helpItem.target = helpTarget
+        menu.addItem(helpItem)
+
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
     @objc private func reloadConfiguration() {
-        cachedConfig = nil  // Force reload from disk
         guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
         delegate.reloadConfig()
-    }
-
-    private func applyConfig(_ block: (inout Config) -> Void) {
-        var config = Config.load()
-        block(&config)
-        try? config.save()
-        cachedConfig = config
-        guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
-        delegate.reloadConfig()
-    }
-
-    private func setHotkey(keyCode: UInt16) {
-        applyConfig { $0.hotkey = HotkeyConfig(keyCode: keyCode, modifiers: []) }
-    }
-
-    private func setModel(_ size: String) {
-        applyConfig { $0.modelSize = size }
-    }
-
-    private func setPunctuation(_ mode: PunctuationMode) {
-        applyConfig { $0.spokenPunctuation = mode }
-    }
-
-    private func setToggleMode(_ enabled: Bool) {
-        applyConfig { $0.toggleMode = FlexBool(enabled) }
-    }
-
-    private func setMaxRecordings(_ count: Int) {
-        applyConfig { $0.maxRecordings = count }
-    }
-
-    private func setRememberWords(_ enabled: Bool) {
-        var config = Config.load()
-        config.rememberWords = FlexBool(enabled)
-        try? config.save()
-        guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
-        delegate.config = config
-        buildMenu()
-    }
-
-    private func setScreenContext(_ enabled: Bool) {
-        if enabled && !ScreenContext.hasPermission {
-            // Opens System Preferences — must be called on main thread
-            _ = ScreenContext.requestPermission()
-        }
-        var config = Config.load()
-        config.screenContext = FlexBool(enabled)
-        try? config.save()
-        guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
-        delegate.config = config
-        buildMenu()
     }
 
     private func updateIcon() {
