@@ -31,7 +31,14 @@ public struct Config: Codable {
 
     public static var configDir: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".config/speakfree")
+        // Use bundle identifier to isolate beta from production
+        let dirName: String
+        if let bundleId = Bundle.main.bundleIdentifier, bundleId.hasSuffix(".beta") {
+            dirName = "speakfree-beta"
+        } else {
+            dirName = "speakfree"
+        }
+        return home.appendingPathComponent(".config/\(dirName)")
     }
 
     public static var configFile: URL {
