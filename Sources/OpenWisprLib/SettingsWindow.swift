@@ -283,6 +283,14 @@ struct SettingsView: View {
                     .frame(width: 200)
                 }
 
+                SettingsRow("Launch at Login") {
+                    Toggle("", isOn: Binding(
+                        get: { LaunchAtLogin.isEnabled },
+                        set: { LaunchAtLogin.isEnabled = $0 }
+                    ))
+                    .labelsHidden()
+                }
+
                 Divider()
 
                 SectionHeader("Transcription")
