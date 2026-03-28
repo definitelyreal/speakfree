@@ -141,7 +141,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 // Clear the stale TCC entry then re-prompt
                 let task = Process()
                 task.launchPath = "/usr/bin/tccutil"
-                task.arguments = ["reset", "Accessibility", "com.definitelyreal.speakfree"]
+                task.arguments = ["reset", "Accessibility", Bundle.main.bundleIdentifier ?? "com.definitelyreal.speakfree"]
                 try? task.run()
                 task.waitUntilExit()
                 let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true]
