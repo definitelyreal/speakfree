@@ -35,15 +35,13 @@ struct Permissions {
     }
 
     static func didUpgrade() -> Bool {
-        let configDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/speakfree")
-        let versionFile = configDir.appendingPathComponent(".last-version")
+        let versionFile = Config.configDir.appendingPathComponent(".last-version")
         let current = OpenWispr.version
         let previous = try? String(contentsOf: versionFile, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Always write the current version
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: Config.configDir, withIntermediateDirectories: true)
         try? current.write(to: versionFile, atomically: true, encoding: .utf8)
 
         if previous == current {
