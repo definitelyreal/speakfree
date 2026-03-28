@@ -182,10 +182,81 @@ private struct LanguageComboBox: View {
     }
 }
 
+// MARK: - Max Recordings Option
+
+private struct MaxRecordingsOption: Hashable {
+    let label: String
+    let value: Int
+}
+
+private let maxRecordingsOptions: [MaxRecordingsOption] = [
+    MaxRecordingsOption(label: "Off", value: 0),
+    MaxRecordingsOption(label: "10", value: 10),
+    MaxRecordingsOption(label: "20", value: 20),
+    MaxRecordingsOption(label: "30", value: 30),
+    MaxRecordingsOption(label: "50", value: 50),
+    MaxRecordingsOption(label: "100", value: 100),
+]
+
+// MARK: - Vocabulary List
+
+struct VocabularyList: View {
+    @Binding var refreshTrigger: Int
+    @State private var entries: [WordMemory.VocabEntry] = []
+
+    var body: some View {
+        Group {
+            if entries.isEmpty {
+                Text("No vocabulary entries")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 120)
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
+                        HStack(spacing: 6) {
+                            Text(entry.word)
+                                .font(.body)
+                            if entry.isAuto {
+                                Text("(auto)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Button(action: {
+                                if entry.isAuto {
+                                    // Auto entries come from dictionary.json — find the wrong key
+                                    let dict = WordMemory.load()
+                                    if let wrong = dict.first(where: { $0.value == entry.word })?.key {
+                                        WordMemory.forget(wrong)
+                                    }
+                                } else {
+                                    WordMemory.removeFromVocab(entry.word)
+                                }
+                                entries = WordMemory.loadVocabularyEntries()
+                            }) {
+                                Image(systemName: "xmark")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+                .padding(.leading, 120)
+            }
+        }
+        .onAppear { entries = WordMemory.loadVocabularyEntries() }
+        .onChange(of: refreshTrigger) { _ in entries = WordMemory.loadVocabularyEntries() }
+    }
+}
+
 // MARK: - Settings View
 
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
+    @State private var vocabRefresh: Int = 0
 
     var body: some View {
         ScrollView {
@@ -248,6 +319,52 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(width: 200)
                 }
+
+                Divider()
+
+                SectionHeader("Vocabulary")
+
+                SettingsRow("Auto-learn") {
+                    Toggle("", isOn: $viewModel.rememberWords)
+                        .labelsHidden()
+                }
+
+                VocabularyList(refreshTrigger: $vocabRefresh)
+
+                HStack(spacing: 12) {
+                    Button("Edit File\u{2026}") {
+                        NSWorkspace.shared.open(Config.vocabularyFile)
+                    }
+                    Button("Reset All") {
+                        WordMemory.resetAll()
+                        vocabRefresh += 1
+                    }
+                }
+                .padding(.leading, 120)
+
+                Divider()
+
+                SectionHeader("Privacy & Storage")
+
+                SettingsRow("Screen Context") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("", isOn: $viewModel.screenContext)
+                            .labelsHidden()
+                        Text("Local OCR of active window")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                SettingsRow("Max Recordings") {
+                    Picker("", selection: $viewModel.maxRecordings) {
+                        ForEach(maxRecordingsOptions, id: \.self) { option in
+                            Text(option.label).tag(option.value)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 200)
+                }
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -257,5 +374,13 @@ struct SettingsView: View {
         .onChange(of: viewModel.modelSize) { _ in viewModel.save() }
         .onChange(of: viewModel.language) { _ in viewModel.save() }
         .onChange(of: viewModel.punctuationMode) { _ in viewModel.save() }
+        .onChange(of: viewModel.rememberWords) { _ in viewModel.save() }
+        .onChange(of: viewModel.screenContext) { newValue in
+            viewModel.save()
+            if newValue && !ScreenContext.hasPermission {
+                _ = ScreenContext.requestPermission()
+            }
+        }
+        .onChange(of: viewModel.maxRecordings) { _ in viewModel.save() }
     }
 }
