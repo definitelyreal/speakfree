@@ -14,6 +14,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     public var lastTranscription: String?
     private var recordingOverlay = RecordingOverlay()
     private var correctionMonitor = CorrectionMonitor()
+    private var settingsViewModel: SettingsViewModel?
 
     // Sparkle auto-updater — checks for updates on launch and periodically
     let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
@@ -188,6 +189,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         statusBar.buildMenu()
         let hotkeyDesc = KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)
         print("Config reloaded: hotkey=\(hotkeyDesc) model=\(config.modelSize)")
+    }
+
+    public func showSettings() {
+        if settingsViewModel == nil {
+            settingsViewModel = SettingsViewModel()
+            settingsViewModel?.onSave = { [weak self] in
+                self?.reloadConfig()
+            }
+        }
+        SettingsWindowController.show(viewModel: settingsViewModel!)
     }
 
     private func handleKeyDown() {
