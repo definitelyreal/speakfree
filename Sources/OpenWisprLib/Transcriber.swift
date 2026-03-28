@@ -27,6 +27,7 @@ public class Transcriber {
             "-l", language,
             "--no-timestamps",
             "-nt",
+            "-t", "\(ProcessInfo.processInfo.activeProcessorCount)",
         ]
         // Spoken mode: suppress whisper's auto-punctuation so only spoken words produce symbols
         if suppressAutoPunctuation {

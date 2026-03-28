@@ -155,6 +155,13 @@ final class ConfigTests: XCTestCase {
         let config = HotkeyConfig(keyCode: 49, modifiers: ["cmd", "bogus"])
         XCTAssertEqual(config.modifierFlags, UInt64(1 << 20))
     }
+
+    // MARK: - Default model
+
+    func testDefaultModelIsSmallEn() {
+        let config = Config.defaultConfig
+        XCTAssertEqual(config.modelSize, "small.en")
+    }
 }
 
 private struct FlexBoolWrapper: Codable {
