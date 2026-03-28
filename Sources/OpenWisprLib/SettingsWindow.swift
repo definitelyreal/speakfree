@@ -81,6 +81,107 @@ private let hotkeyOptions: [HotkeyOption] = [
     HotkeyOption(label: "\u{2303}  Left Control",      keyCode: 59),
 ]
 
+// MARK: - Model Option
+
+private struct ModelOption: Hashable, Identifiable {
+    let id: String   // e.g. "small.en"
+    let label: String
+
+    static let all: [ModelOption] = [
+        ModelOption(id: "tiny.en",    label: "tiny.en"),
+        ModelOption(id: "tiny",       label: "tiny (multilingual)"),
+        ModelOption(id: "base.en",    label: "base.en"),
+        ModelOption(id: "base",       label: "base (multilingual)"),
+        ModelOption(id: "small.en",   label: "small.en"),
+        ModelOption(id: "small",      label: "small (multilingual)"),
+        ModelOption(id: "medium.en",  label: "medium.en"),
+        ModelOption(id: "medium",     label: "medium (multilingual)"),
+        ModelOption(id: "large-v3",   label: "large-v3"),
+    ]
+}
+
+// MARK: - Language Combo Box
+
+/// An autocomplete combo-box for selecting a Whisper language.
+private struct LanguageComboBox: View {
+    @Binding var languageCode: String
+    var onCommit: () -> Void
+
+    @State private var query: String = ""
+    @State private var isOpen: Bool = false
+
+    /// Resolved display name for the current code.
+    private var displayName: String {
+        if languageCode == "auto" { return "Auto-detect" }
+        return WhisperLanguage.find(languageCode)?.name ?? languageCode
+    }
+
+    private var filteredLanguages: [WhisperLanguage] {
+        WhisperLanguage.search(query)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 4) {
+                TextField("Search language...", text: $query, onEditingChanged: { editing in
+                    if editing { isOpen = true }
+                })
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 180)
+                .onAppear { query = displayName }
+
+                if languageCode != "en" && languageCode != "auto" {
+                    Button(action: {
+                        languageCode = "en"
+                        query = "English"
+                        isOpen = false
+                        onCommit()
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if isOpen {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        // Auto-detect at the top
+                        languageRow(name: "Auto-detect", code: "auto")
+
+                        Divider()
+
+                        ForEach(filteredLanguages) { lang in
+                            languageRow(name: "\(lang.name) (\(lang.id))", code: lang.id)
+                        }
+                    }
+                }
+                .frame(width: 200, height: min(CGFloat(filteredLanguages.count + 1) * 26, 200))
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(6)
+                .shadow(radius: 4)
+            }
+        }
+    }
+
+    private func languageRow(name: String, code: String) -> some View {
+        Button(action: {
+            languageCode = code
+            query = name.components(separatedBy: " (").first ?? name
+            isOpen = false
+            onCommit()
+        }) {
+            Text(name)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - Settings View
 
 struct SettingsView: View {
@@ -110,11 +211,51 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(width: 200)
                 }
+
+                Divider()
+
+                SectionHeader("Transcription")
+
+                SettingsRow("Model") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("", selection: $viewModel.modelSize) {
+                            ForEach(ModelOption.all) { option in
+                                Text(option.label).tag(option.id)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 200)
+
+                        Text("\(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)), \(SettingsViewModel.modelSpeedDescription(viewModel.modelSize))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                SettingsRow("Language") {
+                    LanguageComboBox(
+                        languageCode: $viewModel.language,
+                        onCommit: { viewModel.save() }
+                    )
+                }
+
+                SettingsRow("Punctuation") {
+                    Picker("", selection: $viewModel.punctuationMode) {
+                        Text("Off").tag(PunctuationMode.off)
+                        Text("Spoken words").tag(PunctuationMode.spoken)
+                        Text("Hybrid").tag(PunctuationMode.hybrid)
+                    }
+                    .labelsHidden()
+                    .frame(width: 200)
+                }
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onChange(of: viewModel.hotkeyKeyCode) { _ in viewModel.save() }
         .onChange(of: viewModel.toggleMode) { _ in viewModel.save() }
+        .onChange(of: viewModel.modelSize) { _ in viewModel.save() }
+        .onChange(of: viewModel.language) { _ in viewModel.save() }
+        .onChange(of: viewModel.punctuationMode) { _ in viewModel.save() }
     }
 }
