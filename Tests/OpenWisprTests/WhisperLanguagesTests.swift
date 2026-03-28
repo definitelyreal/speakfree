@@ -23,9 +23,13 @@ final class WhisperLanguagesTests: XCTestCase {
     }
 
     func testMultilingualModelConversion() {
+        // English-only models should map to multilingual equivalents
         XCTAssertEqual(WhisperLanguage.multilingualModel(for: "small.en"), "small")
+        XCTAssertEqual(WhisperLanguage.multilingualModel(for: "base.en"), "base")
         XCTAssertEqual(WhisperLanguage.multilingualModel(for: "tiny.en"), "tiny")
+        // Already multilingual models stay the same
         XCTAssertEqual(WhisperLanguage.multilingualModel(for: "large-v3"), "large-v3")
+        XCTAssertEqual(WhisperLanguage.multilingualModel(for: "small"), "small")
         XCTAssertEqual(WhisperLanguage.multilingualModel(for: "base"), "base")
     }
 

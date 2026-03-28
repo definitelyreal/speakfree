@@ -64,7 +64,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             RecordingStore.prune(maxCount: maxRecordings)
         }
 
-        transcriber = Transcriber(modelSize: config.modelSize, language: config.language)
+        var effectiveModelSize = config.modelSize
+        if config.language != "en" && WhisperLanguage.isEnglishOnly(config.modelSize) {
+            effectiveModelSize = WhisperLanguage.multilingualModel(for: config.modelSize)
+            print("Language \(config.language) requires multilingual model — using \(effectiveModelSize)")
+        }
+        transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
         DispatchQueue.main.async {
@@ -119,7 +124,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 print("Model mismatch: config has \(config.modelSize) but found \(existingModel) — using existing")
                 config.modelSize = existingModel
                 try? config.save()
-                transcriber = Transcriber(modelSize: config.modelSize, language: config.language)
+                var fallbackModelSize = config.modelSize
+                if config.language != "en" && WhisperLanguage.isEnglishOnly(config.modelSize) {
+                    fallbackModelSize = WhisperLanguage.multilingualModel(for: config.modelSize)
+                    print("Language \(config.language) requires multilingual model — using \(fallbackModelSize)")
+                }
+                transcriber = Transcriber(modelSize: fallbackModelSize, language: config.language)
                 transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
             } else {
                 // No model at all — auto-download the configured default silently
@@ -172,7 +182,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func reloadConfig() {
         config = Config.load()
-        transcriber = Transcriber(modelSize: config.modelSize, language: config.language)
+        var effectiveModelSize = config.modelSize
+        if config.language != "en" && WhisperLanguage.isEnglishOnly(config.modelSize) {
+            effectiveModelSize = WhisperLanguage.multilingualModel(for: config.modelSize)
+            print("Language \(config.language) requires multilingual model — using \(effectiveModelSize)")
+        }
+        transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
         hotkeyManager?.stop()
