@@ -64,6 +64,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             RecordingStore.prune(maxCount: maxRecordings)
         }
 
+        // One-time migration: clean garbage auto-learned entries
+        DispatchQueue.main.sync {
+            VocabularyMigration.runIfNeeded()
+        }
+
         var effectiveModelSize = config.modelSize
         if config.language != "en" && WhisperLanguage.isEnglishOnly(config.modelSize) {
             effectiveModelSize = WhisperLanguage.multilingualModel(for: config.modelSize)
