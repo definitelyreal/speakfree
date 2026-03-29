@@ -65,7 +65,8 @@ final class ConfigPersistenceTests: XCTestCase {
         XCTAssertNil(config.toggleMode)
         XCTAssertNil(config.screenContext)
         XCTAssertNil(config.rememberWords)
-        XCTAssertNil(config.idleTimeout)
+        XCTAssertNil(config.preBuffer)
+        XCTAssertNil(config.keepModelLoaded)
     }
 
     // MARK: - Corrupted JSON does not crash
@@ -133,35 +134,35 @@ final class ConfigPersistenceTests: XCTestCase {
         XCTAssertEqual(decoded.spokenPunctuation, .hybrid)
     }
 
-    // MARK: - idleTimeout round-trip
+    // MARK: - keepModelLoaded round-trip
 
-    func testIdleTimeoutRoundTrip() throws {
+    func testKeepModelLoadedRoundTrip() throws {
         let config = Config(
             hotkey: HotkeyConfig(keyCode: 63, modifiers: []),
             modelPath: nil,
             modelSize: "base.en",
             language: "en",
-            idleTimeout: 600
+            keepModelLoaded: "always"
         )
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(Config.self, from: data)
-        XCTAssertEqual(decoded.idleTimeout, 600)
+        XCTAssertEqual(decoded.keepModelLoaded, "always")
     }
 
-    func testIdleTimeoutZeroRoundTrip() throws {
+    func testKeepModelLoadedOffRoundTrip() throws {
         let config = Config(
             hotkey: HotkeyConfig(keyCode: 63, modifiers: []),
             modelPath: nil,
             modelSize: "base.en",
             language: "en",
-            idleTimeout: 0
+            keepModelLoaded: "off"
         )
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(Config.self, from: data)
-        XCTAssertEqual(decoded.idleTimeout, 0)
+        XCTAssertEqual(decoded.keepModelLoaded, "off")
     }
 
-    func testIdleTimeoutNilWhenMissing() throws {
+    func testKeepModelLoadedNilWhenMissing() throws {
         let json = """
         {
             "hotkey": {"keyCode": 63, "modifiers": []},
@@ -170,7 +171,34 @@ final class ConfigPersistenceTests: XCTestCase {
         }
         """.data(using: .utf8)!
         let config = try JSONDecoder().decode(Config.self, from: json)
-        XCTAssertNil(config.idleTimeout)
+        XCTAssertNil(config.keepModelLoaded)
+    }
+
+    // MARK: - preBuffer round-trip
+
+    func testPreBufferRoundTrip() throws {
+        let config = Config(
+            hotkey: HotkeyConfig(keyCode: 63, modifiers: []),
+            modelPath: nil,
+            modelSize: "base.en",
+            language: "en",
+            preBuffer: FlexBool(false)
+        )
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(Config.self, from: data)
+        XCTAssertEqual(decoded.preBuffer?.value, false)
+    }
+
+    func testPreBufferNilWhenMissing() throws {
+        let json = """
+        {
+            "hotkey": {"keyCode": 63, "modifiers": []},
+            "modelSize": "small.en",
+            "language": "en"
+        }
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(Config.self, from: json)
+        XCTAssertNil(config.preBuffer)
     }
 
     // MARK: - modelPath round-trip

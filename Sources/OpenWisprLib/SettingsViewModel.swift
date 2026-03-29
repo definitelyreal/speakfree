@@ -16,7 +16,8 @@ public class SettingsViewModel: ObservableObject {
     @Published public var maxRecordings: Int
     @Published public var screenContext: Bool
     @Published public var rememberWords: Bool
-    @Published public var idleTimeout: Int
+    @Published public var preBuffer: Bool
+    @Published public var keepModelLoaded: String
 
     // MARK: - Callback
 
@@ -39,16 +40,8 @@ public class SettingsViewModel: ObservableObject {
         self.maxRecordings = c.maxRecordings ?? Config.defaultMaxRecordings
         self.screenContext = c.screenContext?.value ?? false
         self.rememberWords = c.rememberWords?.value ?? false
-
-        // Idle timeout: nil in config means use RAM-based default
-        if let timeout = c.idleTimeout {
-            self.idleTimeout = timeout
-        } else {
-            let ramGB = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
-            if ramGB <= 16 { self.idleTimeout = 120 }
-            else if ramGB <= 32 { self.idleTimeout = 300 }
-            else { self.idleTimeout = 600 }
-        }
+        self.preBuffer = c.preBuffer?.value ?? true
+        self.keepModelLoaded = c.keepModelLoaded ?? "auto"
     }
 
     // MARK: - Conversion
@@ -65,7 +58,8 @@ public class SettingsViewModel: ObservableObject {
             toggleMode: FlexBool(toggleMode),
             screenContext: FlexBool(screenContext),
             rememberWords: FlexBool(rememberWords),
-            idleTimeout: idleTimeout
+            preBuffer: FlexBool(preBuffer),
+            keepModelLoaded: keepModelLoaded
         )
     }
 

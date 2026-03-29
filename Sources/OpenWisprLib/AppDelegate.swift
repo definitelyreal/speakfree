@@ -103,7 +103,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
-        configureIdleTimeout()
+
+        // Configure pre-buffer
+        recorder.preBufferEnabled = config.preBuffer?.value ?? true
+
+        // Configure model persistence
+        transcriber.engine.keepModelLoaded = config.keepModelLoaded ?? "auto"
+        transcriber.engine.startMemoryPressureMonitoring()
 
         DispatchQueue.main.async {
             self.statusBar.reprocessHandler = { [weak self] url in
@@ -210,7 +216,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private func finishReloadConfig(effectiveModelSize: String) {
         transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
-        configureIdleTimeout()
+
+        // Configure pre-buffer
+        recorder.preBufferEnabled = config.preBuffer?.value ?? true
+
+        // Configure model persistence
+        transcriber.engine.keepModelLoaded = config.keepModelLoaded ?? "auto"
+        transcriber.engine.startMemoryPressureMonitoring()
 
         hotkeyManager?.stop()
         hotkeyManager = HotkeyManager(
@@ -523,16 +535,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         WordMemory.remember(wrong: wrong, right: right)
         print("Remembered: \(wrong) → \(right)")
         statusBar.buildMenu()
-    }
-
-    /// Configure the WhisperEngine idle timeout from config, falling back to a RAM-based default.
-    private func configureIdleTimeout() {
-        let defaultTimeout: Int
-        let ramGB = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
-        if ramGB <= 16 { defaultTimeout = 120 }       // 2 min
-        else if ramGB <= 32 { defaultTimeout = 300 }   // 5 min
-        else { defaultTimeout = 600 }                   // 10 min
-        transcriber.engine.idleTimeout = TimeInterval(config.idleTimeout ?? defaultTimeout)
     }
 
     /// Find any downloaded model on disk, returning the model size string (e.g. "base.en").

@@ -56,8 +56,8 @@ private struct ModelInfo: Identifiable, Hashable {
     let isRecommended: Bool
 
     var label: String {
-        var s = "\(id) \u{2014} \(memory), \(speed)"
-        if isRecommended { s += " (Recommended)" }
+        var s = "\(id) (\(memory), \(speed) load)"
+        if isRecommended { s += " \u{2014} Recommended" }
         return s
     }
 }
@@ -80,11 +80,11 @@ private func availableModels(language: String) -> [ModelInfo] {
     }
 
     let raw: [RawModel] = [
-        RawModel(enId: "tiny.en",   multiId: "tiny",   base: "tiny",   memory: "~230 MB", speed: "~0.6s"),
-        RawModel(enId: "base.en",   multiId: "base",   base: "base",   memory: "~330 MB", speed: "~0.6s"),
-        RawModel(enId: "small.en",  multiId: "small",  base: "small",  memory: "~800 MB", speed: "~0.6s"),
-        RawModel(enId: "medium.en", multiId: "medium",  base: "medium", memory: "~2.1 GB", speed: "~1.3s"),
-        RawModel(enId: "large-v3",  multiId: "large-v3", base: "large", memory: "~3.9 GB", speed: "~2.1s"),
+        RawModel(enId: "tiny.en",   multiId: "tiny",   base: "tiny",   memory: "~230 MB", speed: "~0.2s"),
+        RawModel(enId: "base.en",   multiId: "base",   base: "base",   memory: "~330 MB", speed: "~0.3s"),
+        RawModel(enId: "small.en",  multiId: "small",  base: "small",  memory: "~800 MB", speed: "~0.5s"),
+        RawModel(enId: "medium.en", multiId: "medium",  base: "medium", memory: "~2.1 GB", speed: "~1.0s"),
+        RawModel(enId: "large-v3",  multiId: "large-v3", base: "large", memory: "~3.9 GB", speed: "~2.0s"),
     ]
 
     return raw.map { r in
@@ -107,15 +107,6 @@ private let maxRecordingsOptions: [(label: String, value: Int)] = [
     ("30", 30),
     ("50", 50),
     ("100", 100),
-]
-
-// MARK: - Idle Timeout Options
-
-private let idleTimeoutOptions: [(label: String, value: Int)] = [
-    ("Always", 0),
-    ("2 min", 120),
-    ("5 min", 300),
-    ("10 min", 600),
 ]
 
 // MARK: - Key Recorder Monitor
@@ -378,20 +369,37 @@ struct SettingsView: View {
                     punctuationRow
                 }
 
+                // -- PERFORMANCE -------------------------------------------
+                Section("Performance") {
+                    Toggle("Pre-Buffer for Instant Start", isOn: $viewModel.preBuffer)
+                        .toggleStyle(.checkbox)
+
+                    Text("Listens in the background so your first word is never clipped. Feels magically responsive, but the recording indicator will always be on. (No data is leaving your computer.)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    LabeledContent("Keep Model Loaded") {
+                        Picker("", selection: $viewModel.keepModelLoaded) {
+                            Text("Automatic").tag("auto")
+                            Text("Always").tag("always")
+                            Text("Off").tag("off")
+                        }
+                        .labelsHidden()
+                        .frame(width: 120)
+                    }
+
+                    Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac. Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)). Automatic unloads the model whenever your Mac needs the memory.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 // -- CORRECTIONS & CONTEXT ---------------------------------
                 Section("Corrections & Context") {
                     correctionsRow
                     screenContextRow
                     editVocabularyButton
-                }
-
-                // -- PERFORMANCE -------------------------------------------
-                Section {
-                    performanceRow
-                } footer: {
-                    Text("Model uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)) of RAM when loaded. When unloaded, it takes an additional \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) to start dictation.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                 }
 
                 // -- STORAGE -----------------------------------------------
@@ -454,7 +462,8 @@ struct SettingsView: View {
             }
         }
         .onChange(of: viewModel.maxRecordings) { _ in viewModel.save() }
-        .onChange(of: viewModel.idleTimeout) { _ in viewModel.save() }
+        .onChange(of: viewModel.preBuffer) { _ in viewModel.save() }
+        .onChange(of: viewModel.keepModelLoaded) { _ in viewModel.save() }
     }
 
     /// Check if the currently selected model needs downloading
@@ -691,20 +700,6 @@ struct SettingsView: View {
                 try? template.write(to: url, atomically: true, encoding: .utf8)
             }
             NSWorkspace.shared.open(url)
-        }
-    }
-
-    // MARK: - Performance Row
-
-    private var performanceRow: some View {
-        LabeledContent("Keep model loaded") {
-            Picker("", selection: $viewModel.idleTimeout) {
-                ForEach(idleTimeoutOptions, id: \.value) { option in
-                    Text(option.label).tag(option.value)
-                }
-            }
-            .labelsHidden()
-            .frame(width: 100)
         }
     }
 

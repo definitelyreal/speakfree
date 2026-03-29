@@ -12,6 +12,20 @@ class AudioRecorder {
     /// Current RMS audio level (0.0–1.0), updated from the audio tap.
     private(set) var currentLevel: Float = 0
 
+    /// Whether the pre-buffer engine should run. When false, engine only starts on startRecording.
+    var preBufferEnabled: Bool = true {
+        didSet {
+            if preBufferEnabled && audioEngine == nil {
+                startEngine()
+            } else if !preBufferEnabled && !_isRecording {
+                // Stop the engine when not recording
+                audioEngine?.inputNode.removeTap(onBus: 0)
+                audioEngine?.stop()
+                audioEngine = nil
+            }
+        }
+    }
+
     // MARK: - State (synchronized via stateLock)
 
     /// Lock protecting isRecording + prerollBuffer + audioFile access from audio thread
@@ -36,6 +50,12 @@ class AudioRecorder {
 
     /// Start the always-on audio engine. Call once on app launch.
     func warmUp() {
+        guard preBufferEnabled else { return }
+        startEngine()
+    }
+
+    /// Internal: create and start the audio engine regardless of preBufferEnabled.
+    private func startEngine() {
         guard audioEngine == nil else { return }
 
         let engine = AVAudioEngine()
@@ -56,7 +76,7 @@ class AudioRecorder {
         do {
             try engine.start()
             audioEngine = engine
-            print("AudioRecorder: pre-roll engine started")
+            print("AudioRecorder: audio engine started")
         } catch {
             print("AudioRecorder: engine start failed: \(error.localizedDescription)")
         }
@@ -146,9 +166,9 @@ class AudioRecorder {
             writePrerollToFile(preroll)
         }
 
-        // If engine isn't running (shouldn't happen), start it
+        // If engine isn't running (pre-buffer off), start it now
         if audioEngine == nil {
-            warmUp()
+            startEngine()
         }
     }
 
@@ -185,6 +205,13 @@ class AudioRecorder {
         }
 
         print("AudioRecorder: recording stopped, \(samples.count) total samples (\(String(format: "%.1f", Double(samples.count) / 16000.0))s)")
+
+        // If pre-buffer is off, stop the engine until next recording
+        if !preBufferEnabled {
+            audioEngine?.inputNode.removeTap(onBus: 0)
+            audioEngine?.stop()
+            audioEngine = nil
+        }
 
         guard let url = currentOutputURL else { return nil }
         return (url: url, samples: samples)
