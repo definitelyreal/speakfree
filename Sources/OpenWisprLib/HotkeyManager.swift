@@ -75,7 +75,7 @@ class HotkeyManager {
                 // to prevent degraded event delivery over time (affects option+delete etc.)
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                     DispatchQueue.main.async { manager.startEventTap() }
-                    return nil
+                    return Unmanaged.passUnretained(event)
                 }
                 return manager.handleCGEvent(proxy: proxy, type: type, event: event)
             },
