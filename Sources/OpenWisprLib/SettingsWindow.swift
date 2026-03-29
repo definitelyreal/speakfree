@@ -349,6 +349,22 @@ struct SettingsView: View {
     var body: some View {
         ZStack {
             Form {
+                // Stats banner at the top
+                Section {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 2) {
+                            Text("You've saved **\(UsageStats.shared.timeSavedDescription)** and **\(UsageStats.shared.keystrokesDescription) keystrokes**")
+                                .font(.callout)
+                            Text("\(UsageStats.shared.totalDictations) dictations")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 // -- GENERAL -----------------------------------------------
                 Section("General") {
                     Toggle("Launch at Login", isOn: $launchAtLogin)
