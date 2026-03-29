@@ -288,9 +288,15 @@ class StatusBarController: NSObject, NSMenuDelegate {
         return (0..<count).map { frame in
             let t = Double(frame) / Double(count)
 
-            let size = NSSize(width: 18, height: 18)
+            let size = NSSize(width: 22, height: 18)
             let image = NSImage(size: size, flipped: false) { rect in
+                // Purple rounded-rect background
+                let bgRect = NSRect(x: 1, y: 1, width: rect.width - 2, height: rect.height - 2)
                 recordingColor.setFill()
+                NSBezierPath(roundedRect: bgRect, xRadius: 4, yRadius: 4).fill()
+
+                // White bars on top
+                NSColor.white.setFill()
 
                 let barWidth: CGFloat = 2.0
                 let gap: CGFloat = 2.5
@@ -312,7 +318,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 }
                 return true
             }
-            // Non-template so the purple color shows through
             image.isTemplate = false
             return image
         }
