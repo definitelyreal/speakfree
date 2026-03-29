@@ -74,7 +74,12 @@ class HotkeyManager {
                 // macOS disables taps that stall — destroy and recreate from scratch
                 // to prevent degraded event delivery over time (affects option+delete etc.)
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    DispatchQueue.main.async { manager.startEventTap() }
+                    // Re-enable the EXISTING tap — don't destroy and recreate.
+                    // Destroying creates a gap where modifier state can be lost,
+                    // breaking option+delete.
+                    if let tap = manager.eventTap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
                     return Unmanaged.passUnretained(event)
                 }
                 return manager.handleCGEvent(proxy: proxy, type: type, event: event)
