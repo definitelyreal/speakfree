@@ -8,9 +8,22 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.5.0"),
     ],
     targets: [
+        // C module wrapping whisper.cpp headers — links against the bundled dylib
+        .target(
+            name: "CWhisper",
+            path: "Sources/CWhisper",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L/opt/homebrew/lib",
+                    "-lwhisper",
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
+                ]),
+            ]
+        ),
         .target(
             name: "OpenWisprLib",
-            dependencies: ["Sparkle"],
+            dependencies: ["Sparkle", "CWhisper"],
             path: "Sources/OpenWisprLib",
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
