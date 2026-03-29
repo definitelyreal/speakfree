@@ -59,33 +59,62 @@ class AudioRecorder {
 
     private var deviceChangeObserver: NSObjectProtocol?
 
-    /// Restart the engine when the audio input device changes (e.g. AirPods connect/disconnect).
-    /// The engine's tap is bound to a specific device format — changing devices silently stops delivery.
+    /// Reinstall the audio tap when the input device changes (e.g. AirPods connect/disconnect).
+    /// The engine stays running — only the tap and converter are replaced with the new device's format.
     private func startDeviceChangeMonitor() {
         deviceChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
             guard let self = self else { return }
-            DiagnosticLogger.shared.log("AudioRecorder: audio device changed — restarting engine")
+            DiagnosticLogger.shared.log("AudioRecorder: audio configuration changed — reinstalling tap")
 
-            // Don't restart during active recording — it would lose data
+            // Don't touch the engine during active recording — defer until recording stops
             if self._isRecording {
-                DiagnosticLogger.shared.log("AudioRecorder: deferring restart until recording stops")
+                DiagnosticLogger.shared.log("AudioRecorder: deferring tap reinstall until recording stops")
+                self.needsTapReinstall = true
                 return
             }
 
-            // Tear down and restart
-            self.audioEngine?.inputNode.removeTap(onBus: 0)
-            self.audioEngine?.stop()
-            self.audioEngine = nil
-            self.audioConverter = nil
-
-            if self.preBufferEnabled {
-                self.startEngine()
-            }
+            self.reinstallTap()
         }
+    }
+
+    private var needsTapReinstall = false
+
+    /// Reinstall the audio tap without stopping the engine.
+    /// Called after audio device changes to pick up the new input format.
+    private func reinstallTap() {
+        guard let engine = audioEngine else { return }
+
+        let inputNode = engine.inputNode
+
+        // Remove old tap
+        inputNode.removeTap(onBus: 0)
+
+        // Get new format from the (possibly changed) input device
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+
+        guard let conv = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            DiagnosticLogger.shared.log("AudioRecorder: converter creation failed after device change")
+            return
+        }
+        audioConverter = conv
+
+        // Install new tap with the new format
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+            guard let self = self else { return }
+            self.handleAudioBuffer(buffer, inputFormat: inputFormat, converter: conv)
+        }
+
+        // Clear stale pre-roll (it was from the old device)
+        stateLock.lock()
+        prerollBuffer = []
+        stateLock.unlock()
+
+        needsTapReinstall = false
+        DiagnosticLogger.shared.log("AudioRecorder: tap reinstalled for new audio device")
     }
 
     /// Internal: create and start the audio engine regardless of preBufferEnabled.
@@ -250,15 +279,9 @@ class AudioRecorder {
             audioEngine = nil
         }
 
-        // If we got 0 samples, the engine died (likely audio device change during recording).
-        // Force a restart so the next recording works.
-        if samples.isEmpty && preBufferEnabled {
-            DiagnosticLogger.shared.log("AudioRecorder: 0 samples captured — restarting engine (likely device change)")
-            audioEngine?.inputNode.removeTap(onBus: 0)
-            audioEngine?.stop()
-            audioEngine = nil
-            audioConverter = nil
-            startEngine()
+        // If a device change happened during recording, reinstall the tap now
+        if needsTapReinstall {
+            reinstallTap()
         }
 
         guard let url = currentOutputURL else { return nil }

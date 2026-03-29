@@ -252,6 +252,17 @@ When recording stops, the flag flips back and the tap resumes filling the pre-ro
 [Back to pre-roll mode]
 ```
 
+### Audio Device Hot-Switching
+
+When the audio input device changes (e.g., AirPods connect/disconnect), macOS sends
+`AVAudioEngineConfigurationChange`. The engine stays running — only the tap is reinstalled
+with the new device's input format and a fresh converter. This avoids the mic indicator
+flickering off/on.
+
+If a device change occurs during active recording, the tap reinstall is deferred until
+recording stops. The pre-roll buffer is cleared after reinstall since it contains audio
+from the old device.
+
 This design means:
 - **Zero-gap recording** — no engine creation delay between fn press and first captured sample
 - **Pre-captured speech** — the 500ms before fn was pressed is included
