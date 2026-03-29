@@ -138,16 +138,16 @@ private class OverlayContentView: NSView {
     @objc dynamic var borderWidth: CGFloat = 0
     var hideContents = false
 
-    // Layout constants
+    // Layout constants — visualization is 2x the original size
     private static let barCount = 10
-    private static let dotSize: CGFloat = 2
-    private static let barGap: CGFloat = 2
-    private static let hPadding: CGFloat = 19
-    private static let vPadding: CGFloat = 14
-    private static let maxBarHeight: CGFloat = 14
-    private static let spinnerSize: CGFloat = 17
-    private static let spinnerLeftPad: CGFloat = 9   // gap between bars and spinner
-    private static let spinnerRightPad: CGFloat = 13 // right edge padding
+    private static let dotSize: CGFloat = 4
+    private static let barGap: CGFloat = 4
+    private static let hPadding: CGFloat = 24
+    private static let vPadding: CGFloat = 18
+    private static let maxBarHeight: CGFloat = 28
+    private static let spinnerSize: CGFloat = 22
+    private static let spinnerLeftPad: CGFloat = 12   // gap between bars and spinner
+    private static let spinnerRightPad: CGFloat = 16  // right edge padding
     private static let spinnerSpace: CGFloat = spinnerLeftPad + spinnerSize + spinnerRightPad - hPadding
 
     private var smoothLevel: CGFloat = 0
@@ -179,9 +179,29 @@ private class OverlayContentView: NSView {
         let cornerRadius = rect.height / 2
 
         let pillPath = CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
-        ctx.addPath(pillPath)
-        ctx.setFillColor(NSColor(white: 0.08, alpha: 0.92).cgColor)
-        ctx.fillPath()
+
+        // Purple gradient background for recording state
+        if overlayState == .recording {
+            ctx.saveGState()
+            ctx.addPath(pillPath)
+            ctx.clip()
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let gradientColors = [
+                NSColor(red: 0.25, green: 0.05, blue: 0.35, alpha: 0.94).cgColor,
+                NSColor(red: 0.40, green: 0.10, blue: 0.55, alpha: 0.94).cgColor,
+            ] as CFArray
+            if let gradient = CGGradient(colorsSpace: colorSpace, colors: gradientColors, locations: [0.0, 1.0]) {
+                ctx.drawLinearGradient(gradient,
+                    start: CGPoint(x: rect.minX, y: rect.midY),
+                    end: CGPoint(x: rect.maxX, y: rect.midY),
+                    options: [])
+            }
+            ctx.restoreGState()
+        } else {
+            ctx.addPath(pillPath)
+            ctx.setFillColor(NSColor(white: 0.08, alpha: 0.92).cgColor)
+            ctx.fillPath()
+        }
 
         if hideContents { return }
 
@@ -281,9 +301,9 @@ private class OverlayContentView: NSView {
         let cx = rect.maxX - Self.spinnerRightPad - Self.spinnerSize / 2
         let cy = rect.midY
         let spokeCount = 8
-        let innerR: CGFloat = 4.5  // distance from center to inner tip
-        let outerR: CGFloat = 7.5  // distance from center to outer tip
-        let spokeWidth: CGFloat = 2.0
+        let innerR: CGFloat = 6.0  // distance from center to inner tip
+        let outerR: CGFloat = 10.0  // distance from center to outer tip
+        let spokeWidth: CGFloat = 2.5
 
         // Current leading spoke index (rotates at ~10 steps/sec)
         let leadingSpoke = (tick / 3) % spokeCount

@@ -28,12 +28,18 @@ class WhisperEngine {
         // Unload any existing model first
         if context != nil { unloadModel() }
 
+        DiagnosticLogger.shared.log("WhisperEngine: loading model from \(path)")
+        let loadStart = CFAbsoluteTimeGetCurrent()
+
         var cparams = whisper_context_default_params()
         cparams.use_gpu = true
 
         guard let ctx = whisper_init_from_file_with_params(path, cparams) else {
             throw WhisperEngineError.modelLoadFailed(path)
         }
+
+        let loadTime = CFAbsoluteTimeGetCurrent() - loadStart
+        DiagnosticLogger.shared.log("WhisperEngine: model loaded in \(String(format: "%.2f", loadTime))s")
 
         self.context = ctx
         self.loadedModelPath = path
@@ -99,11 +105,15 @@ class WhisperEngine {
         defer { free(regexCString) }
 
         // Run inference
+        DiagnosticLogger.shared.log("WhisperEngine: transcribing \(samples.count) samples (\(String(format: "%.1f", Double(samples.count) / 16000.0))s audio)")
+        let inferenceStart = CFAbsoluteTimeGetCurrent()
         let result = samples.withUnsafeBufferPointer { buffer in
             whisper_full(ctx, params, buffer.baseAddress, Int32(samples.count))
         }
+        let inferenceTime = CFAbsoluteTimeGetCurrent() - inferenceStart
 
         if result != 0 {
+            DiagnosticLogger.shared.log("WhisperEngine: transcription failed (code \(result))")
             throw WhisperEngineError.transcriptionFailed
         }
 
@@ -141,7 +151,9 @@ class WhisperEngine {
 
         lastTranscriptionTime = Date()
 
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        DiagnosticLogger.shared.log("WhisperEngine: inference \(String(format: "%.2f", inferenceTime))s, result \(trimmed.count) chars")
+        return trimmed
     }
 
     // MARK: - Smart Loading
@@ -160,6 +172,7 @@ class WhisperEngine {
 
             if pressureLevel.contains(.critical) {
                 // Critical: always unload
+                DiagnosticLogger.shared.log("WhisperEngine: critical memory pressure — unloading model")
                 print("WhisperEngine: unloading model (critical memory pressure)")
                 self.unloadModel()
             } else if pressureLevel.contains(.warning) {
@@ -180,6 +193,7 @@ class WhisperEngine {
     /// Call when system is under memory pressure to free the model.
     func handleMemoryPressure() {
         guard isLoaded, keepModelLoaded != "always" else { return }
+        DiagnosticLogger.shared.log("WhisperEngine: memory pressure — unloading model")
         print("WhisperEngine: unloading model due to memory pressure")
         unloadModel()
     }

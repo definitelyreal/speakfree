@@ -46,6 +46,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupInner() throws {
+        DiagnosticLogger.shared.setup()
+        DiagnosticLogger.shared.log("Setup started")
         config = Config.load()
 
         // Check for crash recovery before touching recordings
@@ -103,6 +105,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
+        DiagnosticLogger.shared.log("Model loaded: \(effectiveModelSize)")
 
         // Configure pre-buffer
         recorder.preBufferEnabled = config.preBuffer?.value ?? true
@@ -187,6 +190,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         print("Hotkey: \(hotkeyDesc)")
         print("Model: \(config.modelSize)")
         print("Ready.")
+        DiagnosticLogger.shared.log("Ready — hotkey=\(hotkeyDesc) model=\(config.modelSize)")
     }
 
     public func reloadConfig() {
@@ -383,6 +387,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleRecordingStop() {
         guard isPressed else { return }
         isPressed = false
+        let stopTime = CFAbsoluteTimeGetCurrent()
 
         guard let recording = recorder.stopRecording() else {
             RecordingStore.clearSentinel()
@@ -467,6 +472,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             }
                         })
                         if pasted {
+                            let elapsed = CFAbsoluteTimeGetCurrent() - stopTime
+                            DiagnosticLogger.shared.log("Transcription complete: \(String(format: "%.2f", elapsed))s from key-release to text-inserted, \(text.count) chars")
                             self.statusBar.state = .idle
                             self.statusBar.buildMenu()
                             // Monitor for word corrections for 10 seconds (opt-in)
