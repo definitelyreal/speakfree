@@ -35,6 +35,13 @@ struct Permissions {
     }
 
     static func didUpgrade() -> Bool {
+        // Beta builds are ad-hoc signed — each rebuild changes the code identity,
+        // which makes tccutil reset create stale TCC entries. Skip upgrade detection
+        // entirely for beta builds.
+        if let bundleId = Bundle.main.bundleIdentifier, bundleId.hasSuffix(".beta") {
+            return false
+        }
+
         let versionFile = Config.configDir.appendingPathComponent(".last-version")
         let current = OpenWispr.version
         let previous = try? String(contentsOf: versionFile, encoding: .utf8)
