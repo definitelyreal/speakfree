@@ -139,12 +139,12 @@ private class OverlayContentView: NSView {
     var hideContents = false
 
     // Layout constants — visualization is 2x the original size
-    private static let barCount = 10
-    private static let dotSize: CGFloat = 4
-    private static let barGap: CGFloat = 4
+    private static let barCount = 16
+    private static let dotSize: CGFloat = 2.5
+    private static let barGap: CGFloat = 3
     private static let hPadding: CGFloat = 24
     private static let vPadding: CGFloat = 18
-    private static let maxBarHeight: CGFloat = 28
+    private static let maxBarHeight: CGFloat = 24
     private static let spinnerSize: CGFloat = 22
     private static let spinnerLeftPad: CGFloat = 12   // gap between bars and spinner
     private static let spinnerRightPad: CGFloat = 16  // right edge padding
@@ -187,8 +187,8 @@ private class OverlayContentView: NSView {
             ctx.clip()
             let colorSpace = CGColorSpaceCreateDeviceRGB()
             let gradientColors = [
-                NSColor(red: 0.25, green: 0.05, blue: 0.35, alpha: 0.94).cgColor,
-                NSColor(red: 0.40, green: 0.10, blue: 0.55, alpha: 0.94).cgColor,
+                NSColor(red: 0.25, green: 0.05, blue: 0.35, alpha: 0.6).cgColor,
+                NSColor(red: 0.40, green: 0.10, blue: 0.55, alpha: 0.6).cgColor,
             ] as CFArray
             if let gradient = CGGradient(colorsSpace: colorSpace, colors: gradientColors, locations: [0.0, 1.0]) {
                 ctx.drawLinearGradient(gradient,
@@ -218,7 +218,7 @@ private class OverlayContentView: NSView {
         }
 
         let isTranscribing = overlayState == .transcribing
-        let color = isTranscribing ? NSColor.white.withAlphaComponent(0.35) : NSColor.white.withAlphaComponent(0.9)
+        let color = isTranscribing ? NSColor.white.withAlphaComponent(0.35) : NSColor.white.withAlphaComponent(0.75)
         drawBars(ctx: ctx, rect: rect, color: color)
 
         if isTranscribing {
