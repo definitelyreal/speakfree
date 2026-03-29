@@ -15,62 +15,26 @@ class SettingsWindowController: NSWindowController {
 
     convenience init(viewModel: SettingsViewModel) {
         let hostingController = NSHostingController(rootView: SettingsView(viewModel: viewModel))
-        // Set preferred content size so the hosting controller knows its bounds
-        hostingController.preferredContentSize = NSSize(width: 460, height: 580)
+        hostingController.preferredContentSize = NSSize(width: 420, height: 620)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "speakfree Settings"
         window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 460, height: 580))
+        window.setContentSize(NSSize(width: 420, height: 620))
         window.center()
         window.isReleasedWhenClosed = false
         self.init(window: window)
     }
 }
 
-// MARK: - Reusable Components
+// MARK: - Hotkey Options
 
-struct SectionHeader: View {
-    let title: String
-
-    init(_ title: String) {
-        self.title = title
-    }
-
-    var body: some View {
-        Text(title.uppercased())
-            .font(.caption)
-            .foregroundColor(.secondary)
-            .padding(.top, 8)
-    }
-}
-
-struct SettingsRow<Content: View>: View {
-    let label: String
-    let content: Content
-
-    init(_ label: String, @ViewBuilder content: () -> Content) {
-        self.label = label
-        self.content = content()
-    }
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label)
-                .frame(width: 120, alignment: .leading)
-            content
-            Spacer()
-        }
-    }
-}
-
-// MARK: - Hotkey Option
-
-private struct HotkeyOption: Hashable {
+private struct HotkeyOption: Hashable, Identifiable {
     let label: String
     let keyCode: UInt16
+    var id: UInt16 { keyCode }
 }
 
-private let hotkeyOptions: [HotkeyOption] = [
+private let standardHotkeyOptions: [HotkeyOption] = [
     HotkeyOption(label: "\u{1F310}  Globe / fn",       keyCode: 63),
     HotkeyOption(label: "\u{2318}  Left Command",      keyCode: 55),
     HotkeyOption(label: "\u{2318}  Right Command",     keyCode: 54),
@@ -79,174 +43,144 @@ private let hotkeyOptions: [HotkeyOption] = [
     HotkeyOption(label: "\u{2303}  Left Control",      keyCode: 59),
 ]
 
-// MARK: - Model Option
+// MARK: - Model Helpers
 
-private struct ModelOption: Hashable, Identifiable {
-    let id: String   // e.g. "small.en"
-    let label: String
+private struct ModelInfo: Identifiable, Hashable {
+    let id: String
+    let memory: String
+    let speed: String
+    let isRecommended: Bool
 
-    static let all: [ModelOption] = [
-        ModelOption(id: "tiny.en",    label: "tiny.en"),
-        ModelOption(id: "tiny",       label: "tiny (multilingual)"),
-        ModelOption(id: "base.en",    label: "base.en"),
-        ModelOption(id: "base",       label: "base (multilingual)"),
-        ModelOption(id: "small.en",   label: "small.en"),
-        ModelOption(id: "small",      label: "small (multilingual)"),
-        ModelOption(id: "medium.en",  label: "medium.en"),
-        ModelOption(id: "medium",     label: "medium (multilingual)"),
-        ModelOption(id: "large-v3",   label: "large-v3"),
+    var label: String {
+        var s = "\(id) \u{2014} \(memory), \(speed)"
+        if isRecommended { s += " (Recommended)" }
+        return s
+    }
+}
+
+private func availableModels(language: String) -> [ModelInfo] {
+    let isEnglish = (language == "en")
+    let ramGB = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
+
+    let recommendedBase: String
+    if ramGB >= 32 { recommendedBase = "medium" }
+    else if ramGB > 8 { recommendedBase = "small" }
+    else { recommendedBase = "base" }
+
+    struct RawModel {
+        let enId: String
+        let multiId: String
+        let base: String
+        let memory: String
+        let speed: String
+    }
+
+    let raw: [RawModel] = [
+        RawModel(enId: "tiny.en",   multiId: "tiny",   base: "tiny",   memory: "~230 MB", speed: "~0.6s"),
+        RawModel(enId: "base.en",   multiId: "base",   base: "base",   memory: "~330 MB", speed: "~0.6s"),
+        RawModel(enId: "small.en",  multiId: "small",  base: "small",  memory: "~800 MB", speed: "~0.6s"),
+        RawModel(enId: "medium.en", multiId: "medium",  base: "medium", memory: "~2.1 GB", speed: "~1.3s"),
+        RawModel(enId: "large-v3",  multiId: "large-v3", base: "large", memory: "~3.9 GB", speed: "~2.1s"),
     ]
-}
 
-// MARK: - Language Combo Box
-
-/// An autocomplete combo-box for selecting a Whisper language.
-private struct LanguageComboBox: View {
-    @Binding var languageCode: String
-    var onCommit: () -> Void
-
-    @State private var query: String = ""
-    @State private var isOpen: Bool = false
-
-    /// Resolved display name for the current code.
-    private var displayName: String {
-        if languageCode == "auto" { return "Auto-detect" }
-        return WhisperLanguage.find(languageCode)?.name ?? languageCode
-    }
-
-    private var filteredLanguages: [WhisperLanguage] {
-        WhisperLanguage.search(query)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 4) {
-                TextField("Search language...", text: $query, onEditingChanged: { editing in
-                    if editing { isOpen = true }
-                })
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 180)
-                .onAppear { query = displayName }
-
-                if languageCode != "en" && languageCode != "auto" {
-                    Button(action: {
-                        languageCode = "en"
-                        query = "English"
-                        isOpen = false
-                        onCommit()
-                    }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            if isOpen {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        // Auto-detect at the top
-                        languageRow(name: "Auto-detect", code: "auto")
-
-                        Divider()
-
-                        ForEach(filteredLanguages) { lang in
-                            languageRow(name: "\(lang.name) (\(lang.id))", code: lang.id)
-                        }
-                    }
-                }
-                .frame(width: 200, height: min(CGFloat(filteredLanguages.count + 1) * 26, 200))
-                .background(Color(nsColor: .controlBackgroundColor))
-                .cornerRadius(6)
-                .shadow(radius: 4)
-            }
-        }
-    }
-
-    private func languageRow(name: String, code: String) -> some View {
-        Button(action: {
-            languageCode = code
-            query = name.components(separatedBy: " (").first ?? name
-            isOpen = false
-            onCommit()
-        }) {
-            Text(name)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+    return raw.map { r in
+        let modelId = (isEnglish && r.base != "large") ? r.enId : r.multiId
+        return ModelInfo(
+            id: modelId,
+            memory: r.memory,
+            speed: r.speed,
+            isRecommended: r.base == recommendedBase
+        )
     }
 }
 
-// MARK: - Max Recordings Option
+// MARK: - Max Recordings Options
 
-private struct MaxRecordingsOption: Hashable {
-    let label: String
-    let value: Int
-}
-
-private let maxRecordingsOptions: [MaxRecordingsOption] = [
-    MaxRecordingsOption(label: "Off", value: 0),
-    MaxRecordingsOption(label: "10", value: 10),
-    MaxRecordingsOption(label: "20", value: 20),
-    MaxRecordingsOption(label: "30", value: 30),
-    MaxRecordingsOption(label: "50", value: 50),
-    MaxRecordingsOption(label: "100", value: 100),
+private let maxRecordingsOptions: [(label: String, value: Int)] = [
+    ("Off", 0),
+    ("10", 10),
+    ("20", 20),
+    ("30", 30),
+    ("50", 50),
+    ("100", 100),
 ]
 
-// MARK: - Vocabulary List
+// MARK: - Idle Timeout Options
 
-struct VocabularyList: View {
-    @Binding var refreshTrigger: Int
-    @State private var entries: [WordMemory.VocabEntry] = []
+private let idleTimeoutOptions: [(label: String, value: Int)] = [
+    ("Always", 0),
+    ("2 min", 120),
+    ("5 min", 300),
+    ("10 min", 600),
+]
+
+// MARK: - Key Recorder Monitor
+
+/// Holds the NSEvent monitor reference so it can be cleaned up reliably.
+private class KeyMonitorHolder: ObservableObject {
+    var monitor: Any?
+
+    func install(onCapture: @escaping (UInt16, [String]) -> Void, onCancel: @escaping () -> Void) {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 { // Escape
+                onCancel()
+                return nil
+            }
+
+            var mods: [String] = []
+            let flags = event.modifierFlags
+            if flags.contains(.command) { mods.append("cmd") }
+            if flags.contains(.shift) { mods.append("shift") }
+            if flags.contains(.option) { mods.append("option") }
+            if flags.contains(.control) { mods.append("ctrl") }
+
+            onCapture(event.keyCode, mods)
+            return nil
+        }
+    }
+
+    func remove() {
+        if let m = monitor {
+            NSEvent.removeMonitor(m)
+            monitor = nil
+        }
+    }
+
+    deinit { remove() }
+}
+
+// MARK: - Key Recorder Overlay
+
+private struct KeyRecorderOverlay: View {
+    var onCapture: (_ keyCode: UInt16, _ modifiers: [String]) -> Void
+    var onCancel: () -> Void
+
+    @StateObject private var holder = KeyMonitorHolder()
 
     var body: some View {
-        Group {
-            if entries.isEmpty {
-                Text("No vocabulary entries")
-                    .font(.caption)
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                Text("Press a key or combination\u{2026}")
+                    .font(.headline)
+                Text("Waiting for input\u{2026}")
+                    .font(.subheadline)
                     .foregroundColor(.secondary)
-                    .padding(.leading, 120)
-            } else {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
-                        HStack(spacing: 6) {
-                            Text(entry.word)
-                                .font(.body)
-                            if entry.isAuto {
-                                Text("(auto)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            Button(action: {
-                                if entry.isAuto {
-                                    // Auto entries come from dictionary.json — find the wrong key
-                                    let dict = WordMemory.load()
-                                    if let wrong = dict.first(where: { $0.value == entry.word })?.key {
-                                        WordMemory.forget(wrong)
-                                    }
-                                } else {
-                                    WordMemory.removeFromVocab(entry.word)
-                                }
-                                entries = WordMemory.loadVocabularyEntries()
-                            }) {
-                                Image(systemName: "xmark")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.vertical, 2)
-                    }
-                }
-                .padding(.leading, 120)
+
+                Button("Cancel") { onCancel() }
+                    .keyboardShortcut(.cancelAction)
             }
+            .padding(32)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(nsColor: .windowBackgroundColor))
+                    .shadow(radius: 20)
+            )
         }
-        .onAppear { entries = WordMemory.loadVocabularyEntries() }
-        .onChange(of: refreshTrigger) { _ in entries = WordMemory.loadVocabularyEntries() }
+        .onAppear { holder.install(onCapture: onCapture, onCancel: onCancel) }
+        .onDisappear { holder.remove() }
     }
 }
 
@@ -254,126 +188,86 @@ struct VocabularyList: View {
 
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
-    @State private var vocabRefresh: Int = 0
+    @State private var isRecordingHotkey = false
+
+    /// Sorted language list for the picker
+    private var sortedLanguages: [WhisperLanguage] {
+        WhisperLanguage.all.sorted { $0.name < $1.name }
+    }
+
+    /// Whether current hotkey matches one of the standard options
+    private var isCustomHotkey: Bool {
+        !standardHotkeyOptions.contains(where: { $0.keyCode == viewModel.hotkeyKeyCode })
+    }
+
+    /// Display string for the current hotkey
+    private var hotkeyDisplay: String {
+        KeyCodes.describe(keyCode: viewModel.hotkeyKeyCode, modifiers: viewModel.hotkeyModifiers)
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                SectionHeader("General")
+        ZStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
 
-                SettingsRow("Hotkey") {
-                    Picker("", selection: $viewModel.hotkeyKeyCode) {
-                        ForEach(hotkeyOptions, id: \.self) { option in
-                            Text(option.label).tag(option.keyCode)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 200)
-                }
+                    // ── GENERAL ──────────────────────────────────
+                    sectionHeader("General")
 
-                SettingsRow("Key Mode") {
-                    Picker("", selection: $viewModel.toggleMode) {
-                        Text("Hold").tag(false)
-                        Text("Toggle").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 200)
-                }
-
-                SettingsRow("Launch at Login") {
-                    Toggle("", isOn: Binding(
+                    Toggle("Launch at Login", isOn: Binding(
                         get: { LaunchAtLogin.isEnabled },
                         set: { LaunchAtLogin.isEnabled = $0 }
                     ))
-                    .labelsHidden()
+                    .toggleStyle(.checkbox)
+
+                    hotkeyRow
+
+                    Divider()
+
+                    // ── TRANSCRIPTION ────────────────────────────
+                    sectionHeader("Transcription")
+
+                    languageRow
+                    modelRow
+                    punctuationRow
+
+                    Divider()
+
+                    // ── CORRECTIONS & CONTEXT ────────────────────
+                    sectionHeader("Corrections & Context")
+
+                    correctionsRow
+                    screenContextRow
+                    editVocabularyButton
+
+                    Divider()
+
+                    // ── PERFORMANCE ──────────────────────────────
+                    sectionHeader("Performance")
+
+                    performanceRow
+
+                    Divider()
+
+                    // ── STORAGE ──────────────────────────────────
+                    sectionHeader("Storage")
+
+                    storageRow
                 }
-
-                Divider()
-
-                SectionHeader("Transcription")
-
-                SettingsRow("Model") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Picker("", selection: $viewModel.modelSize) {
-                            ForEach(ModelOption.all) { option in
-                                Text(option.label).tag(option.id)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 200)
-
-                        Text("\(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)), \(SettingsViewModel.modelSpeedDescription(viewModel.modelSize))")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                SettingsRow("Language") {
-                    LanguageComboBox(
-                        languageCode: $viewModel.language,
-                        onCommit: { viewModel.save() }
-                    )
-                }
-
-                SettingsRow("Punctuation") {
-                    Picker("", selection: $viewModel.punctuationMode) {
-                        Text("Off").tag(PunctuationMode.off)
-                        Text("Spoken words").tag(PunctuationMode.spoken)
-                        Text("Hybrid").tag(PunctuationMode.hybrid)
-                    }
-                    .labelsHidden()
-                    .frame(width: 200)
-                }
-
-                Divider()
-
-                SectionHeader("Vocabulary")
-
-                SettingsRow("Auto-learn") {
-                    Toggle("", isOn: $viewModel.rememberWords)
-                        .labelsHidden()
-                }
-
-                VocabularyList(refreshTrigger: $vocabRefresh)
-
-                HStack(spacing: 12) {
-                    Button("Edit File\u{2026}") {
-                        NSWorkspace.shared.open(Config.vocabularyFile)
-                    }
-                    Button("Reset All") {
-                        WordMemory.resetAll()
-                        vocabRefresh += 1
-                    }
-                }
-                .padding(.leading, 120)
-
-                Divider()
-
-                SectionHeader("Privacy & Storage")
-
-                SettingsRow("Screen Context") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("", isOn: $viewModel.screenContext)
-                            .labelsHidden()
-                        Text("Local OCR of active window")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                SettingsRow("Max Recordings") {
-                    Picker("", selection: $viewModel.maxRecordings) {
-                        ForEach(maxRecordingsOptions, id: \.self) { option in
-                            Text(option.label).tag(option.value)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 200)
-                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if isRecordingHotkey {
+                KeyRecorderOverlay(
+                    onCapture: { keyCode, modifiers in
+                        viewModel.hotkeyKeyCode = keyCode
+                        viewModel.hotkeyModifiers = modifiers
+                        viewModel.save()
+                        isRecordingHotkey = false
+                    },
+                    onCancel: { isRecordingHotkey = false }
+                )
+            }
         }
         .onChange(of: viewModel.hotkeyKeyCode) { _ in viewModel.save() }
         .onChange(of: viewModel.toggleMode) { _ in viewModel.save() }
@@ -388,5 +282,232 @@ struct SettingsView: View {
             }
         }
         .onChange(of: viewModel.maxRecordings) { _ in viewModel.save() }
+        .onChange(of: viewModel.idleTimeout) { _ in viewModel.save() }
+    }
+
+    // MARK: - Section Header
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.caption)
+            .fontWeight(.semibold)
+            .foregroundColor(.secondary)
+            .padding(.top, 4)
+    }
+
+    // MARK: - Hotkey Row
+
+    private var hotkeyRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text("Hotkey")
+
+                if isCustomHotkey {
+                    // Show custom key display as a disabled-looking button
+                    Text(hotkeyDisplay)
+                        .font(.body)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5)
+                                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
+                        )
+                } else {
+                    Picker("", selection: $viewModel.hotkeyKeyCode) {
+                        ForEach(standardHotkeyOptions) { option in
+                            Text(option.label).tag(option.keyCode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 170)
+                }
+
+                Button("Other\u{2026}") {
+                    isRecordingHotkey = true
+                }
+
+                Picker("", selection: $viewModel.toggleMode) {
+                    Text("Hold").tag(false)
+                    Text("Toggle").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 110)
+            }
+        }
+    }
+
+    // MARK: - Language Row
+
+    private var languageRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Language")
+                Picker("", selection: $viewModel.language) {
+                    Text("Auto-detect").tag("auto")
+                    Divider()
+                    ForEach(sortedLanguages) { lang in
+                        Text(lang.name).tag(lang.id)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 180)
+            }
+            Text("Choose from 99 languages or Auto-detect (less reliable for short dictation).")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Model Row
+
+    private var modelRow: some View {
+        let models = availableModels(language: viewModel.language)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Model")
+                Picker("", selection: $viewModel.modelSize) {
+                    ForEach(models) { model in
+                        Text(model.label).tag(model.id)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 300)
+                .onChange(of: viewModel.language) { newLang in
+                    // When language changes, switch model variant if needed
+                    let newModels = availableModels(language: newLang)
+                    if !newModels.contains(where: { $0.id == viewModel.modelSize }) {
+                        // Current model not available — find equivalent
+                        let base = viewModel.modelSize.replacingOccurrences(of: ".en", with: "")
+                        if let match = newModels.first(where: { $0.id.hasPrefix(base) }) {
+                            viewModel.modelSize = match.id
+                        }
+                    }
+                }
+            }
+
+            let current = models.first(where: { $0.id == viewModel.modelSize })
+            Text("\(current?.memory ?? "~800 MB"), \(current?.speed ?? "~0.6s") on your Mac")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Text("Larger models are more accurate but use more memory. Model downloads automatically when selected.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Punctuation Row
+
+    private var punctuationRow: some View {
+        HStack {
+            Text("Punctuation")
+            Picker("", selection: $viewModel.punctuationMode) {
+                Text("Automatic").tag(PunctuationMode.off)
+                Text("Spoken").tag(PunctuationMode.spoken)
+                Text("Both").tag(PunctuationMode.hybrid)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 220)
+        }
+    }
+
+    // MARK: - Corrections Row
+
+    private var correctionsRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Toggle("Learn From My Corrections", isOn: $viewModel.rememberWords)
+                    .toggleStyle(.checkbox)
+
+                Spacer()
+
+                Button("Reset") {
+                    WordMemory.resetAll()
+                }
+                .font(.caption)
+            }
+            Text("When you fix a transcribed word, speakfree remembers it and primes the model next time.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Screen Context Row
+
+    private var screenContextRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Use Screen Context", isOn: $viewModel.screenContext)
+                .toggleStyle(.checkbox)
+            Text("Reads text on your screen via local OCR to help the model match names and technical terms.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Edit Vocabulary Button
+
+    private var editVocabularyButton: some View {
+        Button("Edit Vocabulary File\u{2026}") {
+            let url = Config.vocabularyFile
+            let dir = Config.configDir
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: url.path) {
+                let template = "# Vocabulary for speakfree\n# One word or phrase per line.\n# Lines starting with # are ignored.\n"
+                try? template.write(to: url, atomically: true, encoding: .utf8)
+            }
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    // MARK: - Performance Row
+
+    private var performanceRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Keep model loaded")
+                Picker("", selection: $viewModel.idleTimeout) {
+                    ForEach(idleTimeoutOptions, id: \.value) { option in
+                        Text(option.label).tag(option.value)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 250)
+            }
+            Text("Memory: \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)) when loaded")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    // MARK: - Storage Row
+
+    private var storageRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Past Recordings")
+                Picker("", selection: $viewModel.maxRecordings) {
+                    ForEach(maxRecordingsOptions, id: \.value) { option in
+                        Text(option.label).tag(option.value)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 80)
+            }
+            Text("Recent dictations appear in the menu bar. Set to Off to delete recordings after transcription.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
