@@ -147,48 +147,27 @@ private class KeyMonitorHolder: ObservableObject {
 private enum HotkeyValidation {
     case allowed
     case rejected(String)
-    case warning(String)
 }
 
 private enum HotkeyValidator {
-    // Modifier-only keys
     static let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 58, 59, 60, 61, 62, 63]
-
-    // Function keys (F1-F19)
     static let functionKeyCodes: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113]
-
-    // Character keys that produce input (letters, digits, punctuation, space, return, tab)
-    static let characterKeyCodes: Set<UInt16> = Set<UInt16>(0...50).union([51, 53])  // 0-50 + delete + escape
 
     static func validate(keyCode: UInt16, modifiers: [String]) -> HotkeyValidation {
         let hasModifiers = !modifiers.isEmpty
 
         // Single modifier key — always fine
-        if !hasModifiers && modifierKeyCodes.contains(keyCode) {
-            return .allowed
-        }
+        if !hasModifiers && modifierKeyCodes.contains(keyCode) { return .allowed }
 
-        // Function key alone — always fine
-        if !hasModifiers && functionKeyCodes.contains(keyCode) {
-            return .allowed
-        }
+        // Function key alone — fine
+        if !hasModifiers && functionKeyCodes.contains(keyCode) { return .allowed }
 
         // Character key without modifier — reject
-        if !hasModifiers && characterKeyCodes.contains(keyCode) {
-            return .rejected("This key produces text input and can\u{2019}t be used alone as a hotkey. Hold a modifier key (\u{2318}, \u{2325}, \u{2303}) while pressing it.")
+        if !hasModifiers {
+            return .rejected("Add a modifier key (\u{2318}, \u{2325}, \u{2303}) or choose a function key.")
         }
 
-        // Modifier + function key — always fine
-        if hasModifiers && functionKeyCodes.contains(keyCode) {
-            return .allowed
-        }
-
-        // Modifier + character key — allow with warning
-        if hasModifiers && characterKeyCodes.contains(keyCode) {
-            return .warning("This combination may conflict with shortcuts in other apps.")
-        }
-
-        // Anything else — allow
+        // Modifier + any key — allowed
         return .allowed
     }
 }
@@ -242,12 +221,12 @@ private struct KeyRecorderOverlay: View {
                         onCapture(keyCode, modifiers)
                     case .rejected(let reason):
                         rejectionMessage = reason
-                    case .warning:
-                        rejectionMessage = nil
-                        onCapture(keyCode, modifiers)
                     }
                 },
-                onCancel: onCancel
+                onCancel: {
+                    rejectionMessage = nil
+                    onCancel()
+                }
             )
         }
         .onDisappear { holder.remove() }
@@ -426,16 +405,12 @@ struct SettingsView: View {
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
-                // Stats line above the form — no box
-                HStack {
-                    Spacer()
-                    Text("\(UsageStats.shared.totalDictations) dictations, saving \(UsageStats.shared.timeSavedDescription) and \(UsageStats.shared.keystrokesDescription) keystrokes")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                }
-                .padding(.top, 8)
-                .padding(.bottom, 4)
+                Text("\(UsageStats.shared.totalDictations) dictations, saving \(UsageStats.shared.timeSavedDescription) and \(UsageStats.shared.keystrokesDescription) keystrokes")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 8)
+                    .padding(.bottom, 2)
 
             Form {
                 // -- GENERAL -----------------------------------------------
@@ -537,7 +512,10 @@ struct SettingsView: View {
             viewModel.save()
             checkPendingDownload()
         }
-        .onChange(of: viewModel.language) { _ in viewModel.save() }
+        .onChange(of: viewModel.language) { _ in
+            viewModel.save()
+            checkPendingDownload()
+        }
         .onChange(of: viewModel.punctuationMode) { _ in viewModel.save() }
         .onChange(of: viewModel.rememberWords) { _ in viewModel.save() }
         .onChange(of: viewModel.screenContext) { newValue in
@@ -564,10 +542,9 @@ struct SettingsView: View {
 
     private var hotkeyRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Hotkey")
-                .font(.body)
-
-            HStack(spacing: 6) {
+            HStack {
+                Text("Hotkey")
+                Spacer()
                 Picker("", selection: $hotkeyPickerSelection) {
                     // If custom hotkey is set, show it first with divider
                     if isCustomHotkey {
@@ -582,12 +559,15 @@ struct SettingsView: View {
 
                     Divider()
 
-                    // "Other..." at the bottom
+                    // "Other\u{2026}" at the bottom
                     Text("Other\u{2026}").tag(otherHotkeyTag)
                 }
                 .labelsHidden()
-                .frame(minWidth: 170)
+                .frame(width: 200)
+            }
 
+            HStack {
+                Spacer()
                 Picker("", selection: $viewModel.toggleMode) {
                     Text("Hold").tag(false)
                     Text("Toggle").tag(true)
@@ -595,7 +575,7 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
                 .controlSize(.small)
                 .labelsHidden()
-                .frame(width: 100)
+                .frame(width: 200)
             }
         }
     }
@@ -657,7 +637,7 @@ struct SettingsView: View {
                delegate.activeModelSize != viewModel.modelSize {
                 Text("Currently using: \(delegate.activeModelSize)")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.orange)
             }
         }
     }
@@ -847,13 +827,9 @@ struct SettingsView: View {
                 .frame(width: 200)
             }
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Captures audio before you press the hotkey so no words are lost.")
-                Text("Recording indicator stays on. No data leaves your Mac.")
-            }
-            .font(.caption)
-            .foregroundColor(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+            Text("Captures audio before you press the hotkey so no words are lost. Recording indicator stays on.")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 

@@ -224,6 +224,8 @@ private class OverlayContentView: NSView {
     }
 
     private func drawBars(ctx: CGContext, rect: NSRect, color: NSColor) {
+        if overlayState == .transcribing { return }
+
         let centerY = rect.midY
         let startX = Self.hPadding
 
@@ -231,12 +233,7 @@ private class OverlayContentView: NSView {
         let smoothing: CGFloat = audioLevel > smoothLevel ? 0.8 : 0.4
         smoothLevel += (audioLevel - smoothLevel) * smoothing
 
-        let baseLevel: CGFloat
-        if case .transcribing = overlayState {
-            baseLevel = 0
-        } else {
-            baseLevel = smoothLevel
-        }
+        let baseLevel = smoothLevel
 
         // Periodically fire a traveling boost that cascades left to right
         travelTimer += 1
@@ -280,8 +277,7 @@ private class OverlayContentView: NSView {
             displayLevels[i] += (target - displayLevels[i]) * displaySmoothing
 
             let dl = max(displayLevels[i], 0)
-            // Recording: bars can shrink to 1px when very quiet. Transcribing: fixed at 2px.
-            let minH: CGFloat = (overlayState == .transcribing) ? Self.dotSize : 1.0
+            let minH: CGFloat = 1.0  // bars shrink to 1px when very quiet
             let h = minH + (Self.maxBarHeight - minH) * dl
 
             let x = startX + CGFloat(i) * (Self.dotSize + Self.barGap)
