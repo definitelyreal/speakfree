@@ -5,7 +5,6 @@ class AudioRecorder {
     private var audioEngine: AVAudioEngine?
     private var audioConverter: AVAudioConverter?
     private var audioFile: AVAudioFile?
-    private var isRecording = false
     private var currentOutputURL: URL?
     private let writeQueue = DispatchQueue(label: "com.openwisprmod.audiowrite")
     private var pcmSamples: [Float] = []
@@ -13,10 +12,18 @@ class AudioRecorder {
     /// Current RMS audio level (0.0–1.0), updated from the audio tap.
     private(set) var currentLevel: Float = 0
 
+    // MARK: - State (synchronized via stateLock)
+
+    /// Lock protecting isRecording + prerollBuffer + audioFile access from audio thread
+    private let stateLock = NSLock()
+    private var _isRecording = false
+    private var isRecording: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isRecording }
+        set { stateLock.lock(); _isRecording = newValue; stateLock.unlock() }
+    }
+
     // MARK: - Pre-roll circular buffer
 
-    /// Keeps the last ~500ms of audio so speech isn't lost when fn is pressed.
-    private let prerollLock = NSLock()
     private var prerollBuffer: [Float] = []
     private let prerollMaxSamples = 8000  // 500ms at 16kHz
 
@@ -28,9 +35,6 @@ class AudioRecorder {
     )!
 
     /// Start the always-on audio engine. Call once on app launch.
-    /// The engine runs a single tap that operates in two modes:
-    ///   - Idle: fills a 500ms pre-roll circular buffer
-    ///   - Recording: writes to file + accumulates PCM samples
     func warmUp() {
         guard audioEngine == nil else { return }
 
@@ -52,6 +56,7 @@ class AudioRecorder {
         do {
             try engine.start()
             audioEngine = engine
+            print("AudioRecorder: pre-roll engine started")
         } catch {
             print("AudioRecorder: engine start failed: \(error.localizedDescription)")
         }
@@ -81,7 +86,18 @@ class AudioRecorder {
 
         let samples = Array(UnsafeBufferPointer(start: channelData, count: count))
 
-        if isRecording {
+        // Atomically check state and dispatch to correct path
+        stateLock.lock()
+        let recording = _isRecording
+        if !recording {
+            // Pre-roll mode: fill circular buffer (while holding lock)
+            prerollBuffer.append(contentsOf: samples)
+            if prerollBuffer.count > prerollMaxSamples {
+                prerollBuffer.removeFirst(prerollBuffer.count - prerollMaxSamples)
+            }
+            stateLock.unlock()
+        } else {
+            stateLock.unlock()
             // Recording mode: write to file + accumulate samples
             writeQueue.async {
                 self.pcmSamples.append(contentsOf: samples)
@@ -91,28 +107,14 @@ class AudioRecorder {
                     fputs("AudioRecorder write error: \(error.localizedDescription)\n", stderr)
                 }
             }
-        } else {
-            // Pre-roll mode: fill circular buffer
-            prerollLock.lock()
-            prerollBuffer.append(contentsOf: samples)
-            if prerollBuffer.count > prerollMaxSamples {
-                prerollBuffer.removeFirst(prerollBuffer.count - prerollMaxSamples)
-            }
-            prerollLock.unlock()
         }
     }
 
     // MARK: - Recording
 
     func startRecording(to outputURL: URL) throws {
-        guard !isRecording else { return }
-
-        // Drain pre-roll — this is the audio from just before fn was pressed
-        prerollLock.lock()
-        let preroll = prerollBuffer
-        prerollBuffer = []
-        prerollLock.unlock()
-
+        // Set up the file BEFORE flipping the flag, so the audio thread
+        // doesn't try to write to a nil audioFile
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: 16000,
@@ -122,19 +124,27 @@ class AudioRecorder {
             AVLinearPCMIsBigEndianKey: false,
         ]
 
-        audioFile = try AVAudioFile(forWriting: outputURL, settings: settings)
+        let file = try AVAudioFile(forWriting: outputURL, settings: settings)
         currentOutputURL = outputURL
 
-        // Seed with pre-roll audio
-        pcmSamples = preroll
+        // Atomically: drain pre-roll, set up file, flip to recording mode
+        // This ensures no audio samples are lost between drain and flag flip
+        stateLock.lock()
+        guard !_isRecording else { stateLock.unlock(); return }
 
-        // Write pre-roll to WAV file
+        let preroll = prerollBuffer
+        prerollBuffer = []
+        pcmSamples = preroll
+        audioFile = file
+        _isRecording = true
+        stateLock.unlock()
+
+        print("AudioRecorder: recording started, pre-roll: \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms)")
+
+        // Write pre-roll to WAV file (async, flag is already set so tap writes new audio too)
         if !preroll.isEmpty {
             writePrerollToFile(preroll)
         }
-
-        // Switch to recording mode — the tap is already running
-        isRecording = true
 
         // If engine isn't running (shouldn't happen), start it
         if audioEngine == nil {
@@ -161,10 +171,11 @@ class AudioRecorder {
     }
 
     func stopRecording() -> (url: URL, samples: [Float])? {
-        guard isRecording else { return nil }
-
-        // Switch back to pre-roll mode — tap keeps running
-        isRecording = false
+        // Atomically flip back to pre-roll mode
+        stateLock.lock()
+        guard _isRecording else { stateLock.unlock(); return nil }
+        _isRecording = false
+        stateLock.unlock()
 
         var samples: [Float] = []
         writeQueue.sync {
@@ -172,6 +183,8 @@ class AudioRecorder {
             samples = self.pcmSamples
             self.pcmSamples = []
         }
+
+        print("AudioRecorder: recording stopped, \(samples.count) total samples (\(String(format: "%.1f", Double(samples.count) / 16000.0))s)")
 
         guard let url = currentOutputURL else { return nil }
         return (url: url, samples: samples)
