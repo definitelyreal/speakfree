@@ -35,11 +35,13 @@ struct Permissions {
     }
 
     static func didUpgrade() -> Bool {
-        // Beta builds are ad-hoc signed — each rebuild changes the code identity,
-        // which makes tccutil reset create stale TCC entries. Skip upgrade detection
-        // entirely for beta builds.
-        if let bundleId = Bundle.main.bundleIdentifier, bundleId.hasSuffix(".beta") {
-            return false
+        let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
+
+        if isBeta {
+            // Beta builds: track the binary's hash instead of version string,
+            // since ad-hoc signing changes the code identity on every rebuild.
+            // Reset TCC once per new binary so the stale entry is cleared.
+            return didBetaBinaryChange()
         }
 
         let versionFile = Config.configDir.appendingPathComponent(".last-version")
@@ -58,6 +60,37 @@ struct Permissions {
         // First launch (no previous version file) is not an upgrade
         guard previous != nil else { return false }
 
+        return true
+    }
+
+    /// For beta builds: check if the binary changed since last launch by comparing
+    /// a simple file size + modification date fingerprint.
+    private static func didBetaBinaryChange() -> Bool {
+        guard let execPath = Bundle.main.executablePath else { return false }
+
+        let hashFile = Config.configDir.appendingPathComponent(".binary-fingerprint")
+        try? FileManager.default.createDirectory(at: Config.configDir, withIntermediateDirectories: true)
+
+        // Build a simple fingerprint from file size + modification date
+        let attrs = try? FileManager.default.attributesOfItem(atPath: execPath)
+        let size = attrs?[.size] as? Int ?? 0
+        let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let currentFingerprint = "\(size):\(Int(modified))"
+
+        let previousFingerprint = try? String(contentsOf: hashFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Always write current fingerprint
+        try? currentFingerprint.write(to: hashFile, atomically: true, encoding: .utf8)
+
+        // First launch — not an upgrade
+        guard let prev = previousFingerprint, !prev.isEmpty else { return false }
+
+        if prev == currentFingerprint {
+            return false
+        }
+
+        print("Beta binary changed — will reset accessibility")
         return true
     }
 
