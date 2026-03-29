@@ -18,6 +18,7 @@ public class SettingsViewModel: ObservableObject {
     @Published public var rememberWords: Bool
     @Published public var preBuffer: Bool
     @Published public var keepModelLoaded: String
+    @Published public var diagnosticLogging: Bool
 
     // MARK: - Callback
 
@@ -42,6 +43,8 @@ public class SettingsViewModel: ObservableObject {
         self.rememberWords = c.rememberWords?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
+        let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
+        self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
     }
 
     // MARK: - Conversion
@@ -59,7 +62,8 @@ public class SettingsViewModel: ObservableObject {
             screenContext: FlexBool(screenContext),
             rememberWords: FlexBool(rememberWords),
             preBuffer: FlexBool(preBuffer),
-            keepModelLoaded: keepModelLoaded
+            keepModelLoaded: keepModelLoaded,
+            diagnosticLogging: FlexBool(diagnosticLogging)
         )
     }
 
