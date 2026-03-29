@@ -382,11 +382,11 @@ struct SettingsView: View {
                     keepModelLoadedRow
                 }
 
-                // -- CORRECTIONS & CONTEXT ---------------------------------
-                Section("Corrections & Context") {
+                // -- VOCABULARY & CONTEXT ----------------------------------
+                Section("Vocabulary & Context") {
                     correctionsRow
                     screenContextRow
-                    editVocabularyButton
+                    vocabularyStatusRow
                 }
             }
             .formStyle(.grouped)
@@ -494,7 +494,9 @@ struct SettingsView: View {
     // MARK: - Language Row
 
     private var languageRow: some View {
-        LabeledContent("Language") {
+        HStack {
+            Text("Language")
+            Spacer()
             Picker("", selection: $viewModel.language) {
                 Text("Auto-detect").tag("auto")
                 Divider()
@@ -503,7 +505,7 @@ struct SettingsView: View {
                 }
             }
             .labelsHidden()
-            .frame(minWidth: 200)
+            .frame(width: 220)
         }
     }
 
@@ -512,7 +514,9 @@ struct SettingsView: View {
     private var modelRow: some View {
         let models = availableModels(language: viewModel.language)
         return VStack(alignment: .leading, spacing: 2) {
-            LabeledContent("Model") {
+            HStack {
+                Text("Model")
+                Spacer()
                 Picker("", selection: $viewModel.modelSize) {
                     ForEach(models) { model in
                         Text(model.label)
@@ -522,7 +526,7 @@ struct SettingsView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(minWidth: 200)
+                .frame(width: 220)
                 .lineLimit(1)
                 .onChange(of: viewModel.language) { newLang in
                     let newModels = availableModels(language: newLang)
@@ -615,21 +619,22 @@ struct SettingsView: View {
 
     private var punctuationRow: some View {
         VStack(alignment: .leading, spacing: 2) {
-            LabeledContent("Punctuation") {
+            HStack {
+                Text("Punctuation")
+                Spacer()
                 Picker("", selection: $viewModel.punctuationMode) {
                     Text("Automatic & Spoken").tag(PunctuationMode.hybrid)
                     Text("Automatic Only").tag(PunctuationMode.off)
                     Text("Spoken Only").tag(PunctuationMode.spoken)
                 }
                 .labelsHidden()
-                .frame(minWidth: 200)
+                .frame(width: 220)
             }
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Choose how punctuation is added to your dictation.")
-                Text("Automatic Only: Adds natural punctuation automatically. Words like \u{201C}comma\u{201D} are always transcribed.")
-                Text("Spoken Only: Never adds punctuation unless you say the words explicitly.")
-                Text("Automatic & Spoken: Adds punctuation as a default, defers to you when you specify it explicitly.")
+                Text("Automatic Only: Natural punctuation. \u{201C}comma\u{201D} transcribes as a word.")
+                Text("Spoken Only: No auto-punctuation. Say \u{201C}comma\u{201D} or \u{201C}period\u{201D} explicitly.")
+                Text("Automatic & Spoken: Auto-punctuation plus spoken commands.")
             }
             .font(.caption)
             .foregroundColor(.secondary)
@@ -640,63 +645,73 @@ struct SettingsView: View {
     // MARK: - Corrections Row
 
     private var correctionsRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Toggle("Learn From My Corrections", isOn: $viewModel.rememberWords)
                     .toggleStyle(.checkbox)
                 Spacer()
-                Button("Reset") {
-                    WordMemory.resetAll()
-                }
-                .controlSize(.small)
+                Button("Reset") { WordMemory.resetAll() }
+                    .controlSize(.small)
             }
-
-            Text("When you correct a word after dictating, speakfree learns the correction and uses it to improve future transcriptions.")
+            Text("Corrected words are added to your vocabulary to improve future transcriptions.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     // MARK: - Screen Context Row
 
     private var screenContextRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
             Toggle("Use Screen Context", isOn: $viewModel.screenContext)
                 .toggleStyle(.checkbox)
-            Text("Reads text on your screen via local OCR to help the model match names and technical terms.")
+            Text("Uses local OCR to read on-screen text, helping match names and terms.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    // MARK: - Edit Vocabulary Button
+    // MARK: - Vocabulary Status Row
 
-    private var editVocabularyButton: some View {
-        Button("Edit Vocabulary File\u{2026}") {
-            let url = Config.vocabularyFile
-            let dir = Config.configDir
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: url.path) {
-                let template = "# Vocabulary for speakfree\n# One word or phrase per line.\n# Lines starting with # are ignored.\n"
-                try? template.write(to: url, atomically: true, encoding: .utf8)
+    private var vocabularyStatusRow: some View {
+        HStack {
+            let count = WordMemory.loadVocabularyEntries().count
+            Text("Vocabulary: \(count) word\(count == 1 ? "" : "s")")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Spacer()
+            Button("Edit File\u{2026}") {
+                let url = Config.vocabularyFile
+                let dir = Config.configDir
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    let template = "# Vocabulary for speakfree\n# One word or phrase per line.\n# Lines starting with # are ignored.\n"
+                    try? template.write(to: url, atomically: true, encoding: .utf8)
+                }
+                NSWorkspace.shared.open(url)
             }
-            NSWorkspace.shared.open(url)
+            .controlSize(.small)
         }
     }
 
     // MARK: - Storage Row
 
     private var storageRow: some View {
-        LabeledContent("Past Recordings in Toolbar") {
-            Picker("", selection: $viewModel.maxRecordings) {
-                ForEach(maxRecordingsOptions, id: \.value) { option in
-                    Text(option.label).tag(option.value)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Show Past Recordings")
+                Spacer()
+                Picker("", selection: $viewModel.maxRecordings) {
+                    ForEach(maxRecordingsOptions, id: \.value) { option in
+                        Text(option.label).tag(option.value)
+                    }
                 }
+                .labelsHidden()
+                .frame(width: 220)
             }
-            .labelsHidden()
-            .frame(minWidth: 200)
+            Text("Shows recent dictations in the toolbar menu.")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 
@@ -704,13 +719,15 @@ struct SettingsView: View {
 
     private var preBufferRow: some View {
         VStack(alignment: .leading, spacing: 2) {
-            LabeledContent("Pre-Buffer Audio for Instant Start") {
+            HStack {
+                Text("Pre-Buffer Audio for Instant Start")
+                Spacer()
                 Picker("", selection: $viewModel.preBuffer) {
                     Text("On").tag(true)
                     Text("Off").tag(false)
                 }
                 .labelsHidden()
-                .frame(minWidth: 200)
+                .frame(width: 220)
             }
 
             VStack(alignment: .leading, spacing: 1) {
@@ -727,14 +744,16 @@ struct SettingsView: View {
 
     private var keepModelLoadedRow: some View {
         VStack(alignment: .leading, spacing: 2) {
-            LabeledContent("Keep Model Loaded") {
+            HStack {
+                Text("Keep Model Loaded")
+                Spacer()
                 Picker("", selection: $viewModel.keepModelLoaded) {
                     Text("Automatic").tag("auto")
                     Text("Always").tag("always")
                     Text("Off").tag("off")
                 }
                 .labelsHidden()
-                .frame(minWidth: 200)
+                .frame(width: 220)
             }
 
             VStack(alignment: .leading, spacing: 1) {
