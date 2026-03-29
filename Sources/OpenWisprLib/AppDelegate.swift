@@ -76,6 +76,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
         transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
+        configureIdleTimeout()
 
         DispatchQueue.main.async {
             self.statusBar.reprocessHandler = { [weak self] url in
@@ -136,6 +137,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 transcriber = Transcriber(modelSize: fallbackModelSize, language: config.language)
                 transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
+                configureIdleTimeout()
             } else {
                 // No model at all — auto-download the configured default silently
                 DispatchQueue.main.async { self.statusBar.state = .downloading }
@@ -194,6 +196,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
         transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
+        configureIdleTimeout()
 
         hotkeyManager?.stop()
         hotkeyManager = HotkeyManager(
@@ -337,8 +340,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         guard isPressed else { return }
         isPressed = false
 
-        if let audioURL = recorder.stopRecording() {
-            try? FileManager.default.removeItem(at: audioURL)
+        if let result = recorder.stopRecording() {
+            try? FileManager.default.removeItem(at: result.url)
         }
         RecordingStore.clearSentinel()
         recordingSourceElement = nil
@@ -355,13 +358,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         guard isPressed else { return }
         isPressed = false
 
-        guard let audioURL = recorder.stopRecording() else {
+        guard let recording = recorder.stopRecording() else {
             RecordingStore.clearSentinel()
             recordingSourceElement = nil
             statusBar.state = .idle
             recordingOverlay.hide()
             return
         }
+        let audioURL = recording.url
+        let samples = recording.samples
 
         statusBar.state = .transcribing
         recordingOverlay.update(state: .transcribing)
@@ -401,7 +406,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     return parts.isEmpty ? nil : parts.joined(separator: " ")
                 }()
-                let raw = try self.transcriber.transcribe(audioURL: audioURL, prompt: prompt)
+                let raw = try self.transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
                 let mode = self.config.spokenPunctuation ?? .off
                 let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
                 RecordingStore.saveTranscription(text: text, for: audioURL)
@@ -468,7 +473,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 let reprocessPrompt: String? = (mode == .spoken || mode == .hybrid)
                     ? "Spoken punctuation: comma, period, question mark, exclamation mark, semicolon, colon, dash, hyphen, ellipsis, new line."
                     : nil
-                let raw = try self.transcriber.transcribe(audioURL: audioURL, prompt: reprocessPrompt)
+                let raw = try self.transcriber.transcribe(audioURL: audioURL, samples: nil, prompt: reprocessPrompt)
                 let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
                 DispatchQueue.main.async {
                     if !text.isEmpty {
@@ -504,5 +509,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         WordMemory.remember(wrong: wrong, right: right)
         print("Remembered: \(wrong) → \(right)")
         statusBar.buildMenu()
+    }
+
+    /// Configure the WhisperEngine idle timeout from config, falling back to a RAM-based default.
+    private func configureIdleTimeout() {
+        let defaultTimeout: Int
+        let ramGB = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
+        if ramGB <= 16 { defaultTimeout = 120 }       // 2 min
+        else if ramGB <= 32 { defaultTimeout = 300 }   // 5 min
+        else { defaultTimeout = 600 }                   // 10 min
+        transcriber.engine.idleTimeout = TimeInterval(config.idleTimeout ?? defaultTimeout)
     }
 }
