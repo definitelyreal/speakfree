@@ -5,12 +5,55 @@ public class Transcriber {
     private let language: String
     public var suppressAutoPunctuation: Bool = false
 
+    let engine = WhisperEngine()
+
     public init(modelSize: String = "base.en", language: String = "en") {
         self.modelSize = modelSize
         self.language = language
     }
 
-    public func transcribe(audioURL: URL, prompt: String? = nil) throws -> String {
+    /// Transcribe using the in-process engine (fast, model stays loaded).
+    /// Falls back to CLI if engine fails or samples are not provided.
+    public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil) throws -> String {
+        // Try engine first if we have samples
+        if let samples = samples, !samples.isEmpty {
+            do {
+                return try transcribeWithEngine(samples: samples, prompt: prompt)
+            } catch {
+                print("WhisperEngine failed: \(error.localizedDescription) — falling back to CLI")
+            }
+        }
+
+        // Fallback to CLI
+        return try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
+    }
+
+    private func transcribeWithEngine(samples: [Float], prompt: String?) throws -> String {
+        // Ensure model is loaded
+        if !engine.isLoaded {
+            guard let modelPath = Transcriber.findModel(modelSize: modelSize) else {
+                throw TranscriberError.modelNotFound(modelSize)
+            }
+            try engine.loadModel(path: modelPath)
+        }
+
+        let suppressRegex = suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
+
+        let raw = try engine.transcribe(
+            samples: samples,
+            language: language,
+            prompt: prompt,
+            suppressRegex: suppressRegex
+        )
+
+        // Clean up output same way as CLI
+        return raw.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
+    private func transcribeWithCLI(audioURL: URL, prompt: String? = nil) throws -> String {
         guard let whisperPath = Transcriber.findWhisperBinary() else {
             throw TranscriberError.whisperNotFound
         }

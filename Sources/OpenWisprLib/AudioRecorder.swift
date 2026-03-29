@@ -8,6 +8,8 @@ class AudioRecorder {
     private var currentOutputURL: URL?
     // Serial queue protects audioFile from concurrent access between audio thread and main thread
     private let writeQueue = DispatchQueue(label: "com.openwisprmod.audiowrite")
+    // Accumulated Float32 PCM samples for direct engine use (16kHz mono)
+    private var pcmSamples: [Float] = []
 
     /// Current RMS audio level (0.0–1.0), updated from the audio tap.
     private(set) var currentLevel: Float = 0
@@ -70,6 +72,15 @@ class AudioRecorder {
                     self.currentLevel = min(rms / 0.15, 1.0)
                 }
 
+                // Accumulate Float32 samples for direct engine use
+                if let channelData = convertedBuffer.floatChannelData?[0] {
+                    let count = Int(convertedBuffer.frameLength)
+                    let samples = Array(UnsafeBufferPointer(start: channelData, count: count))
+                    self.writeQueue.async {
+                        self.pcmSamples.append(contentsOf: samples)
+                    }
+                }
+
                 self.writeQueue.async {
                     do {
                         try self.audioFile?.write(from: convertedBuffer)
@@ -85,15 +96,21 @@ class AudioRecorder {
         isRecording = true
     }
 
-    func stopRecording() -> URL? {
+    func stopRecording() -> (url: URL, samples: [Float])? {
         guard isRecording else { return nil }
 
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
-        writeQueue.sync { self.audioFile = nil }  // Wait for any in-flight writes to finish
+        var samples: [Float] = []
+        writeQueue.sync {
+            self.audioFile = nil
+            samples = self.pcmSamples
+            self.pcmSamples = []
+        }
         isRecording = false
 
-        return currentOutputURL
+        guard let url = currentOutputURL else { return nil }
+        return (url: url, samples: samples)
     }
 }

@@ -10,6 +10,7 @@ public struct Config: Codable {
     public var toggleMode: FlexBool?
     public var screenContext: FlexBool?
     public var rememberWords: FlexBool?
+    public var idleTimeout: Int?  // seconds, 0 = never unload, nil = use RAM-based default
 
     public static let defaultMaxRecordings = 0
 
