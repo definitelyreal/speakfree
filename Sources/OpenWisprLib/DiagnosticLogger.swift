@@ -11,16 +11,31 @@ class DiagnosticLogger {
 
     func setup() {
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
-        isEnabled = isBeta  // Always log in beta
+        let config = Config.load()
+
+        // Beta: on by default. Production: on if config says so.
+        isEnabled = isBeta || (config.diagnosticLogging?.value ?? false)
 
         if isEnabled {
-            let logsDir = Config.configDir.appendingPathComponent("logs")
-            try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
-            let dateStr = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            logFile = logsDir.appendingPathComponent("speakfree-\(dateStr).log")
-            log("Session started — \(Bundle.main.bundleIdentifier ?? "unknown") v\(OpenWispr.version)")
-            log("Machine: \(ProcessInfo.processInfo.operatingSystemVersionString), RAM: \(ProcessInfo.processInfo.physicalMemory / (1024*1024*1024))GB")
+            startLogging()
         }
+    }
+
+    /// Enable or disable logging at runtime (from settings toggle)
+    func setEnabled(_ enabled: Bool) {
+        isEnabled = enabled
+        if enabled && logFile == nil {
+            startLogging()
+        }
+    }
+
+    private func startLogging() {
+        let logsDir = Config.configDir.appendingPathComponent("logs")
+        try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+        let dateStr = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        logFile = logsDir.appendingPathComponent("speakfree-\(dateStr).log")
+        log("Session started — \(Bundle.main.bundleIdentifier ?? "unknown") v\(OpenWispr.version)")
+        log("Machine: \(ProcessInfo.processInfo.operatingSystemVersionString), RAM: \(ProcessInfo.processInfo.physicalMemory / (1024*1024*1024))GB")
     }
 
     func log(_ message: String) {

@@ -477,6 +477,25 @@ struct SettingsView: View {
                     screenContextRow
                     vocabularyStatusRow
                 }
+
+                Section("Advanced") {
+                    Toggle("Diagnostic Logging", isOn: $viewModel.diagnosticLogging)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: viewModel.diagnosticLogging) { newValue in
+                            viewModel.save()
+                            DiagnosticLogger.shared.setEnabled(newValue)
+                        }
+                    Text("Logs session activity to help diagnose issues. Logs are stored locally.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Button("Open Logs Folder…") {
+                        let logsDir = Config.configDir.appendingPathComponent("logs")
+                        try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(logsDir)
+                    }
+                    .controlSize(.small)
+                }
             }
             .formStyle(.grouped)
             } // end VStack

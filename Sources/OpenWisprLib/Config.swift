@@ -12,6 +12,7 @@ public struct Config: Codable {
     public var rememberWords: FlexBool?
     public var preBuffer: FlexBool?  // nil = default (on)
     public var keepModelLoaded: String?  // "auto", "always", "off" — nil = "auto"
+    public var diagnosticLogging: FlexBool?  // nil = default (off for production, on for beta)
 
     public static let defaultMaxRecordings = 0
 
