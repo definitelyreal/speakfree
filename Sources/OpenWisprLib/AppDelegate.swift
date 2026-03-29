@@ -463,6 +463,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     self.recordingOverlay.hide()
                     if !text.isEmpty {
                         self.lastTranscription = text
+                        // Record usage stats
+                        let audioSeconds = Double(samples.count) / 16000.0
+                        UsageStats.shared.recordDictation(characters: text.count, audioSeconds: audioSeconds)
                         let pasted = self.inserter.insert(text: text, refocusing: capturedElement, onFocusLost: {
                             self.statusBar.state = .copiedToClipboard
                             self.statusBar.buildMenu()
