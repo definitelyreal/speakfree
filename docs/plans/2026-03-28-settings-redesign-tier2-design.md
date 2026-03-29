@@ -303,6 +303,79 @@ This allows gradual migration and graceful degradation.
 
 ---
 
+## System Accessibility Architecture
+
+speakfree requires two macOS permissions: **Microphone** and **Accessibility**.
+
+### Why Accessibility Is Needed
+
+- **CGEventTap** (HotkeyManager) — intercepts fn key globally to start/stop recording.
+  Requires accessibility to create a `.cgSessionEventTap` with `.defaultTap` option.
+- **AXUIElement** (TextInserter) — inserts transcribed text at the cursor via
+  `kAXSelectedTextAttribute`. Falls back to clipboard paste if AX isn't available.
+- **AXUIElement** (AppDelegate) — reads text before cursor for context prompt,
+  captures focused element for refocusing after transcription.
+- **AXUIElement** (CorrectionMonitor) — monitors text field for word corrections.
+- **AXUIElement** (ScreenContext) — captures active window for OCR.
+
+### Permission Flow (AppDelegate.setupInner)
+
+```
+1. Config.load()
+2. VocabularyMigration.runIfNeeded()  — one-time cleanup dialog
+3. Permissions.ensureMicrophone()     — AVCaptureDevice.requestAccess
+4. Permissions.didUpgrade()           — checks .last-version file
+   → If upgrade detected: resetAccessibility() via tccutil reset
+     (clears stale TCC entry so macOS re-prompts with correct binary)
+5. AXIsProcessTrusted()               — check if already granted
+   → If not: set statusBar.state = .waitingForPermission
+     → Show lock icon in menu bar with clickable "Grant Permission" item
+     → Permissions.promptAccessibility() — triggers macOS prompt
+     → Poll AXIsProcessTrusted() every 0.5s until granted
+   → If yes: proceed to startListening()
+```
+
+### Upgrade Detection (Permissions.didUpgrade)
+
+When the app binary changes (new version), macOS invalidates the TCC accessibility
+trust because the code signature changed. The old entry is stale — still visible in
+System Settings but non-functional. `tccutil reset` removes it so macOS prompts fresh.
+
+```swift
+// Read previous version from ~/.config/speakfree/.last-version
+// Write current version
+// If previous != current → upgrade detected → return true
+// If no previous file → first launch → return false
+// Beta builds (.beta bundle ID) → always return false (skip entirely)
+```
+
+### Config Directory Isolation
+
+Production and beta use separate config directories to prevent interference:
+
+- Production: `~/.config/speakfree/` (bundle ID: `com.definitelyreal.speakfree`)
+- Beta: `~/.config/speakfree-beta/` (bundle ID: `com.definitelyreal.speakfree.beta`)
+
+This prevents:
+- Beta's `tccutil reset` from revoking production's accessibility
+- Shared `.last-version` causing false upgrade detection
+- Shared vocabulary/dictionary corruption between versions
+
+### Known Gotchas
+
+- **Ad-hoc signing:** Each rebuild changes the code identity. macOS creates a new TCC
+  entry for each identity. Old entries become stale and can't be removed via UI.
+  Solution: skip `tccutil reset` for beta builds.
+- **tccutil reset scope:** Resets ALL entries for a bundle ID, not just the current one.
+  Multiple stale entries can accumulate.
+- **Two apps, one hotkey:** Running production and beta simultaneously causes hotkey
+  conflicts — both intercept fn. Only run one at a time.
+- **Accessibility polling:** The `while !AXIsProcessTrusted()` loop in setupInner blocks
+  the background thread. The UI thread remains responsive (statusBar updates via
+  DispatchQueue.main.async).
+
+---
+
 ## Bug Fixes Included
 
 ### Language→Model Download Bug
