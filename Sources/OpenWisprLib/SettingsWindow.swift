@@ -15,11 +15,12 @@ class SettingsWindowController: NSWindowController {
 
     convenience init(viewModel: SettingsViewModel) {
         let hostingController = NSHostingController(rootView: SettingsView(viewModel: viewModel))
-        hostingController.preferredContentSize = NSSize(width: 420, height: 620)
+        hostingController.preferredContentSize = NSSize(width: 440, height: 580)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "speakfree Settings"
         window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 420, height: 620))
+        window.setContentSize(NSSize(width: 440, height: 580))
+        window.minSize = NSSize(width: 440, height: 580)
         window.center()
         window.isReleasedWhenClosed = false
         self.init(window: window)
@@ -207,12 +208,9 @@ struct SettingsView: View {
 
     var body: some View {
         ZStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-
-                    // ── GENERAL ──────────────────────────────────
-                    sectionHeader("General")
-
+            Form {
+                // ── GENERAL ──────────────────────────────────
+                Section("General") {
                     Toggle("Launch at Login", isOn: Binding(
                         get: { LaunchAtLogin.isEnabled },
                         set: { LaunchAtLogin.isEnabled = $0 }
@@ -220,42 +218,47 @@ struct SettingsView: View {
                     .toggleStyle(.checkbox)
 
                     hotkeyRow
+                }
 
-                    Divider()
-
-                    // ── TRANSCRIPTION ────────────────────────────
-                    sectionHeader("Transcription")
-
+                // ── TRANSCRIPTION ────────────────────────────
+                Section {
                     languageRow
                     modelRow
                     punctuationRow
+                } header: {
+                    Text("Transcription")
+                } footer: {
+                    Text("Larger models are more accurate but use more memory. Model downloads automatically when selected.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
 
-                    Divider()
-
-                    // ── CORRECTIONS & CONTEXT ────────────────────
-                    sectionHeader("Corrections & Context")
-
+                // ── CORRECTIONS & CONTEXT ────────────────────
+                Section("Corrections & Context") {
                     correctionsRow
                     screenContextRow
                     editVocabularyButton
-
-                    Divider()
-
-                    // ── PERFORMANCE ──────────────────────────────
-                    sectionHeader("Performance")
-
-                    performanceRow
-
-                    Divider()
-
-                    // ── STORAGE ──────────────────────────────────
-                    sectionHeader("Storage")
-
-                    storageRow
                 }
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+                // ── PERFORMANCE ──────────────────────────────
+                Section {
+                    performanceRow
+                } footer: {
+                    Text("Memory: \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)) when loaded")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                // ── STORAGE ──────────────────────────────────
+                Section {
+                    storageRow
+                } footer: {
+                    Text("Recent dictations appear in the menu bar. Set to Off to delete recordings after transcription.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
+            .formStyle(.grouped)
 
             if isRecordingHotkey {
                 KeyRecorderOverlay(
@@ -285,25 +288,12 @@ struct SettingsView: View {
         .onChange(of: viewModel.idleTimeout) { _ in viewModel.save() }
     }
 
-    // MARK: - Section Header
-
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(.caption)
-            .fontWeight(.semibold)
-            .foregroundColor(.secondary)
-            .padding(.top, 4)
-    }
-
     // MARK: - Hotkey Row
 
     private var hotkeyRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text("Hotkey")
-
+        LabeledContent("Hotkey") {
+            HStack(spacing: 6) {
                 if isCustomHotkey {
-                    // Show custom key display as a disabled-looking button
                     Text(hotkeyDisplay)
                         .font(.body)
                         .padding(.horizontal, 8)
@@ -335,8 +325,9 @@ struct SettingsView: View {
                     Text("Toggle").tag(true)
                 }
                 .pickerStyle(.segmented)
+                .controlSize(.small)
                 .labelsHidden()
-                .frame(width: 110)
+                .frame(width: 100)
             }
         }
     }
@@ -344,23 +335,16 @@ struct SettingsView: View {
     // MARK: - Language Row
 
     private var languageRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Language")
-                Picker("", selection: $viewModel.language) {
-                    Text("Auto-detect").tag("auto")
-                    Divider()
-                    ForEach(sortedLanguages) { lang in
-                        Text(lang.name).tag(lang.id)
-                    }
+        LabeledContent("Language") {
+            Picker("", selection: $viewModel.language) {
+                Text("Auto-detect").tag("auto")
+                Divider()
+                ForEach(sortedLanguages) { lang in
+                    Text(lang.name).tag(lang.id)
                 }
-                .labelsHidden()
-                .frame(width: 180)
             }
-            Text("Choose from 99 languages or Auto-detect (less reliable for short dictation).")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            .labelsHidden()
+            .frame(width: 180)
         }
     }
 
@@ -368,21 +352,19 @@ struct SettingsView: View {
 
     private var modelRow: some View {
         let models = availableModels(language: viewModel.language)
+        let current = models.first(where: { $0.id == viewModel.modelSize })
         return VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Model")
+            LabeledContent("Model") {
                 Picker("", selection: $viewModel.modelSize) {
                     ForEach(models) { model in
                         Text(model.label).tag(model.id)
                     }
                 }
                 .labelsHidden()
-                .frame(width: 300)
+                .frame(width: 280)
                 .onChange(of: viewModel.language) { newLang in
-                    // When language changes, switch model variant if needed
                     let newModels = availableModels(language: newLang)
                     if !newModels.contains(where: { $0.id == viewModel.modelSize }) {
-                        // Current model not available — find equivalent
                         let base = viewModel.modelSize.replacingOccurrences(of: ".en", with: "")
                         if let match = newModels.first(where: { $0.id.hasPrefix(base) }) {
                             viewModel.modelSize = match.id
@@ -390,54 +372,39 @@ struct SettingsView: View {
                     }
                 }
             }
-
-            let current = models.first(where: { $0.id == viewModel.modelSize })
             Text("\(current?.memory ?? "~800 MB"), \(current?.speed ?? "~0.6s") on your Mac")
                 .font(.caption)
                 .foregroundColor(.secondary)
-
-            Text("Larger models are more accurate but use more memory. Model downloads automatically when selected.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     // MARK: - Punctuation Row
 
     private var punctuationRow: some View {
-        HStack {
-            Text("Punctuation")
+        LabeledContent("Punctuation") {
             Picker("", selection: $viewModel.punctuationMode) {
                 Text("Automatic").tag(PunctuationMode.off)
                 Text("Spoken").tag(PunctuationMode.spoken)
                 Text("Both").tag(PunctuationMode.hybrid)
             }
             .pickerStyle(.segmented)
+            .controlSize(.small)
             .labelsHidden()
-            .frame(width: 220)
+            .frame(width: 200)
         }
     }
 
     // MARK: - Corrections Row
 
     private var correctionsRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Toggle("Learn From My Corrections", isOn: $viewModel.rememberWords)
-                    .toggleStyle(.checkbox)
-
-                Spacer()
-
-                Button("Reset") {
-                    WordMemory.resetAll()
-                }
-                .font(.caption)
+        HStack {
+            Toggle("Learn From My Corrections", isOn: $viewModel.rememberWords)
+                .toggleStyle(.checkbox)
+            Spacer()
+            Button("Reset") {
+                WordMemory.resetAll()
             }
-            Text("When you fix a transcribed word, speakfree remembers it and primes the model next time.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            .controlSize(.small)
         }
     }
 
@@ -472,42 +439,28 @@ struct SettingsView: View {
     // MARK: - Performance Row
 
     private var performanceRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Keep model loaded")
-                Picker("", selection: $viewModel.idleTimeout) {
-                    ForEach(idleTimeoutOptions, id: \.value) { option in
-                        Text(option.label).tag(option.value)
-                    }
+        LabeledContent("Keep model loaded") {
+            Picker("", selection: $viewModel.idleTimeout) {
+                ForEach(idleTimeoutOptions, id: \.value) { option in
+                    Text(option.label).tag(option.value)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 250)
             }
-            Text("Memory: \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)) when loaded")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            .labelsHidden()
+            .frame(width: 100)
         }
     }
 
     // MARK: - Storage Row
 
     private var storageRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Past Recordings")
-                Picker("", selection: $viewModel.maxRecordings) {
-                    ForEach(maxRecordingsOptions, id: \.value) { option in
-                        Text(option.label).tag(option.value)
-                    }
+        LabeledContent("Past Recordings") {
+            Picker("", selection: $viewModel.maxRecordings) {
+                ForEach(maxRecordingsOptions, id: \.value) { option in
+                    Text(option.label).tag(option.value)
                 }
-                .labelsHidden()
-                .frame(width: 80)
             }
-            Text("Recent dictations appear in the menu bar. Set to Off to delete recordings after transcription.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            .labelsHidden()
+            .frame(width: 80)
         }
     }
 }
