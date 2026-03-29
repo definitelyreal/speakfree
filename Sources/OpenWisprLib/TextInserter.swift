@@ -20,9 +20,17 @@ class TextInserter {
             if !sameElement {
                 let refocused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
                 if refocused {
-                    // Use non-blocking delay for focus to settle, then paste
+                    // Use non-blocking delay for focus to settle, then insert
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        self.pasteText(text)
+                        // Try direct AX insertion on the refocused element first
+                        var settable: DarwinBoolean = false
+                        if AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
+                           settable.boolValue,
+                           AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success {
+                            return
+                        }
+                        // Fall back to clipboard paste
+                        self.pasteViaClipboard(text)
                     }
                     return true
                 } else {
@@ -50,6 +58,33 @@ class TextInserter {
     }
 
     private func pasteText(_ text: String) {
+        // Try direct AX text insertion first — no clipboard involvement
+        if insertViaAccessibility(text) {
+            return
+        }
+
+        // Fall back to clipboard-based paste
+        pasteViaClipboard(text)
+    }
+
+    /// Insert text directly via the Accessibility API. Returns true on success.
+    private func insertViaAccessibility(_ text: String) -> Bool {
+        guard let element = currentFocusedElement() else { return false }
+
+        // Check if the element supports setting the SelectedText attribute
+        var settable: DarwinBoolean = false
+        guard AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
+              settable.boolValue else {
+            return false
+        }
+
+        // Set the selected text — this replaces current selection or inserts at cursor
+        let result = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
+        return result == .success
+    }
+
+    /// Legacy clipboard-based insertion. Saves and restores clipboard.
+    private func pasteViaClipboard(_ text: String) {
         let pasteboard = NSPasteboard.general
         let savedItems = savePasteboard(pasteboard)
         let changeCountBeforePaste = pasteboard.changeCount
