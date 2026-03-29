@@ -211,38 +211,56 @@ class WhisperEngine {
 }
 ```
 
-### SPM Integration
+### SPM Integration (Implemented)
 
-Use the official whisper.spm package or vendor whisper.cpp source directly.
+**Chose Option C:** CWhisper system module linking against Homebrew-installed dylibs.
 
-Option A: Add `https://github.com/ggerganov/whisper.spm` as SPM dependency.
-- Pro: maintained upstream, Metal support included
-- Con: build from source every time, large dependency
+Neither whisper.spm nor SwiftWhisper include Metal GPU acceleration in their SPM builds
+(Metal is commented out). The Homebrew whisper-cpp installation includes Metal via
+libggml-metal.dylib, which is already bundled in the app.
 
-Option B: Vendor a prebuilt XCFramework.
-- Pro: fast builds, controlled version
-- Con: manual updates
+Implementation:
+- `Sources/CWhisper/include/` contains whisper.h + ggml headers copied from Homebrew
+- `Sources/CWhisper/include/module.modulemap` exposes the C API as `import CWhisper`
+- Package.swift links against `/opt/homebrew/lib/libwhisper` with rpath to `@executable_path/../Frameworks`
+- App bundle includes all dylibs in `Contents/Frameworks/` (libwhisper, libggml-*, including Metal)
+- CLI fallback via whisper-cli subprocess remains as a degradation path
 
-Option C: Keep bundling the whisper-cli binary but also link the library.
-- Pro: gradual migration, fallback
-- Con: two code paths
+### Audio Pipeline: Single-Engine with Pre-Roll Buffer
 
-**Recommendation: Option A** with whisper.spm. Clean integration, Metal is automatic,
-matches the existing SPM build system. If build times are bad, switch to XCFramework later.
+A single AVAudioEngine runs continuously from app launch with one tap that operates
+in two modes:
 
-### Audio Pipeline Change
+**Pre-roll mode (idle):** The tap fills a 500ms circular buffer (8000 samples at 16kHz).
+This captures audio from before fn is pressed, so the first word is never lost.
 
-Currently AudioRecorder writes to a WAV file, then Transcriber reads it back.
-With the library, we can feed PCM samples directly:
+**Recording mode:** When fn is pressed, `startRecording()` drains the pre-roll buffer,
+prepends it to the PCM samples and WAV file, then flips `isRecording = true`. The same
+tap starts writing to the file and accumulating samples. No engine restart, no gap.
 
-```swift
-// AudioRecorder accumulates Float32 samples in a buffer
-// On stop, return the buffer instead of a file URL
-func stopRecording() -> (url: URL, samples: [Float])?
+When recording stops, the flag flips back and the tap resumes filling the pre-roll buffer.
+
+```
+[Engine always running]
+    ↓
+[Pre-roll mode: circular buffer of last 500ms]
+    ↓ fn pressed
+[Drain pre-roll → prepend to recording]
+    ↓
+[Recording mode: write to file + accumulate PCM]
+    ↓ fn released
+[Back to pre-roll mode]
 ```
 
-Keep writing the WAV file too (for recordings history) but pass the samples buffer
-directly to WhisperEngine. Eliminates the WAV→read→decode round trip.
+This design means:
+- **Zero-gap recording** — no engine creation delay between fn press and first captured sample
+- **Pre-captured speech** — the 500ms before fn was pressed is included
+- **Single tap** — no risk of two taps on the same input node
+- **WAV file still written** — for recordings history and CLI fallback
+- **PCM samples available** — passed directly to WhisperEngine (no file round-trip)
+
+The microphone indicator (orange dot) is always on while the app runs, which is expected
+for a dictation app.
 
 ### Smart Model Loading
 
@@ -303,12 +321,46 @@ The "Edit Vocabulary File..." button calls `NSWorkspace.shared.open(url)` but th
 may not exist in the beta config dir. Fix: create the file with template content before
 opening, and ensure the directory exists.
 
-### Option-Delete Intermittent
+### Option-Delete Broken System-Wide
 
-This is likely caused by the accessibility trust being in a transitional state after
-tccutil resets. The fix from the `didUpgrade()` path correction should prevent
-most occurrences. If it persists, it's an ad-hoc signing limitation — Developer ID
-signing would resolve it permanently.
+Root cause: The CGEventTap callback returned `nil` when macOS disabled the tap
+(tapDisabledByTimeout / tapDisabledByUserInput), which **dropped the event entirely**.
+If an Option key flagsChanged event was dropped, the system lost track of the Option
+modifier state, making Option-Delete act as plain Delete.
+
+Fix: Return the event (`Unmanaged.passUnretained(event)`) instead of `nil` during
+tap re-enable. One-line change in HotkeyManager.swift.
+
+### Text Insertion Without Clipboard
+
+Root cause: The original `TextInserter` saved the clipboard, wrote transcription text
+to it, simulated ⌘V, then restored the clipboard after 1.5s. This overwrote clipboard
+contents and was fragile.
+
+Fix: Use the Accessibility API (`kAXSelectedTextAttribute`) to insert text directly
+at the cursor without touching the clipboard. Falls back to the clipboard method if
+the AX attribute isn't settable (some Electron apps, custom controls).
+
+### Beta Accessibility Reset Loop
+
+Root cause: `didUpgrade()` used a hardcoded config path and ran `tccutil reset` which
+created stale TCC entries. Each rebuild of the ad-hoc signed beta changed the code
+identity, causing a new TCC entry per launch while old ones couldn't be removed.
+
+Fix: Skip upgrade detection entirely for `.beta` bundle IDs. Use `Config.configDir`
+(not hardcoded path) for the version file. Use `Bundle.main.bundleIdentifier` for
+tccutil reset calls.
+
+### Auto-Learn Vocabulary Corruption
+
+Root cause: `CorrectionMonitor` compared the full text field word-by-word at positional
+index. Any typing after paste shifted positions and created false corrections like
+`"a" → "about"`, `"the" → "a"`. These were injected into Whisper's prompt via
+vocabulary.txt, confusing the model.
+
+Fix: Added minimum word length (≥4 chars) and Levenshtein edit distance filter (<40%
+of longer word) to `CorrectionMonitor.findSingleCorrection()`. Added one-time migration
+(`VocabularyMigration`) that shows a dialog letting users review and clean garbage entries.
 
 ---
 
