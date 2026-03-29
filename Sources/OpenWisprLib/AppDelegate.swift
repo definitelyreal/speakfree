@@ -193,6 +193,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         DiagnosticLogger.shared.log("Ready — hotkey=\(hotkeyDesc) model=\(config.modelSize)")
     }
 
+    /// The model size currently loaded by the transcriber.
+    public var activeModelSize: String { transcriber?.modelSize ?? config.modelSize }
+
     public func reloadConfig() {
         config = Config.load()
         var effectiveModelSize = config.modelSize
@@ -202,16 +205,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if !Transcriber.modelExists(modelSize: effectiveModelSize) {
-            // Download the model with progress dialog
-            ModelDownloadController.downloadModel(effectiveModelSize) { [weak self] success in
-                if success {
-                    self?.finishReloadConfig(effectiveModelSize: effectiveModelSize)
-                } else {
-                    // Revert to previous model — keep current transcriber
-                    print("Download failed — keeping current model")
-                }
-            }
-            return  // finishReloadConfig will be called by completion handler
+            // Don't auto-download — keep the current transcriber running.
+            // The settings UI shows the download prompt inline.
+            print("Model \(effectiveModelSize) not on disk — keeping current model (\(activeModelSize))")
+            // Still reload hotkey and other settings
+            reloadHotkeyAndSettings()
+            return
         }
 
         finishReloadConfig(effectiveModelSize: effectiveModelSize)
@@ -221,12 +220,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
-        // Configure pre-buffer
-        recorder.preBufferEnabled = config.preBuffer?.value ?? true
-
         // Configure model persistence
         transcriber.engine.keepModelLoaded = config.keepModelLoaded ?? "auto"
         transcriber.engine.startMemoryPressureMonitoring()
+
+        reloadHotkeyAndSettings()
+        print("Config reloaded: hotkey=\(KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)) model=\(effectiveModelSize)")
+    }
+
+    /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
+    private func reloadHotkeyAndSettings() {
+        // Configure pre-buffer
+        recorder.preBufferEnabled = config.preBuffer?.value ?? true
+
+        // Update spoken punctuation on existing transcriber
+        transcriber?.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
         hotkeyManager?.stop()
         hotkeyManager = HotkeyManager(
@@ -240,8 +248,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         statusBar.buildMenu()
-        let hotkeyDesc = KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)
-        print("Config reloaded: hotkey=\(hotkeyDesc) model=\(config.modelSize)")
     }
 
     public func showSettings() {

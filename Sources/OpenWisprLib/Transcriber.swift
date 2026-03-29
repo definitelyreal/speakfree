@@ -1,11 +1,29 @@
 import Foundation
 
 public class Transcriber {
-    private let modelSize: String
+    let modelSize: String
     private let language: String
     public var suppressAutoPunctuation: Bool = false
 
     let engine = WhisperEngine()
+
+    // Known whisper hallucinations on silence/noise
+    private static let hallucinations: Set<String> = [
+        "[MUSIC]", "(music)", "[music]", "Music.", "Music",
+        "[APPLAUSE]", "(applause)", "[applause]", "Applause.",
+        "[BLANK_AUDIO]", "[BLANK AUDIO]", "(blank audio)",
+        "[SILENCE]", "(silence)", "[silence]",
+        "[NOISE]", "(noise)", "[noise]",
+        "Thank you.", "Thanks for watching.",
+        "you", "You",
+        "...", "\u{2026}",
+        ".", ""
+    ]
+
+    private func isHallucination(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self.hallucinations.contains(trimmed) || trimmed.count < 2
+    }
 
     public init(modelSize: String = "base.en", language: String = "en") {
         self.modelSize = modelSize
@@ -15,17 +33,27 @@ public class Transcriber {
     /// Transcribe using the in-process engine (fast, model stays loaded).
     /// Falls back to CLI if engine fails or samples are not provided.
     public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil) throws -> String {
+        let result: String
+
         // Try engine first if we have samples
         if let samples = samples, !samples.isEmpty {
             do {
-                return try transcribeWithEngine(samples: samples, prompt: prompt)
+                result = try transcribeWithEngine(samples: samples, prompt: prompt)
             } catch {
                 print("WhisperEngine failed: \(error.localizedDescription) — falling back to CLI")
+                result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
             }
+        } else {
+            // Fallback to CLI
+            result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
         }
 
-        // Fallback to CLI
-        return try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
+        // Filter known hallucinations from both engine and CLI paths
+        if isHallucination(result) {
+            print("Transcriber: filtered hallucination: \"\(result)\"")
+            return ""
+        }
+        return result
     }
 
     private func transcribeWithEngine(samples: [Float], prompt: String?) throws -> String {
