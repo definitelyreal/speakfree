@@ -394,6 +394,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let audioURL = recording.url
         let samples = recording.samples
 
+        // Skip transcription for very short recordings (<300ms) — likely an accidental tap
+        let minSamples = 4800  // 300ms at 16kHz
+        if samples.count < minSamples {
+            print("Recording too short (\(samples.count) samples / \(Int(Double(samples.count) / 16000.0 * 1000))ms) — skipping")
+            RecordingStore.clearSentinel()
+            recordingSourceElement = nil
+            recordingContextText = nil
+            statusBar.state = .idle
+            recordingOverlay.hide()
+            return
+        }
+
         statusBar.state = .transcribing
         recordingOverlay.update(state: .transcribing)
 
