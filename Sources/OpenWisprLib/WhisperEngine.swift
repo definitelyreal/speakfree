@@ -6,10 +6,11 @@ import CWhisper
 class WhisperEngine {
     private var context: OpaquePointer?  // whisper_context*
     private var loadedModelPath: String?
-    private var idleTimer: Timer?
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var lastTranscriptionTime: Date?
 
-    /// Configurable idle timeout in seconds. 0 = never unload.
-    var idleTimeout: TimeInterval = 300  // 5 min default
+    /// How the model should be managed: "auto", "always", "off"
+    var keepModelLoaded: String = "auto"
 
     var isLoaded: Bool { context != nil }
 
@@ -36,13 +37,13 @@ class WhisperEngine {
 
         self.context = ctx
         self.loadedModelPath = path
-        resetIdleTimer()
+        startMemoryPressureMonitoring()
     }
 
     /// Free the model from memory.
     func unloadModel() {
-        idleTimer?.invalidate()
-        idleTimer = nil
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
         if let ctx = context {
             whisper_free(ctx)
         }
@@ -115,34 +116,49 @@ class WhisperEngine {
             }
         }
 
-        resetIdleTimer()
+        lastTranscriptionTime = Date()
 
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Smart Loading
 
-    func resetIdleTimer() {
-        idleTimer?.invalidate()
-        idleTimer = nil
+    func startMemoryPressureMonitoring() {
+        memoryPressureSource?.cancel()
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            guard let self = self, self.isLoaded else { return }
+            guard self.keepModelLoaded != "always" else { return }
 
-        guard idleTimeout > 0 else { return }  // 0 = never unload
+            let pressureLevel = source.data  // .warning or .critical
 
-        // Timer must be scheduled on main run loop
-        DispatchQueue.main.async { [weak self] in
-            self?.idleTimer = Timer.scheduledTimer(withTimeInterval: self?.idleTimeout ?? 300, repeats: false) { [weak self] _ in
-                self?.unloadModel()
-                print("WhisperEngine: model unloaded after idle timeout")
+            if pressureLevel.contains(.critical) {
+                // Critical: always unload
+                print("WhisperEngine: unloading model (critical memory pressure)")
+                self.unloadModel()
+            } else if pressureLevel.contains(.warning) {
+                // Warning: unload if idle for > 60 seconds
+                let idleSeconds = self.lastTranscriptionTime.map { Date().timeIntervalSince($0) } ?? .infinity
+                if idleSeconds > 60 {
+                    print("WhisperEngine: unloading model (memory pressure warning, idle \(Int(idleSeconds))s)")
+                    self.unloadModel()
+                } else {
+                    print("WhisperEngine: keeping model loaded (memory pressure warning, but used \(Int(idleSeconds))s ago)")
+                }
             }
         }
+        source.resume()
+        memoryPressureSource = source
     }
 
     /// Call when system is under memory pressure to free the model.
     func handleMemoryPressure() {
-        if isLoaded {
-            print("WhisperEngine: unloading model due to memory pressure")
-            unloadModel()
-        }
+        guard isLoaded, keepModelLoaded != "always" else { return }
+        print("WhisperEngine: unloading model due to memory pressure")
+        unloadModel()
     }
 
     /// Approximate RSS of the loaded model in bytes, or 0 if unloaded.
