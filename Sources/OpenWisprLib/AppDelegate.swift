@@ -69,11 +69,38 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             VocabularyMigration.runIfNeeded()
         }
 
+        // Determine effective model (multilingual if needed)
         var effectiveModelSize = config.modelSize
         if config.language != "en" && WhisperLanguage.isEnglishOnly(config.modelSize) {
             effectiveModelSize = WhisperLanguage.multilingualModel(for: config.modelSize)
             print("Language \(config.language) requires multilingual model — using \(effectiveModelSize)")
         }
+
+        // Model fallback chain
+        if !Transcriber.modelExists(modelSize: effectiveModelSize) {
+            // Fallback 1: if we wanted multilingual but only have .en, use .en
+            if effectiveModelSize != config.modelSize && Transcriber.modelExists(modelSize: config.modelSize) {
+                print("Multilingual model \(effectiveModelSize) not found — using \(config.modelSize) as fallback")
+                effectiveModelSize = config.modelSize
+            }
+            // Fallback 2: try any model already on disk
+            else if let anyModel = findAnyDownloadedModel() {
+                print("Model \(effectiveModelSize) not found — using \(anyModel) as fallback")
+                effectiveModelSize = anyModel
+            }
+            // Fallback 3: no model at all — must download with progress dialog
+            else {
+                let modelToDownload = effectiveModelSize
+                DispatchQueue.main.sync {
+                    ModelDownloadController.downloadModel(modelToDownload) { _ in }
+                }
+                // After download, verify the model is now available
+                if !Transcriber.modelExists(modelSize: effectiveModelSize) {
+                    print("Model download failed or was cancelled — cannot proceed")
+                }
+            }
+        }
+
         transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
         configureIdleTimeout()
@@ -117,37 +144,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             print("Accessibility: granted")
-        }
-
-        if !Transcriber.modelExists(modelSize: config.modelSize) {
-            // If another model is already on disk, switch to it rather than downloading
-            let modelsDir = Config.configDir.appendingPathComponent("models")
-            let existing = (try? FileManager.default.contentsOfDirectory(atPath: modelsDir.path))?
-                .first(where: { $0.hasPrefix("ggml-") && $0.hasSuffix(".bin") })
-                .map { String($0.dropFirst(5).dropLast(4)) }  // "ggml-base.en.bin" → "base.en"
-
-            if let existingModel = existing {
-                print("Model mismatch: config has \(config.modelSize) but found \(existingModel) — using existing")
-                config.modelSize = existingModel
-                try? config.save()
-                var fallbackModelSize = config.modelSize
-                if config.language != "en" && WhisperLanguage.isEnglishOnly(config.modelSize) {
-                    fallbackModelSize = WhisperLanguage.multilingualModel(for: config.modelSize)
-                    print("Language \(config.language) requires multilingual model — using \(fallbackModelSize)")
-                }
-                transcriber = Transcriber(modelSize: fallbackModelSize, language: config.language)
-                transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
-                configureIdleTimeout()
-            } else {
-                // No model at all — auto-download the configured default silently
-                DispatchQueue.main.async { self.statusBar.state = .downloading }
-                do {
-                    try ModelDownloader.download(modelSize: config.modelSize)
-                } catch {
-                    print("Model download failed: \(error.localizedDescription)")
-                }
-                DispatchQueue.main.async { self.statusBar.state = .idle }
-            }
         }
 
         // Warm up the audio engine now so first recording starts instantly
@@ -194,6 +190,24 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             effectiveModelSize = WhisperLanguage.multilingualModel(for: config.modelSize)
             print("Language \(config.language) requires multilingual model — using \(effectiveModelSize)")
         }
+
+        if !Transcriber.modelExists(modelSize: effectiveModelSize) {
+            // Download the model with progress dialog
+            ModelDownloadController.downloadModel(effectiveModelSize) { [weak self] success in
+                if success {
+                    self?.finishReloadConfig(effectiveModelSize: effectiveModelSize)
+                } else {
+                    // Revert to previous model — keep current transcriber
+                    print("Download failed — keeping current model")
+                }
+            }
+            return  // finishReloadConfig will be called by completion handler
+        }
+
+        finishReloadConfig(effectiveModelSize: effectiveModelSize)
+    }
+
+    private func finishReloadConfig(effectiveModelSize: String) {
         transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
         configureIdleTimeout()
@@ -519,5 +533,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         else if ramGB <= 32 { defaultTimeout = 300 }   // 5 min
         else { defaultTimeout = 600 }                   // 10 min
         transcriber.engine.idleTimeout = TimeInterval(config.idleTimeout ?? defaultTimeout)
+    }
+
+    /// Find any downloaded model on disk, returning the model size string (e.g. "base.en").
+    private func findAnyDownloadedModel() -> String? {
+        let modelsDir = Config.configDir.appendingPathComponent("models")
+        return (try? FileManager.default.contentsOfDirectory(atPath: modelsDir.path))?
+            .first(where: { $0.hasPrefix("ggml-") && $0.hasSuffix(".bin") })
+            .map { String($0.dropFirst(5).dropLast(4)) }  // "ggml-base.en.bin" → "base.en"
     }
 }
