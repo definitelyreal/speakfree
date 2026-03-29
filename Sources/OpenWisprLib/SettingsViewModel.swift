@@ -104,10 +104,47 @@ public class SettingsViewModel: ObservableObject {
         }
     }
 
+    /// Returns an estimated model load time string for the given Whisper model size.
+    public static func modelLoadTimeDescription(_ model: String) -> String {
+        switch normalizedModelBase(model) {
+        case "tiny":   return "~0.2s"
+        case "base":   return "~0.3s"
+        case "small":  return "~0.5s"
+        case "medium": return "~1.0s"
+        case "large":  return "~2.0s"
+        default:       return "unknown"
+        }
+    }
+
+    /// Returns the download size string for the given Whisper model size.
+    public static func modelDownloadSize(_ model: String) -> String {
+        switch normalizedModelBase(model) {
+        case "tiny":   return "75 MB"
+        case "base":   return "142 MB"
+        case "small":  return "466 MB"
+        case "medium": return "1.5 GB"
+        case "large":  return "3.1 GB"
+        default:       return "unknown"
+        }
+    }
+
+    /// Check if a model file exists on disk.
+    public static func modelExists(_ modelSize: String) -> Bool {
+        let modelFileName = "ggml-\(modelSize).bin"
+        let modelsDir = Config.configDir.appendingPathComponent("models")
+        let destPath = modelsDir.appendingPathComponent(modelFileName)
+        return FileManager.default.fileExists(atPath: destPath.path)
+    }
+
+    /// Returns the path to the models directory.
+    public static var modelsDirectory: URL {
+        Config.configDir.appendingPathComponent("models")
+    }
+
     // MARK: - Private helpers
 
     /// Normalize model identifiers like "small.en", "large-v3" to their base name.
-    private static func normalizedModelBase(_ model: String) -> String {
+    static func normalizedModelBase(_ model: String) -> String {
         let lowered = model.lowercased()
         // Strip language suffixes like ".en"
         let withoutLang = lowered.components(separatedBy: ".").first ?? lowered
