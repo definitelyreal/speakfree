@@ -140,11 +140,11 @@ private class OverlayContentView: NSView {
 
     // Layout constants — visualization is 2x the original size
     private static let barCount = 16
-    private static let dotSize: CGFloat = 2.5
+    private static let dotSize: CGFloat = 2.0
     private static let barGap: CGFloat = 3
     private static let hPadding: CGFloat = 24
     private static let vPadding: CGFloat = 18
-    private static let maxBarHeight: CGFloat = 24
+    private static let maxBarHeight: CGFloat = 20
     private static let spinnerSize: CGFloat = 22
     private static let spinnerLeftPad: CGFloat = 12   // gap between bars and spinner
     private static let spinnerRightPad: CGFloat = 16  // right edge padding
@@ -162,14 +162,9 @@ private class OverlayContentView: NSView {
 
     static func pillSize(for state: RecordingOverlay.OverlayState) -> NSSize {
         let barsWidth = CGFloat(barCount) * dotSize + CGFloat(barCount - 1) * barGap
-        let baseWidth = hPadding * 2 + barsWidth
+        let width = hPadding * 2 + barsWidth
         let height = vPadding * 2 + dotSize
-        switch state {
-        case .recording:
-            return NSSize(width: baseWidth, height: height)
-        case .transcribing:
-            return NSSize(width: baseWidth + spinnerSpace, height: height)
-        }
+        return NSSize(width: width, height: height)  // Same size for both states
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -180,8 +175,8 @@ private class OverlayContentView: NSView {
 
         let pillPath = CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
 
-        // Purple gradient background for recording state
-        if overlayState == .recording {
+        // Purple gradient background for recording and transcribing states
+        if overlayState == .recording || overlayState == .transcribing {
             ctx.saveGState()
             ctx.addPath(pillPath)
             ctx.clip()
@@ -218,11 +213,13 @@ private class OverlayContentView: NSView {
         }
 
         let isTranscribing = overlayState == .transcribing
-        let color = isTranscribing ? NSColor.white.withAlphaComponent(0.35) : NSColor.white.withAlphaComponent(0.75)
-        drawBars(ctx: ctx, rect: rect, color: color)
 
         if isTranscribing {
+            // No bars during transcribing — only centered spinner
             drawSpinner(ctx: ctx, rect: rect)
+        } else {
+            let color = NSColor.white.withAlphaComponent(0.75)
+            drawBars(ctx: ctx, rect: rect, color: color)
         }
     }
 
@@ -298,7 +295,7 @@ private class OverlayContentView: NSView {
     }
 
     private func drawSpinner(ctx: CGContext, rect: NSRect) {
-        let cx = rect.maxX - Self.spinnerRightPad - Self.spinnerSize / 2
+        let cx = rect.midX  // centered when transcribing
         let cy = rect.midY
         let spokeCount = 8
         let innerR: CGFloat = 6.0  // distance from center to inner tip

@@ -142,6 +142,57 @@ private class KeyMonitorHolder: ObservableObject {
     deinit { remove() }
 }
 
+// MARK: - Hotkey Validation
+
+private enum HotkeyValidation {
+    case allowed
+    case rejected(String)
+    case warning(String)
+}
+
+private enum HotkeyValidator {
+    // Modifier-only keys
+    static let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 58, 59, 60, 61, 62, 63]
+
+    // Function keys (F1-F19)
+    static let functionKeyCodes: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113]
+
+    // Character keys that produce input (letters, digits, punctuation, space, return, tab)
+    static let characterKeyCodes: Set<UInt16> = Set<UInt16>(0...50).union([51, 53])  // 0-50 + delete + escape
+
+    static func validate(keyCode: UInt16, modifiers: [String]) -> HotkeyValidation {
+        let hasModifiers = !modifiers.isEmpty
+
+        // Single modifier key — always fine
+        if !hasModifiers && modifierKeyCodes.contains(keyCode) {
+            return .allowed
+        }
+
+        // Function key alone — always fine
+        if !hasModifiers && functionKeyCodes.contains(keyCode) {
+            return .allowed
+        }
+
+        // Character key without modifier — reject
+        if !hasModifiers && characterKeyCodes.contains(keyCode) {
+            return .rejected("This key produces text input and can\u{2019}t be used alone as a hotkey. Hold a modifier key (\u{2318}, \u{2325}, \u{2303}) while pressing it.")
+        }
+
+        // Modifier + function key — always fine
+        if hasModifiers && functionKeyCodes.contains(keyCode) {
+            return .allowed
+        }
+
+        // Modifier + character key — allow with warning
+        if hasModifiers && characterKeyCodes.contains(keyCode) {
+            return .warning("This combination may conflict with shortcuts in other apps.")
+        }
+
+        // Anything else — allow
+        return .allowed
+    }
+}
+
 // MARK: - Key Recorder Overlay
 
 private struct KeyRecorderOverlay: View {
@@ -149,6 +200,7 @@ private struct KeyRecorderOverlay: View {
     var onCancel: () -> Void
 
     @StateObject private var holder = KeyMonitorHolder()
+    @State private var rejectionMessage: String?
 
     var body: some View {
         ZStack {
@@ -162,6 +214,14 @@ private struct KeyRecorderOverlay: View {
                     .font(.subheadline)
                     .foregroundColor(.secondary)
 
+                if let msg = rejectionMessage {
+                    Text(msg)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 250)
+                }
+
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
             }
@@ -172,7 +232,24 @@ private struct KeyRecorderOverlay: View {
                     .shadow(radius: 20)
             )
         }
-        .onAppear { holder.install(onCapture: onCapture, onCancel: onCancel) }
+        .onAppear {
+            holder.install(
+                onCapture: { keyCode, modifiers in
+                    let validation = HotkeyValidator.validate(keyCode: keyCode, modifiers: modifiers)
+                    switch validation {
+                    case .allowed:
+                        rejectionMessage = nil
+                        onCapture(keyCode, modifiers)
+                    case .rejected(let reason):
+                        rejectionMessage = reason
+                    case .warning:
+                        rejectionMessage = nil
+                        onCapture(keyCode, modifiers)
+                    }
+                },
+                onCancel: onCancel
+            )
+        }
         .onDisappear { holder.remove() }
     }
 }
@@ -348,23 +425,19 @@ struct SettingsView: View {
 
     var body: some View {
         ZStack {
-            Form {
-                // Stats banner at the top
-                Section {
-                    HStack {
-                        Spacer()
-                        VStack(spacing: 2) {
-                            Text("You've saved **\(UsageStats.shared.timeSavedDescription)** and **\(UsageStats.shared.keystrokesDescription) keystrokes**")
-                                .font(.callout)
-                            Text("\(UsageStats.shared.totalDictations) dictations")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                    }
-                    .padding(.vertical, 4)
+            VStack(spacing: 0) {
+                // Stats line above the form — no box
+                HStack {
+                    Spacer()
+                    Text("\(UsageStats.shared.totalDictations) dictations, saving \(UsageStats.shared.timeSavedDescription) and \(UsageStats.shared.keystrokesDescription) keystrokes")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
                 }
+                .padding(.top, 8)
+                .padding(.bottom, 4)
 
+            Form {
                 // -- GENERAL -----------------------------------------------
                 Section("General") {
                     Toggle("Launch at Login", isOn: $launchAtLogin)
@@ -406,6 +479,7 @@ struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            } // end VStack
 
             if isRecordingHotkey {
                 KeyRecorderOverlay(
@@ -521,7 +595,7 @@ struct SettingsView: View {
                 }
             }
             .labelsHidden()
-            .frame(width: 220)
+            .frame(width: 200)
         }
     }
 
@@ -542,7 +616,7 @@ struct SettingsView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 220)
+                .frame(width: 200)
                 .lineLimit(1)
                 .onChange(of: viewModel.language) { newLang in
                     let newModels = availableModels(language: newLang)
@@ -558,6 +632,14 @@ struct SettingsView: View {
             Text("Larger models are more accurate but use more memory.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+
+            // Show when active model differs from selected
+            if let delegate = NSApplication.shared.delegate as? AppDelegate,
+               delegate.activeModelSize != viewModel.modelSize {
+                Text("Currently using: \(delegate.activeModelSize)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
     }
 
@@ -644,7 +726,7 @@ struct SettingsView: View {
                     Text("Spoken Only").tag(PunctuationMode.spoken)
                 }
                 .labelsHidden()
-                .frame(width: 220)
+                .frame(width: 200)
             }
 
             VStack(alignment: .leading, spacing: 1) {
@@ -723,7 +805,7 @@ struct SettingsView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 220)
+                .frame(width: 200)
             }
             Text("Shows recent dictations in the toolbar menu.")
                 .font(.caption)
@@ -743,12 +825,12 @@ struct SettingsView: View {
                     Text("Off").tag(false)
                 }
                 .labelsHidden()
-                .frame(width: 220)
+                .frame(width: 200)
             }
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Magically responsive. Listens in the background so your first word is never clipped.")
-                Text("This keeps your Mac\u{2019}s recording indicator always on. No data is leaving your computer.")
+                Text("Captures audio before you press the hotkey so no words are lost.")
+                Text("Recording indicator stays on. No data leaves your Mac.")
             }
             .font(.caption)
             .foregroundColor(.secondary)
@@ -769,7 +851,7 @@ struct SettingsView: View {
                     Text("Off").tag("off")
                 }
                 .labelsHidden()
-                .frame(width: 220)
+                .frame(width: 200)
             }
 
             VStack(alignment: .leading, spacing: 1) {
