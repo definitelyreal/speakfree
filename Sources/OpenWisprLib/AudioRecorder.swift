@@ -160,6 +160,7 @@ class AudioRecorder {
         stateLock.unlock()
 
         print("AudioRecorder: recording started, pre-roll: \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms)")
+        DiagnosticLogger.shared.log("AudioRecorder: recording started, pre-roll \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms)")
 
         // Write pre-roll to WAV file (async, flag is already set so tap writes new audio too)
         if !preroll.isEmpty {
@@ -204,7 +205,9 @@ class AudioRecorder {
             self.pcmSamples = []
         }
 
-        print("AudioRecorder: recording stopped, \(samples.count) total samples (\(String(format: "%.1f", Double(samples.count) / 16000.0))s)")
+        let duration = String(format: "%.1f", Double(samples.count) / 16000.0)
+        print("AudioRecorder: recording stopped, \(samples.count) total samples (\(duration)s)")
+        DiagnosticLogger.shared.log("AudioRecorder: recording stopped, \(samples.count) samples (\(duration)s)")
 
         // If pre-buffer is off, stop the engine until next recording
         if !preBufferEnabled {

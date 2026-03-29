@@ -15,12 +15,12 @@ class SettingsWindowController: NSWindowController {
 
     convenience init(viewModel: SettingsViewModel) {
         let hostingController = NSHostingController(rootView: SettingsView(viewModel: viewModel))
-        hostingController.preferredContentSize = NSSize(width: 440, height: 640)
+        hostingController.preferredContentSize = NSSize(width: 480, height: 640)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "speakfree Settings"
         window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 440, height: 640))
-        window.minSize = NSSize(width: 440, height: 580)
+        window.setContentSize(NSSize(width: 480, height: 640))
+        window.minSize = NSSize(width: 480, height: 580)
         window.center()
         window.isReleasedWhenClosed = false
         self.init(window: window)
@@ -56,9 +56,7 @@ private struct ModelInfo: Identifiable, Hashable {
     let isRecommended: Bool
 
     var label: String {
-        var s = "\(id) (\(memory), \(speed) load)"
-        if isRecommended { s += " \u{2014} Recommended" }
-        return s
+        "\(id) (\(memory), \(speed) load)"
     }
 }
 
@@ -328,6 +326,7 @@ struct SettingsView: View {
     @State private var isRecordingHotkey = false
     @State private var pendingModelDownload: String? = nil
     @StateObject private var downloadManager = InlineDownloadManager()
+    @State private var launchAtLogin = false
 
     /// Tracks the picker selection separately so we can intercept "Other..." (999)
     @State private var hotkeyPickerSelection: UInt16 = 0
@@ -352,13 +351,20 @@ struct SettingsView: View {
             Form {
                 // -- GENERAL -----------------------------------------------
                 Section("General") {
-                    Toggle("Launch at Login", isOn: Binding(
-                        get: { LaunchAtLogin.isEnabled },
-                        set: { LaunchAtLogin.isEnabled = $0 }
-                    ))
-                    .toggleStyle(.checkbox)
+                    Toggle("Launch at Login", isOn: $launchAtLogin)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: launchAtLogin) { newValue in
+                            LaunchAtLogin.isEnabled = newValue
+                            // Re-read actual state after setting — if it failed (e.g. ad-hoc signing),
+                            // the checkbox will revert itself
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                launchAtLogin = LaunchAtLogin.isEnabled
+                            }
+                        }
 
                     hotkeyRow
+
+                    storageRow
                 }
 
                 // -- TRANSCRIPTION -----------------------------------------
@@ -371,28 +377,9 @@ struct SettingsView: View {
 
                 // -- PERFORMANCE -------------------------------------------
                 Section("Performance") {
-                    Toggle("Pre-Buffer for Instant Start", isOn: $viewModel.preBuffer)
-                        .toggleStyle(.checkbox)
+                    preBufferRow
 
-                    Text("Listens in the background so your first word is never clipped. Feels magically responsive, but the recording indicator will always be on. (No data is leaving your computer.)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    LabeledContent("Keep Model Loaded") {
-                        Picker("", selection: $viewModel.keepModelLoaded) {
-                            Text("Automatic").tag("auto")
-                            Text("Always").tag("always")
-                            Text("Off").tag("off")
-                        }
-                        .labelsHidden()
-                        .frame(width: 120)
-                    }
-
-                    Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac. Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)). Automatic unloads the model whenever your Mac needs the memory.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    keepModelLoadedRow
                 }
 
                 // -- CORRECTIONS & CONTEXT ---------------------------------
@@ -400,18 +387,6 @@ struct SettingsView: View {
                     correctionsRow
                     screenContextRow
                     editVocabularyButton
-                }
-
-                // -- STORAGE -----------------------------------------------
-                Section {
-                    storageRow
-                } footer: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Recent dictations appear in the menu bar.")
-                        Text("Set to Off to delete recordings after transcription.")
-                    }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
                 }
             }
             .formStyle(.grouped)
@@ -435,6 +410,7 @@ struct SettingsView: View {
         }
         .onAppear {
             hotkeyPickerSelection = viewModel.hotkeyKeyCode
+            launchAtLogin = LaunchAtLogin.isEnabled
             checkPendingDownload()
         }
         .onChange(of: hotkeyPickerSelection) { newValue in
@@ -527,7 +503,7 @@ struct SettingsView: View {
                 }
             }
             .labelsHidden()
-            .frame(minWidth: 180)
+            .frame(minWidth: 200)
         }
     }
 
@@ -535,15 +511,19 @@ struct SettingsView: View {
 
     private var modelRow: some View {
         let models = availableModels(language: viewModel.language)
-        return VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 2) {
             LabeledContent("Model") {
                 Picker("", selection: $viewModel.modelSize) {
                     ForEach(models) { model in
-                        Text(model.label).tag(model.id)
+                        Text(model.label)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .tag(model.id)
                     }
                 }
                 .labelsHidden()
-                .frame(minWidth: 280)
+                .frame(minWidth: 200)
+                .lineLimit(1)
                 .onChange(of: viewModel.language) { newLang in
                     let newModels = availableModels(language: newLang)
                     if !newModels.contains(where: { $0.id == viewModel.modelSize }) {
@@ -634,23 +614,26 @@ struct SettingsView: View {
     // MARK: - Punctuation Row
 
     private var punctuationRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            LabeledContent("Add Punctuation") {
+        VStack(alignment: .leading, spacing: 2) {
+            LabeledContent("Punctuation") {
                 Picker("", selection: $viewModel.punctuationMode) {
-                    Text("Automatic").tag(PunctuationMode.off)
-                    Text("Spoken").tag(PunctuationMode.spoken)
-                    Text("Both").tag(PunctuationMode.hybrid)
+                    Text("Automatic & Spoken").tag(PunctuationMode.hybrid)
+                    Text("Automatic Only").tag(PunctuationMode.off)
+                    Text("Spoken Only").tag(PunctuationMode.spoken)
                 }
-                .pickerStyle(.segmented)
-                .controlSize(.small)
                 .labelsHidden()
-                .frame(width: 200)
+                .frame(minWidth: 200)
             }
 
-            Text("Choose how punctuation is added to your dictation. Automatic lets the model decide. Spoken means you say \u{201C}comma\u{201D} or \u{201C}period.\u{201D} Both combines both methods.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Choose how punctuation is added to your dictation.")
+                Text("Automatic Only: Adds natural punctuation automatically. Words like \u{201C}comma\u{201D} are always transcribed.")
+                Text("Spoken Only: Never adds punctuation unless you say the words explicitly.")
+                Text("Automatic & Spoken: Adds punctuation as a default, defers to you when you specify it explicitly.")
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -706,14 +689,62 @@ struct SettingsView: View {
     // MARK: - Storage Row
 
     private var storageRow: some View {
-        LabeledContent("Show Past Recordings in Toolbar") {
+        LabeledContent("Past Recordings in Toolbar") {
             Picker("", selection: $viewModel.maxRecordings) {
                 ForEach(maxRecordingsOptions, id: \.value) { option in
                     Text(option.label).tag(option.value)
                 }
             }
             .labelsHidden()
-            .frame(width: 80)
+            .frame(minWidth: 200)
+        }
+    }
+
+    // MARK: - Pre-Buffer Row
+
+    private var preBufferRow: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            LabeledContent("Pre-Buffer Audio for Instant Start") {
+                Picker("", selection: $viewModel.preBuffer) {
+                    Text("On").tag(true)
+                    Text("Off").tag(false)
+                }
+                .labelsHidden()
+                .frame(minWidth: 200)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Magically responsive. Listens in the background so your first word is never clipped.")
+                Text("This keeps your Mac\u{2019}s recording indicator always on. No data is leaving your computer.")
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Keep Model Loaded Row
+
+    private var keepModelLoadedRow: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            LabeledContent("Keep Model Loaded") {
+                Picker("", selection: $viewModel.keepModelLoaded) {
+                    Text("Automatic").tag("auto")
+                    Text("Always").tag("always")
+                    Text("Off").tag("off")
+                }
+                .labelsHidden()
+                .frame(minWidth: 200)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac.")
+                Text("Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)).")
+                Text("Automatic unloads the model whenever your Mac needs the memory.")
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

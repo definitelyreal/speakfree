@@ -120,6 +120,19 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Settings — opens the SwiftUI Settings window (first after title)
+        let settingsTarget = MenuItemTarget {
+            guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
+            delegate.showSettings()
+        }
+        menuItemTargets.append(settingsTarget)
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(MenuItemTarget.invoke), keyEquivalent: ",")
+        settingsItem.target = settingsTarget
+        settingsItem.keyEquivalentModifierMask = .command
+        menu.addItem(settingsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         if let progress = downloadProgress {
             let dlItem = NSMenuItem(title: progress, action: nil, keyEquivalent: "")
             dlItem.isEnabled = false
@@ -127,37 +140,40 @@ class StatusBarController: NSObject, NSMenuDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        let stateText: String
-        switch state {
-        case .idle: stateText = "Ready"
-        case .recording: stateText = "Recording..."
-        case .transcribing: stateText = "Transcribing..."
-        case .downloading: stateText = "Downloading model..."
-        case .waitingForPermission: stateText = "⚠️ Grant Accessibility Permission →"
-        case .copiedToClipboard: stateText = "Copied to clipboard"
-        }
-        if case .waitingForPermission = state {
-            let target = MenuItemTarget {
-                // Clear the stale TCC entry then re-prompt
-                let task = Process()
-                task.launchPath = "/usr/bin/tccutil"
-                task.arguments = ["reset", "Accessibility", Bundle.main.bundleIdentifier ?? "com.definitelyreal.speakfree"]
-                try? task.run()
-                task.waitUntilExit()
-                let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true]
-                AXIsProcessTrustedWithOptions(options)
+        // Status line — only show when not idle (remove "Ready" noise)
+        if state != .idle {
+            let stateText: String
+            switch state {
+            case .idle: stateText = ""  // unreachable
+            case .recording: stateText = "Recording..."
+            case .transcribing: stateText = "Transcribing..."
+            case .downloading: stateText = "Downloading model..."
+            case .waitingForPermission: stateText = "⚠️ Grant Accessibility Permission →"
+            case .copiedToClipboard: stateText = "Copied to clipboard"
             }
-            menuItemTargets.append(target)
-            let stateItem = NSMenuItem(title: stateText, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            stateItem.target = target
-            menu.addItem(stateItem)
-        } else {
-            let stateItem = NSMenuItem(title: stateText, action: nil, keyEquivalent: "")
-            stateItem.isEnabled = false
-            menu.addItem(stateItem)
-        }
+            if case .waitingForPermission = state {
+                let target = MenuItemTarget {
+                    // Clear the stale TCC entry then re-prompt
+                    let task = Process()
+                    task.launchPath = "/usr/bin/tccutil"
+                    task.arguments = ["reset", "Accessibility", Bundle.main.bundleIdentifier ?? "com.definitelyreal.speakfree"]
+                    try? task.run()
+                    task.waitUntilExit()
+                    let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true]
+                    AXIsProcessTrustedWithOptions(options)
+                }
+                menuItemTargets.append(target)
+                let stateItem = NSMenuItem(title: stateText, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+                stateItem.target = target
+                menu.addItem(stateItem)
+            } else {
+                let stateItem = NSMenuItem(title: stateText, action: nil, keyEquivalent: "")
+                stateItem.isEnabled = false
+                menu.addItem(stateItem)
+            }
 
-        menu.addItem(NSMenuItem.separator())
+            menu.addItem(NSMenuItem.separator())
+        }
 
         // Recent Dictations submenu — crash recovery, last dictation, then older recordings
         let recentParent = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
@@ -213,17 +229,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // Settings — opens the SwiftUI Settings window
-        let settingsTarget = MenuItemTarget {
-            guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
-            delegate.showSettings()
-        }
-        menuItemTargets.append(settingsTarget)
-        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(MenuItemTarget.invoke), keyEquivalent: ",")
-        settingsItem.target = settingsTarget
-        settingsItem.keyEquivalentModifierMask = .command
-        menu.addItem(settingsItem)
-
         // Check for Updates — wired to Sparkle's updater
         if let delegate = NSApplication.shared.delegate as? AppDelegate {
             let updateTarget = MenuItemTarget {
@@ -272,6 +277,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     private static let waveFrameCount = 30
 
+    private static let recordingColor = NSColor(red: 0.6, green: 0.2, blue: 0.8, alpha: 1.0)
+
     private static func prerenderWaveFrames() -> [NSImage] {
         let count = waveFrameCount
         let baseHeights: [CGFloat] = [4, 8, 12, 8, 4]
@@ -283,7 +290,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
             let size = NSSize(width: 18, height: 18)
             let image = NSImage(size: size, flipped: false) { rect in
-                NSColor.black.setFill()
+                recordingColor.setFill()
 
                 let barWidth: CGFloat = 2.0
                 let gap: CGFloat = 2.5
@@ -305,7 +312,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 }
                 return true
             }
-            image.isTemplate = true
+            // Non-template so the purple color shows through
+            image.isTemplate = false
             return image
         }
     }
@@ -392,7 +400,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         DispatchQueue.main.async {
             if let button = self.statusItem.button {
                 button.image = image
-                button.image?.isTemplate = true
+                // Don't override isTemplate — recording frames set it to false for purple color
             }
         }
     }
