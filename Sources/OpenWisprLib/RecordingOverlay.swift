@@ -207,7 +207,7 @@ private class OverlayContentView: NSView {
             let borderRadius = borderRect.height / 2
             let borderPath = CGPath(roundedRect: borderRect, cornerWidth: borderRadius, cornerHeight: borderRadius, transform: nil)
             ctx.addPath(borderPath)
-            ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.15).cgColor)
+            ctx.setStrokeColor(NSColor(red: 0.5, green: 0.15, blue: 0.7, alpha: 0.8).cgColor)
             ctx.setLineWidth(borderWidth)
             ctx.strokePath()
         }
