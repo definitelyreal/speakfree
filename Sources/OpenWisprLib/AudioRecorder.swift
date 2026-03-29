@@ -52,6 +52,40 @@ class AudioRecorder {
     func warmUp() {
         guard preBufferEnabled else { return }
         startEngine()
+        startDeviceChangeMonitor()
+    }
+
+    // MARK: - Audio device change monitoring
+
+    private var deviceChangeObserver: NSObjectProtocol?
+
+    /// Restart the engine when the audio input device changes (e.g. AirPods connect/disconnect).
+    /// The engine's tap is bound to a specific device format — changing devices silently stops delivery.
+    private func startDeviceChangeMonitor() {
+        deviceChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            DiagnosticLogger.shared.log("AudioRecorder: audio device changed — restarting engine")
+
+            // Don't restart during active recording — it would lose data
+            if self._isRecording {
+                DiagnosticLogger.shared.log("AudioRecorder: deferring restart until recording stops")
+                return
+            }
+
+            // Tear down and restart
+            self.audioEngine?.inputNode.removeTap(onBus: 0)
+            self.audioEngine?.stop()
+            self.audioEngine = nil
+            self.audioConverter = nil
+
+            if self.preBufferEnabled {
+                self.startEngine()
+            }
+        }
     }
 
     /// Internal: create and start the audio engine regardless of preBufferEnabled.
@@ -214,6 +248,17 @@ class AudioRecorder {
             audioEngine?.inputNode.removeTap(onBus: 0)
             audioEngine?.stop()
             audioEngine = nil
+        }
+
+        // If we got 0 samples, the engine died (likely audio device change during recording).
+        // Force a restart so the next recording works.
+        if samples.isEmpty && preBufferEnabled {
+            DiagnosticLogger.shared.log("AudioRecorder: 0 samples captured — restarting engine (likely device change)")
+            audioEngine?.inputNode.removeTap(onBus: 0)
+            audioEngine?.stop()
+            audioEngine = nil
+            audioConverter = nil
+            startEngine()
         }
 
         guard let url = currentOutputURL else { return nil }

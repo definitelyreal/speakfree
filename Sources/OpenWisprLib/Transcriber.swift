@@ -22,7 +22,27 @@ public class Transcriber {
 
     private func isHallucination(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return Self.hallucinations.contains(trimmed) || trimmed.count < 2
+        if trimmed.count < 2 { return true }
+        if Self.hallucinations.contains(trimmed) { return true }
+
+        // Case-insensitive check: "music", "Music", "MUSIC", "Music playing", etc.
+        let lower = trimmed.lowercased()
+            .trimmingCharacters(in: .punctuationCharacters)
+            .trimmingCharacters(in: .whitespaces)
+        let hallucinationPatterns = [
+            "music", "applause", "blank audio", "silence", "noise",
+            "thank you", "thanks for watching", "thanks for listening",
+            "you", "the end", "bye",
+        ]
+        if hallucinationPatterns.contains(lower) { return true }
+
+        // Bracketed/parenthesized content like [Music], (applause), etc.
+        if (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")) ||
+           (trimmed.hasPrefix("(") && trimmed.hasSuffix(")")) {
+            return true
+        }
+
+        return false
     }
 
     public init(modelSize: String = "base.en", language: String = "en") {
