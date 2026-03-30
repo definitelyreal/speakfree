@@ -59,6 +59,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         var elementRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef) == .success,
            let element = elementRef {
+            // swiftlint:disable:next force_cast
             elementBeforeMenuOpen = (element as! AXUIElement)
         } else {
             elementBeforeMenuOpen = nil

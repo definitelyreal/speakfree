@@ -313,6 +313,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         var elementRef: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef)
         if result == .success, let element = elementRef {
+            // swiftlint:disable:next force_cast
             let axElement = element as! AXUIElement
             recordingSourceElement = axElement
             recordingContextText = readTextBeforeCursor(in: axElement)
@@ -333,6 +334,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
            let rangeValue = rangeRef {
             var range = CFRange()
+            // swiftlint:disable:next force_cast
             AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
             let cursorIndex = max(0, range.location)
             if cursorIndex > 0, let swiftIndex = fullText.index(fullText.startIndex, offsetBy: cursorIndex, limitedBy: fullText.endIndex) {

@@ -14,7 +14,10 @@ public class ModelDownloader {
             return
         }
 
-        try FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: modelsDir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
 
         // Clean up any partial download from a previous attempt
         try? FileManager.default.removeItem(at: tmpPath)
