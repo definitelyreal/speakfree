@@ -32,7 +32,7 @@
     "description": "Free, private voice-to-text for macOS. Powered by Whisper AI, runs entirely on-device.",
     "url": "https://open-wispr.pages.dev/",
     "downloadUrl": "https://open-wispr.pages.dev/#install",
-    "softwareVersion": "0.9.5",
+    "softwareVersion": "1.2.0",
     "author": { "@type": "Organization", "name": "human37" },
     "license": "https://opensource.org/licenses/MIT"
   }
@@ -784,6 +784,37 @@
     <div class="flow-step">
       <div class="flow-num">05</div>
       <div class="flow-text"><strong>Service starts.</strong> A waveform icon appears in your menu bar. Hold Globe, speak, release. Done.</div>
+    </div>
+  </div>
+</section>
+
+<section id="changelog" class="features" style="padding-bottom:0">
+  <p class="section-tag">What's New</p>
+  <h2>v1.2 &mdash; Faster, smarter, seamless.</h2>
+  <div class="feature-grid">
+    <div class="feature-cell">
+      <h3><span class="feature-marker"></span>In-process Whisper</h3>
+      <p>Transcription runs directly via Metal GPU instead of shelling out to a CLI. Typical latency: ~80ms from key-release to text.</p>
+    </div>
+    <div class="feature-cell">
+      <h3><span class="feature-marker"></span>Zero-gap recording</h3>
+      <p>Audio engine runs continuously with a 500ms pre-buffer. You never lose the first word again.</p>
+    </div>
+    <div class="feature-cell">
+      <h3><span class="feature-marker"></span>Direct text insertion</h3>
+      <p>Text is inserted via the Accessibility API &mdash; no clipboard hijacking. Falls back to paste only when needed.</p>
+    </div>
+    <div class="feature-cell">
+      <h3><span class="feature-marker"></span>New Settings panel</h3>
+      <p>Native macOS settings with inline model download, language picker, hotkey recorder, and usage stats.</p>
+    </div>
+    <div class="feature-cell">
+      <h3><span class="feature-marker"></span>Audio device hot-switch</h3>
+      <p>Connect or disconnect AirPods mid-session. The audio engine rebuilds automatically &mdash; no restart needed.</p>
+    </div>
+    <div class="feature-cell">
+      <h3><span class="feature-marker"></span>Better accuracy</h3>
+      <p>Silence trimming, hallucination filtering, spoken punctuation, and per-language model selection.</p>
     </div>
   </div>
 </section>
