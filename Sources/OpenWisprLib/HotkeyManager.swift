@@ -113,6 +113,8 @@ class HotkeyManager {
     private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         guard type == .flagsChanged else { return Unmanaged.passUnretained(event) }
         guard event.getIntegerValueField(.keyboardEventKeycode) == Int64(keyCode) else {
+            // IMPORTANT: pass through ALL non-fn flagsChanged events unmodified.
+            // This includes Option, Command, Shift, Control key presses/releases.
             return Unmanaged.passUnretained(event)
         }
 
@@ -129,19 +131,21 @@ class HotkeyManager {
             }
             modifierPressed = true
             modifierPressedAt = mach_absolute_time()
-            // Start a temporary keyDown monitor to detect fn+key shortcuts
             DispatchQueue.main.async {
                 self.startKeyDownMonitor()
                 self.onKeyDown?()
             }
-            return nil  // consume — suppresses emoji drawer
+            return nil  // consume fn press — suppresses emoji drawer
         } else if !fnDown && modifierPressed {
             modifierPressed = false
             DispatchQueue.main.async {
                 self.stopKeyDownMonitor()
                 self.onKeyUp?()
             }
-            return nil  // consume
+            // Pass through the fn release event instead of consuming it.
+            // Consuming it corrupts the system's modifier state, which breaks
+            // Option+Delete immediately after dictation.
+            return Unmanaged.passUnretained(event)
         }
 
         return Unmanaged.passUnretained(event)
