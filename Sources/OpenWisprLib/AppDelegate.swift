@@ -489,11 +489,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     self.recordingOverlay.hide()
                     if !text.isEmpty {
+                        // Add trailing space so the next word flows naturally
+                        let insertText = text + " "
                         self.lastTranscription = text
                         // Record usage stats
                         let audioSeconds = Double(samples.count) / 16000.0
                         UsageStats.shared.recordDictation(characters: text.count, audioSeconds: audioSeconds)
-                        let pasted = self.inserter.insert(text: text, refocusing: capturedElement, onFocusLost: {
+                        let pasted = self.inserter.insert(text: insertText, refocusing: capturedElement, onFocusLost: {
                             self.statusBar.state = .copiedToClipboard
                             self.statusBar.buildMenu()
                             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
@@ -670,8 +672,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
                 DispatchQueue.main.async {
                     if !text.isEmpty {
+                        let insertText = text + " "
                         self.lastTranscription = text
-                        let pasted = self.inserter.insert(text: text, refocusing: capturedElement, onFocusLost: {
+                        let pasted = self.inserter.insert(text: insertText, refocusing: capturedElement, onFocusLost: {
                             self.statusBar.state = .copiedToClipboard
                             self.statusBar.buildMenu()
                             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
