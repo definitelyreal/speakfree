@@ -17,7 +17,7 @@ class AudioRecorder {
         didSet {
             if preBufferEnabled && audioEngine == nil {
                 startEngine()
-            } else if !preBufferEnabled && !_isRecording {
+            } else if !preBufferEnabled && !isRecording {
                 // Stop the engine when not recording
                 audioEngine?.inputNode.removeTap(onBus: 0)
                 audioEngine?.stop()
@@ -71,7 +71,7 @@ class AudioRecorder {
             DiagnosticLogger.shared.log("AudioRecorder: audio configuration changed — reinstalling tap")
 
             // Don't touch the engine during active recording — defer until recording stops
-            if self._isRecording {
+            if self.isRecording {
                 DiagnosticLogger.shared.log("AudioRecorder: deferring tap reinstall until recording stops")
                 self.needsTapReinstall = true
                 return
@@ -83,38 +83,32 @@ class AudioRecorder {
 
     private var needsTapReinstall = false
 
-    /// Reinstall the audio tap without stopping the engine.
-    /// Called after audio device changes to pick up the new input format.
+    /// Rebuild the audio engine from scratch after a device change.
+    /// Patching a running engine after config changes is unreliable — the input node
+    /// format can be stale. Tearing down and recreating is the only safe approach.
     private func reinstallTap() {
-        guard let engine = audioEngine else { return }
+        DiagnosticLogger.shared.log("AudioRecorder: tearing down engine for device change")
 
-        let inputNode = engine.inputNode
-
-        // Remove old tap
-        inputNode.removeTap(onBus: 0)
-
-        // Get new format from the (possibly changed) input device
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-
-        guard let conv = AVAudioConverter(from: inputFormat, to: targetFormat) else {
-            DiagnosticLogger.shared.log("AudioRecorder: converter creation failed after device change")
-            return
+        // Tear down the old engine completely
+        if let engine = audioEngine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
         }
-        audioConverter = conv
-
-        // Install new tap with the new format
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-            guard let self = self else { return }
-            self.handleAudioBuffer(buffer, inputFormat: inputFormat, converter: conv)
-        }
+        audioEngine = nil
+        audioConverter = nil
 
         // Clear stale pre-roll (it was from the old device)
         stateLock.lock()
         prerollBuffer = []
         stateLock.unlock()
 
-        needsTapReinstall = false
-        DiagnosticLogger.shared.log("AudioRecorder: tap reinstalled for new audio device")
+        // Small delay to let CoreAudio settle on the new device
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            self.startEngine()
+            self.needsTapReinstall = false
+            DiagnosticLogger.shared.log("AudioRecorder: engine rebuilt for new audio device")
+        }
     }
 
     /// Internal: create and start the audio engine regardless of preBufferEnabled.

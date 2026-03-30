@@ -53,7 +53,7 @@ class TextInserter {
         var elementRef: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef)
         guard result == .success, let element = elementRef else { return nil }
-        // AXUIElement is a CF opaque type — cast is always valid if AX API returns success
+        // swiftlint:disable:next force_cast
         return (element as! AXUIElement)
     }
 

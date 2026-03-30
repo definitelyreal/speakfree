@@ -98,11 +98,15 @@ class WhisperEngine {
         }
         defer { free(promptCString) }
 
-        // Suppress regex (for spoken punctuation mode)
+        // Suppress regex (for spoken punctuation mode) — validate before passing to C library
         var regexCString: UnsafeMutablePointer<CChar>? = nil
         if let regex = suppressRegex, !regex.isEmpty {
-            regexCString = strdup(regex)
-            params.suppress_regex = UnsafePointer(regexCString)
+            if (try? NSRegularExpression(pattern: regex)) != nil {
+                regexCString = strdup(regex)
+                params.suppress_regex = UnsafePointer(regexCString)
+            } else {
+                DiagnosticLogger.shared.log("WhisperEngine: invalid suppress_regex ignored: \(regex)")
+            }
         }
         defer { free(regexCString) }
 
@@ -188,11 +192,15 @@ class WhisperEngine {
         }
         defer { free(promptCString) }
 
-        // Suppress regex
+        // Suppress regex — validate before passing to C library
         var regexCString: UnsafeMutablePointer<CChar>? = nil
         if let regex = suppressRegex, !regex.isEmpty {
-            regexCString = strdup(regex)
-            params.suppress_regex = UnsafePointer(regexCString)
+            if (try? NSRegularExpression(pattern: regex)) != nil {
+                regexCString = strdup(regex)
+                params.suppress_regex = UnsafePointer(regexCString)
+            } else {
+                DiagnosticLogger.shared.log("WhisperEngine: invalid suppress_regex ignored: \(regex)")
+            }
         }
         defer { free(regexCString) }
 

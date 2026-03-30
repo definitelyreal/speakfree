@@ -121,6 +121,7 @@ class CorrectionMonitor {
               let rangeValue = rangeRef,
               CFGetTypeID(rangeValue) == AXValueGetTypeID() else { return nil }
         var range = CFRange()
+        // swiftlint:disable:next force_cast
         AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
         return range.location
     }
