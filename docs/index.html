@@ -388,9 +388,9 @@
     <p class="slogan">private speech to text &nbsp;•&nbsp; free and open source</p>
     <div class="cta-wrap">
       <div class="cta-row">
-        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.0.6.dmg">
+        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.2.0.dmg">
           ↓&nbsp; Download for Mac
-          <span class="btn-sub">v1.0.6 &nbsp;•&nbsp; 2.9 MB</span>
+          <span class="btn-sub">v1.2.0 &nbsp;•&nbsp; Apple Silicon</span>
         </a>
         <a class="btn btn-secondary" href="https://github.com/definitelyreal/speakfree">
           View on GitHub ↗
@@ -404,7 +404,7 @@
     <p class="main-line">Audio never leaves your machine.</p>
     <p class="sub-line">Just OpenAI's Whisper running locally on your Mac.</p>
     <p class="no-line">No cloud, no account, no subscription.</p>
-    <p class="by-line">By <a href="https://definitelyreal.com">Michael Morgenstern</a></p>
+    <p class="by-line">By <a href="https://x.com/mikemorgenstern">Michael Morgenstern</a></p>
   </section>
 
   <section class="steps">
@@ -461,6 +461,44 @@
         <div class="feature-body">Dictate into any app — notes, email, Slack, code editors, documents. Wherever your cursor is, your words go. Blazing fast on Apple Silicon (M1/M2/M3); also runs on Intel Macs.</div>
       </div>
 
+    </div>
+  </section>
+
+  <section class="changes">
+    <div class="changes-inner">
+      <button class="changes-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+        <span class="arrow">▶</span> What's new in v1.2
+      </button>
+      <div class="changes-body open">
+        <h3>Performance</h3>
+        <ul>
+          <li>Whisper now runs in-process via Metal GPU — ~80ms from key-release to text</li>
+          <li>Audio engine runs continuously with 500ms pre-buffer — never lose the first word</li>
+          <li>Smart model management: stays in memory between dictations, auto-unloads under pressure</li>
+        </ul>
+        <h3>Text insertion</h3>
+        <ul>
+          <li>Text inserted directly via Accessibility API — no clipboard hijacking</li>
+          <li>Falls back to clipboard paste only when direct insertion isn't available</li>
+        </ul>
+        <h3>Settings</h3>
+        <ul>
+          <li>New native macOS settings panel with inline model download</li>
+          <li>Language picker with autocomplete, per-language model selection</li>
+          <li>Hotkey recorder — click and press any key to set your shortcut</li>
+          <li>Usage stats: dictation count, keystrokes saved, time saved</li>
+        </ul>
+        <h3>Reliability</h3>
+        <ul>
+          <li>AirPods and audio device hot-switching — connect/disconnect without restarting</li>
+          <li>Silence trimming (VAD) and hallucination filtering for better accuracy</li>
+          <li>Spoken punctuation: say "period", "comma", "question mark" naturally</li>
+        </ul>
+        <h3>Experimental</h3>
+        <ul>
+          <li>Live streaming preview while you speak (off by default)</li>
+        </ul>
+      </div>
     </div>
   </section>
 
