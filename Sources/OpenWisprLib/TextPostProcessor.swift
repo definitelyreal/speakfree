@@ -15,6 +15,7 @@ public struct TextPostProcessor {
         ("\(ws)semicolon\(we)", ";"),
         ("\(ws)semi colon\(we)", ";"),
         ("\(ws)ellipsis\(we)", "..."),
+        ("\(ws)dot dot dot\(we)", "..."),
         ("\(ws)full stop\(we)", "."),
         ("\(ws)open quote\(we)", "\""),
         ("\(ws)close quote\(we)", "\""),
