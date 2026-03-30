@@ -41,8 +41,8 @@ public class SettingsViewModel: ObservableObject {
         self.language = c.language
         self.punctuationMode = c.spokenPunctuation ?? .hybrid
         self.maxRecordings = c.maxRecordings ?? Config.defaultMaxRecordings
-        self.screenContext = c.screenContext?.value ?? false
-        self.rememberWords = c.rememberWords?.value ?? false
+        self.screenContext = c.screenContext?.value ?? true
+        self.rememberWords = c.rememberWords?.value ?? true
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
