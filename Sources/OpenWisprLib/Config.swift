@@ -13,6 +13,7 @@ public struct Config: Codable {
     public var preBuffer: FlexBool?  // nil = default (on)
     public var keepModelLoaded: String?  // "auto", "always", "off" — nil = "auto"
     public var diagnosticLogging: FlexBool?  // nil = default (off for production, on for beta)
+    public var languageModels: [String: String]?  // e.g. ["en": "small.en", "auto": "small"]
 
     public static let defaultMaxRecordings = 0
 
