@@ -445,6 +445,8 @@ struct SettingsView: View {
                 Section("Performance") {
                     preBufferRow
 
+                    streamingPreviewRow
+
                     keepModelLoadedRow
                 }
 
@@ -466,12 +468,21 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
 
-                    Button("Open Logs Folder…") {
+                    Button("Open Logs Folder\u{2026}") {
                         let logsDir = Config.configDir.appendingPathComponent("logs")
                         try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
                         NSWorkspace.shared.open(logsDir)
                     }
                     .controlSize(.small)
+                }
+
+                Section("Experimental") {
+                    Toggle("Live Preview", isOn: $viewModel.streamingEnabled)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: viewModel.streamingEnabled) { _ in viewModel.save() }
+                    Text("Shows transcribed text as you speak. Work in progress — text may flicker or change.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
             .formStyle(.grouped)
@@ -530,6 +541,7 @@ struct SettingsView: View {
         .onChange(of: viewModel.maxRecordings) { _ in viewModel.save() }
         .onChange(of: viewModel.preBuffer) { _ in viewModel.save() }
         .onChange(of: viewModel.keepModelLoaded) { _ in viewModel.save() }
+        .onChange(of: viewModel.streamingEnabled) { _ in viewModel.save() }
     }
 
     /// Check if the currently selected model needs downloading
@@ -847,6 +859,18 @@ struct SettingsView: View {
             }
 
             Text("Captures audio before you press the hotkey so no words are lost. Recording indicator stays on.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    // MARK: - Streaming Preview Row
+
+    private var streamingPreviewRow: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle("Show Live Preview", isOn: $viewModel.streamingEnabled)
+                .toggleStyle(.checkbox)
+            Text("Shows transcribed text in the overlay as you speak. May use more CPU.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

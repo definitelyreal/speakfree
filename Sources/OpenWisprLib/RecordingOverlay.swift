@@ -80,17 +80,32 @@ class RecordingOverlay {
     func updateStreamingText(_ text: String) {
         guard let view = contentView, let win = window, let screen = NSScreen.main else { return }
 
+        // Only grow the text, never shrink — prevents flickering from re-processing
+        if text.count < view.streamingText.count { return }
+
         let oldText = view.streamingText
         view.streamingText = text
 
-        // Resize the pill if text appeared or disappeared
+        // Resize the pill if text content changed
         let newSize = OverlayContentView.pillSize(for: view.overlayState, streamingText: text)
         let oldSize = OverlayContentView.pillSize(for: view.overlayState, streamingText: oldText)
         if newSize != oldSize {
-            let bottomMargin: CGFloat = 48
             let x = screen.frame.midX - newSize.width / 2
-            let y = screen.visibleFrame.origin.y + bottomMargin
-            win.setFrame(NSRect(x: x, y: y, width: newSize.width, height: newSize.height), display: false)
+            let y: CGFloat
+            if text.isEmpty {
+                // Compact pill at the bottom
+                y = screen.visibleFrame.origin.y + 48
+            } else {
+                // Expanded pill centered on screen
+                y = screen.frame.midY - newSize.height / 2
+            }
+
+            // Animate the size change smoothly
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.15
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                win.animator().setFrame(NSRect(x: x, y: y, width: newSize.width, height: newSize.height), display: true)
+            }
             view.frame = NSRect(origin: .zero, size: newSize)
         }
 
@@ -179,6 +194,9 @@ private class OverlayContentView: NSView {
     private static let spinnerRightPad: CGFloat = 16  // right edge padding
     private static let spinnerSpace: CGFloat = spinnerLeftPad + spinnerSize + spinnerRightPad - hPadding
 
+    // Fixed corner radius — does NOT scale with pill height
+    private static let cornerRadius: CGFloat = 20
+
     private var smoothLevel: CGFloat = 0
     private var displayLevels: [CGFloat] = Array(repeating: 0, count: barCount)
     // Per-bar jitter targets that change periodically, not every frame
@@ -189,6 +207,20 @@ private class OverlayContentView: NSView {
     private var travelTimer: Int = 0
     private var travelCooldown: Int = 0
 
+    // Streaming text layout constants
+    private static let streamingTextMaxWidth: CGFloat = 400
+    private static let streamingTextTopPad: CGFloat = 2
+    private static let streamingTextBottomPad: CGFloat = 12
+    private static let streamingTextFont = NSFont.systemFont(ofSize: 13, weight: .regular)
+    private static let maxVisibleLines = 6
+    private static let lineHeightEstimate: CGFloat = 18 // ~13pt font with leading
+
+    // Compressed bars layout when text is showing
+    private static let compressedDotSize: CGFloat = 1.5
+    private static let compressedBarGap: CGFloat = 2.0
+    private static let compressedMaxBarHeight: CGFloat = 10
+    private static let compressedBarsAreaHeight: CGFloat = 24
+
     static func pillSize(for state: RecordingOverlay.OverlayState, streamingText: String = "") -> NSSize {
         let barsWidth = CGFloat(barCount) * dotSize + CGFloat(barCount - 1) * barGap
         let baseWidth = hPadding * 2 + barsWidth
@@ -198,23 +230,27 @@ private class OverlayContentView: NSView {
             return NSSize(width: baseWidth, height: baseHeight)
         }
 
-        // Expand pill to show streaming text below the bars
+        // Wider pill to accommodate text
         let textWidth = max(baseWidth, streamingTextMaxWidth + hPadding * 2)
-        let textHeight = streamingTextHeight(for: streamingText, maxWidth: streamingTextMaxWidth)
-        let totalHeight = baseHeight + streamingTextTopPad + textHeight + streamingTextBottomPad
 
+        // Calculate text height, capped at ~6 lines
+        let textHeight = streamingTextHeight(for: streamingText, maxWidth: streamingTextMaxWidth)
+        let maxTextHeight = lineHeightEstimate * CGFloat(maxVisibleLines)
+        let clampedTextHeight = min(textHeight, maxTextHeight)
+
+        let totalHeight = compressedBarsAreaHeight + streamingTextTopPad + clampedTextHeight + streamingTextBottomPad
         return NSSize(width: textWidth, height: totalHeight)
     }
 
-    // Streaming text layout constants
-    private static let streamingTextMaxWidth: CGFloat = 400
-    private static let streamingTextTopPad: CGFloat = 2
-    private static let streamingTextBottomPad: CGFloat = 12
-    private static let streamingTextFont = NSFont.systemFont(ofSize: 13, weight: .regular)
-
     private static func streamingTextHeight(for text: String, maxWidth: CGFloat) -> CGFloat {
         guard !text.isEmpty else { return 0 }
-        let attrStr = NSAttributedString(string: text, attributes: [.font: streamingTextFont])
+        let paraStyle = NSMutableParagraphStyle()
+        paraStyle.lineBreakMode = .byWordWrapping
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: streamingTextFont,
+            .paragraphStyle: paraStyle,
+        ]
+        let attrStr = NSAttributedString(string: text, attributes: attrs)
         let boundingRect = attrStr.boundingRect(
             with: NSSize(width: maxWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
@@ -222,13 +258,30 @@ private class OverlayContentView: NSView {
         return ceil(boundingRect.height)
     }
 
+    /// Returns just the last N lines of text that fit in the visible area.
+    private static func visibleTailText(from text: String, maxWidth: CGFloat) -> String {
+        let maxHeight = lineHeightEstimate * CGFloat(maxVisibleLines)
+        let fullHeight = streamingTextHeight(for: text, maxWidth: maxWidth)
+        if fullHeight <= maxHeight { return text }
+
+        // Text exceeds visible area — find lines from the end that fit
+        // Split by newlines (we insert \n for sentence breaks)
+        let lines = text.components(separatedBy: "\n")
+        var result: [String] = []
+        for line in lines.reversed() {
+            let candidate = ([line] + result).joined(separator: "\n")
+            let h = streamingTextHeight(for: candidate, maxWidth: maxWidth)
+            if h > maxHeight && !result.isEmpty { break }
+            result.insert(line, at: 0)
+        }
+        return result.joined(separator: "\n")
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
         let rect = bounds
-        let cornerRadius = rect.height / 2
-
-        let pillPath = CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
+        let pillPath = CGPath(roundedRect: rect, cornerWidth: Self.cornerRadius, cornerHeight: Self.cornerRadius, transform: nil)
 
         // Purple gradient background for recording and transcribing states
         if overlayState == .recording || overlayState == .transcribing {
@@ -259,8 +312,7 @@ private class OverlayContentView: NSView {
         if borderWidth > 0 {
             let inset = borderWidth / 2
             let borderRect = rect.insetBy(dx: inset, dy: inset)
-            let borderRadius = borderRect.height / 2
-            let borderPath = CGPath(roundedRect: borderRect, cornerWidth: borderRadius, cornerHeight: borderRadius, transform: nil)
+            let borderPath = CGPath(roundedRect: borderRect, cornerWidth: Self.cornerRadius, cornerHeight: Self.cornerRadius, transform: nil)
             ctx.addPath(borderPath)
             ctx.setStrokeColor(NSColor(red: 0.5, green: 0.15, blue: 0.7, alpha: 0.8).cgColor)
             ctx.setLineWidth(borderWidth)
@@ -268,34 +320,46 @@ private class OverlayContentView: NSView {
         }
 
         let isTranscribing = overlayState == .transcribing
+        let hasText = !streamingText.isEmpty && !isTranscribing
 
         if isTranscribing {
             // No bars during transcribing — only centered spinner
             drawSpinner(ctx: ctx, rect: rect)
-        } else {
-            let color = NSColor.white.withAlphaComponent(0.75)
-            // When streaming text is present, bars draw in the top portion
-            let barsRect: NSRect
-            if !streamingText.isEmpty {
-                let baseHeight = Self.vPadding * 2 + Self.dotSize
-                barsRect = NSRect(x: rect.minX, y: rect.maxY - baseHeight, width: rect.width, height: baseHeight)
-            } else {
-                barsRect = rect
-            }
-            drawBars(ctx: ctx, rect: barsRect, color: color)
+        } else if hasText {
+            // Bars compressed to top of the expanded pill
+            let barsRect = NSRect(
+                x: rect.minX,
+                y: rect.maxY - Self.compressedBarsAreaHeight,
+                width: rect.width,
+                height: Self.compressedBarsAreaHeight
+            )
+            drawBars(ctx: ctx, rect: barsRect, color: NSColor.white.withAlphaComponent(0.75), compressed: true)
 
-            // Draw streaming text below the bars
-            if !streamingText.isEmpty {
-                drawStreamingText(ctx: ctx, rect: rect)
-            }
+            // Streaming text below bars
+            drawStreamingText(ctx: ctx, rect: rect)
+        } else {
+            // Normal centered bars, no text
+            drawBars(ctx: ctx, rect: rect, color: NSColor.white.withAlphaComponent(0.75), compressed: false)
         }
     }
 
-    private func drawBars(ctx: CGContext, rect: NSRect, color: NSColor) {
+    private func drawBars(ctx: CGContext, rect: NSRect, color: NSColor, compressed: Bool) {
         if overlayState == .transcribing { return }
 
-        let centerY = rect.midY
-        let startX = Self.hPadding
+        let effectiveDotSize = compressed ? Self.compressedDotSize : Self.dotSize
+        let effectiveGap = compressed ? Self.compressedBarGap : Self.barGap
+        let effectiveMaxHeight = compressed ? Self.compressedMaxBarHeight : Self.maxBarHeight
+
+        // When compressed, left-align bars; otherwise center them
+        let startX: CGFloat
+        let centerY: CGFloat
+        if compressed {
+            startX = Self.hPadding
+            centerY = rect.midY
+        } else {
+            startX = Self.hPadding
+            centerY = rect.midY
+        }
 
         // Fast attack, moderate release
         let smoothing: CGFloat = audioLevel > smoothLevel ? 0.8 : 0.4
@@ -345,14 +409,14 @@ private class OverlayContentView: NSView {
             displayLevels[i] += (target - displayLevels[i]) * displaySmoothing
 
             let dl = max(displayLevels[i], 0)
-            let minH: CGFloat = 1.0  // bars shrink to 1px when very quiet
-            let h = minH + (Self.maxBarHeight - minH) * dl
+            let minH: CGFloat = compressed ? 0.5 : 1.0
+            let h = minH + (effectiveMaxHeight - minH) * dl
 
-            let x = startX + CGFloat(i) * (Self.dotSize + Self.barGap)
+            let x = startX + CGFloat(i) * (effectiveDotSize + effectiveGap)
             let y = centerY - h / 2
-            let barRect = CGRect(x: x, y: y, width: Self.dotSize, height: h)
+            let barRect = CGRect(x: x, y: y, width: effectiveDotSize, height: h)
             // Border radius scales with level: square when silent, fully rounded when loud
-            let r = dl * (Self.dotSize / 2)
+            let r = dl * (effectiveDotSize / 2)
             ctx.addPath(CGPath(roundedRect: barRect, cornerWidth: r, cornerHeight: r, transform: nil))
             ctx.fillPath()
         }
@@ -395,13 +459,19 @@ private class OverlayContentView: NSView {
     private func drawStreamingText(ctx: CGContext, rect: NSRect) {
         guard !streamingText.isEmpty else { return }
 
-        let baseHeight = Self.vPadding * 2 + Self.dotSize
-        let textTop = rect.maxY - baseHeight - Self.streamingTextTopPad
         let textMaxWidth = Self.streamingTextMaxWidth
         let textX = rect.midX - textMaxWidth / 2
 
+        // The text area starts below the compressed bars area
+        let textAreaTop = rect.maxY - Self.compressedBarsAreaHeight - Self.streamingTextTopPad
+        let textAreaBottom = rect.minY + Self.streamingTextBottomPad
+        let textAreaHeight = textAreaTop - textAreaBottom
+
+        // Get the visible tail of the text (last ~6 lines)
+        let visibleText = Self.visibleTailText(from: streamingText, maxWidth: textMaxWidth)
+
         let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.alignment = .center
+        paragraphStyle.alignment = .left
         paragraphStyle.lineBreakMode = .byWordWrapping
 
         let attributes: [NSAttributedString.Key: Any] = [
@@ -410,13 +480,20 @@ private class OverlayContentView: NSView {
             .paragraphStyle: paragraphStyle,
         ]
 
-        let attrStr = NSAttributedString(string: streamingText, attributes: attributes)
-        let textHeight = Self.streamingTextHeight(for: streamingText, maxWidth: textMaxWidth)
-        let textRect = NSRect(x: textX, y: textTop - textHeight, width: textMaxWidth, height: textHeight)
+        let attrStr = NSAttributedString(string: visibleText, attributes: attributes)
+        let textHeight = Self.streamingTextHeight(for: visibleText, maxWidth: textMaxWidth)
 
-        // Draw text using NSAttributedString (switches to NSGraphicsContext)
+        // Anchor text to the top of the text area (new text pushes old text up)
+        let textRect = NSRect(x: textX, y: textAreaTop - textHeight, width: textMaxWidth, height: textHeight)
+
+        // Clip to the text area so nothing bleeds outside the pill
+        ctx.saveGState()
+        ctx.clip(to: NSRect(x: rect.minX, y: textAreaBottom, width: rect.width, height: textAreaHeight))
+
         NSGraphicsContext.current?.saveGraphicsState()
         attrStr.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
         NSGraphicsContext.current?.restoreGraphicsState()
+
+        ctx.restoreGState()
     }
 }

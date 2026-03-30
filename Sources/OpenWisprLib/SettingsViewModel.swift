@@ -19,6 +19,7 @@ public class SettingsViewModel: ObservableObject {
     @Published public var preBuffer: Bool
     @Published public var keepModelLoaded: String
     @Published public var diagnosticLogging: Bool
+    @Published public var streamingEnabled: Bool
     @Published public var languageModels: [String: String]
 
     // MARK: - Callback
@@ -46,6 +47,7 @@ public class SettingsViewModel: ObservableObject {
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
+        self.streamingEnabled = c.streamingEnabled?.value ?? false
         self.languageModels = c.languageModels ?? [:]
     }
 
@@ -66,6 +68,7 @@ public class SettingsViewModel: ObservableObject {
             preBuffer: FlexBool(preBuffer),
             keepModelLoaded: keepModelLoaded,
             diagnosticLogging: FlexBool(diagnosticLogging),
+            streamingEnabled: FlexBool(streamingEnabled),
             languageModels: languageModels.isEmpty ? nil : languageModels
         )
     }
