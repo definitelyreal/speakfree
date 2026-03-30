@@ -31,6 +31,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var streamingTimer: Timer?
     private var streamingText: String = ""
     private var isStreamingInFlight = false  // prevents overlapping inference runs
+    /// Text that has been "committed" to display — we won't change it even if re-inference differs.
+    /// New sentences start on a new line so existing lines don't reflow.
+    private var committedStreamingText: String = ""
     /// Serial queue that ensures streaming and final transcriptions never overlap on the whisper context.
     private let whisperSerialQueue = DispatchQueue(label: "com.speakfree.whisper-serial", qos: .userInitiated)
 
@@ -531,8 +534,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Streaming Transcription
 
     private func startStreamingTimer() {
+        guard config.streamingEnabled?.value ?? true else { return }
         guard transcriber.engine.isLoaded else { return }
         streamingText = ""
+        committedStreamingText = ""
         isStreamingInFlight = false
         streamingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.processStreamingChunk()
@@ -544,6 +549,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         streamingTimer?.invalidate()
         streamingTimer = nil
         streamingText = ""
+        committedStreamingText = ""
         isStreamingInFlight = false
         recordingOverlay.clearStreamingText()
     }
@@ -573,13 +579,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     language: language,
                     suppressRegex: suppressRegex,
                     onPartialResult: { text in
-                        // Called on main thread by the callback
-                        self.recordingOverlay.updateStreamingText(text)
+                        // Build display text with sentence breaks on new lines
+                        let displayText = self.buildStableDisplayText(from: text)
+                        self.recordingOverlay.updateStreamingText(displayText)
                     }
                 )
                 self.streamingText = partial
+
+                // Commit completed sentences so they won't change on next inference
+                let displayText = self.buildStableDisplayText(from: partial)
+
                 DispatchQueue.main.async {
-                    self.recordingOverlay.updateStreamingText(partial)
+                    self.recordingOverlay.updateStreamingText(displayText)
                     self.isStreamingInFlight = false
                 }
             } catch {
@@ -589,6 +600,53 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    /// Build stable display text: committed sentences are frozen, new content is appended.
+    /// Each sentence starts on a new line so existing lines don't reflow.
+    private func buildStableDisplayText(from rawText: String) -> String {
+        let trimmed = rawText.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return committedStreamingText }
+
+        // If the new text is shorter than committed, keep committed (prevents regression)
+        guard trimmed.count >= committedStreamingText.replacingOccurrences(of: "\n", with: " ").count else {
+            return committedStreamingText
+        }
+
+        // Find the portion of text beyond what we've committed
+        let committedFlat = committedStreamingText.replacingOccurrences(of: "\n", with: " ")
+        let newPortion: String
+        if trimmed.hasPrefix(committedFlat) {
+            newPortion = String(trimmed.dropFirst(committedFlat.count)).trimmingCharacters(in: .whitespaces)
+        } else if trimmed.count > committedFlat.count {
+            // Text diverged slightly but is longer — take the new tail
+            newPortion = String(trimmed.dropFirst(committedFlat.count)).trimmingCharacters(in: .whitespaces)
+        } else {
+            // Text is same length or shorter — show committed
+            return committedStreamingText
+        }
+
+        if newPortion.isEmpty { return committedStreamingText }
+
+        // Check if the new portion contains complete sentences (ends with .!?)
+        // If so, commit everything up to the last sentence end
+        var result = committedStreamingText
+        if !result.isEmpty && !newPortion.isEmpty {
+            result += "\n"
+        }
+        result += newPortion
+
+        // Commit text through the last sentence-ending punctuation
+        if let lastPunct = newPortion.lastIndex(where: { ".!?".contains($0) }) {
+            let throughPunct = String(newPortion[...lastPunct])
+            if committedStreamingText.isEmpty {
+                committedStreamingText = throughPunct
+            } else {
+                committedStreamingText += "\n" + throughPunct
+            }
+        }
+
+        return result
     }
 
     public func reprocess(audioURL: URL) {
