@@ -383,6 +383,8 @@ struct SettingsView: View {
     @State private var pendingModelDownload: String? = nil
     @StateObject private var downloadManager = InlineDownloadManager()
     @State private var launchAtLogin = false
+    /// Tracks the previous language so we can save its model on switch
+    @State private var previousLanguage: String = ""
 
     /// Tracks the picker selection separately so we can intercept "Other..." (999)
     @State private var hotkeyPickerSelection: UInt16 = 0
@@ -495,6 +497,7 @@ struct SettingsView: View {
         .onAppear {
             hotkeyPickerSelection = viewModel.hotkeyKeyCode
             launchAtLogin = LaunchAtLogin.isEnabled
+            previousLanguage = viewModel.language
             checkPendingDownload()
         }
         .onChange(of: hotkeyPickerSelection) { newValue in
@@ -618,6 +621,22 @@ struct SettingsView: View {
                 .frame(width: 200)
                 .lineLimit(1)
                 .onChange(of: viewModel.language) { newLang in
+                    // Save the current model for the previous language before switching
+                    if previousLanguage != newLang {
+                        viewModel.languageModels[previousLanguage] = viewModel.modelSize
+                    }
+                    previousLanguage = newLang
+
+                    // Check if we have a saved model for the new language
+                    if let savedModel = viewModel.languageModels[newLang] {
+                        let newModels = availableModels(language: newLang)
+                        if newModels.contains(where: { $0.id == savedModel }) {
+                            viewModel.modelSize = savedModel
+                            return
+                        }
+                    }
+
+                    // No saved model — auto-switch to equivalent
                     let newModels = availableModels(language: newLang)
                     if !newModels.contains(where: { $0.id == viewModel.modelSize }) {
                         let base = viewModel.modelSize.replacingOccurrences(of: ".en", with: "")

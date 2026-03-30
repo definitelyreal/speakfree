@@ -33,7 +33,7 @@ public struct TextPostProcessor {
         // Require punctuation immediately before (after optional whitespace):
         // "hello, comma how" → replace ("," before "comma" = whisper saw a break)
         // "comma separating" → skip (no punctuation before = regular word)
-        ("(?<=[.,!?;:])\\s*(?:[ck]omma|kana)\(we)", ","),
+        ("(?<=[.,!?;:])\\s*(?:[ck]omma|kana|kanna)\(we)", ","),
         ("(?<=[.,!?;:])\\s*period\(we)", "."),
         ("(?<=[.,!?;:])\\s*colon\(we)", ":"),
         ("(?<=[.,!?;:])\\s*dash\(we)", " —"),
@@ -46,7 +46,7 @@ public struct TextPostProcessor {
     // Fallback replacements for spoken mode (no whisper auto-punct, so no context to read).
     // These use the same boundaries as alwaysReplace — replace regardless of surrounding punct.
     private static var spokenFallback: [(pattern: String, replacement: String)] {[
-        ("\(ws)(?:[ck]omma|kana)\(we)", ","),
+        ("\(ws)(?:[ck]omma|kana|kanna)\(we)", ","),
         ("\(ws)period\(we)", "."),
         ("\(ws)colon\(we)", ":"),
         ("\(ws)dash\(we)", " —"),
@@ -80,6 +80,12 @@ public struct TextPostProcessor {
             )
         }
 
+        // 2.5. In hybrid mode, catch ambiguous words at end of clause/sentence that
+        // the context-aware regex missed (e.g. "hello period" with no preceding punctuation)
+        if hybrid {
+            result = convertEndOfClauseAmbiguous(result)
+        }
+
         // 3. Protect real ellipsis (from spoken "ellipsis" word) before collapsing
         result = result.replacingOccurrences(of: "...", with: ellipsisPlaceholder)
 
@@ -96,6 +102,9 @@ public struct TextPostProcessor {
         // 6. Collapse adjacent different-type punctuation conflicts
         result = collapseAdjacentPunctuation(result)
 
+        // 6.5. Remove auto-generated "..." from pauses (spoken "ellipsis" is already a placeholder)
+        result = result.replacingOccurrences(of: "...", with: "")
+
         // 7. Restore ellipsis
         result = result.replacingOccurrences(of: ellipsisPlaceholder, with: "...")
 
@@ -109,6 +118,35 @@ public struct TextPostProcessor {
         // 9. Ensure space after punctuation before next word
         result = ensureSpaceAfterPunctuation(result)
 
+        return result
+    }
+
+    /// In hybrid mode, convert ambiguous punctuation words when they appear at the end
+    /// of a clause or before a capital letter (indicating sentence boundary).
+    /// This catches "hello period" where there's no preceding whisper punctuation.
+    private static func convertEndOfClauseAmbiguous(_ text: String) -> String {
+        var result = text
+        let ambiguousWords: [(word: String, replacement: String)] = [
+            ("period", "."),
+            ("comma", ","),
+            ("komma", ","),
+            ("kana", ","),
+            ("kanna", ","),
+            ("colon", ":"),
+            ("dash", " —"),
+            ("hyphen", "-"),
+        ]
+
+        for (word, replacement) in ambiguousWords {
+            // Match the word at end of string, before newline, or before a capital letter
+            let pattern = "(?i)\\b\(word)\\s*(?=$|\\n|(?=[A-Z]))"
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            result = regex.stringByReplacingMatches(
+                in: result,
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: replacement
+            )
+        }
         return result
     }
 

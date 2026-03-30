@@ -19,6 +19,7 @@ public class SettingsViewModel: ObservableObject {
     @Published public var preBuffer: Bool
     @Published public var keepModelLoaded: String
     @Published public var diagnosticLogging: Bool
+    @Published public var languageModels: [String: String]
 
     // MARK: - Callback
 
@@ -45,6 +46,7 @@ public class SettingsViewModel: ObservableObject {
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
+        self.languageModels = c.languageModels ?? [:]
     }
 
     // MARK: - Conversion
@@ -63,7 +65,8 @@ public class SettingsViewModel: ObservableObject {
             rememberWords: FlexBool(rememberWords),
             preBuffer: FlexBool(preBuffer),
             keepModelLoaded: keepModelLoaded,
-            diagnosticLogging: FlexBool(diagnosticLogging)
+            diagnosticLogging: FlexBool(diagnosticLogging),
+            languageModels: languageModels.isEmpty ? nil : languageModels
         )
     }
 
