@@ -27,6 +27,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var screenContextText: String?
     private let screenContextLock = NSLock()
 
+    // Streaming transcription: periodic inference during recording
+    private var streamingTimer: Timer?
+    private var streamingText: String = ""
+    private var isStreamingInFlight = false  // prevents overlapping inference runs
+    /// Serial queue that ensures streaming and final transcriptions never overlap on the whisper context.
+    private let whisperSerialQueue = DispatchQueue(label: "com.speakfree.whisper-serial", qos: .userInitiated)
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar = StatusBarController()
         recorder = AudioRecorder()
@@ -360,6 +367,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             let outputURL = RecordingStore.newRecordingURL()
             RecordingStore.writeSentinel(recordingURL: outputURL)
             try recorder.startRecording(to: outputURL)
+
+            // Start streaming transcription timer — processes audio every 2s for live preview
+            startStreamingTimer()
         } catch {
             print("Error: \(error.localizedDescription)")
             RecordingStore.clearSentinel()
@@ -375,6 +385,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleRecordingAbort() {
         guard isPressed else { return }
         isPressed = false
+
+        stopStreamingTimer()
 
         if let result = recorder.stopRecording() {
             try? FileManager.default.removeItem(at: result.url)
@@ -394,6 +406,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         guard isPressed else { return }
         isPressed = false
         let stopTime = CFAbsoluteTimeGetCurrent()
+
+        // Stop streaming timer and clear streaming state
+        stopStreamingTimer()
 
         guard let recording = recorder.stopRecording() else {
             RecordingStore.clearSentinel()
@@ -429,7 +444,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         recordingSourceElement = nil
         recordingContextText = nil
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        // Use whisperSerialQueue to ensure any in-flight streaming inference finishes first
+        whisperSerialQueue.async { [weak self] in
             guard let self = self else { return }
             let maxRecordings = Config.effectiveMaxRecordings(self.config.maxRecordings)
             do {
@@ -507,6 +523,69 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     print("Error: Transcription failed")
                     self.statusBar.state = .idle
                     self.statusBar.buildMenu()
+                }
+            }
+        }
+    }
+
+    // MARK: - Streaming Transcription
+
+    private func startStreamingTimer() {
+        guard transcriber.engine.isLoaded else { return }
+        streamingText = ""
+        isStreamingInFlight = false
+        streamingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.processStreamingChunk()
+        }
+        DiagnosticLogger.shared.log("Streaming: timer started (2.0s interval)")
+    }
+
+    private func stopStreamingTimer() {
+        streamingTimer?.invalidate()
+        streamingTimer = nil
+        streamingText = ""
+        isStreamingInFlight = false
+        recordingOverlay.clearStreamingText()
+    }
+
+    private func processStreamingChunk() {
+        guard isPressed, !isStreamingInFlight else { return }
+
+        let currentSamples = recorder.currentSamples()
+        // Need at least 1 second of audio for meaningful transcription
+        guard currentSamples.count > 16000 else { return }
+
+        isStreamingInFlight = true
+
+        let language = config.language
+        let suppressRegex = transcriber.suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
+
+        whisperSerialQueue.async { [weak self] in
+            guard let self = self else { return }
+            // Re-check: user may have released hotkey while we waited for the queue
+            guard self.isPressed else {
+                DispatchQueue.main.async { self.isStreamingInFlight = false }
+                return
+            }
+            do {
+                let partial = try self.transcriber.engine.transcribeStreaming(
+                    samples: currentSamples,
+                    language: language,
+                    suppressRegex: suppressRegex,
+                    onPartialResult: { text in
+                        // Called on main thread by the callback
+                        self.recordingOverlay.updateStreamingText(text)
+                    }
+                )
+                self.streamingText = partial
+                DispatchQueue.main.async {
+                    self.recordingOverlay.updateStreamingText(partial)
+                    self.isStreamingInFlight = false
+                }
+            } catch {
+                DiagnosticLogger.shared.log("Streaming: chunk failed — \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self.isStreamingInFlight = false
                 }
             }
         }
