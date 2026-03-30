@@ -15,14 +15,29 @@ class SettingsWindowController: NSWindowController {
 
     convenience init(viewModel: SettingsViewModel) {
         let hostingController = NSHostingController(rootView: SettingsView(viewModel: viewModel))
-        hostingController.preferredContentSize = NSSize(width: 480, height: 640)
+
+        // Size the window to 4/5 of the screen height, capped at a reasonable max
+        let screenHeight = NSScreen.main?.visibleFrame.height ?? 900
+        let windowHeight = min(screenHeight * 0.8, 900)
+
+        hostingController.preferredContentSize = NSSize(width: 480, height: windowHeight)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "speakfree Settings"
-        window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 480, height: 640))
-        window.minSize = NSSize(width: 480, height: 580)
+        window.styleMask = [.titled, .closable, .resizable]
+        window.setContentSize(NSSize(width: 480, height: windowHeight))
+        window.minSize = NSSize(width: 480, height: 500)
+        window.maxSize = NSSize(width: 600, height: screenHeight)
         window.center()
         window.isReleasedWhenClosed = false
+
+        // Ensure the window stays on-screen when displays change
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { _ in
+            window.constrainFrameRect(window.frame, to: window.screen)
+        }
+
         self.init(window: window)
     }
 }
@@ -56,7 +71,8 @@ private struct ModelInfo: Identifiable, Hashable {
     let isRecommended: Bool
 
     var label: String {
-        "\(id) (\(memory), \(speed) load)"
+        let base = "\(id) (\(memory), \(speed) load)"
+        return isRecommended ? "\(base) \u{2014} Recommended" : base
     }
 }
 
@@ -385,12 +401,14 @@ struct SettingsView: View {
     @State private var launchAtLogin = false
     /// Tracks the previous language so we can save its model on switch
     @State private var previousLanguage: String = ""
+    /// Last model that was actually on disk — used to revert on download cancel
+    @State private var previousWorkingModel: String? = nil
 
     /// Tracks the picker selection separately so we can intercept "Other..." (999)
     @State private var hotkeyPickerSelection: UInt16 = 0
 
-    /// Consistent label width for aligned rows
-    private let labelWidth: CGFloat = 180
+    /// Consistent label width across ALL Grid sections.
+    private let labelWidth: CGFloat = 105
 
     /// Sorted language list for the picker
     private var sortedLanguages: [WhisperLanguage] {
@@ -407,9 +425,10 @@ struct SettingsView: View {
         KeyCodes.describe(keyCode: viewModel.hotkeyKeyCode, modifiers: viewModel.hotkeyModifiers)
     }
 
-    /// Helper for consistent label-control rows
+    /// Helper for consistent label-control rows.
+    /// Labels left-aligned in a fixed column, controls fill remaining space.
     private func settingsRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack {
+        HStack(spacing: 8) {
             Text(label)
                 .frame(width: labelWidth, alignment: .leading)
             content()
@@ -418,19 +437,16 @@ struct SettingsView: View {
 
     var body: some View {
         ZStack {
-            VStack(spacing: 0) {
-                Text("\(UsageStats.shared.totalDictations) dictations, saving \(UsageStats.shared.timeSavedDescription) and \(UsageStats.shared.keystrokesDescription) keystrokes")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 8)
-                    .padding(.bottom, 2)
-
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(spacing: 20) {
+                Text("\(UsageStats.shared.totalDictations) dictations, saving \(UsageStats.shared.timeSavedDescription) and \(UsageStats.shared.keystrokesDescription) keystrokes")
+                    .font(.callout)
+                    .foregroundColor(.primary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 4)
                 // -- GENERAL -----------------------------------------------
                 GroupBox("General") {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 14) {
                         Toggle("Launch at Login", isOn: $launchAtLogin)
                             .toggleStyle(.checkbox)
                             .onChange(of: launchAtLogin) { newValue in
@@ -440,47 +456,181 @@ struct SettingsView: View {
                                 }
                             }
 
-                        hotkeyRow
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                            GridRow {
+                                Text("Hotkey").frame(width: labelWidth, alignment: .leading).gridColumnAlignment(.leading)
+                                HStack(spacing: 8) {
+                                    Picker("", selection: $hotkeyPickerSelection) {
+                                        if isCustomHotkey {
+                                            Text(hotkeyDisplay).tag(viewModel.hotkeyKeyCode)
+                                            Divider()
+                                        }
+                                        ForEach(standardHotkeyOptions) { option in
+                                            Text(option.label).tag(option.keyCode)
+                                        }
+                                        Divider()
+                                        Text("Other\u{2026}").tag(otherHotkeyTag)
+                                    }
+                                    .pickerStyle(.menu)
+                                    .labelsHidden()
 
-                        storageRow
+                                    Picker("", selection: $viewModel.toggleMode) {
+                                        Text("Hold").tag(false)
+                                        Text("Toggle").tag(true)
+                                    }
+                                    .pickerStyle(.segmented)
+                                    .controlSize(.small)
+                                    .labelsHidden()
+                                    .frame(width: 100)
+                                }
+                            }
+
+                            GridRow {
+                                Text("Past Recordings")
+                                Picker("", selection: $viewModel.maxRecordings) {
+                                    ForEach(maxRecordingsOptions, id: \.value) { option in
+                                        Text(option.label).tag(option.value)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .labelsHidden()
+                                .frame(width: 80, alignment: .leading)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text("Shows recent dictations in the toolbar menu.")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
                     }
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 4)
                 }
 
                 // -- TRANSCRIPTION -----------------------------------------
                 GroupBox("Transcription") {
                     VStack(alignment: .leading, spacing: 10) {
-                        languageRow
-                        modelRow
-                        inlineDownloadSection
-                        punctuationRow
+                        modelStatusBanner
+
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                            GridRow {
+                                Text("Language").frame(width: labelWidth, alignment: .leading).gridColumnAlignment(.leading)
+                                Picker("", selection: $viewModel.language) {
+                                    Text("Auto-detect").tag("auto")
+                                    Divider()
+                                    ForEach(sortedLanguages) { lang in
+                                        Text(lang.name).tag(lang.id)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .labelsHidden()
+                                .onChange(of: viewModel.language) { newLang in
+                                    if previousLanguage != newLang {
+                                        viewModel.languageModels[previousLanguage] = viewModel.modelSize
+                                    }
+                                    previousLanguage = newLang
+
+                                    if let savedModel = viewModel.languageModels[newLang] {
+                                        let newModels = availableModels(language: newLang)
+                                        if newModels.contains(where: { $0.id == savedModel }) {
+                                            viewModel.modelSize = savedModel
+                                            return
+                                        }
+                                    }
+
+                                    let newModels = availableModels(language: newLang)
+                                    if !newModels.contains(where: { $0.id == viewModel.modelSize }) {
+                                        let base = viewModel.modelSize.replacingOccurrences(of: ".en", with: "")
+                                        if let match = newModels.first(where: { $0.id.hasPrefix(base) }) {
+                                            viewModel.modelSize = match.id
+                                        }
+                                    }
+                                }
+                            }
+
+                            GridRow {
+                                Text("Model")
+                                Picker("", selection: $viewModel.modelSize) {
+                                    ForEach(availableModels(language: viewModel.language)) { model in
+                                        Text(model.label)
+                                            .lineLimit(1)
+                                            .truncationMode(.tail)
+                                            .tag(model.id)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .labelsHidden()
+                                .lineLimit(1)
+                            }
+
+                            GridRow {
+                                Text("Punctuation")
+                                Picker("", selection: $viewModel.punctuationMode) {
+                                    Text("Automatic & Spoken").tag(PunctuationMode.hybrid)
+                                    Text("Automatic Only").tag(PunctuationMode.off)
+                                    Text("Spoken Only").tag(PunctuationMode.spoken)
+                                }
+                                .pickerStyle(.menu)
+                                .labelsHidden()
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text("Larger models are more accurate but use more memory.")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
                     }
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 4)
                 }
 
                 // -- PERFORMANCE -------------------------------------------
                 GroupBox("Performance") {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 14) {
                         preBufferRow
-                        streamingPreviewRow
-                        keepModelLoadedRow
+
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                            GridRow {
+                                Text("Model Loading").frame(width: labelWidth, alignment: .leading).gridColumnAlignment(.leading)
+                                Picker("", selection: $viewModel.keepModelLoaded) {
+                                    Text("Automatic").tag("auto")
+                                    Text("Always").tag("always")
+                                    Text("Off").tag("off")
+                                }
+                                .pickerStyle(.menu)
+                                .labelsHidden()
+                                .frame(width: 120, alignment: .leading)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac.")
+                            Text("Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)).")
+                            Text("Automatic unloads the model whenever your Mac needs the memory.")
+                        }
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 4)
                 }
 
                 // -- VOCABULARY & CONTEXT ----------------------------------
                 GroupBox("Vocabulary & Context") {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 14) {
                         correctionsRow
                         screenContextRow
                         vocabularyStatusRow
                     }
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 4)
                 }
 
                 // -- ADVANCED ----------------------------------------------
                 GroupBox("Advanced") {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 14) {
                         HStack {
                             Toggle("Diagnostic Logging", isOn: $viewModel.diagnosticLogging)
                                 .toggleStyle(.checkbox)
@@ -497,28 +647,25 @@ struct SettingsView: View {
                             .controlSize(.small)
                         }
                         Text("Logs session activity to help diagnose issues. Logs are stored locally.")
-                            .font(.caption)
+                            .font(.footnote)
                             .foregroundColor(.secondary)
-                    }
-                    .padding(.vertical, 4)
-                }
 
-                // -- EXPERIMENTAL ------------------------------------------
-                GroupBox("Experimental") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Toggle("Live Preview", isOn: $viewModel.streamingEnabled)
-                            .toggleStyle(.checkbox)
-                            .onChange(of: viewModel.streamingEnabled) { _ in viewModel.save() }
-                        Text("Shows transcribed text as you speak. Work in progress — text may flicker or change.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("Live Preview (Experimental)", isOn: $viewModel.streamingEnabled)
+                                .toggleStyle(.checkbox)
+                                .onChange(of: viewModel.streamingEnabled) { _ in viewModel.save() }
+                            Text("Shows transcribed text as you speak. Work in progress \u{2014} text may flicker.")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
                     }
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 4)
                 }
                 } // end VStack
-                .padding(16)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
             } // end ScrollView
-            } // end VStack
 
             if isRecordingHotkey {
                 KeyRecorderOverlay(
@@ -577,9 +724,22 @@ struct SettingsView: View {
     /// Check if the currently selected model needs downloading
     private func checkPendingDownload() {
         if !SettingsViewModel.modelExists(viewModel.modelSize) {
+            // Remember the last working model so we can revert on cancel
+            if previousWorkingModel == nil || SettingsViewModel.modelExists(previousWorkingModel ?? "") {
+                // Keep the existing previousWorkingModel if it's still valid
+            } else {
+                previousWorkingModel = nil
+            }
+            if pendingModelDownload == nil {
+                // Save what we had before this change
+                if let delegate = NSApplication.shared.delegate as? AppDelegate {
+                    previousWorkingModel = delegate.activeModelSize
+                }
+            }
             pendingModelDownload = viewModel.modelSize
         } else {
             pendingModelDownload = nil
+            previousWorkingModel = viewModel.modelSize
         }
     }
 
@@ -600,7 +760,7 @@ struct SettingsView: View {
             }
             .pickerStyle(.menu)
             .labelsHidden()
-            .frame(width: 170)
+            .frame(maxWidth: .infinity)
 
             Picker("", selection: $viewModel.toggleMode) {
                 Text("Hold").tag(false)
@@ -610,6 +770,7 @@ struct SettingsView: View {
             .controlSize(.small)
             .labelsHidden()
             .frame(width: 100)
+            .padding(.trailing, 4)
         }
     }
 
@@ -626,7 +787,90 @@ struct SettingsView: View {
             }
             .pickerStyle(.menu)
             .labelsHidden()
-            .frame(width: 160)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    // MARK: - Model Status Banner
+
+    /// Display name for the current language selection (e.g. "Estonian" not "et")
+    private var languageDisplayName: String {
+        if viewModel.language == "auto" { return "Auto-detect" }
+        return WhisperLanguage.all.first(where: { $0.id == viewModel.language })?.name ?? viewModel.language
+    }
+
+    /// Dismiss button for banners — large click target
+    private func dismissButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var modelStatusBanner: some View {
+        if let pending = pendingModelDownload {
+            // Model needs downloading
+            VStack(alignment: .leading, spacing: 8) {
+                if downloadManager.isDownloading {
+                    // Downloading state
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Downloading \(languageDisplayName) \(pending)\u{2026} \(Int(downloadManager.progress * 100))%")
+                                .font(.callout.weight(.medium))
+                            ProgressView(value: downloadManager.progress, total: 1.0)
+                                .progressViewStyle(.linear)
+                        }
+                        dismissButton {
+                            downloadManager.cancelDownload()
+                        }
+                    }
+                } else {
+                    // Not downloaded state
+                    HStack {
+                        Image(systemName: "arrow.down.circle")
+                            .foregroundColor(.orange)
+                        Text("\(languageDisplayName) \(pending)")
+                            .font(.callout.weight(.medium))
+                        Text("(\(SettingsViewModel.modelDownloadSize(pending)))")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button("Download") {
+                            downloadManager.startDownload(modelSize: pending) { [self] in
+                                pendingModelDownload = nil
+                            }
+                        }
+                        .controlSize(.small)
+                        dismissButton {
+                            // Revert to the previous working model
+                            if let prev = previousWorkingModel {
+                                viewModel.modelSize = prev
+                            }
+                            pendingModelDownload = nil
+                        }
+                    }
+
+                    if let error = downloadManager.errorMessage {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                }
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.orange.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.orange.opacity(0.3), lineWidth: 0.5)
+            )
         }
     }
 
@@ -634,7 +878,7 @@ struct SettingsView: View {
 
     private var modelRow: some View {
         let models = availableModels(language: viewModel.language)
-        return VStack(alignment: .leading, spacing: 2) {
+        return VStack(alignment: .leading, spacing: 4) {
             settingsRow("Model") {
                 Picker("", selection: $viewModel.modelSize) {
                     ForEach(models) { model in
@@ -646,7 +890,7 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(minWidth: 240)
+                .frame(maxWidth: .infinity)
                 .lineLimit(1)
                 .onChange(of: viewModel.language) { newLang in
                     if previousLanguage != newLang {
@@ -675,92 +919,14 @@ struct SettingsView: View {
             Text("Larger models are more accurate but use more memory.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-                .padding(.leading, labelWidth)
-
-            if let delegate = NSApplication.shared.delegate as? AppDelegate,
-               delegate.activeModelSize != viewModel.modelSize {
-                Text("Currently using: \(delegate.activeModelSize)")
-                    .font(.caption)
-                    .foregroundColor(.orange)
-                    .padding(.leading, labelWidth)
-            }
-        }
-    }
-
-    // MARK: - Inline Download Section
-
-    @ViewBuilder
-    private var inlineDownloadSection: some View {
-        if let pending = pendingModelDownload {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("\(pending) (\(SettingsViewModel.modelDownloadSize(pending)))")
-                        .font(.body.weight(.medium))
-                    Text("\u{2014} not downloaded")
-                        .font(.body)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                }
-
-                if let error = downloadManager.errorMessage {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundColor(.red)
-                }
-
-                if downloadManager.isDownloading {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Downloading... \(Int(downloadManager.progress * 100))%")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                        }
-                        ProgressView(value: downloadManager.progress, total: 1.0)
-                            .progressViewStyle(.linear)
-                        HStack {
-                            Spacer()
-                            Button("Cancel") {
-                                downloadManager.cancelDownload()
-                            }
-                            .controlSize(.small)
-                        }
-                    }
-                } else {
-                    HStack {
-                        Button("Download") {
-                            downloadManager.startDownload(modelSize: pending) { [self] in
-                                pendingModelDownload = nil
-                            }
-                        }
-
-                        Spacer()
-
-                        Button("Open Models Folder\u{2026}") {
-                            let modelsDir = SettingsViewModel.modelsDirectory
-                            try? FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
-                            NSWorkspace.shared.open(modelsDir)
-                        }
-                        .controlSize(.small)
-                    }
-                }
-            }
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
-            )
+                .padding(.leading, 0)
         }
     }
 
     // MARK: - Punctuation Row
 
     private var punctuationRow: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             settingsRow("Punctuation") {
                 Picker("", selection: $viewModel.punctuationMode) {
                     Text("Automatic & Spoken").tag(PunctuationMode.hybrid)
@@ -769,7 +935,7 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(width: 200)
+                .frame(maxWidth: .infinity)
             }
 
             VStack(alignment: .leading, spacing: 1) {
@@ -780,14 +946,14 @@ struct SettingsView: View {
             .font(.caption)
             .foregroundColor(.secondary)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.leading, labelWidth)
+            .padding(.leading, 2)
         }
     }
 
     // MARK: - Corrections Row
 
     private var correctionsRow: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Toggle("Learn From My Corrections", isOn: $viewModel.rememberWords)
                     .toggleStyle(.checkbox)
@@ -804,7 +970,7 @@ struct SettingsView: View {
     // MARK: - Screen Context Row
 
     private var screenContextRow: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             Toggle("Use Screen Context", isOn: $viewModel.screenContext)
                 .toggleStyle(.checkbox)
             Text("Uses local OCR to read on-screen text, helping match names and terms.")
@@ -840,8 +1006,8 @@ struct SettingsView: View {
     // MARK: - Storage Row
 
     private var storageRow: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            settingsRow("Show Past Recordings") {
+        VStack(alignment: .leading, spacing: 4) {
+            settingsRow("Past Recordings") {
                 Picker("", selection: $viewModel.maxRecordings) {
                     ForEach(maxRecordingsOptions, id: \.value) { option in
                         Text(option.label).tag(option.value)
@@ -849,33 +1015,25 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(width: 80)
+                .frame(width: 80, alignment: .leading)
+            Spacer()
             }
             Text("Shows recent dictations in the toolbar menu.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-                .padding(.leading, labelWidth)
+                .padding(.leading, 0)
         }
     }
 
     // MARK: - Pre-Buffer Row
 
     private var preBufferRow: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            settingsRow("Pre-Buffer Audio") {
-                Picker("", selection: $viewModel.preBuffer) {
-                    Text("On").tag(true)
-                    Text("Off").tag(false)
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(width: 80)
-            }
-
-            Text("Captures audio before you press the hotkey so no words are lost. Recording indicator stays on.")
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Pre-Buffer Audio", isOn: $viewModel.preBuffer)
+                .toggleStyle(.checkbox)
+            Text("Captures audio before you press the hotkey so no words are lost.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-                .padding(.leading, labelWidth)
         }
     }
 
@@ -894,7 +1052,7 @@ struct SettingsView: View {
     // MARK: - Keep Model Loaded Row
 
     private var keepModelLoadedRow: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             settingsRow("Keep Model Loaded") {
                 Picker("", selection: $viewModel.keepModelLoaded) {
                     Text("Automatic").tag("auto")
@@ -903,7 +1061,8 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(width: 120)
+                .frame(width: 120, alignment: .leading)
+            Spacer()
             }
 
             VStack(alignment: .leading, spacing: 1) {
@@ -914,7 +1073,7 @@ struct SettingsView: View {
             .font(.caption)
             .foregroundColor(.secondary)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.leading, labelWidth)
+            .padding(.leading, 2)
         }
     }
 }
