@@ -14,8 +14,7 @@ public struct TextPostProcessor {
         ("\(ws)exclamation point\(we)", "!"),
         ("\(ws)semicolon\(we)", ";"),
         ("\(ws)semi colon\(we)", ";"),
-        ("\(ws)ellipsis\(we)", "..."),
-        ("\(ws)dot dot dot\(we)", "..."),
+        // Ellipsis removed — whisper generates "..." from pauses causing false positives
         ("\(ws)full stop\(we)", "."),
         ("\(ws)open quote\(we)", "\""),
         ("\(ws)close quote\(we)", "\""),
@@ -41,8 +40,8 @@ public struct TextPostProcessor {
         ("(?<=[.,!?;:])\\s*hyphen\(we)", "-"),
     ]}
 
-    // Unicode placeholder for real ellipsis (from spoken "ellipsis" word)
-    private static let ellipsisPlaceholder = "\u{FFFE}"
+    // Ellipsis support removed — whisper generates "..." from pauses, causing false positives.
+    // All multi-dot sequences are now stripped unconditionally.
 
     // Fallback replacements for spoken mode (no whisper auto-punct, so no context to read).
     // These use the same boundaries as alwaysReplace — replace regardless of surrounding punct.
@@ -87,8 +86,12 @@ public struct TextPostProcessor {
             result = convertEndOfClauseAmbiguous(result)
         }
 
-        // 3. Protect real ellipsis (from spoken "ellipsis" word) before collapsing
-        result = result.replacingOccurrences(of: "...", with: ellipsisPlaceholder)
+        // 3. Strip all multi-dot sequences and unicode ellipsis (whisper pause artifacts)
+        if let dotsRegex = try? NSRegularExpression(pattern: "\\.{2,}", options: []) {
+            result = dotsRegex.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
+        }
+        result = result.replacingOccurrences(of: "\u{2026}", with: "")
 
         // 4. Collapse space-separated same-type punctuation BEFORE fixSpacing
         if let regex = try? NSRegularExpression(pattern: "([.,!?;:])(?:\\s*\\1)+", options: []) {
@@ -103,26 +106,7 @@ public struct TextPostProcessor {
         // 6. Collapse adjacent different-type punctuation conflicts
         result = collapseAdjacentPunctuation(result)
 
-        // 6.5. Remove auto-generated "..." (and "..", "....", etc.) from pauses.
-        // The spoken "ellipsis" command is safe — it's stored as \u{FFFE} at this point.
-        if let dotsRegex = try? NSRegularExpression(pattern: "\\.{2,}", options: []) {
-            result = dotsRegex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
-        }
-        // Also strip Unicode ellipsis character (U+2026) that Whisper sometimes outputs directly
-        result = result.replacingOccurrences(of: "\u{2026}", with: "")
-
-        // 7. Restore ellipsis
-        result = result.replacingOccurrences(of: ellipsisPlaceholder, with: "...")
-
-        // 8. Normalize 4+ dots to ellipsis
-        if let regex = try? NSRegularExpression(pattern: "\\.{4,}", options: []) {
-            result = regex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "..."
-            )
-        }
-
-        // 9. Ensure space after punctuation before next word
+        // 6. Ensure space after punctuation before next word
         result = ensureSpaceAfterPunctuation(result)
 
         return result
@@ -159,7 +143,7 @@ public struct TextPostProcessor {
 
     private static func fixSpacingAroundPunctuation(_ text: String) -> String {
         var result = text
-        guard let regex = try? NSRegularExpression(pattern: "\\s+([.,?!:;\u{FFFE}])", options: []) else { return result }
+        guard let regex = try? NSRegularExpression(pattern: "\\s+([.,?!:;...])", options: []) else { return result }
         result = regex.stringByReplacingMatches(
             in: result,
             range: NSRange(result.startIndex..., in: result),
@@ -173,14 +157,14 @@ public struct TextPostProcessor {
         var result = text
 
         // Remove comma/semicolon/colon before a sentence-ending mark: ",!" → "!", ";." → "."
-        if let regex = try? NSRegularExpression(pattern: "[,;:]\\s*([.!?\u{FFFE}])", options: []) {
+        if let regex = try? NSRegularExpression(pattern: "[,;:]\\s*([.!?...])", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
             )
         }
 
         // Remove period before ! or ? or ellipsis: ".!" → "!"
-        if let regex = try? NSRegularExpression(pattern: "\\.\\s*([!?\u{FFFE}])", options: []) {
+        if let regex = try? NSRegularExpression(pattern: "\\.\\s*([!?...])", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
             )

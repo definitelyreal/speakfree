@@ -9,6 +9,37 @@ class TextInserter {
     private var cachedVKeyCode: CGKeyCode?
     private var cachedInputSourceID: String?
 
+    /// Check if a space should be prepended before inserting text.
+    /// Returns true if the character before the cursor is a non-whitespace character.
+    func shouldPrependSpace(before element: AXUIElement?) -> Bool {
+        guard let element = element ?? currentFocusedElement() else { return false }
+
+        // Try to read selected text range to find cursor position
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let rangeValue = rangeRef else { return false }
+
+        var range = CFRange()
+        // swiftlint:disable:next force_cast
+        AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
+
+        // If cursor is at position 0, nothing before it
+        guard range.location > 0 else { return false }
+
+        // Read the full text value
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
+              let fullText = valueRef as? String, !fullText.isEmpty else { return false }
+
+        // Get the character just before the cursor
+        let cursorPos = range.location
+        guard cursorPos <= fullText.count,
+              let index = fullText.index(fullText.startIndex, offsetBy: cursorPos, limitedBy: fullText.endIndex) else { return false }
+
+        let charBefore = fullText[fullText.index(before: index)]
+        return !charBefore.isWhitespace && !charBefore.isNewline
+    }
+
     // Paste text, optionally refocusing the element that was active when recording started.
     // Returns true if text was pasted, false if focus couldn't be restored (text copied to clipboard instead).
     @discardableResult

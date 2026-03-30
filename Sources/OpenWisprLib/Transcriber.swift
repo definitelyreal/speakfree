@@ -68,12 +68,15 @@ public class Transcriber {
             result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
         }
 
+        // Strip non-speech characters whisper sometimes outputs (bullets, arrows, etc.)
+        let cleaned = result.replacingOccurrences(of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
+
         // Filter known hallucinations from both engine and CLI paths
-        if isHallucination(result) {
-            print("Transcriber: filtered hallucination: \"\(result)\"")
+        if isHallucination(cleaned) {
+            print("Transcriber: filtered hallucination: \"\(cleaned)\"")
             return ""
         }
-        return result
+        return cleaned
     }
 
     private func transcribeWithEngine(samples: [Float], prompt: String?) throws -> String {
