@@ -117,31 +117,15 @@ class WhisperEngine {
             throw WhisperEngineError.transcriptionFailed
         }
 
-        // Collect output segments, filtering by confidence
+        // Collect output segments, filtering by no-speech probability
         let nSegments = whisper_full_n_segments(ctx)
         var text = ""
         for i in 0..<nSegments {
-            // Skip segments where whisper thinks there's no speech
             let noSpeechProb = whisper_full_get_segment_no_speech_prob(ctx, i)
             if noSpeechProb > 0.6 {
                 let segText = whisper_full_get_segment_text(ctx, i).map { String(cString: $0) } ?? ""
-                print("WhisperEngine: skipping low-confidence segment (no_speech_prob=\(String(format: "%.2f", noSpeechProb))): \"\(segText.prefix(50))\"")
+                DiagnosticLogger.shared.log("WhisperEngine: skipping no-speech segment (p=\(String(format: "%.2f", noSpeechProb))): \"\(segText.prefix(50))\"")
                 continue
-            }
-
-            // Check average token probability — skip if model is guessing
-            let nTokens = whisper_full_n_tokens(ctx, i)
-            if nTokens > 0 {
-                var totalP: Float = 0
-                for t in 0..<nTokens {
-                    totalP += whisper_full_get_token_p(ctx, i, t)
-                }
-                let avgP = totalP / Float(nTokens)
-                if avgP < 0.3 {
-                    let segText = whisper_full_get_segment_text(ctx, i).map { String(cString: $0) } ?? ""
-                    print("WhisperEngine: skipping low-confidence segment (avg_token_p=\(String(format: "%.2f", avgP))): \"\(segText.prefix(50))\"")
-                    continue
-                }
             }
 
             if let cStr = whisper_full_get_segment_text(ctx, i) {
