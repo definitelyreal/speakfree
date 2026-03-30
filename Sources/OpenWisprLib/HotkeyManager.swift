@@ -15,6 +15,9 @@ class HotkeyManager {
     private var modifierPressed = false
     /// When fn was pressed — used to distinguish keyboard shortcuts (key within 300ms) from dictation
     private var modifierPressedAt: UInt64 = 0
+    /// Track tap re-enables to detect runaway loops
+    private var tapReEnableCount = 0
+    private var tapReEnableWindowStart: UInt64 = 0
 
     init(keyCode: UInt16, modifiers: UInt64 = 0) {
         self.keyCode = keyCode
@@ -74,9 +77,32 @@ class HotkeyManager {
                 // macOS disables taps that stall — destroy and recreate from scratch
                 // to prevent degraded event delivery over time (affects option+delete etc.)
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    // Re-enable the EXISTING tap — don't destroy and recreate.
-                    // Destroying creates a gap where modifier state can be lost,
-                    // breaking option+delete.
+                    // Rate-limit re-enables: if we've re-enabled >5 times in 10 seconds,
+                    // something is wrong — tear down and recreate after a delay to avoid
+                    // freezing the input pipeline.
+                    let now = mach_absolute_time()
+                    var timebaseInfo = mach_timebase_info_data_t()
+                    mach_timebase_info(&timebaseInfo)
+                    let elapsedNs = (now - manager.tapReEnableWindowStart) * UInt64(timebaseInfo.numer) / UInt64(timebaseInfo.denom)
+                    let elapsedSec = Double(elapsedNs) / 1_000_000_000
+
+                    if elapsedSec > 10 {
+                        manager.tapReEnableCount = 0
+                        manager.tapReEnableWindowStart = now
+                    }
+                    manager.tapReEnableCount += 1
+
+                    if manager.tapReEnableCount > 5 {
+                        // Too many re-enables — tear down and recreate after a delay
+                        DiagnosticLogger.shared.log("HotkeyManager: tap disabled \(manager.tapReEnableCount) times in \(Int(elapsedSec))s — rebuilding after delay")
+                        manager.tapReEnableCount = 0
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            manager.tearDownEventTap()
+                            manager.startEventTap()
+                        }
+                        return Unmanaged.passUnretained(event)
+                    }
+
                     if let tap = manager.eventTap {
                         CGEvent.tapEnable(tap: tap, enable: true)
                     }
