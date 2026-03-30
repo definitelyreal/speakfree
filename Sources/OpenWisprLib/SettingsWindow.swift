@@ -389,6 +389,9 @@ struct SettingsView: View {
     /// Tracks the picker selection separately so we can intercept "Other..." (999)
     @State private var hotkeyPickerSelection: UInt16 = 0
 
+    /// Consistent label width for aligned rows
+    private let labelWidth: CGFloat = 180
+
     /// Sorted language list for the picker
     private var sortedLanguages: [WhisperLanguage] {
         WhisperLanguage.all.sorted { $0.name < $1.name }
@@ -404,88 +407,117 @@ struct SettingsView: View {
         KeyCodes.describe(keyCode: viewModel.hotkeyKeyCode, modifiers: viewModel.hotkeyModifiers)
     }
 
+    /// Helper for consistent label-control rows
+    private func settingsRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack {
+            Text(label)
+                .frame(width: labelWidth, alignment: .leading)
+            content()
+        }
+    }
+
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
                 Text("\(UsageStats.shared.totalDictations) dictations, saving \(UsageStats.shared.timeSavedDescription) and \(UsageStats.shared.keystrokesDescription) keystrokes")
-                    .font(.caption)
+                    .font(.body)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity)
                     .padding(.top, 8)
                     .padding(.bottom, 2)
 
-            Form {
+            ScrollView {
+                VStack(spacing: 16) {
                 // -- GENERAL -----------------------------------------------
-                Section("General") {
-                    Toggle("Launch at Login", isOn: $launchAtLogin)
-                        .toggleStyle(.checkbox)
-                        .onChange(of: launchAtLogin) { newValue in
-                            LaunchAtLogin.isEnabled = newValue
-                            // Re-read actual state after setting — if it failed (e.g. ad-hoc signing),
-                            // the checkbox will revert itself
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                launchAtLogin = LaunchAtLogin.isEnabled
+                GroupBox("General") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Launch at Login", isOn: $launchAtLogin)
+                            .toggleStyle(.checkbox)
+                            .onChange(of: launchAtLogin) { newValue in
+                                LaunchAtLogin.isEnabled = newValue
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    launchAtLogin = LaunchAtLogin.isEnabled
+                                }
                             }
-                        }
 
-                    hotkeyRow
+                        hotkeyRow
 
-                    storageRow
+                        storageRow
+                    }
+                    .padding(.vertical, 4)
                 }
 
                 // -- TRANSCRIPTION -----------------------------------------
-                Section("Transcription") {
-                    languageRow
-                    modelRow
-                    inlineDownloadSection
-                    punctuationRow
+                GroupBox("Transcription") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        languageRow
+                        modelRow
+                        inlineDownloadSection
+                        punctuationRow
+                    }
+                    .padding(.vertical, 4)
                 }
 
                 // -- PERFORMANCE -------------------------------------------
-                Section("Performance") {
-                    preBufferRow
-
-                    streamingPreviewRow
-
-                    keepModelLoadedRow
+                GroupBox("Performance") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        preBufferRow
+                        streamingPreviewRow
+                        keepModelLoadedRow
+                    }
+                    .padding(.vertical, 4)
                 }
 
                 // -- VOCABULARY & CONTEXT ----------------------------------
-                Section("Vocabulary & Context") {
-                    correctionsRow
-                    screenContextRow
-                    vocabularyStatusRow
-                }
-
-                Section("Advanced") {
-                    Toggle("Diagnostic Logging", isOn: $viewModel.diagnosticLogging)
-                        .toggleStyle(.checkbox)
-                        .onChange(of: viewModel.diagnosticLogging) { newValue in
-                            viewModel.save()
-                            DiagnosticLogger.shared.setEnabled(newValue)
-                        }
-                    Text("Logs session activity to help diagnose issues. Logs are stored locally.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Button("Open Logs Folder\u{2026}") {
-                        let logsDir = Config.configDir.appendingPathComponent("logs")
-                        try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
-                        NSWorkspace.shared.open(logsDir)
+                GroupBox("Vocabulary & Context") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        correctionsRow
+                        screenContextRow
+                        vocabularyStatusRow
                     }
-                    .controlSize(.small)
+                    .padding(.vertical, 4)
                 }
 
-                Section("Experimental") {
-                    Toggle("Live Preview", isOn: $viewModel.streamingEnabled)
-                        .toggleStyle(.checkbox)
-                        .onChange(of: viewModel.streamingEnabled) { _ in viewModel.save() }
-                    Text("Shows transcribed text as you speak. Work in progress — text may flicker or change.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                // -- ADVANCED ----------------------------------------------
+                GroupBox("Advanced") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Toggle("Diagnostic Logging", isOn: $viewModel.diagnosticLogging)
+                                .toggleStyle(.checkbox)
+                                .onChange(of: viewModel.diagnosticLogging) { newValue in
+                                    viewModel.save()
+                                    DiagnosticLogger.shared.setEnabled(newValue)
+                                }
+                            Spacer()
+                            Button("Open Logs Folder\u{2026}") {
+                                let logsDir = Config.configDir.appendingPathComponent("logs")
+                                try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+                                NSWorkspace.shared.open(logsDir)
+                            }
+                            .controlSize(.small)
+                        }
+                        Text("Logs session activity to help diagnose issues. Logs are stored locally.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 4)
                 }
-            }
-            .formStyle(.grouped)
+
+                // -- EXPERIMENTAL ------------------------------------------
+                GroupBox("Experimental") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Live Preview", isOn: $viewModel.streamingEnabled)
+                            .toggleStyle(.checkbox)
+                            .onChange(of: viewModel.streamingEnabled) { _ in viewModel.save() }
+                        Text("Shows transcribed text as you speak. Work in progress — text may flicker or change.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+                } // end VStack
+                .padding(16)
+            } // end ScrollView
             } // end VStack
 
             if isRecordingHotkey {
@@ -498,7 +530,6 @@ struct SettingsView: View {
                         isRecordingHotkey = false
                     },
                     onCancel: {
-                        // Revert picker selection to actual hotkey
                         hotkeyPickerSelection = viewModel.hotkeyKeyCode
                         isRecordingHotkey = false
                     }
@@ -513,7 +544,6 @@ struct SettingsView: View {
         }
         .onChange(of: hotkeyPickerSelection) { newValue in
             if newValue == otherHotkeyTag {
-                // Show the key recorder, don't save 999
                 isRecordingHotkey = true
             } else {
                 viewModel.hotkeyKeyCode = newValue
@@ -556,51 +586,37 @@ struct SettingsView: View {
     // MARK: - Hotkey Row
 
     private var hotkeyRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Hotkey")
-                Spacer()
-                Picker("", selection: $hotkeyPickerSelection) {
-                    // If custom hotkey is set, show it first with divider
-                    if isCustomHotkey {
-                        Text(hotkeyDisplay).tag(viewModel.hotkeyKeyCode)
-                        Divider()
-                    }
-
-                    // Standard options
-                    ForEach(standardHotkeyOptions) { option in
-                        Text(option.label).tag(option.keyCode)
-                    }
-
+        settingsRow("Hotkey") {
+            Picker("", selection: $hotkeyPickerSelection) {
+                if isCustomHotkey {
+                    Text(hotkeyDisplay).tag(viewModel.hotkeyKeyCode)
                     Divider()
-
-                    // "Other\u{2026}" at the bottom
-                    Text("Other\u{2026}").tag(otherHotkeyTag)
                 }
-                .labelsHidden()
-                .frame(width: 200)
-            }
-
-            HStack {
-                Spacer()
-                Picker("", selection: $viewModel.toggleMode) {
-                    Text("Hold").tag(false)
-                    Text("Toggle").tag(true)
+                ForEach(standardHotkeyOptions) { option in
+                    Text(option.label).tag(option.keyCode)
                 }
-                .pickerStyle(.segmented)
-                .controlSize(.small)
-                .labelsHidden()
-                .frame(width: 200)
+                Divider()
+                Text("Other\u{2026}").tag(otherHotkeyTag)
             }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(width: 170)
+
+            Picker("", selection: $viewModel.toggleMode) {
+                Text("Hold").tag(false)
+                Text("Toggle").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .labelsHidden()
+            .frame(width: 100)
         }
     }
 
     // MARK: - Language Row
 
     private var languageRow: some View {
-        HStack {
-            Text("Language")
-            Spacer()
+        settingsRow("Language") {
             Picker("", selection: $viewModel.language) {
                 Text("Auto-detect").tag("auto")
                 Divider()
@@ -608,8 +624,9 @@ struct SettingsView: View {
                     Text(lang.name).tag(lang.id)
                 }
             }
+            .pickerStyle(.menu)
             .labelsHidden()
-            .frame(width: 200)
+            .frame(width: 160)
         }
     }
 
@@ -618,9 +635,7 @@ struct SettingsView: View {
     private var modelRow: some View {
         let models = availableModels(language: viewModel.language)
         return VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Model")
-                Spacer()
+            settingsRow("Model") {
                 Picker("", selection: $viewModel.modelSize) {
                     ForEach(models) { model in
                         Text(model.label)
@@ -629,17 +644,16 @@ struct SettingsView: View {
                             .tag(model.id)
                     }
                 }
+                .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(width: 200)
+                .frame(minWidth: 240)
                 .lineLimit(1)
                 .onChange(of: viewModel.language) { newLang in
-                    // Save the current model for the previous language before switching
                     if previousLanguage != newLang {
                         viewModel.languageModels[previousLanguage] = viewModel.modelSize
                     }
                     previousLanguage = newLang
 
-                    // Check if we have a saved model for the new language
                     if let savedModel = viewModel.languageModels[newLang] {
                         let newModels = availableModels(language: newLang)
                         if newModels.contains(where: { $0.id == savedModel }) {
@@ -648,7 +662,6 @@ struct SettingsView: View {
                         }
                     }
 
-                    // No saved model — auto-switch to equivalent
                     let newModels = availableModels(language: newLang)
                     if !newModels.contains(where: { $0.id == viewModel.modelSize }) {
                         let base = viewModel.modelSize.replacingOccurrences(of: ".en", with: "")
@@ -662,13 +675,14 @@ struct SettingsView: View {
             Text("Larger models are more accurate but use more memory.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+                .padding(.leading, labelWidth)
 
-            // Show when active model differs from selected
             if let delegate = NSApplication.shared.delegate as? AppDelegate,
                delegate.activeModelSize != viewModel.modelSize {
                 Text("Currently using: \(delegate.activeModelSize)")
                     .font(.caption)
                     .foregroundColor(.orange)
+                    .padding(.leading, labelWidth)
             }
         }
     }
@@ -747,14 +761,13 @@ struct SettingsView: View {
 
     private var punctuationRow: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Punctuation")
-                Spacer()
+            settingsRow("Punctuation") {
                 Picker("", selection: $viewModel.punctuationMode) {
                     Text("Automatic & Spoken").tag(PunctuationMode.hybrid)
                     Text("Automatic Only").tag(PunctuationMode.off)
                     Text("Spoken Only").tag(PunctuationMode.spoken)
                 }
+                .pickerStyle(.menu)
                 .labelsHidden()
                 .frame(width: 200)
             }
@@ -767,6 +780,7 @@ struct SettingsView: View {
             .font(.caption)
             .foregroundColor(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, labelWidth)
         }
     }
 
@@ -803,12 +817,9 @@ struct SettingsView: View {
 
     private var vocabularyStatusRow: some View {
         HStack {
-            let count = WordMemory.loadVocabularyEntries().count
-            Text("Vocabulary: \(count) word\(count == 1 ? "" : "s")")
-                .font(.caption)
-                .foregroundColor(.secondary)
             Spacer()
-            Button("Edit File\u{2026}") {
+            let count = WordMemory.loadVocabularyEntries().count
+            Button("Edit Vocabulary File") {
                 let url = Config.vocabularyFile
                 let dir = Config.configDir
                 try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -819,6 +830,10 @@ struct SettingsView: View {
                 NSWorkspace.shared.open(url)
             }
             .controlSize(.small)
+            Text("(\(count) word\(count == 1 ? "" : "s"))")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Spacer()
         }
     }
 
@@ -826,20 +841,20 @@ struct SettingsView: View {
 
     private var storageRow: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Show Past Recordings")
-                Spacer()
+            settingsRow("Show Past Recordings") {
                 Picker("", selection: $viewModel.maxRecordings) {
                     ForEach(maxRecordingsOptions, id: \.value) { option in
                         Text(option.label).tag(option.value)
                     }
                 }
+                .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(width: 200)
+                .frame(width: 80)
             }
             Text("Shows recent dictations in the toolbar menu.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+                .padding(.leading, labelWidth)
         }
     }
 
@@ -847,20 +862,20 @@ struct SettingsView: View {
 
     private var preBufferRow: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Pre-Buffer Audio for Instant Start")
-                Spacer()
+            settingsRow("Pre-Buffer Audio") {
                 Picker("", selection: $viewModel.preBuffer) {
                     Text("On").tag(true)
                     Text("Off").tag(false)
                 }
+                .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(width: 200)
+                .frame(width: 80)
             }
 
             Text("Captures audio before you press the hotkey so no words are lost. Recording indicator stays on.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+                .padding(.leading, labelWidth)
         }
     }
 
@@ -880,16 +895,15 @@ struct SettingsView: View {
 
     private var keepModelLoadedRow: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Keep Model Loaded")
-                Spacer()
+            settingsRow("Keep Model Loaded") {
                 Picker("", selection: $viewModel.keepModelLoaded) {
                     Text("Automatic").tag("auto")
                     Text("Always").tag("always")
                     Text("Off").tag("off")
                 }
+                .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(width: 200)
+                .frame(width: 120)
             }
 
             VStack(alignment: .leading, spacing: 1) {
@@ -900,6 +914,7 @@ struct SettingsView: View {
             .font(.caption)
             .foregroundColor(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, labelWidth)
         }
     }
 }

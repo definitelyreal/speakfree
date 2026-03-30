@@ -103,8 +103,14 @@ public struct TextPostProcessor {
         // 6. Collapse adjacent different-type punctuation conflicts
         result = collapseAdjacentPunctuation(result)
 
-        // 6.5. Remove auto-generated "..." from pauses (spoken "ellipsis" is already a placeholder)
-        result = result.replacingOccurrences(of: "...", with: "")
+        // 6.5. Remove auto-generated "..." (and "..", "....", etc.) from pauses.
+        // The spoken "ellipsis" command is safe — it's stored as \u{FFFE} at this point.
+        if let dotsRegex = try? NSRegularExpression(pattern: "\\.{2,}", options: []) {
+            result = dotsRegex.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
+        }
+        // Also strip Unicode ellipsis character (U+2026) that Whisper sometimes outputs directly
+        result = result.replacingOccurrences(of: "\u{2026}", with: "")
 
         // 7. Restore ellipsis
         result = result.replacingOccurrences(of: ellipsisPlaceholder, with: "...")
