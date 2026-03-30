@@ -63,7 +63,12 @@ class TextInserter {
             return
         }
 
-        // Fall back to clipboard-based paste
+        // Try typing via CGEvent unicode — works in Electron apps without clipboard
+        if typeViaKeyEvents(text) {
+            return
+        }
+
+        // Last resort: clipboard-based paste
         pasteViaClipboard(text)
     }
 
@@ -81,6 +86,40 @@ class TextInserter {
         // Set the selected text — this replaces current selection or inserts at cursor
         let result = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
         return result == .success
+    }
+
+    /// Insert text by simulating keyboard events with unicode characters.
+    /// Works in Electron apps (VS Code, Slack, Discord) without touching the clipboard.
+    /// CGEventKeyboardSetUnicodeString handles up to 20 UTF-16 code units per event,
+    /// so we chunk the text accordingly.
+    private func typeViaKeyEvents(_ text: String) -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
+
+        let utf16 = Array(text.utf16)
+        let chunkSize = 20  // max unicode chars per CGEvent
+        var index = 0
+
+        while index < utf16.count {
+            let end = min(index + chunkSize, utf16.count)
+            let chunk = Array(utf16[index..<end])
+
+            guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                  let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
+                return false
+            }
+
+            chunk.withUnsafeBufferPointer { buffer in
+                keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
+                keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
+            }
+
+            keyDown.post(tap: .cghidEventTap)
+            keyUp.post(tap: .cghidEventTap)
+
+            index = end
+        }
+
+        return true
     }
 
     /// Legacy clipboard-based insertion. Saves and restores clipboard.
