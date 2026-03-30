@@ -40,10 +40,12 @@ class UsageStats {
     var totalDictations: Int { data.totalDictations }
     var totalAudioSeconds: Double { data.totalAudioSeconds }
 
-    /// Estimate time saved: assume average typing speed of 40 WPM (200 chars/min = 3.3 chars/sec)
-    /// Time saved = characters / 3.3 seconds
+    /// Estimate time saved: typing_time - speaking_time
+    /// Typing speed: 40 WPM (200 chars/min = 3.3 chars/sec)
+    /// Subtract actual speaking time since the user wasn't idle
     var estimatedTimeSaved: TimeInterval {
-        Double(data.totalCharacters) / 3.3
+        let typingTime = Double(data.totalCharacters) / 3.3
+        return max(0, typingTime - data.totalAudioSeconds)
     }
 
     /// Human-readable time saved string
