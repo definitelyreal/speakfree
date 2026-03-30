@@ -142,10 +142,7 @@ class HotkeyManager {
                 self.stopKeyDownMonitor()
                 self.onKeyUp?()
             }
-            // Pass through the fn release event instead of consuming it.
-            // Consuming it corrupts the system's modifier state, which breaks
-            // Option+Delete immediately after dictation.
-            return Unmanaged.passUnretained(event)
+            return nil  // consume — suppresses emoji drawer / system dictation on fn release
         }
 
         return Unmanaged.passUnretained(event)
