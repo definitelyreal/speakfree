@@ -193,6 +193,20 @@ class AudioRecorder {
         }
     }
 
+    // MARK: - Streaming Access
+
+    /// Read the current accumulated PCM samples without stopping recording.
+    /// Thread-safe: dispatches synchronously on the write queue.
+    /// Returns an empty array if not currently recording.
+    func currentSamples() -> [Float] {
+        guard isRecording else { return [] }
+        var samples: [Float] = []
+        writeQueue.sync {
+            samples = self.pcmSamples
+        }
+        return samples
+    }
+
     // MARK: - Recording
 
     func startRecording(to outputURL: URL) throws {

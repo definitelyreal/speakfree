@@ -66,13 +66,41 @@ class RecordingOverlay {
         }
         view.overlayState = state
 
-        let pillSize = OverlayContentView.pillSize(for: state)
+        let pillSize = OverlayContentView.pillSize(for: state, streamingText: view.streamingText)
         let bottomMargin: CGFloat = 48
         let x = screen.frame.midX - pillSize.width / 2
         let y = screen.visibleFrame.origin.y + bottomMargin
         win.setFrame(NSRect(x: x, y: y, width: pillSize.width, height: pillSize.height), display: false)
         view.frame = NSRect(origin: .zero, size: pillSize)
         view.needsDisplay = true
+    }
+
+    /// Update the overlay with streaming transcription text.
+    /// Called from the main thread during recording as partial results arrive.
+    func updateStreamingText(_ text: String) {
+        guard let view = contentView, let win = window, let screen = NSScreen.main else { return }
+
+        let oldText = view.streamingText
+        view.streamingText = text
+
+        // Resize the pill if text appeared or disappeared
+        let newSize = OverlayContentView.pillSize(for: view.overlayState, streamingText: text)
+        let oldSize = OverlayContentView.pillSize(for: view.overlayState, streamingText: oldText)
+        if newSize != oldSize {
+            let bottomMargin: CGFloat = 48
+            let x = screen.frame.midX - newSize.width / 2
+            let y = screen.visibleFrame.origin.y + bottomMargin
+            win.setFrame(NSRect(x: x, y: y, width: newSize.width, height: newSize.height), display: false)
+            view.frame = NSRect(origin: .zero, size: newSize)
+        }
+
+        view.needsDisplay = true
+    }
+
+    /// Clear streaming text (called when recording stops).
+    func clearStreamingText() {
+        contentView?.streamingText = ""
+        contentView?.needsDisplay = true
     }
 
     func hide() {
@@ -137,6 +165,7 @@ private class OverlayContentView: NSView {
     var tick: Int = 0
     @objc dynamic var borderWidth: CGFloat = 0
     var hideContents = false
+    var streamingText: String = ""
 
     // Layout constants — visualization is 2x the original size
     private static let barCount = 16
@@ -160,11 +189,37 @@ private class OverlayContentView: NSView {
     private var travelTimer: Int = 0
     private var travelCooldown: Int = 0
 
-    static func pillSize(for state: RecordingOverlay.OverlayState) -> NSSize {
+    static func pillSize(for state: RecordingOverlay.OverlayState, streamingText: String = "") -> NSSize {
         let barsWidth = CGFloat(barCount) * dotSize + CGFloat(barCount - 1) * barGap
-        let width = hPadding * 2 + barsWidth
-        let height = vPadding * 2 + dotSize
-        return NSSize(width: width, height: height)  // Same size for both states
+        let baseWidth = hPadding * 2 + barsWidth
+        let baseHeight = vPadding * 2 + dotSize
+
+        if streamingText.isEmpty || state == .transcribing {
+            return NSSize(width: baseWidth, height: baseHeight)
+        }
+
+        // Expand pill to show streaming text below the bars
+        let textWidth = max(baseWidth, streamingTextMaxWidth + hPadding * 2)
+        let textHeight = streamingTextHeight(for: streamingText, maxWidth: streamingTextMaxWidth)
+        let totalHeight = baseHeight + streamingTextTopPad + textHeight + streamingTextBottomPad
+
+        return NSSize(width: textWidth, height: totalHeight)
+    }
+
+    // Streaming text layout constants
+    private static let streamingTextMaxWidth: CGFloat = 400
+    private static let streamingTextTopPad: CGFloat = 2
+    private static let streamingTextBottomPad: CGFloat = 12
+    private static let streamingTextFont = NSFont.systemFont(ofSize: 13, weight: .regular)
+
+    private static func streamingTextHeight(for text: String, maxWidth: CGFloat) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        let attrStr = NSAttributedString(string: text, attributes: [.font: streamingTextFont])
+        let boundingRect = attrStr.boundingRect(
+            with: NSSize(width: maxWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        return ceil(boundingRect.height)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -219,7 +274,20 @@ private class OverlayContentView: NSView {
             drawSpinner(ctx: ctx, rect: rect)
         } else {
             let color = NSColor.white.withAlphaComponent(0.75)
-            drawBars(ctx: ctx, rect: rect, color: color)
+            // When streaming text is present, bars draw in the top portion
+            let barsRect: NSRect
+            if !streamingText.isEmpty {
+                let baseHeight = Self.vPadding * 2 + Self.dotSize
+                barsRect = NSRect(x: rect.minX, y: rect.maxY - baseHeight, width: rect.width, height: baseHeight)
+            } else {
+                barsRect = rect
+            }
+            drawBars(ctx: ctx, rect: barsRect, color: color)
+
+            // Draw streaming text below the bars
+            if !streamingText.isEmpty {
+                drawStreamingText(ctx: ctx, rect: rect)
+            }
         }
     }
 
@@ -322,5 +390,33 @@ private class OverlayContentView: NSView {
             ctx.addLine(to: CGPoint(x: x2, y: y2))
             ctx.strokePath()
         }
+    }
+
+    private func drawStreamingText(ctx: CGContext, rect: NSRect) {
+        guard !streamingText.isEmpty else { return }
+
+        let baseHeight = Self.vPadding * 2 + Self.dotSize
+        let textTop = rect.maxY - baseHeight - Self.streamingTextTopPad
+        let textMaxWidth = Self.streamingTextMaxWidth
+        let textX = rect.midX - textMaxWidth / 2
+
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        paragraphStyle.lineBreakMode = .byWordWrapping
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: Self.streamingTextFont,
+            .foregroundColor: NSColor.white.withAlphaComponent(0.85),
+            .paragraphStyle: paragraphStyle,
+        ]
+
+        let attrStr = NSAttributedString(string: streamingText, attributes: attributes)
+        let textHeight = Self.streamingTextHeight(for: streamingText, maxWidth: textMaxWidth)
+        let textRect = NSRect(x: textX, y: textTop - textHeight, width: textMaxWidth, height: textHeight)
+
+        // Draw text using NSAttributedString (switches to NSGraphicsContext)
+        NSGraphicsContext.current?.saveGraphicsState()
+        attrStr.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
+        NSGraphicsContext.current?.restoreGraphicsState()
     }
 }
