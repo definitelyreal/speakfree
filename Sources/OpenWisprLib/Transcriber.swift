@@ -36,6 +36,16 @@ public class Transcriber {
         ]
         if hallucinationPatterns.contains(lower) { return true }
 
+        // Subtitle/training data leakage
+        let substringHallucinations = [
+            "amara.org", "amara. org", "subtitles by", "translated by",
+            "transcribed by", "captioned by", "captions by",
+            "subscribe", "like and subscribe",
+        ]
+        for pattern in substringHallucinations {
+            if lower.contains(pattern) { return true }
+        }
+
         // Bracketed/parenthesized content like [Music], (applause), etc.
         if (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")) ||
            (trimmed.hasPrefix("(") && trimmed.hasSuffix(")")) {

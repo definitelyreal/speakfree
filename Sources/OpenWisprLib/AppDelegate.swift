@@ -309,18 +309,32 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func captureFocusedElement() {
-        let systemWide = AXUIElementCreateSystemWide()
-        var elementRef: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef)
-        if result == .success, let element = elementRef {
-            // swiftlint:disable:next force_cast
-            let axElement = element as! AXUIElement
-            recordingSourceElement = axElement
-            recordingContextText = readTextBeforeCursor(in: axElement)
-        } else {
-            recordingSourceElement = nil
-            recordingContextText = nil
+        // Run AX queries with a timeout — if the frontmost app is unresponsive,
+        // AXUIElementCopyAttributeValue blocks indefinitely, stalling the main thread
+        // and eventually causing macOS to disable our event tap.
+        let semaphore = DispatchSemaphore(value: 0)
+        var capturedElement: AXUIElement?
+        var capturedContext: String?
+
+        DispatchQueue.global(qos: .userInteractive).async {
+            let systemWide = AXUIElementCreateSystemWide()
+            var elementRef: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef)
+            if result == .success, let element = elementRef {
+                // swiftlint:disable:next force_cast
+                let axElement = element as! AXUIElement
+                capturedElement = axElement
+                capturedContext = self.readTextBeforeCursor(in: axElement)
+            }
+            semaphore.signal()
         }
+
+        let timeout = semaphore.wait(timeout: .now() + 0.5)
+        if timeout == .timedOut {
+            DiagnosticLogger.shared.log("captureFocusedElement: AX query timed out — skipping context")
+        }
+        recordingSourceElement = capturedElement
+        recordingContextText = capturedContext
     }
 
     /// Reads up to 500 characters before the cursor without changing selection or focus.

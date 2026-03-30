@@ -80,10 +80,11 @@ public struct TextPostProcessor {
             )
         }
 
-        // 2.5. In hybrid mode, catch ambiguous words at end of clause/sentence that
-        // the context-aware regex missed (e.g. "hello period" with no preceding punctuation)
+        // 2.5. In hybrid mode, catch ambiguous words the context-aware regex missed.
+        // The context regex requires preceding punctuation, but users often say
+        // "word comma word" without whisper adding a comma first.
         if hybrid {
-            result = convertEndOfClauseAmbiguous(result)
+            result = convertStandaloneAmbiguous(result)
         }
 
         // 3. Strip all multi-dot sequences and unicode ellipsis (whisper pause artifacts)
@@ -112,31 +113,40 @@ public struct TextPostProcessor {
         return result
     }
 
-    /// In hybrid mode, convert ambiguous punctuation words when they appear at the end
-    /// of a clause or before a capital letter (indicating sentence boundary).
-    /// This catches "hello period" where there's no preceding whisper punctuation.
-    private static func convertEndOfClauseAmbiguous(_ text: String) -> String {
+    /// In hybrid mode, convert ambiguous punctuation words when they appear as standalone
+    /// words between phrases. "things like comma San Francisco" → "things like, San Francisco".
+    /// Only skips conversion when the word is part of a compound like "comma separated".
+    private static func convertStandaloneAmbiguous(_ text: String) -> String {
         var result = text
-        let ambiguousWords: [(word: String, replacement: String)] = [
-            ("period", "."),
-            ("comma", ","),
-            ("komma", ","),
-            ("kana", ","),
-            ("kanna", ","),
-            ("colon", ":"),
-            ("dash", " —"),
-            ("hyphen", "-"),
+        let ambiguousWords: [(word: String, replacement: String, skipBefore: Set<String>)] = [
+            ("comma", ",", ["separated", "delimited", "splice", "operator"]),
+            ("komma", ",", []),
+            ("kana", ",", []),
+            ("kanna", ",", []),
+            ("period", ".", ["of", "piece"]),
+            ("colon", ":", ["cancer", "surgery", "cleanse", "polyp"]),
+            ("dash", " —", ["of", "board", "cam"]),
+            ("hyphen", "-", ["ated", "ation"]),
         ]
 
-        for (word, replacement) in ambiguousWords {
-            // Match the word at end of string, before newline, or before a capital letter
-            let pattern = "(?i)\\b\(word)\\s*(?=$|\\n|(?=[A-Z]))"
+        for (word, replacement, skipBefore) in ambiguousWords {
+            // Match the word as a standalone token (word boundaries on both sides)
+            let pattern = "(?i)(?<=\\s|^)\(word)(?=\\s|$|[.,!?;:])"
             guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
-            result = regex.stringByReplacingMatches(
-                in: result,
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: replacement
-            )
+
+            // Process matches in reverse so indices stay valid
+            let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+            for match in matches.reversed() {
+                guard let range = Range(match.range, in: result) else { continue }
+
+                // Check if the next word is in the skip list
+                let afterMatch = result[range.upperBound...]
+                    .drop(while: { $0.isWhitespace })
+                let nextWord = String(afterMatch.prefix(while: { $0.isLetter })).lowercased()
+                if skipBefore.contains(nextWord) { continue }
+
+                result.replaceSubrange(range, with: replacement)
+            }
         }
         return result
     }
