@@ -11,33 +11,42 @@ class TextInserter {
 
     /// Check if a space should be prepended before inserting text.
     /// Returns true if the character before the cursor is a non-whitespace character.
+    /// Runs AX queries with a 300ms timeout to avoid blocking on slow apps (Electron).
     func shouldPrependSpace(before element: AXUIElement?) -> Bool {
-        guard let element = element ?? currentFocusedElement() else { return false }
+        let semaphore = DispatchSemaphore(value: 0)
+        var result = false
 
-        // Try to read selected text range to find cursor position
-        var rangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-              let rangeValue = rangeRef else { return false }
+        DispatchQueue.global(qos: .userInteractive).async {
+            guard let el = element ?? self.currentFocusedElement() else { semaphore.signal(); return }
 
-        var range = CFRange()
-        // swiftlint:disable:next force_cast
-        AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
+            var rangeRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+                  let rangeValue = rangeRef else { semaphore.signal(); return }
 
-        // If cursor is at position 0, nothing before it
-        guard range.location > 0 else { return false }
+            var range = CFRange()
+            // swiftlint:disable:next force_cast
+            AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
 
-        // Read the full text value
-        var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
-              let fullText = valueRef as? String, !fullText.isEmpty else { return false }
+            guard range.location > 0 else { semaphore.signal(); return }
 
-        // Get the character just before the cursor
-        let cursorPos = range.location
-        guard cursorPos <= fullText.count,
-              let index = fullText.index(fullText.startIndex, offsetBy: cursorPos, limitedBy: fullText.endIndex) else { return false }
+            var valueRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success,
+                  let fullText = valueRef as? String, !fullText.isEmpty else { semaphore.signal(); return }
 
-        let charBefore = fullText[fullText.index(before: index)]
-        return !charBefore.isWhitespace && !charBefore.isNewline
+            let cursorPos = range.location
+            guard cursorPos <= fullText.count,
+                  let index = fullText.index(fullText.startIndex, offsetBy: cursorPos, limitedBy: fullText.endIndex) else { semaphore.signal(); return }
+
+            let charBefore = fullText[fullText.index(before: index)]
+            result = !charBefore.isWhitespace && !charBefore.isNewline
+            semaphore.signal()
+        }
+
+        let timeout = semaphore.wait(timeout: .now() + 0.3)
+        if timeout == .timedOut {
+            DiagnosticLogger.shared.log("shouldPrependSpace: AX query timed out")
+        }
+        return result
     }
 
     // Paste text, optionally refocusing the element that was active when recording started.
