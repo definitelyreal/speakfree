@@ -47,6 +47,20 @@ class HotkeyManager {
         stopKeyDownMonitor()
     }
 
+    /// Verify the event tap is alive. If it died, recreate it.
+    func ensureTapHealthy() {
+        guard isModifierOnlyKey(keyCode) else { return } // only event tap keys need this
+        if let tap = eventTap {
+            if !CGEvent.tapIsEnabled(tap: tap) {
+                DiagnosticLogger.shared.log("HotkeyManager: event tap disabled — re-enabling")
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+        } else {
+            DiagnosticLogger.shared.log("HotkeyManager: event tap missing — recreating")
+            startEventTap()
+        }
+    }
+
     deinit {
         stop()
     }

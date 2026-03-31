@@ -366,6 +366,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isPressed else { return }
         isPressed = true
 
+        // Verify subsystems are healthy before every recording
+        recorder.ensureAudioHealthy()
+        hotkeyManager?.ensureTapHealthy()
+
         // Capture focused element before anything else changes
         captureFocusedElement()
 
@@ -443,6 +447,19 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let minSamples = 4800  // 300ms at 16kHz
         if samples.count < minSamples {
             print("Recording too short (\(samples.count) samples / \(Int(Double(samples.count) / 16000.0 * 1000))ms) — skipping")
+            RecordingStore.clearSentinel()
+            recordingSourceElement = nil
+            recordingContextText = nil
+            statusBar.state = .idle
+            recordingOverlay.hide()
+            return
+        }
+
+        // Check for dead audio (all silence) — engine may have died mid-recording
+        let rms = sqrtf(samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count))
+        if rms < 0.0001 {
+            DiagnosticLogger.shared.log("Recording was silent (RMS \(rms)) — audio engine may be dead, rebuilding")
+            recorder.ensureAudioHealthy()
             RecordingStore.clearSentinel()
             recordingSourceElement = nil
             recordingContextText = nil
