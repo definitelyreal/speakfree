@@ -12,6 +12,9 @@ class AudioRecorder {
     /// Current RMS audio level (0.0–1.0), updated from the audio tap.
     private(set) var currentLevel: Float = 0
 
+    /// Timestamp of last audio buffer received — used by health check to detect dead engines.
+    private var lastBufferTime: Date = Date()
+
     /// Whether the pre-buffer engine should run. When false, engine only starts on startRecording.
     var preBufferEnabled: Bool = true {
         didSet {
@@ -53,6 +56,34 @@ class AudioRecorder {
         guard preBufferEnabled else { return }
         startEngine()
         startDeviceChangeMonitor()
+    }
+
+    /// Verify audio is flowing. If the engine is dead, rebuild it.
+    /// Call this before every recording to catch silent AirPods handoffs.
+    /// Only rebuilds audio — never touches the whisper model.
+    func ensureAudioHealthy() {
+        guard preBufferEnabled else { return }
+
+        // No engine at all — start one
+        guard let engine = audioEngine else {
+            DiagnosticLogger.shared.log("AudioRecorder: no engine — starting")
+            startEngine()
+            return
+        }
+
+        // Engine exists but not running
+        if !engine.isRunning {
+            DiagnosticLogger.shared.log("AudioRecorder: engine stopped — rebuilding")
+            reinstallTap()
+            return
+        }
+
+        // Engine running but no buffers flowing (silent death)
+        let elapsed = Date().timeIntervalSince(lastBufferTime)
+        if elapsed > 3.0 {
+            DiagnosticLogger.shared.log("AudioRecorder: no audio buffers for \(Int(elapsed))s — rebuilding engine")
+            reinstallTap()
+        }
     }
 
     // MARK: - Audio device change monitoring
@@ -152,6 +183,9 @@ class AudioRecorder {
 
         guard error == nil, convertedBuffer.frameLength > 0,
               let channelData = convertedBuffer.floatChannelData?[0] else { return }
+
+        // Track last buffer time for health check
+        self.lastBufferTime = Date()
 
         let count = Int(convertedBuffer.frameLength)
 
