@@ -18,6 +18,8 @@ class HotkeyManager {
     /// Track tap re-enables to detect runaway loops
     private var tapReEnableCount = 0
     private var tapReEnableWindowStart: UInt64 = 0
+    /// Track tap creation retries after TCC propagation delay
+    private var tapRetryCount = 0
 
     init(keyCode: UInt16, modifiers: UInt64 = 0) {
         self.keyCode = keyCode
@@ -128,9 +130,22 @@ class HotkeyManager {
         )
 
         guard let tap = tap else {
-            startGlobalMonitor()
+            // Tap creation failed — accessibility may not be fully propagated yet.
+            if tapRetryCount < 10 {
+                tapRetryCount += 1
+                let delay = Double(tapRetryCount) * 1.0
+                DiagnosticLogger.shared.log("HotkeyManager: event tap creation failed — retry \(tapRetryCount)/10 in \(Int(delay))s")
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self = self, self.eventTap == nil else { return }
+                    self.startEventTap()
+                }
+            } else {
+                DiagnosticLogger.shared.log("HotkeyManager: event tap failed after 10 attempts — falling back to global monitor")
+                startGlobalMonitor()
+            }
             return
         }
+        tapRetryCount = 0  // Success — reset counter
 
         eventTap = tap
         let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
