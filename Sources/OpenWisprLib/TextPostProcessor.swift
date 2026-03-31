@@ -9,9 +9,9 @@ public struct TextPostProcessor {
     // Unambiguous: these phrases are almost never used as regular words in speech.
     // Always safe to replace regardless of context.
     private static var alwaysReplace: [(pattern: String, replacement: String)] {[
-        ("\(ws)question mark\(we)", "?"),
-        ("\(ws)exclamation mark\(we)", "!"),
-        ("\(ws)exclamation point\(we)", "!"),
+        ("\(ws)question marks?\(we)", "?"),
+        ("\(ws)exclamation marks?\(we)", "!"),
+        ("\(ws)exclamation points?\(we)", "!"),
         ("\(ws)semicolon\(we)", ";"),
         ("\(ws)semi colon\(we)", ";"),
         // Ellipsis removed — whisper generates "..." from pauses causing false positives
@@ -107,10 +107,29 @@ public struct TextPostProcessor {
         // 6. Collapse adjacent different-type punctuation conflicts
         result = collapseAdjacentPunctuation(result)
 
-        // 6. Ensure space after punctuation before next word
+        // 7. Ensure space after punctuation before next word
         result = ensureSpaceAfterPunctuation(result)
 
+        // 8. Capitalize first letter after sentence-ending punctuation (. ! ?)
+        result = capitalizeAfterSentenceEnd(result)
+
         return result
+    }
+
+    /// Capitalize the first letter after sentence-ending punctuation.
+    /// "hello. would love" → "hello. Would love"
+    private static func capitalizeAfterSentenceEnd(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "([.!?])\\s+(\\w)", options: []) else { return text }
+        let mutable = NSMutableString(string: text)
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        // Process in reverse so ranges stay valid
+        for match in matches.reversed() {
+            let letterRange = match.range(at: 2)
+            guard let swiftRange = Range(letterRange, in: text) else { continue }
+            let upper = text[swiftRange].uppercased()
+            mutable.replaceCharacters(in: letterRange, with: upper)
+        }
+        return mutable as String
     }
 
     /// In hybrid mode, convert ambiguous punctuation words when they appear as standalone
@@ -187,10 +206,10 @@ public struct TextPostProcessor {
             )
         }
 
-        // Remove period before comma: ".," → ","
+        // Remove comma after period: ".," → "." (period is stronger than comma)
         if let regex = try? NSRegularExpression(pattern: "\\.\\s*,", options: []) {
             result = regex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: ","
+                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "."
             )
         }
 

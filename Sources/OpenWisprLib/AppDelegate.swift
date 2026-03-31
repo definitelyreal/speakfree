@@ -468,25 +468,26 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             let maxRecordings = Config.effectiveMaxRecordings(self.config.maxRecordings)
             do {
-                // Build Whisper prompt. Only the final 224 tokens (~800 chars) matter,
-                // so order by importance: glossary first, screen context middle, input text next,
-                // punctuation hint last. Whisper follows the style of whatever ends the prompt.
+                // Build Whisper prompt. Only the final 224 tokens (~800 chars) matter.
+                // Whisper mimics the style of whatever ENDS the prompt, so put the
+                // user's own text last — this makes output match their writing style
+                // (capitalization, punctuation, formality).
                 let prompt: String? = {
                     var parts: [String] = []
+                    // Instructions first (furthest from end = least style influence)
+                    let mode = self.config.spokenPunctuation ?? .off
+                    if mode == .spoken || mode == .hybrid {
+                        parts.append("Spoken punctuation: comma, period, question mark, exclamation mark, semicolon, colon, dash, hyphen, new line.")
+                    }
                     if let vocab = Config.loadVocabulary() {
                         parts.append("Glossary: \(vocab).")
                     }
                     if let screen = capturedScreenText {
                         parts.append(screen)
                     }
+                    // User's text LAST — whisper will match this style
                     if let input = capturedInputText {
                         parts.append(input)
-                    }
-                    // In spoken/hybrid mode, prime Whisper to correctly recognise spoken
-                    // punctuation words rather than mishearing them as similar-sounding tokens.
-                    let mode = self.config.spokenPunctuation ?? .off
-                    if mode == .spoken || mode == .hybrid {
-                        parts.append("Spoken punctuation: comma, period, question mark, exclamation mark, semicolon, colon, dash, hyphen, ellipsis, new line.")
                     }
                     return parts.isEmpty ? nil : parts.joined(separator: " ")
                 }()

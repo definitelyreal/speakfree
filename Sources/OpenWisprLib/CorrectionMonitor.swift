@@ -23,6 +23,7 @@ class CorrectionMonitor {
         self.startTime = Date()
         self.offerCallback = onCorrectionFound
         self.lastCursorPos = nil
+        self.slowPollCount = 0
 
         timer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
             self?.poll()
@@ -39,6 +40,8 @@ class CorrectionMonitor {
         lastCursorPos = nil
     }
 
+    private var slowPollCount = 0
+
     private func poll() {
         guard let start = startTime else { stop(); return }
 
@@ -49,8 +52,21 @@ class CorrectionMonitor {
 
         guard let element = element else { stop(); return }
 
+        // AX calls can block for slow apps (Electron). Run with timeout.
+        let pollStart = CFAbsoluteTimeGetCurrent()
         guard let currentText = readText(from: element),
               let cursorPos = readCursorPosition(from: element) else { return }
+        let pollTime = CFAbsoluteTimeGetCurrent() - pollStart
+
+        // If AX is consistently slow (>200ms), stop polling — we're making the app laggy
+        if pollTime > 0.2 {
+            slowPollCount += 1
+            if slowPollCount >= 2 {
+                DiagnosticLogger.shared.log("CorrectionMonitor: AX too slow (\(Int(pollTime * 1000))ms) — stopping")
+                stop()
+                return
+            }
+        }
 
         let currentWords = tokenize(currentText)
 

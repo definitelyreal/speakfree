@@ -11,6 +11,24 @@ class SettingsWindowController: NSWindowController {
         shared?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         shared?.window?.makeKeyAndOrderFront(nil)
+
+        // LSUIElement apps don't get standard menus, so Cmd+W doesn't work.
+        // Install a minimal main menu with Close when settings are shown.
+        Self.installMainMenu()
+    }
+
+    private static func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenu = NSMenu()
+        appMenu.addItem(NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "Quit speakfree", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let appMenuItem = NSMenuItem()
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        NSApp.mainMenu = mainMenu
     }
 
     convenience init(viewModel: SettingsViewModel) {
