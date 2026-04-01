@@ -35,19 +35,12 @@ struct Permissions {
     }
 
     static func didUpgrade() -> Bool {
-        // Ad-hoc signed builds (including bundle-app.sh dev builds) change code
-        // identity on every rebuild, which invalidates TCC accessibility grants.
-        // We ALWAYS check the binary fingerprint to catch this. Version-based
-        // checking alone only works for stable Developer ID signed releases.
-        //
-        // BUILD PROCESS NOTE:
-        // - `scripts/build.sh` signs with Developer ID → stable signature across rebuilds
-        // - `scripts/bundle-app.sh` ad-hoc signs (`codesign --sign -`) → NEW signature every time
-        // - Ad-hoc builds MUST go through fingerprint check or accessibility breaks
-        // - The fingerprint is stored in ~/.config/speakfree/.binary-fingerprint
-        // - When fingerprint changes, we call tccutil reset to clear the stale TCC entry
-        //   and then re-prompt for accessibility permission
-        if didBetaBinaryChange() {
+        // Only reset TCC when the VERSION changes (e.g. 1.2.3 → 1.2.4).
+        // Developer ID signed builds keep the same code identity across rebuilds,
+        // so the fingerprint check is unnecessary and causes repeated TCC resets.
+        // Ad-hoc (beta) builds still track fingerprint separately.
+        let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
+        if isBeta && didBetaBinaryChange() {
             return true
         }
 
