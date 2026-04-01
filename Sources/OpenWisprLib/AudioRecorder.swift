@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Foundation
 
 class AudioRecorder {
@@ -51,6 +52,13 @@ class AudioRecorder {
         interleaved: false
     )!
 
+    /// Shut down the audio engine. Call before app exit.
+    func shutdown() {
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+    }
+
     /// Start the always-on audio engine. Call once on app launch.
     func warmUp() {
         guard preBufferEnabled else { return }
@@ -91,8 +99,8 @@ class AudioRecorder {
     private var deviceChangeObserver: NSObjectProtocol?
 
     /// Reinstall the audio tap when the input device changes (e.g. AirPods connect/disconnect).
-    /// The engine stays running — only the tap and converter are replaced with the new device's format.
     private func startDeviceChangeMonitor() {
+        // AVAudioEngine notification — fires for most device changes
         deviceChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: nil,
@@ -109,6 +117,27 @@ class AudioRecorder {
             }
 
             self.reinstallTap()
+        }
+
+        // CoreAudio listener — catches Bluetooth handoffs (AirPods switching between
+        // devices) that AVAudioEngineConfigurationChange sometimes misses.
+        var inputDeviceAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &inputDeviceAddress,
+            DispatchQueue.main
+        ) { [weak self] _, _ in
+            guard let self = self else { return }
+            DiagnosticLogger.shared.log("AudioRecorder: CoreAudio default input device changed — rebuilding")
+            if self.isRecording {
+                self.needsTapReinstall = true
+            } else {
+                self.reinstallTap()
+            }
         }
     }
 

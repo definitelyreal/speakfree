@@ -16,6 +16,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var correctionMonitor = CorrectionMonitor()
     private var settingsViewModel: SettingsViewModel?
 
+    // Clean up whisper model before exit to prevent ggml Metal assertion crash.
+    // The crash happens in __cxa_finalize_ranges when ggml tries to free Metal
+    // residency sets that are still active during static destructor cleanup.
+    public func applicationWillTerminate(_ notification: Notification) {
+        transcriber?.engine.unloadModel()
+        hotkeyManager?.stop()
+        recorder?.shutdown()
+    }
+
     // Sparkle auto-updater — checks for updates on launch and periodically
     let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
