@@ -110,10 +110,29 @@ public struct TextPostProcessor {
         // 7. Ensure space after punctuation before next word
         result = ensureSpaceAfterPunctuation(result)
 
-        // 8. Capitalize first letter after sentence-ending punctuation (. ! ?)
+        // 8. Comma before capital letter → period (whisper uses commas at sentence boundaries)
+        result = commaBeforeCapitalToPeriod(result)
+
+        // 9. Capitalize first letter after sentence-ending punctuation (. ! ?)
         result = capitalizeAfterSentenceEnd(result)
 
         return result
+    }
+
+    /// Convert comma to period when followed by a capital letter.
+    /// Whisper often uses commas at sentence boundaries: "the film, There's" → "the film. There's"
+    /// Skips common patterns where comma + capital is correct (proper nouns after commas in lists).
+    private static func commaBeforeCapitalToPeriod(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: ",\\s+([A-Z])", options: []) else { return text }
+        let mutable = NSMutableString(string: text)
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        for match in matches.reversed() {
+            let fullRange = match.range
+            guard let swiftRange = Range(fullRange, in: text) else { continue }
+            let replacement = ". " + text[swiftRange].suffix(1)
+            mutable.replaceCharacters(in: fullRange, with: String(replacement))
+        }
+        return mutable as String
     }
 
     /// Capitalize the first letter after sentence-ending punctuation.
