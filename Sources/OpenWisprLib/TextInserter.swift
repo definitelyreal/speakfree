@@ -103,8 +103,10 @@ class TextInserter {
             return
         }
 
-        // Try typing via CGEvent unicode — works in Electron apps without clipboard
-        if typeViaKeyEvents(text) {
+        // Try typing via CGEvent unicode — works in Electron apps without clipboard.
+        // Skip for remote desktop apps — they intercept CGEvents but don't forward
+        // unicode key events correctly to the remote machine.
+        if !isRemoteDesktopFrontmost(), typeViaKeyEvents(text) {
             return
         }
 
@@ -126,6 +128,26 @@ class TextInserter {
         // Set the selected text — this replaces current selection or inserts at cursor
         let result = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
         return result == .success
+    }
+
+    /// Remote desktop apps that don't properly forward CGEvent unicode key events.
+    private static let remoteDesktopBundleIDs: Set<String> = [
+        "com.splashtop.PersonalBusiness",    // Splashtop Personal/Business
+        "com.splashtop.streamer",
+        "com.microsoft.rdc.macos",           // Microsoft Remote Desktop
+        "com.microsoft.rdc.osx",
+        "com.teamviewer.TeamViewer",         // TeamViewer
+        "com.parallels.desktop.console",     // Parallels
+        "com.vmware.fusion",                 // VMware Fusion
+        "com.realvnc.vncviewer",             // RealVNC
+        "com.citrix.receiver.icaviewer",     // Citrix
+        "com.parsec-cloud.parsec",           // Parsec
+        "com.moonlight-stream.Moonlight",    // Moonlight
+    ]
+
+    private func isRemoteDesktopFrontmost() -> Bool {
+        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return false }
+        return Self.remoteDesktopBundleIDs.contains(bundleID)
     }
 
     /// Insert text by simulating keyboard events with unicode characters.

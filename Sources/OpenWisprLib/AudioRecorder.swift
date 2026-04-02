@@ -121,53 +121,75 @@ class AudioRecorder {
 
         // CoreAudio listener — catches Bluetooth handoffs (AirPods switching between
         // devices) that AVAudioEngineConfigurationChange sometimes misses.
+        // IMPORTANT: dispatch on a dedicated queue, NOT main — CoreAudio can deadlock
+        // if the listener callback blocks the main thread during reconfiguration.
         var inputDeviceAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
+        let deviceQueue = DispatchQueue(label: "com.speakfree.audiodevice")
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &inputDeviceAddress,
-            DispatchQueue.main
+            deviceQueue
         ) { [weak self] _, _ in
             guard let self = self else { return }
-            DiagnosticLogger.shared.log("AudioRecorder: CoreAudio default input device changed — rebuilding")
-            if self.isRecording {
-                self.needsTapReinstall = true
-            } else {
-                self.reinstallTap()
+            DiagnosticLogger.shared.log("AudioRecorder: CoreAudio default input device changed")
+            DispatchQueue.main.async {
+                DiagnosticLogger.shared.log("AudioRecorder: device change — bounced to main, isRebuilding=\(self.isRebuilding)")
+                if self.isRecording {
+                    self.needsTapReinstall = true
+                } else {
+                    self.reinstallTap()
+                }
             }
         }
     }
 
     private var needsTapReinstall = false
+    private var isRebuilding = false
 
     /// Rebuild the audio engine from scratch after a device change.
-    /// Patching a running engine after config changes is unreliable — the input node
-    /// format can be stale. Tearing down and recreating is the only safe approach.
+    /// Tears down the old engine on a background thread to avoid deadlocking
+    /// with CoreAudio's internal locks during reconfiguration.
     private func reinstallTap() {
-        DiagnosticLogger.shared.log("AudioRecorder: tearing down engine for device change")
-
-        // Tear down the old engine completely
-        if let engine = audioEngine {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+        guard !isRebuilding else {
+            DiagnosticLogger.shared.log("AudioRecorder: rebuild already in progress — skipping")
+            return
         }
+        isRebuilding = true
+        DiagnosticLogger.shared.log("AudioRecorder: tearing down engine for device change (isMainThread=\(Thread.isMainThread))")
+
+        // Capture the old engine and nil out our reference immediately
+        let oldEngine = audioEngine
         audioEngine = nil
         audioConverter = nil
 
-        // Clear stale pre-roll (it was from the old device)
+        // Clear stale pre-roll
         stateLock.lock()
         prerollBuffer = []
         stateLock.unlock()
 
-        // Small delay to let CoreAudio settle on the new device
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
-            self.startEngine()
-            self.needsTapReinstall = false
-            DiagnosticLogger.shared.log("AudioRecorder: engine rebuilt for new audio device")
+        // Tear down on a background thread — removeTap/stop can deadlock
+        // with CoreAudio's internal locks if called during a device-change callback
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let engine = oldEngine {
+                DiagnosticLogger.shared.log("AudioRecorder: removeTap starting (background thread)")
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+                DiagnosticLogger.shared.log("AudioRecorder: old engine stopped")
+            }
+
+            // Rebuild on main after CoreAudio settles
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self = self else { return }
+                DiagnosticLogger.shared.log("AudioRecorder: asyncAfter fired — starting engine rebuild")
+                self.startEngine()
+                self.needsTapReinstall = false
+                self.isRebuilding = false
+                DiagnosticLogger.shared.log("AudioRecorder: engine rebuilt for new audio device")
+            }
         }
     }
 
