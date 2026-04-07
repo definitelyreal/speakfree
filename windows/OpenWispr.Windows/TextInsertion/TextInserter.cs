@@ -1,5 +1,5 @@
 using System.Runtime.InteropServices;
-using System.Windows;
+using WpfClipboard = System.Windows.Clipboard;
 using OpenWispr.Windows.Core;
 
 namespace OpenWispr.Windows.TextInsertion;
@@ -48,15 +48,15 @@ public class TextInserter
 
     private static void PasteViaClipboard(string text)
     {
-        var prev = Clipboard.ContainsText() ? Clipboard.GetText() : null;
-        Clipboard.SetText(text);
+        var prev = WpfClipboard.ContainsText() ? WpfClipboard.GetText() : null;
+        WpfClipboard.SetText(text);
         keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
         keybd_event(VK_V, 0, 0, UIntPtr.Zero);
         keybd_event(VK_V, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         Thread.Sleep(50);
-        if (prev != null) Clipboard.SetText(prev);
-        else Clipboard.Clear();
+        if (prev != null) WpfClipboard.SetText(prev);
+        else WpfClipboard.Clear();
     }
 
     private static INPUT KeyInput(byte vk, uint flags) => new()

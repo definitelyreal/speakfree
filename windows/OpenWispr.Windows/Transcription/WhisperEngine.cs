@@ -44,8 +44,7 @@ public class WhisperEngine : IDisposable
 
         var builder = _factory.CreateBuilder()
             .WithLanguage(language)
-            .WithNoContext()
-            .WithSingleSegment(false);
+            .WithNoContext();
 
         if (!string.IsNullOrEmpty(prompt))
             builder = builder.WithPrompt(prompt);
