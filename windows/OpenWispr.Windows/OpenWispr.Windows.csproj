@@ -16,6 +16,6 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="Whisper.net" Version="1.7.4" />
     <PackageReference Include="Whisper.net.Runtime" Version="1.7.4" />
-    <PackageReference Include="Hardcodet.Wpf.TaskbarNotification" Version="2.0.0" />
+    <PackageReference Include="Hardcodet.Wpf.TaskbarNotification" Version="1.0.5" />
   </ItemGroup>
 </Project>
