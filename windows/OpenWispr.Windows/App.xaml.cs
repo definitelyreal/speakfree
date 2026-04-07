@@ -9,7 +9,7 @@ using OpenWispr.Windows.UI;
 
 namespace OpenWispr.Windows;
 
-public partial class App : Application
+public partial class App
 {
     public AppSettings Settings { get; private set; } = AppSettings.Default;
     public WhisperEngine Engine { get; } = new();
