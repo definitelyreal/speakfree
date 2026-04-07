@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(gh api:*)",
-      "Read(//Users/mikemorgenstern/.config/open-wispr/**)"
+      "Read(//Users/mikemorgenstern/.config/open-wispr/**)",
+      "Read(//Applications/speakfree.app/Contents/MacOS/**)",
+      "Read(//Applications/speakfree.app/Contents/**)",
+      "Bash(bash scripts/build.sh)"
+    ],
+    "additionalDirectories": [
+      "/Users/mikemorgenstern/.claude/tmp"
     ]
   }
 }

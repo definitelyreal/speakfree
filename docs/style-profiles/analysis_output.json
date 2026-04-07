@@ -1,0 +1,319 @@
+{
+  "signal": {
+    "platform": "signal",
+    "samples_raw": 50,
+    "samples_analyzed": 47,
+    "capitalization": {
+      "starts_capitalized": 0.87,
+      "starts_lowercase": 0.11
+    },
+    "ending_punctuation": {
+      "period": 0.0,
+      "question_mark": 0.19,
+      "exclamation": 0.21,
+      "no_punctuation": 0.51,
+      "ellipsis": 0.0,
+      "emoji": 0.0
+    },
+    "message_length": {
+      "avg_words": 10.5,
+      "median_words": 7,
+      "distribution": {
+        "1-3_words": 0.3,
+        "4-10_words": 0.3,
+        "11-25_words": 0.34,
+        "26+_words": 0.06
+      }
+    },
+    "contraction_rate": 0.28,
+    "avg_contractions_per_msg": 0.36,
+    "emoji": {
+      "rate": 0.04,
+      "top_emojis": [
+        ":/",
+        ":)"
+      ]
+    },
+    "shortcuts_and_slang": {
+      "oh": 3,
+      "haha": 2,
+      "hehe": 2,
+      "lol": 1,
+      "wanna": 1,
+      "ima": 1,
+      "em": 1,
+      "yayyy": 1,
+      "whooo": 1,
+      "oo": 1,
+      "hm": 1
+    },
+    "fragment_rate": 0.51,
+    "hedge_words": {
+      "I think": 2,
+      "I mean": 1,
+      "definitely": 1,
+      "actually": 1
+    },
+    "greetings": {
+      "hey": 2,
+      "hi": 2,
+      "yo": 1
+    },
+    "signoffs": {
+      "thank you": 1
+    },
+    "structural": {
+      "multi_line_messages": 0.02,
+      "comma_splices": 0.06,
+      "em_dash_usage": 0.0,
+      "ellipsis_usage": 0.04
+    },
+    "i_capitalization": {
+      "always_uppercase_I": 12,
+      "sometimes_lowercase_i": 0,
+      "mixed_in_same_msg": 0,
+      "msgs_containing_i": 12
+    },
+    "sample_messages": [
+      "whats the sound",
+      "wow, yeah, that happens to me too",
+      "Well how's it now?",
+      "This is a bit more about our film:",
+      "I'd love to talk. Can I email you to set up a call? Will loop in our production manager",
+      "Hey Soji, it's great to meet you!",
+      "I mean who doesnt",
+      "I meant these two, are these both desks?",
+      "Oh yeah..hm what do you think about bathroom storage?",
+      "Aw, this is lovely!\nI would definitely take some of those lamps, the standing one, and the tables, probably not the chair.\n\nWould definitely love to take the dresser if that's an option. So is that white table and that wooden one that folds over, are those both desks?"
+    ]
+  },
+  "imessage": {
+    "platform": "imessage",
+    "samples_raw": 50,
+    "samples_analyzed": 43,
+    "capitalization": {
+      "starts_capitalized": 0.98,
+      "starts_lowercase": 0.02
+    },
+    "ending_punctuation": {
+      "period": 0.0,
+      "question_mark": 0.19,
+      "exclamation": 0.23,
+      "no_punctuation": 0.58,
+      "ellipsis": 0.0,
+      "emoji": 0.0
+    },
+    "message_length": {
+      "avg_words": 12.2,
+      "median_words": 7,
+      "distribution": {
+        "1-3_words": 0.21,
+        "4-10_words": 0.49,
+        "11-25_words": 0.19,
+        "26+_words": 0.12
+      }
+    },
+    "contraction_rate": 0.37,
+    "avg_contractions_per_msg": 0.49,
+    "emoji": {
+      "rate": 0.02,
+      "top_emojis": [
+        ":3"
+      ]
+    },
+    "shortcuts_and_slang": {
+      "haha": 1,
+      "gonna": 1,
+      "wanna": 1,
+      "whatcha": 1,
+      "um": 1,
+      "ah": 1,
+      "oh": 1
+    },
+    "fragment_rate": 0.49,
+    "hedge_words": {
+      "I think": 3,
+      "just": 2,
+      "pretty": 1,
+      "definitely": 1
+    },
+    "greetings": {
+      "hey": 8
+    },
+    "signoffs": {
+      "thanks": 2
+    },
+    "structural": {
+      "multi_line_messages": 0.0,
+      "comma_splices": 0.09,
+      "em_dash_usage": 0.0,
+      "ellipsis_usage": 0.0
+    },
+    "i_capitalization": {
+      "always_uppercase_I": 16,
+      "sometimes_lowercase_i": 2,
+      "mixed_in_same_msg": 0,
+      "msgs_containing_i": 18
+    },
+    "sample_messages": [
+      "The one in Brett and Alexa's room is the one you got, and yeah that one's definitely too tall. Could you find a place for it or sell it or somehow get rid of it?",
+      "I can talk a little bit later",
+      "Awesome thanks!",
+      "If you haven't gotten it yet I could send you a copy of the movie and the existing sound design",
+      "Thanks, I appreciate it. Yeah, I have high ambitions and I am exacting and I think it's a good thing, I just need budget for it. I think this whole time I wanted to make a $40M movie and just went and sat for less and that was painful and it'll be really nice in retrospect and hopefully next time we'll have the budget. I think we just needed more supervisors, more layers of management, more professionals, more money to buy more time from more experienced people",
+      "It's hard dealing with that now as I'm keeping that same quality bar and obsessing over details and watching the premier get closer and yeah at some point you got to pick or it gets picked for you",
+      "Oh really? That would be amazing",
+      "OK, yeah I think that would also work. Sounds really exciting!",
+      "I'm free now if you want to give me a call but no stress, we can also talk tomorrow. What's your email address?",
+      "hey, what's up stud"
+    ]
+  },
+  "slack": {
+    "platform": "slack",
+    "samples_raw": 50,
+    "samples_analyzed": 50,
+    "capitalization": {
+      "starts_capitalized": 1.0,
+      "starts_lowercase": 0.0
+    },
+    "ending_punctuation": {
+      "period": 0.0,
+      "question_mark": 0.26,
+      "exclamation": 0.36,
+      "no_punctuation": 0.34,
+      "ellipsis": 0.0,
+      "emoji": 0.0
+    },
+    "message_length": {
+      "avg_words": 13.5,
+      "median_words": 11,
+      "distribution": {
+        "1-3_words": 0.26,
+        "4-10_words": 0.18,
+        "11-25_words": 0.44,
+        "26+_words": 0.12
+      }
+    },
+    "contraction_rate": 0.28,
+    "avg_contractions_per_msg": 0.42,
+    "emoji": {
+      "rate": 0.0,
+      "top_emojis": []
+    },
+    "shortcuts_and_slang": {
+      "oh": 2,
+      "wanna": 1,
+      "lemme": 1,
+      "hm": 1
+    },
+    "fragment_rate": 0.34,
+    "hedge_words": {
+      "just": 5,
+      "I think": 1
+    },
+    "greetings": {
+      "hey": 9,
+      "hi": 1
+    },
+    "signoffs": {
+      "thank you": 2
+    },
+    "structural": {
+      "multi_line_messages": 0.08,
+      "comma_splices": 0.04,
+      "em_dash_usage": 0.08,
+      "ellipsis_usage": 0.04
+    },
+    "i_capitalization": {
+      "always_uppercase_I": 11,
+      "sometimes_lowercase_i": 0,
+      "mixed_in_same_msg": 0,
+      "msgs_containing_i": 11
+    },
+    "sample_messages": [
+      "Head rigging I will look at!\n\nHmm, I think you staying on 5030 will make the most sense. I was going to try and get you notes today — is there anything else that'd help you move forward?",
+      "Okay amazing",
+      "Would love to ask your thoughts on look for Sean — have a second to chat?",
+      "For ref, my earlier ref, his last version, and his latest version",
+      "Hey hey, do you mind if we push 15min?",
+      "Just jumped on",
+      "Hey hey, was aiming to get you notes today but it might take a bit longer — could we do a call a bit later than our usual one with notes?",
+      "Sure!",
+      "Shall we skip today at least until I can review then?",
+      "Sounds good"
+    ]
+  },
+  "gmail": {
+    "platform": "gmail",
+    "samples_raw": 32,
+    "samples_analyzed": 32,
+    "capitalization": {
+      "starts_capitalized": 1.0,
+      "starts_lowercase": 0.0
+    },
+    "ending_punctuation": {
+      "period": 0.03,
+      "question_mark": 0.12,
+      "exclamation": 0.06,
+      "no_punctuation": 0.66,
+      "ellipsis": 0.0,
+      "emoji": 0.0
+    },
+    "message_length": {
+      "avg_words": 30.5,
+      "median_words": 35,
+      "distribution": {
+        "1-3_words": 0.03,
+        "4-10_words": 0.09,
+        "11-25_words": 0.12,
+        "26+_words": 0.75
+      }
+    },
+    "contraction_rate": 0.66,
+    "avg_contractions_per_msg": 1.09,
+    "emoji": {
+      "rate": 0.0,
+      "top_emojis": []
+    },
+    "shortcuts_and_slang": {},
+    "fragment_rate": 0.12,
+    "hedge_words": {
+      "I think": 4,
+      "just": 3,
+      "definitely": 1
+    },
+    "greetings": {
+      "hi": 11,
+      "hello": 2,
+      "hey": 1
+    },
+    "signoffs": {
+      "best": 1,
+      "thank you": 1
+    },
+    "structural": {
+      "multi_line_messages": 0.0,
+      "comma_splices": 0.19,
+      "em_dash_usage": 0.06,
+      "ellipsis_usage": 0.0
+    },
+    "i_capitalization": {
+      "always_uppercase_I": 23,
+      "sometimes_lowercase_i": 0,
+      "mixed_in_same_msg": 0,
+      "msgs_containing_i": 23
+    },
+    "sample_messages": [
+      "Can we get this done on Monday? Please let me know what I need to do. If there's another form, another hoop, another hiccup, can you collect it and we can either speak on the phone or resolve it",
+      "Hello, That address is the same, yes. It's listed as business because it's a virtual mailbox, but it's the address on all my credit card statements, bank accounts, and everything else. I",
+      "Hi Wolfie, My sincere apologies on getting this to you so late! Here's our loop group sheet! Please let us know if you have any questions, and I'm excited for the session! Thanks very much,",
+      "Each model gets a sandboxed computer, and a repetitive prompt: I want you to improve yourself.",
+      "Organize room Go to Erica's Bike and downstairs Loop group Date me doc launch VFX Finances Talk to Pez Other housing Eat well Work out",
+      "Is it 10-15 minutes or 8? Which voice? Voice options Get gender and When I say \"yeah, I think that's it\" there's a pause. Can deposits vary based on what the conversation context is?",
+      "Also add Betta testing notice to the top",
+      "Add feedback prompt Add this signal that message you with the list of people, and your custom dare me doc page Get a domain name Signal ask if you have any feedback. It lets you go back to the LLM",
+      "You came towards me. You asked for more. You showed interest and then pulled back. You said you wanted to come to Room Service, then you said no. I know you say \"respect my boundaries\" but",
+      "You going through a hard time doesn't give you a pass on how your actions affect other people. Even when I'm supporting you, I'm still a person with feelings. And at that point when we had"
+    ]
+  }
+}
