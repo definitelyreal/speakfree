@@ -7,7 +7,7 @@ class MenuItemTarget: NSObject {
 }
 
 class StatusBarController: NSObject, NSMenuDelegate {
-    private var statusItem: NSStatusItem
+    private(set) var statusItem: NSStatusItem
     private var animationTimer: Timer?
     private var animationFrame = 0
     private var animationFrames: [NSImage] = []

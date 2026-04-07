@@ -5,6 +5,7 @@ import CoreGraphics
 class HotkeyManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var eventTapRunLoop: CFRunLoop?
     private var globalMonitor: Any?
     private var keyDownMonitor: Any?
     private let keyCode: UInt16
@@ -150,8 +151,25 @@ class HotkeyManager {
         eventTap = tap
         let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         runLoopSource = src
-        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
+
+        // Run the tap callback on a dedicated high-priority thread, not the main run loop.
+        // A .headInsertEventTap on the main run loop means ANY main-thread work
+        // (AX semaphore waits, animations) delays system-wide modifier key delivery —
+        // causing Shift+click selection failures and cursor flicker in other apps.
+        let startSema = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            self.eventTapRunLoop = CFRunLoopGetCurrent()
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), src, .commonModes)
+            startSema.signal()
+            CFRunLoopRun()  // blocks until tearDownEventTap calls CFRunLoopStop
+        }
+        thread.name = "com.speakfree.event-tap"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+        startSema.wait()  // ensure run loop is live before enabling
+
         CGEvent.tapEnable(tap: tap, enable: true)
+        DiagnosticLogger.shared.log("HotkeyManager: event tap created on dedicated thread")
     }
 
     private func tearDownEventTap() {
@@ -159,10 +177,12 @@ class HotkeyManager {
             CGEvent.tapEnable(tap: tap, enable: false)
             eventTap = nil
         }
-        if let src = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
-            runLoopSource = nil
+        if let src = runLoopSource, let rl = eventTapRunLoop {
+            CFRunLoopRemoveSource(rl, src, .commonModes)
+            CFRunLoopStop(rl)  // causes the dedicated thread's CFRunLoopRun() to return
+            eventTapRunLoop = nil
         }
+        runLoopSource = nil
     }
 
     private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {

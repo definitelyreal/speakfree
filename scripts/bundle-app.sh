@@ -47,6 +47,8 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
     <string>speakfree needs microphone access to record speech for transcription.</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>speakfree uses screen capture for local OCR to improve transcription accuracy (opt-in).</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>speakfree uses Apple Events to paste text into remote desktop apps like Splashtop.</string>
 </dict>
 </plist>
 PLIST

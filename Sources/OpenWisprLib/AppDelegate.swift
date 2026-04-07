@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import AVFoundation
 import Sparkle
 
 public class AppDelegate: NSObject, NSApplicationDelegate {
@@ -15,6 +16,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordingOverlay = RecordingOverlay()
     private var correctionMonitor = CorrectionMonitor()
     private var settingsViewModel: SettingsViewModel?
+    private var recordingStyleMode: TextPostProcessor.StyleMode = .none
 
     // Clean up whisper model before exit to prevent ggml Metal assertion crash.
     // The crash happens in __cxa_finalize_ranges when ggml tries to free Metal
@@ -210,6 +212,53 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         print("Model: \(config.modelSize)")
         print("Ready.")
         DiagnosticLogger.shared.log("Ready — hotkey=\(hotkeyDesc) model=\(config.modelSize)")
+
+        // Verify all subsystems after startup
+        verifySubsystems(context: "startup")
+    }
+
+    /// Comprehensive health check — logs status of all subsystems.
+    /// Call at startup and before each recording.
+    private func verifySubsystems(context: String) {
+        var issues: [String] = []
+
+        // 1. Status bar icon
+        if statusBar.statusItem.button?.image == nil {
+            issues.append("status bar icon missing")
+            statusBar.state = .idle  // force redraw
+        }
+
+        // 2. Event tap
+        if let hm = hotkeyManager {
+            hm.ensureTapHealthy()
+        } else {
+            issues.append("hotkeyManager is nil")
+        }
+
+        // 3. Audio engine
+        recorder.ensureAudioHealthy()
+
+        // 4. Accessibility
+        if !AXIsProcessTrusted() {
+            issues.append("accessibility not granted")
+        }
+
+        // 5. Microphone
+        if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
+            issues.append("microphone not granted")
+        }
+
+        // 6. Model file exists
+        if Transcriber.findModel(modelSize: transcriber?.modelSize ?? config.modelSize) == nil {
+            issues.append("model file missing")
+        }
+
+        if issues.isEmpty {
+            DiagnosticLogger.shared.log("Health check (\(context)): all OK")
+        } else {
+            DiagnosticLogger.shared.log("Health check (\(context)): ISSUES — \(issues.joined(separator: ", "))")
+            print("⚠️ Health check (\(context)): \(issues.joined(separator: ", "))")
+        }
     }
 
     /// The model size currently loaded by the transcriber.
@@ -375,15 +424,28 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isPressed else { return }
         isPressed = true
 
-        // Verify subsystems are healthy before every recording
-        recorder.ensureAudioHealthy()
-        hotkeyManager?.ensureTapHealthy()
+        // Verify all subsystems before every recording
+        verifySubsystems(context: "pre-recording")
 
-        // Capture focused element before anything else changes
-        captureFocusedElement()
+        // Detect style mode from frontmost app before menu bar steals focus
+        recordingStyleMode = TextPostProcessor.detectStyleMode(
+            bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        )
 
-        // Capture screen context in background if enabled
-        if config.screenContext?.value == true {
+        // Capture focused element before anything else changes.
+        // Skip for remote desktop — AX reads the Splashtop UI, not the remote text field.
+        if !inserter.isRemoteDesktopFrontmost() {
+            captureFocusedElement()
+        } else {
+            recordingSourceElement = nil
+            recordingContextText = nil
+        }
+
+        // Capture screen context in background if enabled.
+        // Skip for remote desktop apps — OCR captures the remote screen content
+        // which whisper then parrots instead of transcribing speech.
+        let isRemoteDesktop = inserter.isRemoteDesktopFrontmost()
+        if config.screenContext?.value == true && !isRemoteDesktop {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let text = ScreenContext.captureAndRecognize()
                 self?.screenContextLock.lock()
@@ -508,8 +570,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     if let vocab = Config.loadVocabulary() {
                         parts.append("Glossary: \(vocab).")
                     }
+                    // Screen context: extract only unique words as vocabulary hints.
+                    // Don't pass raw text — whisper parrots it instead of transcribing.
                     if let screen = capturedScreenText {
-                        parts.append(screen)
+                        let words = Set(screen.components(separatedBy: .whitespacesAndNewlines)
+                            .filter { $0.count > 3 })
+                            .prefix(20)
+                            .joined(separator: ", ")
+                        if !words.isEmpty {
+                            parts.append("Context words: \(words).")
+                        }
                     }
                     // User's text LAST — whisper will match this style
                     if let input = capturedInputText {
@@ -519,7 +589,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 }()
                 let raw = try self.transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
                 let mode = self.config.spokenPunctuation ?? .off
-                let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
+                var text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
+                // Apply per-app style (e.g. strip trailing period for messaging apps)
+                text = TextPostProcessor.applyStyle(text, mode: self.recordingStyleMode)
                 RecordingStore.saveTranscription(text: text, for: audioURL)
 
                 RecordingStore.clearSentinel()
@@ -696,49 +768,28 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func reprocess(audioURL: URL) {
         guard statusBar.state == .idle else { return }
-        statusBar.state = .transcribing
 
-        // Use the element captured when the menu opened (before it stole focus) — no delay needed
-        let capturedElement = statusBar.elementBeforeMenuOpen
-        statusBar.elementBeforeMenuOpen = nil
+        // Read saved transcription text — no need to re-transcribe
+        let textURL = audioURL.deletingPathExtension().appendingPathExtension("txt")
+        guard let text = try? String(contentsOf: textURL, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            print("Reprocess: no saved transcription for \(audioURL.lastPathComponent)")
+            return
+        }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            do {
-                let mode = self.config.spokenPunctuation ?? .off
-                let reprocessPrompt: String? = (mode == .spoken || mode == .hybrid)
-                    ? "Spoken punctuation: comma, period, question mark, exclamation mark, semicolon, colon, dash, hyphen, ellipsis, new line."
-                    : nil
-                let raw = try self.transcriber.transcribe(audioURL: audioURL, samples: nil, prompt: reprocessPrompt)
-                let text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
-                DispatchQueue.main.async {
-                    if !text.isEmpty {
-                        let insertText = self.inserter.shouldPrependSpace(before: capturedElement) ? " " + text : text
-                        self.lastTranscription = text
-                        let pasted = self.inserter.insert(text: insertText, refocusing: capturedElement, onFocusLost: {
-                            self.statusBar.state = .copiedToClipboard
-                            self.statusBar.buildMenu()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                self.statusBar.state = .idle
-                                self.statusBar.buildMenu()
-                            }
-                        })
-                        if pasted {
-                            self.statusBar.state = .idle
-                            self.statusBar.buildMenu()
-                        }
-                    } else {
-                        self.statusBar.state = .idle
-                        self.statusBar.buildMenu()
-                    }
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    print("Reprocess error: \(error.localizedDescription)")
-                    self.statusBar.state = .idle
-                    self.statusBar.buildMenu()
-                }
-            }
+        // Copy to clipboard — the menu stole focus from the user's app,
+        // so direct insertion via AX won't work reliably. Clipboard is the safest path.
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+
+        lastTranscription = text
+
+        statusBar.state = .copiedToClipboard
+        statusBar.buildMenu()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.statusBar.state = .idle
+            self?.statusBar.buildMenu()
         }
     }
 
