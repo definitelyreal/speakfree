@@ -5,6 +5,8 @@ APP="speakfree.app"
 VERSION=$(grep 'let version' Sources/OpenWisprLib/Version.swift | sed 's/.*"\(.*\)".*/\1/')
 DMG="speakfree-${VERSION}.dmg"
 SIGN_ID="Developer ID Application: Michael Morgenstern (AZ53Y7V4UZ)"
+ENTITLEMENTS="$(dirname "$0")/speakfree.entitlements"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Find the real binary path
 WHISPER_BIN=$(python3 -c "import os; print(os.path.realpath('/opt/homebrew/bin/whisper-cli'))")
@@ -12,6 +14,10 @@ WHISPER_LIB_DIR=$(dirname "$WHISPER_BIN")/../lib
 
 echo "Building speakfree v${VERSION}..."
 swift build -c release
+
+echo "Updating Info.plist version to ${VERSION}..."
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "$APP/Contents/Info.plist"
 
 echo "Copying main binary..."
 cp .build/release/speakfree "$APP/Contents/MacOS/speakfree"
@@ -52,12 +58,13 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" \
 
 echo "Signing..."
 xattr -cr "$APP"
-# Sign dylibs and whisper-cli first, then the app bundle
+# Sign dylibs and whisper-cli first (no entitlements needed for these)
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/"*.dylib
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/Sparkle.framework"
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/MacOS/whisper-cli"
-codesign --force --deep --options runtime --sign "$SIGN_ID" "$APP"
+# Sign the main app with entitlements (microphone + apple-events)
+codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP"
 
 echo "Building DMG..."
 rm -f "$DMG"
