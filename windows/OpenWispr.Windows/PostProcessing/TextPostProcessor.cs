@@ -64,6 +64,7 @@ public static class TextPostProcessor
         result = Regex.Replace(result, @"\.{2,}", "");
         result = result.Replace("\u2026", "");
         result = Regex.Replace(result, @"([.,!?;:])(?:\s*\1)+", "$1");
+        result = StripSpacesAroundDelimiters(result);
         result = FixSpacingAroundPunctuation(result);
         result = CollapseAdjacentPunctuation(result);
         result = EnsureSpaceAfterPunctuation(result);
@@ -135,6 +136,14 @@ public static class TextPostProcessor
             });
         }
         return result;
+    }
+
+    private static string StripSpacesAroundDelimiters(string text)
+    {
+        text = Regex.Replace(text, "([\"(])\\s+", "$1");
+        text = Regex.Replace(text, "\\s+([\"\\)])", "$1");
+        text = Regex.Replace(text, @"\s*\n\s*", "\n");
+        return text;
     }
 
     private static string FixSpacingAroundPunctuation(string text)

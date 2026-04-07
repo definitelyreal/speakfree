@@ -45,7 +45,7 @@ public class TextPostProcessorTests
 
     [Fact]
     public void Space_is_added_after_punctuation_before_word()
-        => TextPostProcessor.Process("hello.world").Should().Be("hello. world");
+        => TextPostProcessor.Process("hello.world").Should().Be("hello. World");
 
     [Fact]
     public void Capitalizes_after_period()
@@ -58,7 +58,7 @@ public class TextPostProcessorTests
     [Fact]
     public void Texting_style_strips_trailing_period()
         => TextPostProcessor.ApplyStyle("hello world.", TextPostProcessor.StyleMode.Texting)
-            .Should().Be("hello world");
+            .Should().Be("Hello world");
 
     [Fact]
     public void Texting_style_capitalizes_first_letter()
