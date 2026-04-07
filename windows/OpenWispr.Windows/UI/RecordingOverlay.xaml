@@ -1,0 +1,33 @@
+<Window x:Class="OpenWispr.Windows.UI.RecordingOverlay"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" AllowsTransparency="True"
+        Background="Transparent" Topmost="True"
+        IsHitTestVisible="False"
+        ShowInTaskbar="False"
+        Width="130" Height="40"
+        WindowStartupLocation="Manual">
+    <Grid>
+        <Border Background="#CC1C1C1E" CornerRadius="8" Padding="12,8">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                <Ellipse x:Name="Dot" Width="10" Height="10" Fill="#FF4444"
+                         Margin="0,0,8,0" VerticalAlignment="Center">
+                    <Ellipse.Triggers>
+                        <EventTrigger RoutedEvent="Loaded">
+                            <BeginStoryboard>
+                                <Storyboard RepeatBehavior="Forever">
+                                    <DoubleAnimation Storyboard.TargetName="Dot"
+                                                     Storyboard.TargetProperty="Opacity"
+                                                     From="1" To="0.2" Duration="0:0:0.6"
+                                                     AutoReverse="True"/>
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
+                    </Ellipse.Triggers>
+                </Ellipse>
+                <TextBlock Text="Recording..." Foreground="White" FontSize="12"
+                           VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
