@@ -1,0 +1,29 @@
+{
+  "planPath": "docs/plans/2026-04-07-windows-port-impl.md",
+  "tasks": [
+    {"id": 0, "subject": "Task 1: Provision Azure Windows VM", "status": "pending"},
+    {"id": 1, "subject": "Task 2: Scaffold C# WPF Solution", "status": "pending", "blockedBy": [0]},
+    {"id": 2, "subject": "Task 3: Dev Loop Script", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 4: AppSettings", "status": "pending", "blockedBy": [2]},
+    {"id": 4, "subject": "Task 5: TextPostProcessor", "status": "pending", "blockedBy": [2]},
+    {"id": 5, "subject": "Task 6: DiagnosticLogger", "status": "pending", "blockedBy": [2]},
+    {"id": 6, "subject": "Task 7: WordMemory", "status": "pending", "blockedBy": [2]},
+    {"id": 7, "subject": "Task 8: ModelDownloader", "status": "pending", "blockedBy": [2]},
+    {"id": 8, "subject": "Task 9: WhisperEngine", "status": "pending", "blockedBy": [3, 5, 7]},
+    {"id": 9, "subject": "Task 10: AudioRecorder", "status": "pending", "blockedBy": [5]},
+    {"id": 10, "subject": "Task 11: HotkeyManager", "status": "pending", "blockedBy": [5]},
+    {"id": 11, "subject": "Task 12: TextInserter", "status": "pending", "blockedBy": [5]},
+    {"id": 12, "subject": "Task 13: LaunchAtLogin", "status": "pending", "blockedBy": [5]},
+    {"id": 13, "subject": "Task 14: App Bootstrap", "status": "pending", "blockedBy": [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]},
+    {"id": 14, "subject": "Task 15: TrayController", "status": "pending", "blockedBy": [13]},
+    {"id": 15, "subject": "Task 16: RecordingOverlay", "status": "pending", "blockedBy": [13]},
+    {"id": 16, "subject": "Task 17: ModelDownloadWindow", "status": "pending", "blockedBy": [13]},
+    {"id": 17, "subject": "Task 18: SettingsWindow", "status": "pending", "blockedBy": [14]},
+    {"id": 18, "subject": "Task 19: HelpWindow", "status": "pending", "blockedBy": [14]},
+    {"id": 19, "subject": "Task 20: End-to-End Integration Test", "status": "pending", "blockedBy": [14, 15, 16, 17, 18]},
+    {"id": 20, "subject": "Task 21: Release Build", "status": "pending", "blockedBy": [19]},
+    {"id": 21, "subject": "Task 22: Deallocate VM", "status": "pending", "blockedBy": [20]},
+    {"id": 22, "subject": "Task 23: Send Release to Evan", "status": "pending", "blockedBy": [20]}
+  ],
+  "lastUpdated": "2026-04-07T00:00:00Z"
+}
