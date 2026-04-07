@@ -1,0 +1,49 @@
+<Window x:Class="OpenWispr.Windows.UI.HelpWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="OpenWispr Help" Width="480" Height="520"
+        WindowStartupLocation="CenterScreen">
+    <ScrollViewer Padding="24">
+        <StackPanel>
+            <TextBlock Text="How to use OpenWispr" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,16"/>
+
+            <TextBlock Text="Basic usage" FontWeight="SemiBold" Margin="0,0,0,4"/>
+            <TextBlock TextWrapping="Wrap" Margin="0,0,0,16">
+                Hold your hotkey (default: Right Ctrl), speak, then release.
+                Your words appear wherever your cursor is. If no text field is focused,
+                the text is copied to your clipboard.
+            </TextBlock>
+
+            <TextBlock Text="Punctuation modes" FontWeight="SemiBold" Margin="0,0,0,4"/>
+            <TextBlock TextWrapping="Wrap" Margin="0,0,0,4">
+                Hybrid (default): Say "question mark" or "exclamation mark" — always converted.
+                Ambiguous words like "comma" and "period" convert only when Whisper detected a pause before them.
+            </TextBlock>
+            <TextBlock TextWrapping="Wrap" Margin="0,0,0,4">
+                Spoken words: Always converts spoken punctuation words regardless of context.
+            </TextBlock>
+            <TextBlock TextWrapping="Wrap" Margin="0,0,0,16">
+                Off: No spoken punctuation conversion.
+            </TextBlock>
+
+            <TextBlock Text="Models" FontWeight="SemiBold" Margin="0,0,0,4"/>
+            <TextBlock TextWrapping="Wrap" Margin="0,0,0,16">
+                Larger models are more accurate but slower.
+                base.en (~142 MB) is recommended for most people.
+                All models run 100% locally — no internet required after download.
+            </TextBlock>
+
+            <TextBlock Text="Key mode" FontWeight="SemiBold" Margin="0,0,0,4"/>
+            <TextBlock TextWrapping="Wrap" Margin="0,0,0,16">
+                Hold (default): press and hold while speaking, release to transcribe.
+                Toggle: press once to start recording, press again to stop and transcribe.
+            </TextBlock>
+
+            <TextBlock Text="Hotkey" FontWeight="SemiBold" Margin="0,0,0,4"/>
+            <TextBlock TextWrapping="Wrap" Margin="0,0,0,16">
+                Right Ctrl is recommended — rarely used for other shortcuts.
+                You can change it to any modifier key in Settings.
+            </TextBlock>
+        </StackPanel>
+    </ScrollViewer>
+</Window>
