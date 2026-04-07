@@ -1,42 +1,56 @@
-using Hardcodet.Wpf.TaskbarNotification;
+using System.Windows.Forms;
+using OpenWispr.Windows.Core;
 
 namespace OpenWispr.Windows.UI;
 
 public class TrayController : IDisposable
 {
-    private readonly TaskbarIcon _tray;
+    private readonly NotifyIcon _tray;
     private readonly App _app;
 
     public TrayController(App app)
     {
         _app = app;
-        _tray = new TaskbarIcon
+        _tray = new NotifyIcon
         {
-            ToolTipText = "OpenWispr — Hold Right Ctrl to speak",
+            Text = "OpenWispr — Hold Right Ctrl to speak",
             Icon = LoadIcon(),
+            Visible = true,
         };
-        _tray.TrayMouseDoubleClick += (_, _) => OpenSettings();
 
-        var menu = new System.Windows.Controls.ContextMenu();
-        AddMenuItem(menu, "Settings", OpenSettings);
-        AddMenuItem(menu, "Help", OpenHelp);
-        menu.Items.Add(new System.Windows.Controls.Separator());
-        AddMenuItem(menu, "Quit", () => app.Shutdown());
-        _tray.ContextMenu = menu;
+        _tray.DoubleClick += (_, _) => OpenSettings();
+
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Settings", null, (_, _) => OpenSettings());
+        menu.Items.Add("Help", null, (_, _) => OpenHelp());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Quit", null, (_, _) => app.Shutdown());
+        _tray.ContextMenuStrip = menu;
+
+        DiagnosticLogger.Shared.Log("TrayController: initialized");
     }
 
     public void SetRecording(bool recording)
     {
-        _tray.ToolTipText = recording
+        _tray.Text = recording
             ? "OpenWispr — Recording..."
             : "OpenWispr — Hold Right Ctrl to speak";
     }
 
     public void ShowNotification(string title, string message)
-        => _tray.ShowBalloonTip(title, message, BalloonIcon.Info);
+        => _tray.ShowBalloonTip(3000, title, message, ToolTipIcon.Info);
 
-    private void OpenSettings() => new SettingsWindow(_app).Show();
-    private void OpenHelp() => new HelpWindow().Show();
+    private void OpenSettings()
+    {
+        System.Windows.Application.Current.Dispatcher.Invoke(
+            () => new SettingsWindow(_app).Show());
+    }
+
+    private void OpenHelp()
+    {
+        System.Windows.Application.Current.Dispatcher.Invoke(
+            () => new HelpWindow().Show());
+    }
 
     private static System.Drawing.Icon LoadIcon()
     {
@@ -46,12 +60,9 @@ public class TrayController : IDisposable
             : System.Drawing.SystemIcons.Application;
     }
 
-    private static void AddMenuItem(System.Windows.Controls.ContextMenu menu, string header, Action action)
+    public void Dispose()
     {
-        var item = new System.Windows.Controls.MenuItem { Header = header };
-        item.Click += (_, _) => action();
-        menu.Items.Add(item);
+        _tray.Visible = false;
+        _tray.Dispose();
     }
-
-    public void Dispose() => _tray.Dispose();
 }
