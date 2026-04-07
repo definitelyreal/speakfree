@@ -149,11 +149,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         Permissions.ensureMicrophone()
 
-        // On upgrade, the binary changes so macOS invalidates the accessibility trust.
-        // Reset the stale entry so the prompt appears fresh instead of silently failing.
-        if Permissions.didUpgrade() {
-            print("Upgrade detected — resetting Accessibility trust")
+        // For Developer ID signed releases, macOS tracks TCC grants by bundle ID + team ID,
+        // both of which stay constant across version updates. Resetting TCC on every version
+        // bump breaks first launch after every release — don't do it.
+        // For beta (ad-hoc signed) builds, the code identity changes on each rebuild, so we
+        // still reset there to avoid stale grants.
+        let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
+        if isBeta && Permissions.didUpgrade() {
+            print("Beta upgrade detected — resetting Accessibility trust")
             Permissions.resetAccessibility()
+        } else {
+            _ = Permissions.didUpgrade()  // still update .last-version file
         }
 
         if !AXIsProcessTrusted() {
