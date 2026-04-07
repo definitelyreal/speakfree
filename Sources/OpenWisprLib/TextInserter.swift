@@ -98,19 +98,25 @@ class TextInserter {
     }
 
     private func pasteText(_ text: String) {
+        let frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
+        let isRemote = isRemoteDesktopFrontmost()
+        DiagnosticLogger.shared.log("TextInserter: inserting \(text.count) chars into \(frontApp) (remoteDesktop=\(isRemote))")
+
         // Try direct AX text insertion first — no clipboard involvement
         if insertViaAccessibility(text) {
+            DiagnosticLogger.shared.log("TextInserter: used AX insertion")
             return
         }
 
-        // Try typing via CGEvent unicode — works in Electron apps without clipboard.
-        // Skip for remote desktop apps — they intercept CGEvents but don't forward
-        // unicode key events correctly to the remote machine.
-        if !isRemoteDesktopFrontmost(), typeViaKeyEvents(text) {
+        // Try typing via CGEvent unicode — works in SOME Electron apps.
+        // Skip for remote desktop apps and known Electron apps that mangle unicode events.
+        if !isRemote, !isElectronApp(), typeViaKeyEvents(text) {
+            DiagnosticLogger.shared.log("TextInserter: used CGEvent unicode typing")
             return
         }
 
         // Last resort: clipboard-based paste
+        DiagnosticLogger.shared.log("TextInserter: using clipboard paste (AppleScript=\(isRemote))")
         pasteViaClipboard(text)
     }
 
@@ -132,7 +138,9 @@ class TextInserter {
 
     /// Remote desktop apps that don't properly forward CGEvent unicode key events.
     private static let remoteDesktopBundleIDs: Set<String> = [
-        "com.splashtop.PersonalBusiness",    // Splashtop Personal/Business
+        "com.splashtop.stp.macosx",          // Splashtop Personal
+        "com.splashtop.Splashtop-Streamer",  // Splashtop Streamer
+        "com.splashtop.PersonalBusiness",    // Splashtop Business
         "com.splashtop.streamer",
         "com.microsoft.rdc.macos",           // Microsoft Remote Desktop
         "com.microsoft.rdc.osx",
@@ -145,9 +153,31 @@ class TextInserter {
         "com.moonlight-stream.Moonlight",    // Moonlight
     ]
 
-    private func isRemoteDesktopFrontmost() -> Bool {
+    func isRemoteDesktopFrontmost() -> Bool {
         guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return false }
-        return Self.remoteDesktopBundleIDs.contains(bundleID)
+        if Self.remoteDesktopBundleIDs.contains(bundleID) { return true }
+        // Fuzzy match for apps with variant bundle IDs
+        let lower = bundleID.lowercased()
+        let remoteKeywords = ["splashtop", "teamviewer", "parsec", "moonlight", "vnc", "remotedesktop"]
+        return remoteKeywords.contains(where: { lower.contains($0) })
+    }
+
+    /// Electron apps that mangle CGEvent unicode key events.
+    /// These apps accept the events but produce garbled text (extra apostrophes, commas).
+    /// Use clipboard paste instead.
+    private func isElectronApp() -> Bool {
+        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.lowercased() else { return false }
+        let electronApps = [
+            "superhuman", "slack", "discord", "notion", "figma",
+            "linear", "obsidian", "spotify", "whatsapp",
+            "signal", "telegram", "microsoft.teams",
+        ]
+        // Also check if the app bundle contains Electron framework
+        if let path = NSWorkspace.shared.frontmostApplication?.bundleURL?.path,
+           FileManager.default.fileExists(atPath: path + "/Contents/Frameworks/Electron Framework.framework") {
+            return true
+        }
+        return electronApps.contains(where: { bundleID.contains($0) })
     }
 
     /// Insert text by simulating keyboard events with unicode characters.
@@ -238,6 +268,28 @@ class TextInserter {
     private func simulatePaste() {
         guard let vKey = vKeyCode() else { return }
 
+        // For remote desktop apps, use AppleScript keystroke targeted at the process.
+        // Remote desktop apps capture raw HID events and forward them to the remote
+        // machine. CGEvent.post sends through HID, so Cmd+V becomes a raw "V" keypress.
+        // AppleScript keystroke routes through the app's NSEvent dispatch, where its
+        // local Cmd+V handler triggers clipboard sync + paste on the remote side.
+        if isRemoteDesktopFrontmost(), let app = NSWorkspace.shared.frontmostApplication {
+            let processName = app.localizedName ?? ""
+            let script = NSAppleScript(source: """
+                tell application "System Events"
+                    tell process "\(processName)"
+                        keystroke "v" using command down
+                    end tell
+                end tell
+            """)
+            var error: NSDictionary?
+            script?.executeAndReturnError(&error)
+            if let error = error {
+                DiagnosticLogger.shared.log("TextInserter: AppleScript paste failed: \(error)")
+            }
+            return
+        }
+
         guard let source = CGEventSource(stateID: .hidSystemState),
             let keyDown = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true),
             let keyUp = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false) else {
@@ -248,7 +300,6 @@ class TextInserter {
         keyUp.flags = .maskCommand
 
         keyDown.post(tap: .cghidEventTap)
-        // Non-blocking delay between key down and up — some apps need time to register the paste command
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             keyUp.post(tap: .cghidEventTap)
         }

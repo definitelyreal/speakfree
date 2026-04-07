@@ -388,9 +388,9 @@
     <p class="slogan">private speech to text &nbsp;•&nbsp; free and open source</p>
     <div class="cta-wrap">
       <div class="cta-row">
-        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.2.4.dmg">
+        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.2.6.dmg">
           ↓&nbsp; Download for Mac
-          <span class="btn-sub">v1.2.4 &nbsp;•&nbsp; Apple Silicon</span>
+          <span class="btn-sub">v1.2.6 &nbsp;•&nbsp; Apple Silicon</span>
         </a>
         <a class="btn btn-secondary" href="https://github.com/definitelyreal/speakfree">
           View on GitHub ↗
@@ -470,6 +470,21 @@
         <span class="arrow">▶</span> What's new in v1.2
       </button>
       <div class="changes-body open">
+        <h3>v1.2.6</h3>
+        <ul>
+          <li>Fix: keyboard modifier event tap moved off the main thread — eliminates "can't select text" and cursor flicker caused by system-wide event delivery delays</li>
+          <li>Fix: Accessibility polling after dictation moved to background thread — no more hover/cursor lag in the frontmost app</li>
+          <li>Fix: Electron apps (Slack, Discord, VS Code) now use clipboard paste — no more garbled characters</li>
+          <li>Fix: Remote desktop (Splashtop, TeamViewer) now uses AppleScript paste — no more stray "V" keystrokes</li>
+          <li>Fix: Whisper comma-before-capital sentence detection tuned to avoid false positives</li>
+          <li>Fix: Per-app writing style — trailing period stripped for messaging apps (Signal, Messages, Slack)</li>
+        </ul>
+        <h3>v1.2.5</h3>
+        <ul>
+          <li>Deadlock-free audio rebuild — engine teardown on background thread, AirPods handoff reliable</li>
+          <li>Remote desktop support — clipboard/AppleScript paste for Splashtop, TeamViewer, RDP, Parsec</li>
+          <li>Better sentence detection — comma before capital → period</li>
+        </ul>
         <h3>Performance</h3>
         <ul>
           <li>Whisper now runs in-process via Metal GPU — ~80ms from key-release to text</li>

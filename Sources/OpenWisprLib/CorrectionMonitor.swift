@@ -9,8 +9,8 @@ class CorrectionMonitor {
     private var offerCallback: ((String, String) -> Void)?
     private var lastCursorPos: Int?
 
-    private static let monitorDuration: TimeInterval = 10
-    private static let pollInterval: TimeInterval = 0.5
+    private static let monitorDuration: TimeInterval = 8
+    private static let pollInterval: TimeInterval = 1.0
 
     /// Start monitoring a text field for corrections after a transcription was pasted.
     func start(element: AXUIElement, pastedText: String, onCorrectionFound: @escaping (String, String) -> Void) {
@@ -44,50 +44,57 @@ class CorrectionMonitor {
 
     private func poll() {
         guard let start = startTime else { stop(); return }
+        if Date().timeIntervalSince(start) > Self.monitorDuration { stop(); return }
+        guard let element = self.element else { stop(); return }
 
-        if Date().timeIntervalSince(start) > Self.monitorDuration {
-            stop()
-            return
-        }
+        // Capture element locally — avoids race if stop() is called while AX work is in flight.
+        let capturedElement = element
 
-        guard let element = element else { stop(); return }
+        // AX calls (especially kAXValueAttribute on large fields) can block the target app's
+        // main thread via IPC, causing cursor/hover flicker and selection lag in that app.
+        // Run them on a background thread so they don't stall the main run loop.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self, self.element != nil else { return }
 
-        // AX calls can block for slow apps (Electron). Run with timeout.
-        let pollStart = CFAbsoluteTimeGetCurrent()
-        guard let currentText = readText(from: element),
-              let cursorPos = readCursorPosition(from: element) else { return }
-        let pollTime = CFAbsoluteTimeGetCurrent() - pollStart
+            let pollStart = CFAbsoluteTimeGetCurrent()
+            guard let currentText = self.readText(from: capturedElement),
+                  let cursorPos = self.readCursorPosition(from: capturedElement) else { return }
+            let pollTime = CFAbsoluteTimeGetCurrent() - pollStart
 
-        // If AX is consistently slow (>200ms), stop polling — we're making the app laggy
-        if pollTime > 0.2 {
-            slowPollCount += 1
-            if slowPollCount >= 2 {
-                DiagnosticLogger.shared.log("CorrectionMonitor: AX too slow (\(Int(pollTime * 1000))ms) — stopping")
-                stop()
-                return
+            DispatchQueue.main.async {
+                guard self.element != nil else { return }  // stopped while AX was in flight
+
+                // If AX is consistently slow (>200ms), stop polling — we're making the app laggy
+                if pollTime > 0.2 {
+                    self.slowPollCount += 1
+                    if self.slowPollCount >= 2 {
+                        DiagnosticLogger.shared.log("CorrectionMonitor: AX too slow (\(Int(pollTime * 1000))ms) — stopping")
+                        self.stop()
+                        return
+                    }
+                }
+
+                let currentWords = self.tokenize(currentText)
+
+                // If word count changed (user inserted/deleted words), update snapshot and bail —
+                // positional comparison would be wrong.
+                guard currentWords.count == self.originalWords.count else {
+                    self.originalWords = currentWords
+                    self.lastCursorPos = cursorPos
+                    return
+                }
+
+                // Only check for corrections when the cursor moves
+                if let lastPos = self.lastCursorPos, cursorPos != lastPos {
+                    if let (wrong, right) = self.findSingleCorrection(original: self.originalWords, current: currentWords) {
+                        self.offerCallback?(wrong, right)
+                        self.originalWords = currentWords
+                    }
+                }
+
+                self.lastCursorPos = cursorPos
             }
         }
-
-        let currentWords = tokenize(currentText)
-
-        // If word count changed (user inserted/deleted words), update snapshot and bail —
-        // positional comparison would be wrong.
-        guard currentWords.count == originalWords.count else {
-            originalWords = currentWords
-            lastCursorPos = cursorPos
-            return
-        }
-
-        // Only check for corrections when the cursor moves
-        if let lastPos = lastCursorPos, cursorPos != lastPos {
-            // Scan all words for the single changed one
-            if let (wrong, right) = findSingleCorrection(original: originalWords, current: currentWords) {
-                offerCallback?(wrong, right)
-                originalWords = currentWords
-            }
-        }
-
-        lastCursorPos = cursorPos
     }
 
     /// Minimum character length for a word to qualify as a correction candidate.

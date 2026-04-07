@@ -119,18 +119,95 @@ public struct TextPostProcessor {
         return result
     }
 
-    /// Convert comma to period when followed by a capital letter.
-    /// Whisper often uses commas at sentence boundaries: "the film, There's" → "the film. There's"
-    /// Skips common patterns where comma + capital is correct (proper nouns after commas in lists).
+    // MARK: - Style Modes
+
+    public enum StyleMode {
+        case texting    // Signal, iMessage, WhatsApp, SMS
+        case slack      // Slack, Discord, Teams
+        case email      // Gmail, Outlook, Mail
+        case none       // No style processing (default for unknown apps)
+    }
+
+    /// Detect style mode from the frontmost app's bundle ID.
+    public static func detectStyleMode(bundleID: String?) -> StyleMode {
+        guard let id = bundleID?.lowercased() else { return .none }
+        // Texting apps
+        if id.contains("signal") || id.contains("imessage") || id.contains("messages")
+            || id.contains("whatsapp") || id.contains("telegram") || id.contains("sms") {
+            return .texting
+        }
+        // Slack-style work chat
+        if id.contains("slack") || id.contains("discord") || id.contains("teams") {
+            return .slack
+        }
+        // Email
+        if id.contains("gmail") || id.contains("mail") || id.contains("outlook")
+            || id.contains("superhuman") || id.contains("spark") {
+            return .email
+        }
+        return .none
+    }
+
+    /// Apply Michael's writing style to transcribed text.
+    /// Based on style profiles derived from 172 messages across platforms.
+    /// Only modifies text for messaging apps — email and other apps keep normal punctuation.
+    public static func applyStyle(_ text: String, mode: StyleMode) -> String {
+        // Only apply style processing for messaging apps
+        guard mode == .texting || mode == .slack else { return text }
+
+        var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !result.isEmpty else { return result }
+
+        // Strip trailing period only — mid-sentence periods stay for multi-sentence dictations.
+        // Michael never ends messages with a period (0% across texting platforms).
+        if result.hasSuffix(".") && !result.hasSuffix("..") {
+            let beforeDot = result.dropLast()
+            if !beforeDot.isEmpty {
+                let lastWord = String(beforeDot.split(separator: " ").last ?? "")
+                if lastWord.count > 2 { // keep after abbreviations like "U.S."
+                    result = String(beforeDot)
+                }
+            }
+        }
+
+        // Capitalize first letter (90%+ across all platforms)
+        if let first = result.first, first.isLowercase {
+            result = first.uppercased() + result.dropFirst()
+        }
+
+        return result
+    }
+
+    /// Convert comma to period when followed by a capitalized word that signals
+    /// a new sentence. Only converts when the next word is a common sentence starter
+    /// (not "I", proper nouns, or words in lists).
     private static func commaBeforeCapitalToPeriod(_ text: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: ",\\s+([A-Z])", options: []) else { return text }
+        // Match comma + space + capitalized word + next word
+        guard let regex = try? NSRegularExpression(pattern: ",\\s+([A-Z][a-z]+)", options: []) else { return text }
         let mutable = NSMutableString(string: text)
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+
+        // Words that ONLY appear at the start of a new sentence, never after a comma
+        // in normal speech. Removed "She", "He", "Her", "His", "It", "In", "And", "But"
+        // because they commonly follow commas: "Yeah, she said", "and then, he went"
+        let sentenceStarters: Set<String> = [
+            "There", "Then", "This", "That", "They", "The",
+            "So", "What", "When", "Where", "Which", "While", "Who", "Why",
+            "Also", "After", "Before",
+        ]
+
         for match in matches.reversed() {
+            let wordRange = match.range(at: 1)
+            guard let swiftWordRange = Range(wordRange, in: text) else { continue }
+            let word = String(text[swiftWordRange])
+
+            // Only convert if the word is a known sentence starter
+            guard sentenceStarters.contains(word) else { continue }
+
             let fullRange = match.range
             guard let swiftRange = Range(fullRange, in: text) else { continue }
-            let replacement = ". " + text[swiftRange].suffix(1)
-            mutable.replaceCharacters(in: fullRange, with: String(replacement))
+            let replacement = ". " + String(text[swiftRange].dropFirst(2)) // drop ", "
+            mutable.replaceCharacters(in: fullRange, with: replacement)
         }
         return mutable as String
     }
@@ -220,6 +297,13 @@ public struct TextPostProcessor {
 
         // Remove trailing period after ! or ?: "!." → "!", "?." → "?"
         if let regex = try? NSRegularExpression(pattern: "([!?])\\s*\\.", options: []) {
+            result = regex.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
+            )
+        }
+
+        // Remove comma after ! or ?: "!," → "!", "?," → "?"
+        if let regex = try? NSRegularExpression(pattern: "([!?])\\s*,", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
             )
