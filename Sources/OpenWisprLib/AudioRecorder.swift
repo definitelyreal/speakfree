@@ -100,14 +100,18 @@ class AudioRecorder {
 
     /// Reinstall the audio tap when the input device changes (e.g. AirPods connect/disconnect).
     private func startDeviceChangeMonitor() {
-        // AVAudioEngine notification — fires for most device changes
+        // AVAudioEngine notification — fires for most device changes.
+        // IMPORTANT: this fires while AVAudioEngine's internal engine queue holds
+        // its recursive_mutex during IOUnitConfigurationChanged(). Calling
+        // removeTap/stop synchronously here re-enters that lock → deadlock.
+        // Defer with a short delay to let the engine finish its internal reconfiguration.
         deviceChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: nil,
             queue: .main
         ) { [weak self] notification in
             guard let self = self else { return }
-            DiagnosticLogger.shared.log("AudioRecorder: audio configuration changed — reinstalling tap")
+            DiagnosticLogger.shared.log("AudioRecorder: audio configuration changed — scheduling tap reinstall")
 
             // Don't touch the engine during active recording — defer until recording stops
             if self.isRecording {
@@ -116,7 +120,13 @@ class AudioRecorder {
                 return
             }
 
-            self.reinstallTap()
+            // Delay 0.5s to let AVAudioEngine finish its internal reconfiguration
+            // before we tear down and rebuild. Without this, removeTap deadlocks
+            // on the engine's recursive_mutex (AVAudioEngineImpl::IOUnitConfigurationChanged).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self = self else { return }
+                self.reinstallTap()
+            }
         }
 
         // CoreAudio listener — catches Bluetooth handoffs (AirPods switching between
