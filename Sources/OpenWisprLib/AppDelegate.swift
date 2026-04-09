@@ -571,7 +571,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     // Instructions first (furthest from end = least style influence)
                     let mode = self.config.spokenPunctuation ?? .off
                     if mode == .spoken || mode == .hybrid {
-                        parts.append("Spoken punctuation: comma, period, question mark, exclamation mark, semicolon, colon, dash, hyphen, new line.")
+                        // Avoid commas in the instruction — whisper mimics prompt style,
+                        // and comma-heavy prompts cause comma spam in output.
+                        parts.append("Spoken punctuation: say the word \"period\" or \"comma\" or \"question mark\" to insert punctuation.")
                     }
                     if let vocab = Config.loadVocabulary() {
                         parts.append("Glossary: \(vocab).")
