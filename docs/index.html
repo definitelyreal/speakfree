@@ -388,9 +388,9 @@
     <p class="slogan">private speech to text &nbsp;•&nbsp; free and open source</p>
     <div class="cta-wrap">
       <div class="cta-row">
-        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.2.8.dmg">
+        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.2.9.dmg">
           ↓&nbsp; Download for Mac
-          <span class="btn-sub">v1.2.8 &nbsp;•&nbsp; Apple Silicon</span>
+          <span class="btn-sub">v1.2.9 &nbsp;•&nbsp; Apple Silicon</span>
         </a>
         <a class="btn btn-secondary" href="https://github.com/definitelyreal/speakfree">
           View on GitHub ↗
@@ -470,9 +470,16 @@
         <span class="arrow">▶</span> What's new in v1.2
       </button>
       <div class="changes-body open">
+        <h3>v1.2.9</h3>
+        <ul>
+          <li>Fix: comma spam caused by whisper mimicking comma-heavy prompt instruction</li>
+          <li>Fix: only Superhuman uses clipboard paste fallback — VS Code, Signal, Slack etc. now use direct text insertion again</li>
+          <li>Screen context moved to Advanced, marked experimental (can cause hallucinations), off by default</li>
+          <li>Microphone + Apple Events entitlements added to build (fixes silent recordings)</li>
+        </ul>
         <h3>v1.2.8</h3>
         <ul>
-          <li>Fix: AirPods connect/disconnect no longer deadlocks the audio engine — AVAudioEngineConfigurationChange now defers tap reinstall by 0.5s to let the engine finish its internal reconfiguration</li>
+          <li>Fix: AirPods connect/disconnect no longer deadlocks the audio engine</li>
         </ul>
         <h3>v1.2.7</h3>
         <ul>

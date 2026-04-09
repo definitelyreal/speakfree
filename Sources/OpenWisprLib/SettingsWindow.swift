@@ -639,7 +639,6 @@ struct SettingsView: View {
                 GroupBox("Vocabulary & Context") {
                     VStack(alignment: .leading, spacing: 14) {
                         correctionsRow
-                        screenContextRow
                         vocabularyStatusRow
                     }
                     .padding(.vertical, 6)
@@ -676,6 +675,8 @@ struct SettingsView: View {
                                 .font(.footnote)
                                 .foregroundColor(.secondary)
                         }
+
+                        screenContextRow
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
@@ -727,12 +728,6 @@ struct SettingsView: View {
         }
         .onChange(of: viewModel.punctuationMode) { _ in viewModel.save() }
         .onChange(of: viewModel.rememberWords) { _ in viewModel.save() }
-        .onChange(of: viewModel.screenContext) { newValue in
-            viewModel.save()
-            if newValue && !ScreenContext.hasPermission {
-                _ = ScreenContext.requestPermission()
-            }
-        }
         .onChange(of: viewModel.maxRecordings) { _ in viewModel.save() }
         .onChange(of: viewModel.preBuffer) { _ in viewModel.save() }
         .onChange(of: viewModel.keepModelLoaded) { _ in viewModel.save() }
@@ -989,10 +984,16 @@ struct SettingsView: View {
 
     private var screenContextRow: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Toggle("Use Screen Context", isOn: $viewModel.screenContext)
+            Toggle("Screen Context (Experimental)", isOn: $viewModel.screenContext)
                 .toggleStyle(.checkbox)
-            Text("Uses local OCR to read on-screen text, helping match names and terms.")
-                .font(.caption)
+                .onChange(of: viewModel.screenContext) { newValue in
+                    viewModel.save()
+                    if newValue && !ScreenContext.hasPermission {
+                        _ = ScreenContext.requestPermission()
+                    }
+                }
+            Text("Uses local OCR to read on-screen text as vocabulary hints. Can cause hallucinations \u{2014} whisper may generate text from screen content instead of transcribing speech.")
+                .font(.footnote)
                 .foregroundColor(.secondary)
         }
     }

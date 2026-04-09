@@ -162,22 +162,15 @@ class TextInserter {
         return remoteKeywords.contains(where: { lower.contains($0) })
     }
 
-    /// Electron apps that mangle CGEvent unicode key events.
-    /// These apps accept the events but produce garbled text (extra apostrophes, commas).
-    /// Use clipboard paste instead.
+    /// Check if the frontmost app mangles CGEvent unicode typing.
+    /// Only specific Electron apps have this issue (Superhuman garbles apostrophes/commas).
+    /// Most Electron apps (VS Code, Signal, Slack) handle CGEvent unicode fine.
     private func isElectronApp() -> Bool {
         guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.lowercased() else { return false }
-        let electronApps = [
-            "superhuman", "slack", "discord", "notion", "figma",
-            "linear", "obsidian", "spotify", "whatsapp",
-            "signal", "telegram", "microsoft.teams",
+        let brokenElectronApps = [
+            "superhuman",
         ]
-        // Also check if the app bundle contains Electron framework
-        if let path = NSWorkspace.shared.frontmostApplication?.bundleURL?.path,
-           FileManager.default.fileExists(atPath: path + "/Contents/Frameworks/Electron Framework.framework") {
-            return true
-        }
-        return electronApps.contains(where: { bundleID.contains($0) })
+        return brokenElectronApps.contains(where: { bundleID.contains($0) })
     }
 
     /// Insert text by simulating keyboard events with unicode characters.
