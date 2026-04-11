@@ -59,7 +59,12 @@ public struct TextPostProcessor {
     public static func process(_ text: String, hybrid: Bool = false) -> String {
         var result = text
 
-        // 1. Replace unambiguous spoken punctuation words (always safe)
+        // 1. Convert whisper's auto-commas before capitals to periods FIRST,
+        // before spoken punctuation replaces words like "comma" with literal commas.
+        // This way, user-intentional commas (from saying "comma") won't be overridden.
+        result = commaBeforeCapitalToPeriod(result)
+
+        // 2. Replace unambiguous spoken punctuation words (always safe)
         for (pattern, replacement) in alwaysReplace {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
             result = regex.stringByReplacingMatches(
@@ -110,10 +115,7 @@ public struct TextPostProcessor {
         // 7. Ensure space after punctuation before next word
         result = ensureSpaceAfterPunctuation(result)
 
-        // 8. Comma before capital letter → period (whisper uses commas at sentence boundaries)
-        result = commaBeforeCapitalToPeriod(result)
-
-        // 9. Capitalize first letter after sentence-ending punctuation (. ! ?)
+        // 8. Capitalize first letter after sentence-ending punctuation (. ! ?)
         result = capitalizeAfterSentenceEnd(result)
 
         return result
@@ -179,36 +181,13 @@ public struct TextPostProcessor {
     }
 
     /// Convert comma to period when followed by a capitalized word that signals
-    /// a new sentence. Only converts when the next word is a common sentence starter
-    /// (not "I", proper nouns, or words in lists).
+    /// In dictation, a comma before a capital letter is almost always a sentence break.
+    /// Convert all of them — the false positive rate ("Hello, Michael" → "Hello. Michael")
+    /// is far lower than the missed-conversion rate with a conservative whitelist.
     private static func commaBeforeCapitalToPeriod(_ text: String) -> String {
-        // Match comma + space + capitalized word + next word
-        guard let regex = try? NSRegularExpression(pattern: ",\\s+([A-Z][a-z]+)", options: []) else { return text }
+        guard let regex = try? NSRegularExpression(pattern: ",\\s+([A-Z])", options: []) else { return text }
         let mutable = NSMutableString(string: text)
-        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
-
-        // Words that ONLY appear at the start of a new sentence, never after a comma
-        // in normal speech. Removed "She", "He", "Her", "His", "It", "In", "And", "But"
-        // because they commonly follow commas: "Yeah, she said", "and then, he went"
-        let sentenceStarters: Set<String> = [
-            "There", "Then", "This", "That", "They", "The",
-            "So", "What", "When", "Where", "Which", "While", "Who", "Why",
-            "Also", "After", "Before",
-        ]
-
-        for match in matches.reversed() {
-            let wordRange = match.range(at: 1)
-            guard let swiftWordRange = Range(wordRange, in: text) else { continue }
-            let word = String(text[swiftWordRange])
-
-            // Only convert if the word is a known sentence starter
-            guard sentenceStarters.contains(word) else { continue }
-
-            let fullRange = match.range
-            guard let swiftRange = Range(fullRange, in: text) else { continue }
-            let replacement = ". " + String(text[swiftRange].dropFirst(2)) // drop ", "
-            mutable.replaceCharacters(in: fullRange, with: replacement)
-        }
+        regex.replaceMatches(in: mutable, range: NSRange(location: 0, length: mutable.length), withTemplate: ". $1")
         return mutable as String
     }
 

@@ -505,10 +505,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleRecordingStop() {
         guard isPressed else { return }
         isPressed = false
-        let stopTime = CFAbsoluteTimeGetCurrent()
 
         // Stop streaming timer and clear streaming state
         stopStreamingTimer()
+
+        // Keep recording for 300ms after key release to capture trailing audio.
+        // AVAudioEngine buffers audio in chunks — releasing fn mid-word loses
+        // the tail of the last buffer. This post-buffer ensures the last word
+        // isn't cut off.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.finalizeRecording()
+        }
+    }
+
+    private func finalizeRecording() {
+        let stopTime = CFAbsoluteTimeGetCurrent()
 
         guard let recording = recorder.stopRecording() else {
             RecordingStore.clearSentinel()
