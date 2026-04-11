@@ -7,15 +7,15 @@
     <language>en</language>
     <item>
       <title>speakfree v1.2.9</title>
-      <pubDate>Thu, 09 Apr 2026 09:29:23 +0000</pubDate>
+      <pubDate>Sat, 11 Apr 2026 20:48:32 +0000</pubDate>
       <sparkle:version>1.2.9</sparkle:version>
       <sparkle:shortVersionString>1.2.9</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
       <enclosure
         url="https://github.com/definitelyreal/speakfree/releases/download/v1.2.9/speakfree-1.2.9.dmg"
         type="application/octet-stream"
-        sparkle:edSignature="6813278"
-        length="6813278" />
+        sparkle:edSignature="4372920"
+        length="4372920" />
     </item>
   </channel>
 </rss>
