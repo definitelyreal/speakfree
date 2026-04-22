@@ -388,9 +388,9 @@
     <p class="slogan">private speech to text &nbsp;•&nbsp; free and open source</p>
     <div class="cta-wrap">
       <div class="cta-row">
-        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.2.9.dmg">
+        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.2.10.dmg">
           ↓&nbsp; Download for Mac
-          <span class="btn-sub">v1.2.9 &nbsp;•&nbsp; Apple Silicon</span>
+          <span class="btn-sub">v1.2.10 &nbsp;•&nbsp; Apple Silicon</span>
         </a>
         <a class="btn btn-secondary" href="https://github.com/definitelyreal/speakfree">
           View on GitHub ↗
@@ -470,6 +470,13 @@
         <span class="arrow">▶</span> What's new in v1.2
       </button>
       <div class="changes-body open">
+        <h3>v1.2.10</h3>
+        <ul>
+          <li>Fix: Google Docs in Chrome now gets text inserted via clipboard (Docs silently drops CGEvent unicode events)</li>
+          <li>Fix: Splashtop no longer pastes stale text — types characters directly via AppleScript keystroke, bypassing clipboard sync entirely</li>
+          <li>Fix: whisper comma spam collapsed in post-processing when 3+ consecutive single-word-commas appear ("I'll, try, to, make, it" → "I'll try to make it")</li>
+          <li>Fix: bundle script now always includes Sparkle.framework (previous builds sometimes missed it and crashed on launch)</li>
+        </ul>
         <h3>v1.2.9</h3>
         <ul>
           <li>Fix: comma spam caused by whisper mimicking comma-heavy prompt instruction</li>

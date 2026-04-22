@@ -100,7 +100,23 @@ class TextInserter {
     private func pasteText(_ text: String) {
         let frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
         let isRemote = isRemoteDesktopFrontmost()
-        DiagnosticLogger.shared.log("TextInserter: inserting \(text.count) chars into \(frontApp) (remoteDesktop=\(isRemote))")
+        let isBroken = isElectronApp()
+        DiagnosticLogger.shared.log("TextInserter: inserting \(text.count) chars into \(frontApp) (remoteDesktop=\(isRemote), brokenApp=\(isBroken))")
+
+        // Remote desktop: type via AppleScript keystroke (clipboard sync unreliable)
+        if isRemote {
+            DiagnosticLogger.shared.log("TextInserter: using AppleScript keystroke (remote desktop)")
+            typeViaAppleScript(text)
+            return
+        }
+
+        // Broken apps (Superhuman, Google Docs): AX "succeeds" but changes nothing,
+        // and CGEvent unicode gets mangled/dropped. Go straight to clipboard paste.
+        if isBroken {
+            DiagnosticLogger.shared.log("TextInserter: using clipboard paste (broken app)")
+            pasteViaClipboard(text)
+            return
+        }
 
         // Try direct AX text insertion first — no clipboard involvement
         if insertViaAccessibility(text) {
@@ -108,16 +124,39 @@ class TextInserter {
             return
         }
 
-        // Try typing via CGEvent unicode — works in SOME Electron apps.
-        // Skip for remote desktop apps and known Electron apps that mangle unicode events.
-        if !isRemote, !isElectronApp(), typeViaKeyEvents(text) {
+        // Try typing via CGEvent unicode — works in most apps
+        if typeViaKeyEvents(text) {
             DiagnosticLogger.shared.log("TextInserter: used CGEvent unicode typing")
             return
         }
 
         // Last resort: clipboard-based paste
-        DiagnosticLogger.shared.log("TextInserter: using clipboard paste (AppleScript=\(isRemote))")
+        DiagnosticLogger.shared.log("TextInserter: using clipboard paste (fallback)")
         pasteViaClipboard(text)
+    }
+
+    /// Type text into the frontmost app via AppleScript keystroke.
+    /// Used for remote desktop apps where clipboard sync is unreliable.
+    private func typeViaAppleScript(_ text: String) {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        let processName = app.localizedName ?? ""
+        // Escape double quotes and backslashes for AppleScript
+        let escaped = text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = NSAppleScript(source: """
+            tell application "System Events"
+                tell process "\(processName)"
+                    keystroke "\(escaped)"
+                end tell
+            end tell
+        """)
+        var error: NSDictionary?
+        script?.executeAndReturnError(&error)
+        if let error = error {
+            DiagnosticLogger.shared.log("TextInserter: AppleScript keystroke failed: \(error) — falling back to clipboard")
+            pasteViaClipboard(text)
+        }
     }
 
     /// Insert text directly via the Accessibility API. Returns true on success.
@@ -163,14 +202,54 @@ class TextInserter {
     }
 
     /// Check if the frontmost app mangles CGEvent unicode typing.
-    /// Only specific Electron apps have this issue (Superhuman garbles apostrophes/commas).
-    /// Most Electron apps (VS Code, Signal, Slack) handle CGEvent unicode fine.
+    /// Covers Superhuman (Electron apostrophe/comma garbling) and Google Docs editors
+    /// in any browser (custom contenteditable that ignores synthetic unicode events).
     private func isElectronApp() -> Bool {
         guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.lowercased() else { return false }
-        let brokenElectronApps = [
+        let brokenApps = [
             "superhuman",
         ]
-        return brokenElectronApps.contains(where: { bundleID.contains($0) })
+        if brokenApps.contains(where: { bundleID.contains($0) }) { return true }
+
+        // Browser-agnostic check: look at the frontmost window title via AX.
+        // Google Docs/Sheets/Slides set the page title to "<doc name> - Google Docs"
+        // (or Sheets/Slides), which appears in the browser's window title.
+        if isBrowser(bundleID: bundleID), let title = frontWindowTitle() {
+            let lower = title.lowercased()
+            if lower.contains("google docs") || lower.contains("google sheets") || lower.contains("google slides") {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /// Is this bundle ID a known browser? Covers Chromium forks, Safari, and Firefox.
+    private func isBrowser(bundleID: String) -> Bool {
+        let browsers = [
+            "com.google.chrome", "com.apple.safari", "org.mozilla.firefox",
+            "company.thebrowser.browser",  // Arc
+            "com.brave.browser", "com.microsoft.edgemac",
+            "com.operasoftware.opera", "com.vivaldi.vivaldi",
+            "com.microsoft.edgemac.dev", "com.microsoft.edgemac.beta",
+            "com.kagi.kagimacos",  // Orion
+        ]
+        return browsers.contains(where: { bundleID.contains($0) })
+    }
+
+    /// Get the title of the frontmost window via Accessibility API.
+    private func frontWindowTitle() -> String? {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
+        let appElement = AXUIElementCreateApplication(pid)
+        var windowRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
+              let windowElement = windowRef else { return nil }
+        // swiftlint:disable:next force_cast
+        let window = windowElement as! AXUIElement
+        var titleRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef) == .success,
+              let title = titleRef as? String else { return nil }
+        return title
     }
 
     /// Insert text by simulating keyboard events with unicode characters.
@@ -219,8 +298,10 @@ class TextInserter {
         simulatePaste()
 
         // Restore after a generous delay to let the target app consume the paste.
-        // Check changeCount before restoring — if user copied something new, don't overwrite it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+        // Remote desktop paste is delayed 400ms + needs clipboard sync to remote,
+        // so give it extra time before restoring.
+        let restoreDelay: Double = isRemoteDesktopFrontmost() ? 3.0 : 1.5
+        DispatchQueue.main.asyncAfter(deadline: .now() + restoreDelay) {
             // changeCount increments on every clipboard change. We set it once (clearContents + setString).
             // If it changed again since then, the user or another app wrote to the clipboard — don't restore.
             let expectedChangeCount = changeCountBeforePaste + 2  // clearContents + setString
@@ -266,19 +347,25 @@ class TextInserter {
         // machine. CGEvent.post sends through HID, so Cmd+V becomes a raw "V" keypress.
         // AppleScript keystroke routes through the app's NSEvent dispatch, where its
         // local Cmd+V handler triggers clipboard sync + paste on the remote side.
+        //
+        // Delay the Cmd+V by 400ms so the remote clipboard has time to sync from
+        // the local clipboard before the paste fires. Without this delay, Splashtop
+        // pastes the OLD clipboard content on the remote (sync hadn't completed yet).
         if isRemoteDesktopFrontmost(), let app = NSWorkspace.shared.frontmostApplication {
             let processName = app.localizedName ?? ""
-            let script = NSAppleScript(source: """
-                tell application "System Events"
-                    tell process "\(processName)"
-                        keystroke "v" using command down
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                let script = NSAppleScript(source: """
+                    tell application "System Events"
+                        tell process "\(processName)"
+                            keystroke "v" using command down
+                        end tell
                     end tell
-                end tell
-            """)
-            var error: NSDictionary?
-            script?.executeAndReturnError(&error)
-            if let error = error {
-                DiagnosticLogger.shared.log("TextInserter: AppleScript paste failed: \(error)")
+                """)
+                var error: NSDictionary?
+                script?.executeAndReturnError(&error)
+                if let error = error {
+                    DiagnosticLogger.shared.log("TextInserter: AppleScript paste failed: \(error)")
+                }
             }
             return
         }
