@@ -18,6 +18,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cp "$REPO_DIR/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 
+# Bundle Sparkle.framework (required at runtime — binary links against it)
+mkdir -p "$APP_DIR/Contents/Frameworks"
+SPARKLE_FW="$REPO_DIR/.build/arm64-apple-macosx/release/Sparkle.framework"
+if [ ! -d "$SPARKLE_FW" ]; then
+    SPARKLE_FW="$REPO_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+fi
+if [ -d "$SPARKLE_FW" ]; then
+    cp -a "$SPARKLE_FW" "$APP_DIR/Contents/Frameworks/"
+fi
+
 cat > "$APP_DIR/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

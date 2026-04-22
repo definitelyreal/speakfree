@@ -115,10 +115,39 @@ public struct TextPostProcessor {
         // 7. Ensure space after punctuation before next word
         result = ensureSpaceAfterPunctuation(result)
 
+        // 7.5. Collapse whisper's comma spam: runs of 3+ consecutive single-word-commas.
+        // Pathological pattern: "I'll, try, to, make, it" — whisper inserts commas at every
+        // speech pause. Real grammatical commas like "First, let me explain" have only ONE
+        // single-word-comma before a multi-word phrase, so they're safe.
+        result = collapseCommaSpam(result)
+
         // 8. Capitalize first letter after sentence-ending punctuation (. ! ?)
         result = capitalizeAfterSentenceEnd(result)
 
         return result
+    }
+
+    /// Find runs of 3+ consecutive "word, word, " patterns and strip the commas.
+    /// Whisper's comma-at-every-pause pattern. A run of 3+ means commas are noise;
+    /// 1-2 is normal English ("First, ..." / "apples, oranges").
+    private static func collapseCommaSpam(_ text: String) -> String {
+        // Word chars including apostrophe + hyphen (so "I'll", "don't", "wee-hours" all count as single words)
+        // Match a word, then 2+ repetitions of ", word", optionally one more ", word"
+        let pattern = #"\b[\w'-]+(?:,\s+[\w'-]+){2,}\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
+
+        let mutable = NSMutableString(string: text)
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+
+        // Process in reverse so ranges stay valid
+        for match in matches.reversed() {
+            guard let range = Range(match.range, in: text) else { continue }
+            let matched = String(text[range])
+            // Strip commas between words (but keep the words)
+            let fixed = matched.replacingOccurrences(of: ", ", with: " ")
+            mutable.replaceCharacters(in: match.range, with: fixed)
+        }
+        return mutable as String
     }
 
     // MARK: - Style Modes
