@@ -8,9 +8,12 @@ SIGN_ID="Developer ID Application: Michael Morgenstern (AZ53Y7V4UZ)"
 ENTITLEMENTS="$(dirname "$0")/speakfree.entitlements"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Find the real binary path
-WHISPER_BIN=$(python3 -c "import os; print(os.path.realpath('/opt/homebrew/bin/whisper-cli'))")
-WHISPER_LIB_DIR=$(dirname "$WHISPER_BIN")/../lib
+# Vendored whisper.cpp + ggml binaries. Pinning to a known-good version
+# (libwhisper 1.8.3 + ggml 0.9.5) avoids depending on transient brew state —
+# specifically, brew's whisper-cpp 1.8.4 is ABI-incompatible with current ggml
+# 0.10.0, so building against brew silently produces a binary that ggml_aborts
+# at model load. See scripts/vendor/dylibs/README.md.
+VENDOR_DIR="$(dirname "$0")/vendor/dylibs"
 
 echo "Building speakfree v${VERSION}..."
 swift build -c release
@@ -24,7 +27,7 @@ cp .build/release/speakfree "$APP/Contents/MacOS/speakfree"
 
 echo "Bundling whisper-cli..."
 mkdir -p "$APP/Contents/Frameworks"
-cp "$WHISPER_BIN" "$APP/Contents/MacOS/whisper-cli"
+cp "$VENDOR_DIR/whisper-cli" "$APP/Contents/MacOS/whisper-cli"
 
 echo "Bundling Sparkle.framework..."
 SPARKLE_FW=".build/arm64-apple-macosx/release/Sparkle.framework"
@@ -34,14 +37,17 @@ fi
 rm -rf "$APP/Contents/Frameworks/Sparkle.framework"
 cp -a "$SPARKLE_FW" "$APP/Contents/Frameworks/Sparkle.framework"
 
-# Copy real dylibs (not symlinks)
-for dylib in "$WHISPER_LIB_DIR"/*.dylib; do
-    if [ ! -L "$dylib" ]; then
-        cp "$dylib" "$APP/Contents/Frameworks/"
-    fi
+# Wipe stale dylibs (and any Dropbox conflicted-copy cruft) before bundling
+# the pinned set, so we never accidentally ship an old/incompatible version.
+find "$APP/Contents/Frameworks" -maxdepth 1 -type f -name '*.dylib' -delete
+find "$APP/Contents/Frameworks" -maxdepth 1 -type l -name '*.dylib' -delete
+
+# Bundle the pinned whisper.cpp + ggml dylibs from vendor.
+for dylib in "$VENDOR_DIR"/*.dylib; do
+    cp "$dylib" "$APP/Contents/Frameworks/"
 done
 
-# Create versioned symlinks so whisper-cli can find its dylibs by soname
+# Create versioned symlinks so whisper-cli + libwhisper can find their deps by soname
 for real_dylib in "$APP/Contents/Frameworks"/*.dylib; do
     basename=$(basename "$real_dylib")
     soname=$(echo "$basename" | sed 's/\([^0-9]*[0-9]*\)\.[0-9]*\.[0-9]*\.dylib$/\1.dylib/')
@@ -50,11 +56,22 @@ for real_dylib in "$APP/Contents/Frameworks"/*.dylib; do
     fi
 done
 
-# Fix rpaths so binaries find frameworks/dylibs inside the bundle
+# Fix rpaths so binaries find frameworks/dylibs inside the bundle.
+# (Use add_rpath in a guarded form: it errors if the rpath already exists.)
 install_name_tool -add_rpath "@executable_path/../Frameworks" \
     "$APP/Contents/MacOS/speakfree" 2>/dev/null || true
 install_name_tool -add_rpath "@executable_path/../Frameworks" \
     "$APP/Contents/MacOS/whisper-cli" 2>/dev/null || true
+
+# Re-point the speakfree binary's libwhisper reference to @rpath. Swift Package
+# Manager links it against the dylib's LC_ID_DYLIB (an absolute brew path), so
+# without this fixup the running binary loads brew's libwhisper at runtime
+# instead of the bundled one, defeating the whole pinning scheme.
+SPEAKFREE_BIN="$APP/Contents/MacOS/speakfree"
+ORIG_WHISPER_REF=$(otool -L "$SPEAKFREE_BIN" | awk '/libwhisper\.1\.dylib/ {print $1; exit}')
+if [ -n "$ORIG_WHISPER_REF" ] && [ "$ORIG_WHISPER_REF" != "@rpath/libwhisper.1.dylib" ]; then
+    install_name_tool -change "$ORIG_WHISPER_REF" "@rpath/libwhisper.1.dylib" "$SPEAKFREE_BIN"
+fi
 
 echo "Signing..."
 xattr -cr "$APP"

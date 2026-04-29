@@ -607,6 +607,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     return parts.isEmpty ? nil : parts.joined(separator: " ")
                 }()
                 let raw = try self.transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
+                RecordingStore.saveRaw(text: raw, for: audioURL)
                 let mode = self.config.spokenPunctuation ?? .off
                 var text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
                 // Apply per-app style (e.g. strip trailing period for messaging apps)

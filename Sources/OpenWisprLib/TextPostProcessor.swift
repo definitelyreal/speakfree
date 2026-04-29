@@ -29,15 +29,19 @@ public struct TextPostProcessor {
     // "period of time", "colon cancer", "dash of salt"). Only replace when whisper
     // signaled a break before the word (preceded by punctuation), indicating the speaker
     // paused — meaning they intended a punctuation command, not a regular word.
+    // The trailing `(?:[.,!?;:]|(?=\\s|$))` *consumes* a trailing punctuation char
+    // when there is one, so that whisper's auto-punct adjacent to the user's spoken
+    // word ("comma?" / "period.") does not survive into the cleanup steps and override
+    // the user's stated intent. Spoken-word substitution always wins over auto-punct.
     private static var contextReplace: [(pattern: String, replacement: String)] {[
         // Require punctuation immediately before (after optional whitespace):
         // "hello, comma how" → replace ("," before "comma" = whisper saw a break)
         // "comma separating" → skip (no punctuation before = regular word)
-        ("(?<=[.,!?;:])\\s*(?:[ck]omma|kana|kanna)\(we)", ","),
-        ("(?<=[.,!?;:])\\s*period\(we)", "."),
-        ("(?<=[.,!?;:])\\s*colon\(we)", ":"),
-        ("(?<=[.,!?;:])\\s*dash\(we)", " —"),
-        ("(?<=[.,!?;:])\\s*hyphen\(we)", "-"),
+        ("(?<=[.,!?;:])\\s*(?:[ck]omma|kana|kanna)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("(?<=[.,!?;:])\\s*period(?:[.,!?;:]|(?=\\s|$))", "."),
+        ("(?<=[.,!?;:])\\s*colon(?:[.,!?;:]|(?=\\s|$))", ":"),
+        ("(?<=[.,!?;:])\\s*dash(?:[.,!?;:]|(?=\\s|$))", " —"),
+        ("(?<=[.,!?;:])\\s*hyphen(?:[.,!?;:]|(?=\\s|$))", "-"),
     ]}
 
     // Ellipsis support removed — whisper generates "..." from pauses, causing false positives.
@@ -59,7 +63,19 @@ public struct TextPostProcessor {
     public static func process(_ text: String, hybrid: Bool = false) -> String {
         var result = text
 
-        // 1. Convert whisper's auto-commas before capitals to periods FIRST,
+        // 0.5. Collapse whisper's comma spam FIRST. If we let comma→period run first,
+        // any capitalized word inside the spam ("I'd", "Claude") becomes a sentence
+        // break, leaving "Hey hey. I'd. Claude do some research..." instead of
+        // "Hey hey I'd Claude do some research...". Detect the run before reinterpreting
+        // individual commas.
+        result = collapseCommaSpam(result)
+
+        // 0.6. Trailing comma → period for whisper-trailing-off cases. Run BEFORE
+        // spoken punctuation substitution so a user-said "comma" at the end of an
+        // utterance (which becomes "," after substitution) is not undone.
+        result = trailingCommaToPeriod(result)
+
+        // 1. Convert whisper's auto-commas before capitals to periods,
         // before spoken punctuation replaces words like "comma" with literal commas.
         // This way, user-intentional commas (from saying "comma") won't be overridden.
         result = commaBeforeCapitalToPeriod(result)
@@ -92,15 +108,20 @@ public struct TextPostProcessor {
             result = convertStandaloneAmbiguous(result)
         }
 
-        // 3. Strip all multi-dot sequences and unicode ellipsis (whisper pause artifacts)
-        if let dotsRegex = try? NSRegularExpression(pattern: "\\.{2,}", options: []) {
+        // 3. Collapse exactly-two-dots (from substitution duplicates) to a single dot.
+        // The lookbehind+lookahead together ensure we don't touch any pair that's part
+        // of a 3+ dot ellipsis run ("So... You"). Strip unicode ellipsis (whisper
+        // occasionally emits it).
+        if let dotsRegex = try? NSRegularExpression(pattern: "(?<!\\.)\\.\\.(?!\\.)", options: []) {
             result = dotsRegex.stringByReplacingMatches(
-                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
+                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: ".")
         }
         result = result.replacingOccurrences(of: "\u{2026}", with: "")
 
-        // 4. Collapse space-separated same-type punctuation BEFORE fixSpacing
-        if let regex = try? NSRegularExpression(pattern: "([.,!?;:])(?:\\s*\\1)+", options: []) {
+        // 4. Collapse space-separated same-type punctuation BEFORE fixSpacing.
+        // Excludes "." so 3+ dot ellipses ("So...") survive — double-dots from
+        // substitution duplicates are already handled by the dot-collapse above.
+        if let regex = try? NSRegularExpression(pattern: "([,!?;:])(?:\\s*\\1)+", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
             )
@@ -115,25 +136,36 @@ public struct TextPostProcessor {
         // 7. Ensure space after punctuation before next word
         result = ensureSpaceAfterPunctuation(result)
 
-        // 7.5. Collapse whisper's comma spam: runs of 3+ consecutive single-word-commas.
-        // Pathological pattern: "I'll, try, to, make, it" — whisper inserts commas at every
-        // speech pause. Real grammatical commas like "First, let me explain" have only ONE
-        // single-word-comma before a multi-word phrase, so they're safe.
-        result = collapseCommaSpam(result)
-
         // 8. Capitalize first letter after sentence-ending punctuation (. ! ?)
         result = capitalizeAfterSentenceEnd(result)
 
         return result
     }
 
-    /// Find runs of 3+ consecutive "word, word, " patterns and strip the commas.
-    /// Whisper's comma-at-every-pause pattern. A run of 3+ means commas are noise;
-    /// 1-2 is normal English ("First, ..." / "apples, oranges").
+    /// Replace a trailing comma (ignoring trailing whitespace) with a period.
+    /// "Hello there," → "Hello there." / "Done, " → "Done. "
+    private static func trailingCommaToPeriod(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasSuffix(",") else { return text }
+        // Find the last comma in the original text and swap it for a period,
+        // preserving any trailing whitespace exactly.
+        guard let lastComma = text.lastIndex(of: ",") else { return text }
+        // Confirm that everything after the comma is whitespace (so it really is trailing).
+        let afterComma = text[text.index(after: lastComma)...]
+        guard afterComma.allSatisfy({ $0.isWhitespace }) else { return text }
+        return text.replacingCharacters(in: lastComma...lastComma, with: ".")
+    }
+
+    /// Find runs of 5+ consecutive "word, word, " patterns and strip the commas.
+    /// Whisper's comma-at-every-pause pattern. A run of 5+ means commas are noise;
+    /// 1-4 is normal English ("First, ..." / "Okay, yeah, I think you can ..." /
+    /// "apples, oranges, bananas, and pears"). Threshold tuned from real failures
+    /// where 3-rep collapse ate legitimate speech-pause commas at the start of
+    /// thoughts ("Okay, yeah, I think").
     private static func collapseCommaSpam(_ text: String) -> String {
         // Word chars including apostrophe + hyphen (so "I'll", "don't", "wee-hours" all count as single words)
-        // Match a word, then 2+ repetitions of ", word", optionally one more ", word"
-        let pattern = #"\b[\w'-]+(?:,\s+[\w'-]+){2,}\b"#
+        // Match a word, then 4+ repetitions of ", word"
+        let pattern = #"\b[\w'-]+(?:,\s+[\w'-]+){4,}\b"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
 
         let mutable = NSMutableString(string: text)
@@ -209,14 +241,24 @@ public struct TextPostProcessor {
         return result
     }
 
-    /// Convert comma to period when followed by a capitalized word that signals
-    /// In dictation, a comma before a capital letter is almost always a sentence break.
-    /// Convert all of them — the false positive rate ("Hello, Michael" → "Hello. Michael")
-    /// is far lower than the missed-conversion rate with a conservative whitelist.
+    /// Convert comma+capital → period+capital. Whisper sometimes punctuates sentence
+    /// breaks with comma instead of period.
+    /// Skip the standalone pronoun "I": "It's crazy, I don't understand" is almost
+    /// always one comma-clause, not two sentences. (If you do want a sentence break
+    /// before "I", use the period spoken word.)
     private static func commaBeforeCapitalToPeriod(_ text: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: ",\\s+([A-Z])", options: []) else { return text }
+        // Match ", " + capital, but skip standalone "I" (followed by space, apostrophe,
+        // or end of string). Other capitals stay aggressive.
+        guard let regex = try? NSRegularExpression(
+            pattern: ",\\s+(I(?=\\s|'|$)|[A-HJ-Z])",
+            options: []) else { return text }
         let mutable = NSMutableString(string: text)
-        regex.replaceMatches(in: mutable, range: NSRange(location: 0, length: mutable.length), withTemplate: ". $1")
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        for match in matches.reversed() {
+            let captured = (text as NSString).substring(with: match.range(at: 1))
+            if captured == "I" { continue } // skip ", I" — see comment above
+            mutable.replaceCharacters(in: match.range, with: ". \(captured)")
+        }
         return mutable as String
     }
 
@@ -268,7 +310,17 @@ public struct TextPostProcessor {
                 let nextWord = String(afterMatch.prefix(while: { $0.isLetter })).lowercased()
                 if skipBefore.contains(nextWord) { continue }
 
-                result.replaceSubrange(range, with: replacement)
+                // If the next non-space character is whisper auto-punct, consume it —
+                // user's spoken word wins ("comma." → "," not ",.", "period?" → "." not ".?").
+                let trailing = result[range.upperBound...]
+                let punctSet: Set<Character> = [".", ",", "!", "?", ";", ":"]
+                if let firstNonWS = trailing.first(where: { !$0.isWhitespace }), punctSet.contains(firstNonWS) {
+                    let endIdx = trailing.firstIndex(of: firstNonWS)!
+                    let extendedRange = range.lowerBound..<result.index(after: endIdx)
+                    result.replaceSubrange(extendedRange, with: replacement)
+                } else {
+                    result.replaceSubrange(range, with: replacement)
+                }
             }
         }
         return result
@@ -296,8 +348,10 @@ public struct TextPostProcessor {
             )
         }
 
-        // Remove period before ! or ? or ellipsis: ".!" → "!"
-        if let regex = try? NSRegularExpression(pattern: "\\.\\s*([!?...])", options: []) {
+        // Remove period before ! or ?: ".!" → "!". Excludes "." in the character
+        // class so 3+ dot ellipses ("So...") survive — sentence-end punct trumps
+        // period, but a period inside an ellipsis isn't a "weaker" sentence-ender.
+        if let regex = try? NSRegularExpression(pattern: "\\.\\s*([!?])", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
             )

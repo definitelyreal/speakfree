@@ -1,0 +1,133 @@
+[
+  {
+    "name": "comma-before-capital-sentence-boundary",
+    "note": "Whisper auto-punctuates sentence boundaries with comma+capital. Should become period.",
+    "mode": "hybrid",
+    "input": "I went to the store, We had fun",
+    "expected": "I went to the store. We had fun"
+  },
+  {
+    "name": "comma-spam-five-words",
+    "note": "Whisper inserts comma at every speech pause. Run of 3+ consecutive comma-words should collapse.",
+    "mode": "hybrid",
+    "input": "I'll, try, to, make, it",
+    "expected": "I'll try to make it"
+  },
+  {
+    "name": "comma-spam-with-multiword-tail",
+    "note": "From a real reported bug: long comma-spam with mixed multi-word phrases.",
+    "mode": "hybrid",
+    "input": "Hey hey, I'd, Claude, do, some, research, for, mocks",
+    "expected": "Hey hey I'd Claude do some research for mocks"
+  },
+  {
+    "name": "trailing-comma-becomes-period",
+    "note": "Whisper sometimes ends an utterance with comma instead of period when speaker trails off.",
+    "mode": "hybrid",
+    "input": "Hello there,",
+    "expected": "Hello there."
+  },
+  {
+    "name": "trailing-comma-with-space",
+    "note": "Trailing comma followed by whitespace should still become a period.",
+    "mode": "hybrid",
+    "input": "Done, ",
+    "expected": "Done. "
+  },
+  {
+    "name": "legit-comma-lowercase-stays",
+    "note": "Comma followed by lowercase is a real comma — don't touch.",
+    "mode": "hybrid",
+    "input": "She said hello, but he didn't answer",
+    "expected": "She said hello, but he didn't answer"
+  },
+  {
+    "name": "spoken-comma-after-punct-hybrid",
+    "note": "Hybrid mode: 'comma' word becomes ',' only when whisper signaled a break.",
+    "mode": "hybrid",
+    "input": "first, comma second",
+    "expected": "first, second"
+  },
+  {
+    "name": "spoken-period-word",
+    "note": "Saying 'period' should produce '.'",
+    "mode": "hybrid",
+    "input": "All done period",
+    "expected": "All done."
+  },
+  {
+    "name": "spoken-question-mark",
+    "mode": "hybrid",
+    "input": "Are you sure question mark",
+    "expected": "Are you sure?"
+  },
+  {
+    "name": "known-limitation-comma-before-name",
+    "note": "Aggressive comma→period rule converts 'Hello, Michael' to 'Hello. Michael' (false positive). Documented tradeoff per v1.2.10 design choice.",
+    "mode": "hybrid",
+    "input": "Hello, Michael",
+    "expected": "Hello. Michael"
+  },
+  {
+    "name": "abbreviation-period-stays",
+    "note": "Sanity: existing periods in abbreviations should not be disturbed.",
+    "mode": "hybrid",
+    "input": "Mr. Smith went home",
+    "expected": "Mr. Smith went home"
+  },
+  {
+    "name": "empty-string",
+    "mode": "hybrid",
+    "input": "",
+    "expected": ""
+  },
+  {
+    "name": "off-mode-passthrough",
+    "note": "When mode is off, post-processor should not run.",
+    "mode": "off",
+    "input": "Hello, world,",
+    "expected": "Hello, world,"
+  },
+  {
+    "name": "real-spoken-period-mid-and-end-2026-04-29",
+    "note": "Live capture: user said 'period' twice. Whisper added period after first 'period' word and a comma+'period' at the end. Both should resolve to period punctuation. Source: recording-2026-04-29-022153-E729F4B7.",
+    "mode": "hybrid",
+    "input": "This is a very exciting time period. I think we're going to be seeing some nice things, period.",
+    "expected": "This is a very exciting time. I think we're going to be seeing some nice things."
+  },
+  {
+    "name": "real-spoken-comma-end-of-question-2026-04-29",
+    "note": "Live capture: user said 'comma' at end of a question. Whisper auto-added '?' due to intonation, plus a literal comma before the spoken word. Spoken comma should win over whisper's question mark. Source: recording-2026-04-29-022202-A2497241.",
+    "mode": "hybrid",
+    "input": "What are you saying, comma?",
+    "expected": "What are you saying,"
+  },
+  {
+    "name": "real-spoken-comma-as-trailing-2026-04-29",
+    "note": "Live capture: user explicitly said 'comma' at end of utterance. Trailing comma should be preserved (NOT converted to period by trailingCommaToPeriod rule). Source: recording-2026-04-29-022224-3363E1E4.",
+    "mode": "hybrid",
+    "input": "Another thing is that sometimes we do want commas at the end because I might be in the middle of a sentence and end with a comma.",
+    "expected": "Another thing is that sometimes we do want commas at the end because I might be in the middle of a sentence and end with a,"
+  },
+  {
+    "name": "real-leading-commas-spam-false-positive-2026-04-29",
+    "note": "Live capture: collapseCommaSpam fired on 'Okay, yeah, I think' (3 word-comma reps). Fixed by raising threshold to 5+ reps so leading speech-pause commas are preserved. (Note: Michael originally wanted an additional comma between 'think' and 'you' but that's beyond rule capability — whisper didn't put one in the raw input. Expected codified to what rules CAN achieve.) Source: recording-2026-04-29-024257-299F978D.",
+    "mode": "hybrid",
+    "input": "Okay, yeah, I think you can also just use the stems Alex delivered plus the conversation that Alex and we had on the cues sheet, comma, Alex is blue and I'm red.",
+    "expected": "Okay, yeah, I think you can also just use the stems Alex delivered plus the conversation that Alex and we had on the cues sheet, Alex is blue and I'm red."
+  },
+  {
+    "name": "real-multi-spoken-period-eaten-2026-04-29",
+    "note": "Live capture: user said 'period' three times mid-utterance. Each ', period.' collapsed to just ',' — both the spoken 'period' and the whisper auto-period got dropped, leaving the wrong comma. Each 'period' should produce '.'. Source: recording-2026-04-29-024401-1D17F289.",
+    "mode": "hybrid",
+    "input": "What happened was, \"composer 1\" would finish and then give everything to the next person, period. Then that person would either build on top or modify, period. Sometimes we were telling the original composer to not include a stem, comma, sometimes the second composer modified, or sometimes they just got added together, period. So... You could also do a compare per stem for further ambiguity. I think this is definitely the direction to go.",
+    "expected": "What happened was, \"composer 1\" would finish and then give everything to the next person. Then that person would either build on top or modify. Sometimes we were telling the original composer to not include a stem, sometimes the second composer modified, or sometimes they just got added together. So... You could also do a compare per stem for further ambiguity. I think this is definitely the direction to go."
+  },
+  {
+    "name": "real-comma-before-capital-I-stays-2026-04-29",
+    "note": "Live capture: aggressive commaBeforeCapital rule fired on 'crazy, I don't', producing 'crazy. I don't'. User wants the comma kept — it's a natural speech-pause comma joining one thought, not a sentence break. Tightening the rule must not regress the cases where comma+capital IS a sentence boundary (see real-spoken-period-mid-and-end-2026-04-29 etc.). Source: recording-2026-04-29-025512-941B2366.",
+    "mode": "hybrid",
+    "input": "It's crazy, I don't understand why there aren't AI models that can make one microphone sound like another or off-axis sound like on.",
+    "expected": "It's crazy, I don't understand why there aren't AI models that can make one microphone sound like another or off-axis sound like on."
+  }
+]

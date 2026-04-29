@@ -79,8 +79,19 @@ public class RecordingStore {
         try? text.write(to: sidecar, atomically: true, encoding: .utf8)
     }
 
+    /// Save raw whisper output before any post-processing, as `<audio>.raw.txt`.
+    /// Pairs with `.txt` (post-processed) to form a regression corpus for the post-processor.
+    public static func saveRaw(text: String, for audioURL: URL) {
+        let sidecar = audioURL.deletingPathExtension().appendingPathExtension("raw.txt")
+        try? text.write(to: sidecar, atomically: true, encoding: .utf8)
+    }
+
     private static func sidecarURL(for audioURL: URL) -> URL {
         audioURL.deletingPathExtension().appendingPathExtension("txt")
+    }
+
+    private static func rawSidecarURL(for audioURL: URL) -> URL {
+        audioURL.deletingPathExtension().appendingPathExtension("raw.txt")
     }
 
     // MARK: - Listing and pruning
@@ -115,6 +126,7 @@ public class RecordingStore {
             do {
                 try FileManager.default.removeItem(at: recording.url)
                 try? FileManager.default.removeItem(at: sidecarURL(for: recording.url))
+                try? FileManager.default.removeItem(at: rawSidecarURL(for: recording.url))
             } catch {
                 fputs("Warning: could not remove old recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
             }
@@ -126,6 +138,7 @@ public class RecordingStore {
             do {
                 try FileManager.default.removeItem(at: recording.url)
                 try? FileManager.default.removeItem(at: sidecarURL(for: recording.url))
+                try? FileManager.default.removeItem(at: rawSidecarURL(for: recording.url))
             } catch {
                 fputs("Warning: could not remove recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
             }
