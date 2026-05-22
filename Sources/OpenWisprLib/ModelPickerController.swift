@@ -8,7 +8,7 @@ class ModelPickerController: NSWindowController {
     private var progressBar: NSProgressIndicator!
     private var downloadButton: NSButton!
     private var radioButtons: [NSButton] = []
-    private let modelIDs = ["tiny.en", "base.en", "small.en", "medium.en", "large"]
+    private let modelIDs = ["tiny.en", "base.en", "small.en", "medium.en", "large-v3-turbo", "large"]
 
     static func show(onComplete: @escaping (String) -> Void) {
         let controller = ModelPickerController()
@@ -45,6 +45,7 @@ class ModelPickerController: NSWindowController {
             ("base.en",   "base.en  — 142 MB",     "Recommended — fast and accurate"),
             ("small.en",  "small.en  — 466 MB",    "More accurate, slightly slower"),
             ("medium.en", "medium.en — 1.5 GB",    "High accuracy"),
+            ("large-v3-turbo", "large-v3-turbo — 1.6 GB", "Best accuracy, fast (recommended, M1 Pro+)"),
             ("large",     "large       — 3 GB",    "Best accuracy (M1 Pro+ recommended)"),
         ]
 

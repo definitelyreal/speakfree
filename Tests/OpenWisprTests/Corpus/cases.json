@@ -129,5 +129,26 @@
     "mode": "hybrid",
     "input": "It's crazy, I don't understand why there aren't AI models that can make one microphone sound like another or off-axis sound like on.",
     "expected": "It's crazy, I don't understand why there aren't AI models that can make one microphone sound like another or off-axis sound like on."
+  },
+  {
+    "name": "real-literal-comma-word-not-converted-2026-05-21",
+    "note": "FALSE POSITIVE (the 'disaster'): user referenced the WORD 'comma' as a noun ('the comma issue'); convertStandaloneAmbiguous wrongly converted it to ',' producing 'the, issue'. Preceding-article guard ('the'/'a'/'an') now skips it. Source: recording-2026-05-21-190015-61C5CFC2.",
+    "mode": "hybrid",
+    "input": "I want you looking not at just the comma issue, but all the other issues that we might have.",
+    "expected": "I want you looking not at just the comma issue, but all the other issues that we might have."
+  },
+  {
+    "name": "real-number-decimal-not-split-2026-05-21",
+    "note": "ensureSpaceAfterPunctuation split the decimal '4.30' into '4. 30'. Lookbehind (?<!\\d) now leaves digit-flanked periods/commas intact. Source: recording-2026-05-21-164007-C4411897.",
+    "mode": "hybrid",
+    "input": "I may need to do it at 4.30, would that be alright?",
+    "expected": "I may need to do it at 4.30, would that be alright?"
+  },
+  {
+    "name": "real-ellipsis-no-capitalize-2026-05-21",
+    "note": "capitalizeAfterSentenceEnd capitalized the word after an ellipsis ('could... do' -> 'could... Do'). Lookbehind (?<!\\.) now skips the trailing dot of '...'. Source: recording-2026-05-21-163804-7A812263.",
+    "mode": "hybrid",
+    "input": "Is that what you could... do together",
+    "expected": "Is that what you could... do together"
   }
 ]

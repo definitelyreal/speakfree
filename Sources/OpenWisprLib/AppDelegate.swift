@@ -82,7 +82,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        let maxRecordings = Config.effectiveMaxRecordings(config.maxRecordings)
+        let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         if maxRecordings > 0 {
             RecordingStore.prune(maxCount: maxRecordings)
         }
@@ -571,7 +571,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Use whisperSerialQueue to ensure any in-flight streaming inference finishes first
         whisperSerialQueue.async { [weak self] in
             guard let self = self else { return }
-            let maxRecordings = Config.effectiveMaxRecordings(self.config.maxRecordings)
+            let maxRecordings = (self.config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(self.config.maxRecordings)
             do {
                 // Build Whisper prompt. Only the final 224 tokens (~800 chars) matter.
                 // Whisper mimics the style of whatever ENDS the prompt, so put the
@@ -600,9 +600,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             parts.append("Context words: \(words).")
                         }
                     }
-                    // User's text LAST — whisper will match this style
+                    // Cursor context: extract words-only as vocab hints — do NOT pass raw
+                    // text. Whisper mimics the punctuation style of whatever ENDS the prompt,
+                    // so feeding raw surrounding text (which is often comma/apostrophe-heavy,
+                    // e.g. a prior degraded dictation) makes whisper amplify commas and
+                    // apostrophes — a self-reinforcing spiral. Mirror the screen-context path
+                    // above. (Sentence-position / formality belongs in the post-pass reasoner,
+                    // not in whisper's prompt — whisper parrots style, it doesn't reason.)
                     if let input = capturedInputText {
-                        parts.append(input)
+                        let words = Set(input.components(separatedBy: .whitespacesAndNewlines)
+                            .filter { $0.count > 3 })
+                            .prefix(20)
+                            .joined(separator: " ")
+                        if !words.isEmpty {
+                            parts.append("Context words: \(words).")
+                        }
                     }
                     return parts.isEmpty ? nil : parts.joined(separator: " ")
                 }()

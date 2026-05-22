@@ -10,13 +10,19 @@ public struct Config: Codable {
     public var toggleMode: FlexBool?
     public var screenContext: FlexBool?
     public var rememberWords: FlexBool?
+    // Hidden dev/power-user escape hatch — NOT exposed in Settings UI. When true, recordings
+    // are never pruned (for corpus collection). Only settable by editing config.json directly.
+    // Shipped default is OFF so production builds always prune to defaultMaxRecordings.
+    public var preserveAllRecordings: FlexBool?
     public var preBuffer: FlexBool?  // nil = default (on)
     public var keepModelLoaded: String?  // "auto", "always", "off" — nil = "auto"
     public var diagnosticLogging: FlexBool?  // nil = default (off for production, on for beta)
     public var streamingEnabled: FlexBool?  // nil = default (true) — show live preview while recording
     public var languageModels: [String: String]?  // e.g. ["en": "small.en", "auto": "small"]
 
-    public static let defaultMaxRecordings = 0
+    // Sane shipped default — production builds always cap retained recordings.
+    // (Was 0 = keep-everything-forever, which caused unbounded disk growth.)
+    public static let defaultMaxRecordings = 30
 
     public static func effectiveMaxRecordings(_ value: Int?) -> Int {
         let raw = value ?? Config.defaultMaxRecordings

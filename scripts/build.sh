@@ -110,7 +110,17 @@ SPARKLE_BIN="/opt/homebrew/Caskroom/sparkle/2.9.0/bin"
 APPCAST="docs/appcast.xml"
 DOWNLOAD_URL="https://github.com/definitelyreal/speakfree/releases/download/v${VERSION}/${DMG}"
 DMG_SIZE=$(stat -f%z "$DMG")
-SIGNATURE=$("$SPARKLE_BIN/sign_update" "$DMG" 2>/dev/null | grep "sparkle:edSignature" | sed 's/.*"\(.*\)".*/\1/')
+# Extract ONLY the edSignature value. The previous greedy sed (s/.*"\(.*\)".*/\1/)
+# matched through to the LAST quote and captured length="...", shipping the file
+# length as the "signature" — which Sparkle rejects, silently breaking auto-update
+# for everyone since launch. Anchor on edSignature="..." specifically.
+SIGNATURE=$("$SPARKLE_BIN/sign_update" "$DMG" 2>/dev/null | sed -E 's/.*edSignature="([^"]*)".*/\1/')
+# Guard: a real EdDSA signature is base64 (~86 chars), never all-digits. Fail the
+# release rather than ship a broken appcast again.
+if [[ -z "$SIGNATURE" || "$SIGNATURE" =~ ^[0-9]+$ || ${#SIGNATURE} -lt 40 ]]; then
+    echo "FATAL: extracted Sparkle signature looks invalid ('$SIGNATURE'). Aborting release." >&2
+    exit 1
+fi
 PUB_DATE=$(date -u "+%a, %d %b %Y %H:%M:%S %z")
 
 # Build new appcast with this release at the top

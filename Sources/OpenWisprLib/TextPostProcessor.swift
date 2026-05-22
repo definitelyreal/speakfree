@@ -265,7 +265,9 @@ public struct TextPostProcessor {
     /// Capitalize the first letter after sentence-ending punctuation.
     /// "hello. would love" → "hello. Would love"
     private static func capitalizeAfterSentenceEnd(_ text: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: "([.!?])\\s+(\\w)", options: []) else { return text }
+        // Lookbehind (?<!\.) skips the trailing dot of an ellipsis ("..."), so
+        // "could... do" stays lowercase instead of becoming "could... Do".
+        guard let regex = try? NSRegularExpression(pattern: "(?<!\\.)([.!?])\\s+(\\w)", options: []) else { return text }
         let mutable = NSMutableString(string: text)
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
         // Process in reverse so ranges stay valid
@@ -284,7 +286,7 @@ public struct TextPostProcessor {
     private static func convertStandaloneAmbiguous(_ text: String) -> String {
         var result = text
         let ambiguousWords: [(word: String, replacement: String, skipBefore: Set<String>)] = [
-            ("comma", ",", ["separated", "delimited", "splice", "operator"]),
+            ("comma", ",", ["separated", "delimited", "splice", "operator", "issue", "issues", "problem", "problems", "key", "question", "thing", "things", "usage", "placement", "rule", "rules", "character"]),
             ("komma", ",", []),
             ("kana", ",", []),
             ("kanna", ",", []),
@@ -383,7 +385,9 @@ public struct TextPostProcessor {
 
     private static func ensureSpaceAfterPunctuation(_ text: String) -> String {
         var result = text
-        guard let regex = try? NSRegularExpression(pattern: "([.,?!:;])(\\w)", options: []) else { return result }
+        // (?<!\d) skips a period/comma sitting between digits ("4.30", "30,000") so
+        // decimals and thousands separators aren't split into "4. 30".
+        guard let regex = try? NSRegularExpression(pattern: "(?<!\\d)([.,?!:;])(\\w)", options: []) else { return result }
         result = regex.stringByReplacingMatches(
             in: result,
             range: NSRange(result.startIndex..., in: result),
