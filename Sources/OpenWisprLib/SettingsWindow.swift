@@ -99,7 +99,7 @@ private func availableModels(language: String) -> [ModelInfo] {
     let ramGB = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
 
     let recommendedBase: String
-    if ramGB >= 32 { recommendedBase = "medium" }
+    if ramGB >= 16 { recommendedBase = "turbo" }
     else if ramGB > 8 { recommendedBase = "small" }
     else { recommendedBase = "base" }
 
@@ -116,6 +116,7 @@ private func availableModels(language: String) -> [ModelInfo] {
         RawModel(enId: "base.en",   multiId: "base",   base: "base",   memory: "~330 MB", speed: "~0.3s"),
         RawModel(enId: "small.en",  multiId: "small",  base: "small",  memory: "~800 MB", speed: "~0.5s"),
         RawModel(enId: "medium.en", multiId: "medium",  base: "medium", memory: "~2.1 GB", speed: "~1.0s"),
+        RawModel(enId: "large-v3-turbo", multiId: "large-v3-turbo", base: "turbo", memory: "~1.6 GB", speed: "~1.1s"),
         RawModel(enId: "large-v3",  multiId: "large-v3", base: "large", memory: "~3.9 GB", speed: "~2.0s"),
     ]
 
@@ -132,8 +133,9 @@ private func availableModels(language: String) -> [ModelInfo] {
 
 // MARK: - Max Recordings Options
 
+// No "Off"/unlimited option — production always prunes. The keep-everything escape
+// hatch is the hidden `preserveAllRecordings` config key (edit config.json directly).
 private let maxRecordingsOptions: [(label: String, value: Int)] = [
-    ("Off", 0),
     ("10", 10),
     ("20", 20),
     ("30", 30),

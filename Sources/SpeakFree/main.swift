@@ -27,7 +27,7 @@ func printUsage() {
         speakfree set-hotkey ctrl+space         Ctrl + Space
 
     AVAILABLE MODELS:
-        tiny.en, tiny, base.en, base, small.en, small, medium.en, medium, large
+        tiny.en, tiny, base.en, base, small.en, small, medium.en, medium, large-v3-turbo, large
     """)
 }
 
@@ -67,7 +67,7 @@ func cmdSetHotkey(_ keyString: String) {
 }
 
 func cmdSetModel(_ size: String) {
-    let validSizes = ["tiny.en", "tiny", "base.en", "base", "small.en", "small", "medium.en", "medium", "large"]
+    let validSizes = ["tiny.en", "tiny", "base.en", "base", "small.en", "small", "medium.en", "medium", "large-v3-turbo", "large"]
     guard validSizes.contains(size) else {
         print("Error: Unknown model '\(size)'")
         print("Available: \(validSizes.joined(separator: ", "))")
