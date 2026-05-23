@@ -1,7 +1,7 @@
 {
   "planPath": "docs/plans/2026-05-23-speakfree-2.0-wave-1.md",
   "tasks": [
-    {"id": 1,  "subject": "Task 1: Extract TextPipeline.run from AppDelegate inline prompt-assembly closure",         "status": "pending"},
+    {"id": 1,  "subject": "Task 1: Extract TextPipeline.run from AppDelegate inline prompt-assembly closure",         "status": "completed", "commitSha": "820e8a4", "reviewedBy": ["spec:passed", "code-quality:approved-with-polish"], "polishNotes": "docs/plans/2026-05-23-speakfree-2.0-wave-1-polish-notes.md"},
     {"id": 2,  "subject": "Task 2: Add comma-feedback-loop regression test in TextPipelineTests",                    "status": "pending", "blockedBy": [1]},
     {"id": 3,  "subject": "Task 3: Add 'speakfree process <wav>' headless subcommand emitting JSON",                  "status": "pending", "blockedBy": [1]},
     {"id": 4,  "subject": "Task 4: Audio golden test harness with property assertions + 3-fixture seed manifest",    "status": "pending", "blockedBy": [3]},
@@ -22,5 +22,5 @@
     {"id": 19, "subject": "Task 19: Commit appcast; push branch; gh release create v1.3.0 + DMG; merge to main + push; poll live appcast", "status": "pending", "blockedBy": [18]},
     {"id": 20, "subject": "Task 20: Dogfood hand-off; capture findings; gate Wave 2 plan on Michael's greenlight",   "status": "pending", "blockedBy": [19]}
   ],
-  "lastUpdated": "2026-05-23T00:00:00Z"
+  "lastUpdated": "2026-05-23T11:30:00Z"
 }
