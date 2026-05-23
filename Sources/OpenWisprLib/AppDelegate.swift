@@ -573,57 +573,28 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             let maxRecordings = (self.config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(self.config.maxRecordings)
             do {
-                // Build Whisper prompt. Only the final 224 tokens (~800 chars) matter.
-                // Whisper mimics the style of whatever ENDS the prompt, so put the
-                // user's own text last — this makes output match their writing style
-                // (capitalization, punctuation, formality).
-                let prompt: String? = {
-                    var parts: [String] = []
-                    // Instructions first (furthest from end = least style influence)
-                    let mode = self.config.spokenPunctuation ?? .off
-                    if mode == .spoken || mode == .hybrid {
-                        // Avoid commas in the instruction — whisper mimics prompt style,
-                        // and comma-heavy prompts cause comma spam in output.
-                        parts.append("Spoken punctuation: say the word \"period\" or \"comma\" or \"question mark\" to insert punctuation.")
-                    }
-                    if let vocab = Config.loadVocabulary() {
-                        parts.append("Glossary: \(vocab).")
-                    }
-                    // Screen context: extract only unique words as vocabulary hints.
-                    // Don't pass raw text — whisper parrots it instead of transcribing.
-                    if let screen = capturedScreenText {
-                        let words = Set(screen.components(separatedBy: .whitespacesAndNewlines)
-                            .filter { $0.count > 3 })
-                            .prefix(20)
-                            .joined(separator: ", ")
-                        if !words.isEmpty {
-                            parts.append("Context words: \(words).")
-                        }
-                    }
-                    // Cursor context: extract words-only as vocab hints — do NOT pass raw
-                    // text. Whisper mimics the punctuation style of whatever ENDS the prompt,
-                    // so feeding raw surrounding text (which is often comma/apostrophe-heavy,
-                    // e.g. a prior degraded dictation) makes whisper amplify commas and
-                    // apostrophes — a self-reinforcing spiral. Mirror the screen-context path
-                    // above. (Sentence-position / formality belongs in the post-pass reasoner,
-                    // not in whisper's prompt — whisper parrots style, it doesn't reason.)
-                    if let input = capturedInputText {
-                        let words = Set(input.components(separatedBy: .whitespacesAndNewlines)
-                            .filter { $0.count > 3 })
-                            .prefix(20)
-                            .joined(separator: " ")
-                        if !words.isEmpty {
-                            parts.append("Context words: \(words).")
-                        }
-                    }
-                    return parts.isEmpty ? nil : parts.joined(separator: " ")
-                }()
+                // Build Whisper prompt + run post-processing through the shared
+                // TextPipeline core. Extracting this out of an inline closure is
+                // what lets unit tests cover the same code path the app uses,
+                // preventing the kind of drift that shipped the v1.2.11 comma loop.
+                let mode = self.config.spokenPunctuation ?? .off
+                let glossary = Config.loadVocabulary()
+                // Build pipeline inputs with placeholder raw; we need promptHints
+                // before whisper runs, then re-run with the real raw text.
+                let makeInput: (String) -> TextPipeline.Input = { raw in
+                    TextPipeline.Input(
+                        raw: raw,
+                        cursorContextText: capturedInputText,
+                        screenContextText: capturedScreenText,
+                        punctuationMode: mode,
+                        styleMode: self.recordingStyleMode,
+                        glossaryWords: glossary
+                    )
+                }
+                let prompt = TextPipeline.assemblePromptHints(input: makeInput(""))
                 let raw = try self.transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
                 RecordingStore.saveRaw(text: raw, for: audioURL)
-                let mode = self.config.spokenPunctuation ?? .off
-                var text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
-                // Apply per-app style (e.g. strip trailing period for messaging apps)
-                text = TextPostProcessor.applyStyle(text, mode: self.recordingStyleMode)
+                let text = TextPipeline.run(makeInput(raw)).finalText
                 RecordingStore.saveTranscription(text: text, for: audioURL)
 
                 RecordingStore.clearSentinel()
