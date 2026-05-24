@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreAudio
+import CTryCatch
 import Foundation
 
 class AudioRecorder {
@@ -211,15 +212,40 @@ class AudioRecorder {
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
+        // Guard against the AirPods/Bluetooth-handoff race: during SCO negotiation the
+        // input node briefly reports a 0-channel / 0-rate format. Calling installTap
+        // with that throws an NSException which (with libggml's terminate hook) becomes
+        // SIGABRT. Skip + wait for the next AVAudioEngineConfigurationChange to retry.
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: skip startEngine — input format not yet valid "
+                + "(rate=\(inputFormat.sampleRate), ch=\(inputFormat.channelCount)); will retry on next config change"
+            )
+            return
+        }
+
         guard let conv = AVAudioConverter(from: inputFormat, to: targetFormat) else {
             print("AudioRecorder: converter creation failed")
             return
         }
         audioConverter = conv
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-            guard let self = self else { return }
-            self.handleAudioBuffer(buffer, inputFormat: inputFormat, converter: conv)
+        // Wrap installTap in a try/catch shim — even with the format guard above, AVAudioEngine
+        // can still throw on edge-case formats from external devices. Crashing is worse than
+        // missing one tap install: the next configuration-change notification will retry.
+        var tapErr: NSError?
+        let tapOK = CTryCatch({
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+                guard let self = self else { return }
+                self.handleAudioBuffer(buffer, inputFormat: inputFormat, converter: conv)
+            }
+        }, &tapErr)
+        guard tapOK else {
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: installTap raised NSException — "
+                + "\(tapErr?.localizedDescription ?? "unknown"); will retry on next config change"
+            )
+            return
         }
 
         do {
