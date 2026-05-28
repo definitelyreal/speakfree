@@ -63,6 +63,12 @@ public struct TextPostProcessor {
     public static func process(_ text: String, hybrid: Bool = false) -> String {
         var result = text
 
+        // 0.4. Strip surrounding quotes around spoken-command words. Whisper sometimes
+        // wraps emphasized speech in quotes — `publish "Question mark"?` or `etc. "period."`
+        // — so the unquoted-form rules below never see "comma"/"period"/etc. Strip the
+        // quotes first; the existing rules then handle the now-unquoted command.
+        result = stripQuotesAroundCommandWords(result)
+
         // 0.5. Collapse whisper's comma spam FIRST. If we let comma→period run first,
         // any capitalized word inside the spam ("I'd", "Claude") becomes a sentence
         // break, leaving "Hey hey. I'd. Claude do some research..." instead of
@@ -162,6 +168,24 @@ public struct TextPostProcessor {
     /// "apples, oranges, bananas, and pears"). Threshold tuned from real failures
     /// where 3-rep collapse ate legitimate speech-pause commas at the start of
     /// thoughts ("Okay, yeah, I think").
+    /// Strip surrounding quotes (straight or curly) around recognized spoken-command words.
+    /// Whisper sometimes wraps emphasized speech in quotes, e.g. `"Question mark"` instead of
+    /// the literal phrase. Stripping the quotes first lets the existing spoken-punct rules
+    /// match the unquoted form. Multi-word commands ("question mark", "exclamation mark",
+    /// "new paragraph") are included. Match is case-insensitive.
+    private static func stripQuotesAroundCommandWords(_ text: String) -> String {
+        let commands = "comma|period|question marks?|exclamation marks?|exclamation points?|semicolon|semi colon|colon|dash|hyphen|full stop|new line|newline|new paragraph|open quote|close quote|open paren|close paren"
+        // Match: opening quote + command (case-insens) + optional trailing punct + closing quote.
+        // Capture group 1 is the command word; we substitute back without the surrounding quotes
+        // (and without the trailing punct inside the quotes — the downstream spoken-punct rules
+        // produce the correct symbol from the now-unquoted command word).
+        let pattern = "(?i)[\"\u{201C}\u{201D}](\(commands))[.,!?;:]*[\"\u{201C}\u{201D}]"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
+        return regex.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "$1"
+        )
+    }
+
     private static func collapseCommaSpam(_ text: String) -> String {
         // Word chars including apostrophe + hyphen (so "I'll", "don't", "wee-hours" all count as single words)
         // Match a word, then 4+ repetitions of ", word"
@@ -265,9 +289,12 @@ public struct TextPostProcessor {
     /// Capitalize the first letter after sentence-ending punctuation.
     /// "hello. would love" → "hello. Would love"
     private static func capitalizeAfterSentenceEnd(_ text: String) -> String {
-        // Lookbehind (?<!\.) skips the trailing dot of an ellipsis ("..."), so
-        // "could... do" stays lowercase instead of becoming "could... Do".
-        guard let regex = try? NSRegularExpression(pattern: "(?<!\\.)([.!?])\\s+(\\w)", options: []) else { return text }
+        // (?<!\.)  — skip the trailing dot of an ellipsis ("..."), so "could... do"
+        //            stays lowercase instead of becoming "could... Do".
+        // (?<![A-Z]) — skip when the dot follows a single uppercase letter, which is
+        //            typically an acronym end ("U.S.A. next" / "Subs.S.A. essay").
+        //            Capitalizing would turn the next common word into a fake sentence.
+        guard let regex = try? NSRegularExpression(pattern: "(?<!\\.)(?<![A-Z])([.!?])\\s+(\\w)", options: []) else { return text }
         let mutable = NSMutableString(string: text)
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
         // Process in reverse so ranges stay valid
@@ -385,9 +412,13 @@ public struct TextPostProcessor {
 
     private static func ensureSpaceAfterPunctuation(_ text: String) -> String {
         var result = text
-        // (?<!\d) skips a period/comma sitting between digits ("4.30", "30,000") so
-        // decimals and thousands separators aren't split into "4. 30".
-        guard let regex = try? NSRegularExpression(pattern: "(?<!\\d)([.,?!:;])(\\w)", options: []) else { return result }
+        // (?<!\d) skips a period/comma between digits ("4.30", "30,000") so decimals
+        // and thousands separators aren't split into "4. 30".
+        // (?![A-Z]\.) skips when the next char is an uppercase letter that's itself
+        // followed by another dot — i.e. a single-letter acronym chain ("U.S.A.",
+        // "Subs.S.A.I"). Keeps acronyms compact instead of shattering them into
+        // "U. S. A.".
+        guard let regex = try? NSRegularExpression(pattern: "(?<!\\d)([.,?!:;])(?![A-Z]\\.)(\\w)", options: []) else { return result }
         result = regex.stringByReplacingMatches(
             in: result,
             range: NSRange(result.startIndex..., in: result),
