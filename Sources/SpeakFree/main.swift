@@ -13,6 +13,7 @@ func printUsage() {
 
     USAGE:
         speakfree start              Start the dictation daemon
+        speakfree process <wav>      Transcribe a wav file; prints JSON {raw, processed, styled}
         speakfree set-hotkey <key>   Set the push-to-talk hotkey
         speakfree get-hotkey         Show current hotkey
         speakfree set-model <size>   Set the Whisper model
@@ -104,6 +105,20 @@ func cmdDownloadModel(_ size: String) {
     }
 }
 
+func cmdProcess(_ wavPath: String) {
+    let wavURL = URL(fileURLWithPath: wavPath)
+    do {
+        let result = try ProcessCommand.run(wavURL: wavURL)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(result)
+        print(String(data: data, encoding: .utf8) ?? "{}")
+    } catch {
+        fputs("Error: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
 func cmdStatus() {
     let config = Config.load()
     let hotkeyDesc = KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)
@@ -124,6 +139,12 @@ let command = args.count > 1 ? args[1] : nil
 switch command {
 case "start":
     cmdStart()
+case "process":
+    guard args.count > 2 else {
+        print("Usage: speakfree process <wav>")
+        exit(1)
+    }
+    cmdProcess(args[2])
 case "set-hotkey":
     guard args.count > 2 else {
         print("Usage: speakfree set-hotkey <key>")
