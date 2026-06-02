@@ -55,8 +55,11 @@ public enum TextPipeline {
         }
         // Screen context: extract only unique words as vocabulary hints.
         // Don't pass raw text — whisper parrots it instead of transcribing.
+        // Strip terminal punctuation from tokens so embedded commas (e.g. "hello,")
+        // don't survive into the prompt and amplify comma output.
         if let screen = input.screenContextText {
             let words = Set(screen.components(separatedBy: .whitespacesAndNewlines)
+                .map { $0.trimmingCharacters(in: .punctuationCharacters) }
                 .filter { $0.count > 3 })
                 .prefix(20)
                 .joined(separator: ", ")
@@ -73,6 +76,7 @@ public enum TextPipeline {
         // not in whisper's prompt — whisper parrots style, it doesn't reason.)
         if let cursor = input.cursorContextText {
             let words = Set(cursor.components(separatedBy: .whitespacesAndNewlines)
+                .map { $0.trimmingCharacters(in: .punctuationCharacters) }
                 .filter { $0.count > 3 })
                 .prefix(20)
                 .joined(separator: " ")
