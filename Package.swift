@@ -21,9 +21,16 @@ let package = Package(
                 ]),
             ]
         ),
+        // Tiny Objective-C bridge so Swift can catch NSException from AVAudioEngine
+        // (e.g. installTap on a transient Bluetooth-handoff format). See CTryCatch.h.
+        .target(
+            name: "CTryCatch",
+            path: "Sources/CTryCatch",
+            publicHeadersPath: "include"
+        ),
         .target(
             name: "OpenWisprLib",
-            dependencies: ["Sparkle", "CWhisper"],
+            dependencies: ["Sparkle", "CWhisper", "CTryCatch"],
             path: "Sources/OpenWisprLib",
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
