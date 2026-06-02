@@ -147,6 +147,27 @@ final class TextPipelineTests: XCTestCase {
                      "No instruction, no context, no glossary -> nil prompt")
     }
 
+    // MARK: - comma-feedback-loop regression (Task 2 — locks the v1.2.11 fix)
+
+    func test_commaHeavyCursorContext_doesNotAmplifyCommas() {
+        // Reproduce the spiral: a comma-heavy cursor context (a prior degraded dictation)
+        // must NOT cause the prompt to feed comma-heavy text to Whisper.
+        let pollutedContext = "First, comma, then, comma, then, more, commas, everywhere"
+        let input = TextPipeline.Input(
+            raw: "Plain sentence with one comma, like this.",
+            cursorContextText: pollutedContext,
+            screenContextText: nil,
+            punctuationMode: .hybrid,
+            styleMode: .none,
+            glossaryWords: nil
+        )
+        let result = TextPipeline.run(input)
+        let hints = result.promptHints ?? ""
+        // Prompt must not parrot the raw comma-spam — only extract words.
+        XCTAssertFalse(hints.contains(","), "prompt must not carry raw commas from cursor context")
+        XCTAssertFalse(hints.contains("comma, comma"), "prompt must not parrot comma-spam phrasing")
+    }
+
     func test_promptHints_screenContextWordsAreCommaJoined() {
         // Sanity: the screen-context line uses comma-joined words (per existing code),
         // while cursor-context uses space-joined. Distinguishes the two code paths.
