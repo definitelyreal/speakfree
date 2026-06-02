@@ -388,9 +388,9 @@
     <p class="slogan">private speech to text &nbsp;•&nbsp; free and open source</p>
     <div class="cta-wrap">
       <div class="cta-row">
-        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.2.10.dmg">
+        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.2.12.dmg">
           ↓&nbsp; Download for Mac
-          <span class="btn-sub">v1.2.10 &nbsp;•&nbsp; Apple Silicon</span>
+          <span class="btn-sub">v1.2.12 &nbsp;•&nbsp; Apple Silicon</span>
         </a>
         <a class="btn btn-secondary" href="https://github.com/definitelyreal/speakfree">
           View on GitHub ↗
@@ -470,6 +470,21 @@
         <span class="arrow">▶</span> What's new in v1.2
       </button>
       <div class="changes-body open">
+        <h3>v1.2.12</h3>
+        <ul>
+          <li>Fix: AirPods/Bluetooth handoff no longer crashes the app (AVAudioEngine NSException now caught instead of becoming SIGABRT)</li>
+          <li>Fix: spoken-punctuation wrapped in quotes ("Question mark" / "period.") now converts correctly</li>
+          <li>Fix: single-letter acronyms (U.S.A., A.B.C.) stay joined instead of being split into "U. S. A."</li>
+        </ul>
+        <h3>v1.2.11</h3>
+        <ul>
+          <li>CRITICAL: Sparkle auto-update is now working — every previously shipped version had a broken signature, so this is the first version that can actually deliver updates</li>
+          <li>Fix: the gradual comma/apostrophe degradation (cursor-context was being fed raw into Whisper's prompt, which made it amplify commas/apostrophes over time)</li>
+          <li>Fix: literal "comma" word no longer wrongly converted to a comma in phrases like "the comma issue"</li>
+          <li>Fix: decimals (4.30) preserved; word after "..." stays lowercase</li>
+          <li>Added: large-v3-turbo model option (faster and more accurate than medium.en) — selectable in Settings</li>
+          <li>Retention: recording-history cap applied by default (was previously unbounded; hidden config preserves the old behavior for power users)</li>
+        </ul>
         <h3>v1.2.10</h3>
         <ul>
           <li>Fix: Google Docs in Chrome now gets text inserted via clipboard (Docs silently drops CGEvent unicode events)</li>
