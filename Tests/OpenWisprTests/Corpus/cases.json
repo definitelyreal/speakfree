@@ -145,6 +145,27 @@
     "expected": "I may need to do it at 4.30, would that be alright?"
   },
   {
+    "name": "real-quoted-spoken-question-mark-2026-05-27",
+    "note": "Whisper sometimes wraps spoken commands in quotes (treating them as emphasized speech): `publish \"Question mark\"?`. Old boundaries didn't include quote chars so the rule wouldn't fire. Extended ws/we to include straight + curly quotes. Source: recording-2026-05-27-194533-8EBBB210.",
+    "mode": "hybrid",
+    "input": "could I ask you your thoughts on a sub-tikor article I'm going to publish \"Question mark\"",
+    "expected": "could I ask you your thoughts on a sub-tikor article I'm going to publish?"
+  },
+  {
+    "name": "real-quoted-spoken-period-2026-05-27",
+    "note": "Same class as quoted-question-mark — whisper-quoted spoken `\"period.\"` not detected by old boundaries. Source: recording-2026-05-27-183722-A749947C.",
+    "mode": "hybrid",
+    "input": "or if I just heard non-profits etc. \"period.\"",
+    "expected": "or if I just heard non-profits etc."
+  },
+  {
+    "name": "real-acronym-not-split-2026-05-27",
+    "note": "ensureSpaceAfterPunctuation was shattering single-letter acronyms like 'U.S.A.' into 'U. S. A.'. Added (?![A-Z]\\.) lookahead to skip dots before an uppercase-then-dot pattern. Source: recording-2026-05-27-194737-D308CE50.",
+    "mode": "hybrid",
+    "input": "I'd love to ask your thoughts on a Subs.S.A. essay I was planning to publish",
+    "expected": "I'd love to ask your thoughts on a Subs.S.A. essay I was planning to publish"
+  },
+  {
     "name": "real-ellipsis-no-capitalize-2026-05-21",
     "note": "capitalizeAfterSentenceEnd capitalized the word after an ellipsis ('could... do' -> 'could... Do'). Lookbehind (?<!\\.) now skips the trailing dot of '...'. Source: recording-2026-05-21-163804-7A812263.",
     "mode": "hybrid",
