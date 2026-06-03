@@ -11,24 +11,40 @@ class WhisperEngine {
     private var languageMismatchCount = 0
     private let languageMismatchThreshold = 3
 
+    /// Serializes all load/transcribe/unload operations. Public methods dispatch onto this
+    /// queue; private *Locked methods run only from within the queue to prevent re-entrancy.
+    private let engineQueue = DispatchQueue(label: "com.speakfree.engine", qos: .userInitiated)
+
     /// How the model should be managed: "auto", "always", "off"
     var keepModelLoaded: String = "auto"
 
-    var isLoaded: Bool { context != nil }
+    var isLoaded: Bool {
+        var result = false
+        engineQueue.sync { result = self.context != nil }
+        return result
+    }
 
     deinit {
-        unloadModel()
+        engineQueue.sync { unloadModelLocked() }
     }
 
     // MARK: - Model Lifecycle
 
     /// Load a GGML model from disk. Metal GPU is used automatically.
     func loadModel(path: String) throws {
+        var thrownError: Error?
+        engineQueue.sync {
+            do { try loadModelLocked(path: path) } catch { thrownError = error }
+        }
+        if let e = thrownError { throw e }
+    }
+
+    private func loadModelLocked(path: String) throws {
         // Don't reload if same model is already loaded
         if let loaded = loadedModelPath, loaded == path, context != nil { return }
 
         // Unload any existing model first
-        if context != nil { unloadModel() }
+        if context != nil { unloadModelLocked() }
 
         DiagnosticLogger.shared.log("WhisperEngine: loading model from \(path)")
         let loadStart = CFAbsoluteTimeGetCurrent()
@@ -45,11 +61,15 @@ class WhisperEngine {
 
         self.context = ctx
         self.loadedModelPath = path
-        startMemoryPressureMonitoring()
+        DispatchQueue.main.async { [weak self] in self?.startMemoryPressureMonitoring() }
     }
 
     /// Free the model from memory.
     func unloadModel() {
+        engineQueue.sync { unloadModelLocked() }
+    }
+
+    private func unloadModelLocked() {
         memoryPressureSource?.cancel()
         memoryPressureSource = nil
         if let ctx = context {
@@ -63,6 +83,23 @@ class WhisperEngine {
 
     /// Transcribe PCM Float32 audio samples (16kHz, mono).
     func transcribe(
+        samples: [Float],
+        language: String = "en",
+        prompt: String? = nil,
+        suppressRegex: String? = nil,
+        threadCount: Int? = nil
+    ) throws -> String {
+        var result: String = ""
+        var thrownError: Error?
+        engineQueue.sync {
+            do { result = try transcribeLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, threadCount: threadCount) }
+            catch { thrownError = error }
+        }
+        if let e = thrownError { throw e }
+        return result
+    }
+
+    private func transcribeLocked(
         samples: [Float],
         language: String = "en",
         prompt: String? = nil,
@@ -128,19 +165,7 @@ class WhisperEngine {
 
         // Collect output segments, filtering by no-speech probability
         let nSegments = whisper_full_n_segments(ctx)
-        var text = ""
-        for i in 0..<nSegments {
-            let noSpeechProb = whisper_full_get_segment_no_speech_prob(ctx, i)
-            if noSpeechProb > 0.6 {
-                let segText = whisper_full_get_segment_text(ctx, i).map { String(cString: $0) } ?? ""
-                DiagnosticLogger.shared.log("WhisperEngine: skipping no-speech segment (p=\(String(format: "%.2f", noSpeechProb))): \"\(segText.prefix(50))\"")
-                continue
-            }
-
-            if let cStr = whisper_full_get_segment_text(ctx, i) {
-                text += String(cString: cStr)
-            }
-        }
+        let text = collectSegments(ctx: ctx, nSegments: nSegments)
 
         // Check detected language for mismatch
         checkLanguageMismatch(ctx: ctx, configuredLanguage: language)
@@ -158,6 +183,23 @@ class WhisperEngine {
     /// Designed to be called periodically with a growing audio buffer during recording.
     /// Returns the final accumulated text.
     func transcribeStreaming(
+        samples: [Float],
+        language: String = "en",
+        prompt: String? = nil,
+        suppressRegex: String? = nil,
+        onPartialResult: @escaping (String) -> Void
+    ) throws -> String {
+        var result: String = ""
+        var thrownError: Error?
+        engineQueue.sync {
+            do { result = try transcribeStreamingLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, onPartialResult: onPartialResult) }
+            catch { thrownError = error }
+        }
+        if let e = thrownError { throw e }
+        return result
+    }
+
+    private func transcribeStreamingLocked(
         samples: [Float],
         language: String = "en",
         prompt: String? = nil,
@@ -255,20 +297,51 @@ class WhisperEngine {
 
         // Collect final text, filtering by no-speech probability
         let nSegments = whisper_full_n_segments(ctx)
-        var text = ""
-        for i in 0..<nSegments {
-            let noSpeechProb = whisper_full_get_segment_no_speech_prob(ctx, i)
-            if noSpeechProb > 0.6 { continue }
-            if let cStr = whisper_full_get_segment_text(ctx, i) {
-                text += String(cString: cStr)
-            }
-        }
+        let text = collectSegments(ctx: ctx, nSegments: nSegments)
 
         lastTranscriptionTime = Date()
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         DiagnosticLogger.shared.log("WhisperEngine: streaming inference \(String(format: "%.2f", inferenceTime))s, result \(trimmed.count) chars")
         return trimmed
+    }
+
+    // MARK: - Segment Collection (shared between batch and streaming paths)
+
+    /// Collect whisper segments, filtering by no-speech probability.
+    /// If all segments are filtered, salvages the highest-confidence one (prob < 0.9).
+    private func collectSegments(ctx: OpaquePointer, nSegments: Int32) -> String {
+        var text = ""
+        var bestSalvageSeg: Int32 = -1
+        var bestSalvageProb: Float = 1.0
+
+        for i in 0..<nSegments {
+            let noSpeechProb = whisper_full_get_segment_no_speech_prob(ctx, i)
+            if noSpeechProb > 0.6 {
+                let segText = whisper_full_get_segment_text(ctx, i).map { String(cString: $0) } ?? ""
+                DiagnosticLogger.shared.log("WhisperEngine: skipping no-speech segment (p=\(String(format: "%.2f", noSpeechProb))): \"\(segText.prefix(50))\"")
+                if noSpeechProb < bestSalvageProb {
+                    bestSalvageProb = noSpeechProb
+                    bestSalvageSeg = i
+                }
+                continue
+            }
+            if let cStr = whisper_full_get_segment_text(ctx, i) {
+                text += String(cString: cStr)
+            }
+        }
+
+        // Salvage: if all segments were filtered, return the lowest-prob no-speech segment
+        // as long as it's below the silence ceiling (< 0.9 = not true silence).
+        if text.isEmpty, bestSalvageSeg >= 0, bestSalvageProb < 0.9 {
+            if let cStr = whisper_full_get_segment_text(ctx, bestSalvageSeg) {
+                let salvaged = String(cString: cStr)
+                DiagnosticLogger.shared.log("WhisperEngine: salvaged segment (p=\(String(format: "%.2f", bestSalvageProb))): \"\(salvaged.prefix(50))\"")
+                text = salvaged
+            }
+        }
+
+        return text
     }
 
     // MARK: - Language Mismatch Detection
@@ -346,22 +419,22 @@ class WhisperEngine {
             queue: .main
         )
         source.setEventHandler { [weak self] in
-            guard let self = self, self.isLoaded else { return }
+            guard let self = self else { return }
             guard self.keepModelLoaded != "always" else { return }
 
             let pressureLevel = source.data  // .warning or .critical
 
             if pressureLevel.contains(.critical) {
-                // Critical: always unload
+                // Critical: always unload — async to avoid re-entering engineQueue from main
                 DiagnosticLogger.shared.log("WhisperEngine: critical memory pressure — unloading model")
                 print("WhisperEngine: unloading model (critical memory pressure)")
-                self.unloadModel()
+                self.engineQueue.async { [weak self] in self?.unloadModelLocked() }
             } else if pressureLevel.contains(.warning) {
                 // Warning: unload if idle for > 60 seconds
-                let idleSeconds = self.lastTranscriptionTime.map { Date().timeIntervalSince($0) } ?? .infinity
+                let idleSeconds = self.lastTranscriptionTime.map { Date().timeIntervalSince($0) } ?? Double.infinity
                 if idleSeconds > 60 {
                     print("WhisperEngine: unloading model (memory pressure warning, idle \(Int(idleSeconds))s)")
-                    self.unloadModel()
+                    self.engineQueue.async { [weak self] in self?.unloadModelLocked() }
                 } else {
                     print("WhisperEngine: keeping model loaded (memory pressure warning, but used \(Int(idleSeconds))s ago)")
                 }
@@ -373,15 +446,17 @@ class WhisperEngine {
 
     /// Call when system is under memory pressure to free the model.
     func handleMemoryPressure() {
-        guard isLoaded, keepModelLoaded != "always" else { return }
+        guard keepModelLoaded != "always" else { return }
         DiagnosticLogger.shared.log("WhisperEngine: memory pressure — unloading model")
         print("WhisperEngine: unloading model due to memory pressure")
-        unloadModel()
+        engineQueue.async { [weak self] in self?.unloadModelLocked() }
     }
 
     /// Approximate RSS of the loaded model in bytes, or 0 if unloaded.
     var estimatedMemoryUsage: UInt64 {
-        guard let path = loadedModelPath else { return 0 }
+        var path: String?
+        engineQueue.sync { path = self.loadedModelPath }
+        guard let path = path else { return 0 }
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         let diskSize = attrs?[.size] as? UInt64 ?? 0
         // Loaded model is roughly 1.5-2x disk size
