@@ -21,11 +21,22 @@ public class RecordingStore {
     }()
 
     public static func ensureDirectory() {
+        let fm = FileManager.default
         do {
-            let fm = FileManager.default
             try fm.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
+        } catch {
+            fputs("Warning: could not create recordings directory: \(error.localizedDescription)\n", stderr)
+            return
+        }
+        // Each attribute operation is independent — a failure in one must not silently
+        // skip the others (they share no invariant and the do/catch would hide the gap).
+        do {
             // 0700: owner rwx, group/other none — recordings are private to this user
             try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: recordingsDir.path)
+        } catch {
+            fputs("Warning: could not set recordings directory permissions: \(error.localizedDescription)\n", stderr)
+        }
+        do {
             // Exclude from iCloud/Time Machine backup — recordings can be large and are
             // regenerable from the original audio (or simply re-dictated).
             var mutableURL = recordingsDir
@@ -33,7 +44,7 @@ public class RecordingStore {
             rv.isExcludedFromBackup = true
             try mutableURL.setResourceValues(rv)
         } catch {
-            fputs("Warning: could not configure recordings directory: \(error.localizedDescription)\n", stderr)
+            fputs("Warning: could not exclude recordings directory from backup: \(error.localizedDescription)\n", stderr)
         }
     }
 
