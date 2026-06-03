@@ -726,7 +726,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     suppressRegex: suppressRegex,
                     onPartialResult: { [weak self, generation] text in
                         guard let self = self, self.streamingGeneration == generation else { return }
-                        let displayText = self.buildStableDisplayText(from: text)
+                        // Strip Whisper hallucination markers so they don't appear in the
+                        // streaming overlay — the finalize path goes through TextPipeline,
+                        // but the preview path calls the engine directly.
+                        let cleaned = TextPipeline.stripWhisperBracketMarkers(text)
+                        let displayText = self.buildStableDisplayText(from: cleaned)
                         self.recordingOverlay.updateStreamingText(displayText)
                     }
                 )
