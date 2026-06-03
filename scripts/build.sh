@@ -77,6 +77,13 @@ ORIG_WHISPER_REF=$(otool -L "$SPEAKFREE_BIN" | awk '/libwhisper\.1\.dylib/ {prin
 if [ -n "$ORIG_WHISPER_REF" ] && [ "$ORIG_WHISPER_REF" != "@rpath/libwhisper.1.dylib" ]; then
     install_name_tool -change "$ORIG_WHISPER_REF" "@rpath/libwhisper.1.dylib" "$SPEAKFREE_BIN"
 fi
+# Guard: verify the rpath fix took — if it still points to brew, the DMG would ship
+# a binary that loads brew's libwhisper at runtime and crashes on model load.
+FINAL_WHISPER_REF=$(otool -L "$SPEAKFREE_BIN" | awk '/libwhisper\.1\.dylib/ {print $1; exit}')
+if [ "$FINAL_WHISPER_REF" != "@rpath/libwhisper.1.dylib" ]; then
+    echo "FATAL: libwhisper still points to '$FINAL_WHISPER_REF' — rpath fix failed. Aborting." >&2
+    exit 1
+fi
 
 echo "Signing..."
 xattr -cr "$APP"
