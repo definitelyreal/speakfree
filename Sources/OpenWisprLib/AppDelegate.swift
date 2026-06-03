@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import AVFoundation
+import os
 import Sparkle
 
 public class AppDelegate: NSObject, NSApplicationDelegate {
@@ -10,7 +11,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var transcriber: Transcriber!
     var inserter: TextInserter!
     var config: Config!
-    var isPressed = false
+    private let _isPressed = OSAllocatedUnfairLock(initialState: false)
+    var isPressed: Bool {
+        get { _isPressed.withLock { $0 } }
+        set { _isPressed.withLock { $0 = newValue } }
+    }
     var isReady = false
     public var lastTranscription: String?
     private var recordingOverlay = RecordingOverlay()
