@@ -98,6 +98,14 @@ class TextInserter {
     }
 
     private func pasteText(_ text: String) {
+        // Refuse to insert text when Secure Input is active (e.g. password fields).
+        // CGEventTap is not disabled — the tap re-enables itself via kCGEventTapDisabled*
+        // handling in HotkeyManager. We just skip the insertion so passwords stay safe.
+        if IsSecureEventInputEnabled() {
+            DiagnosticLogger.shared.log("TextInserter: skipping insertion — Secure Input is enabled (password field?)")
+            return
+        }
+
         let frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
         let isRemote = isRemoteDesktopFrontmost()
         let isBroken = isElectronApp()
