@@ -571,17 +571,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         recordingSourceElement = nil
         recordingContextText = nil
 
+        // Snapshot ALL config-derived state on main before crossing into whisperSerialQueue.
+        // Accessing self.config.* from a background queue is a torn-read race — Config is a
+        // struct so reads and writes are not atomic across threads.
+        let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
+        let mode = config.spokenPunctuation ?? .off
+        let glossary = Config.loadVocabulary()
+        let capturedStyleMode = recordingStyleMode
+
         // Use whisperSerialQueue to ensure any in-flight streaming inference finishes first
         whisperSerialQueue.async { [weak self] in
             guard let self = self else { return }
-            let maxRecordings = (self.config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(self.config.maxRecordings)
             do {
                 // Build Whisper prompt + run post-processing through the shared
                 // TextPipeline core. Extracting this out of an inline closure is
                 // what lets unit tests cover the same code path the app uses,
                 // preventing the kind of drift that shipped the v1.2.11 comma loop.
-                let mode = self.config.spokenPunctuation ?? .off
-                let glossary = Config.loadVocabulary()
+
                 // Build pipeline inputs with placeholder raw; we need promptHints
                 // before whisper runs, then re-run with the real raw text.
                 let makeInput: (String) -> TextPipeline.Input = { raw in
@@ -590,7 +596,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         cursorContextText: capturedInputText,
                         screenContextText: capturedScreenText,
                         punctuationMode: mode,
-                        styleMode: self.recordingStyleMode,
+                        styleMode: capturedStyleMode,
                         glossaryWords: glossary
                     )
                 }
