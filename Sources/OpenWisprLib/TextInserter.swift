@@ -138,15 +138,22 @@ class TextInserter {
     /// Type text into the frontmost app via AppleScript keystroke.
     /// Used for remote desktop apps where clipboard sync is unreliable.
     private func typeViaAppleScript(_ text: String) {
+        // Multi-line text is slow and lossy as per-line keystrokes on remote desktop.
+        // Fall back to clipboard which remote desktop apps sync correctly.
+        if text.contains("\n") || text.contains("\r") {
+            pasteViaClipboard(text)
+            return
+        }
+
         guard let app = NSWorkspace.shared.frontmostApplication else { return }
-        let processName = app.localizedName ?? ""
+        let pid = app.processIdentifier  // target by PID — process name can be ambiguous
         // Escape double quotes and backslashes for AppleScript
         let escaped = text
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         let script = NSAppleScript(source: """
             tell application "System Events"
-                tell process "\(processName)"
+                tell (first process whose unix id is \(pid))
                     keystroke "\(escaped)"
                 end tell
             end tell
@@ -352,11 +359,11 @@ class TextInserter {
         // the local clipboard before the paste fires. Without this delay, Splashtop
         // pastes the OLD clipboard content on the remote (sync hadn't completed yet).
         if isRemoteDesktopFrontmost(), let app = NSWorkspace.shared.frontmostApplication {
-            let processName = app.localizedName ?? ""
+            let pid = app.processIdentifier  // target by PID — process name can be ambiguous
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                 let script = NSAppleScript(source: """
                     tell application "System Events"
-                        tell process "\(processName)"
+                        tell (first process whose unix id is \(pid))
                             keystroke "v" using command down
                         end tell
                     end tell
