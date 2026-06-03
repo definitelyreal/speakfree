@@ -75,8 +75,11 @@ fi
 
 echo "Signing..."
 xattr -cr "$APP"
-# Sign dylibs and whisper-cli first (no entitlements needed for these)
-codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/"*.dylib
+# Sign dylibs and whisper-cli first (no entitlements needed for these).
+# Use find -type f to skip symlinks — codesign fails with "timestamp expected"
+# when re-signing an already-signed file via a symlink to it.
+find "$APP/Contents/Frameworks" -maxdepth 1 -type f -name '*.dylib' \
+    -exec codesign --force --options runtime --sign "$SIGN_ID" {} \;
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/Sparkle.framework"
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/MacOS/whisper-cli"

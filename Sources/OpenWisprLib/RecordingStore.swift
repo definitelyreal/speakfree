@@ -21,10 +21,30 @@ public class RecordingStore {
     }()
 
     public static func ensureDirectory() {
+        let fm = FileManager.default
         do {
-            try FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
         } catch {
             fputs("Warning: could not create recordings directory: \(error.localizedDescription)\n", stderr)
+            return
+        }
+        // Each attribute operation is independent — a failure in one must not silently
+        // skip the others (they share no invariant and the do/catch would hide the gap).
+        do {
+            // 0700: owner rwx, group/other none — recordings are private to this user
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: recordingsDir.path)
+        } catch {
+            fputs("Warning: could not set recordings directory permissions: \(error.localizedDescription)\n", stderr)
+        }
+        do {
+            // Exclude from iCloud/Time Machine backup — recordings can be large and are
+            // regenerable from the original audio (or simply re-dictated).
+            var mutableURL = recordingsDir
+            var rv = URLResourceValues()
+            rv.isExcludedFromBackup = true
+            try mutableURL.setResourceValues(rv)
+        } catch {
+            fputs("Warning: could not exclude recordings directory from backup: \(error.localizedDescription)\n", stderr)
         }
     }
 
@@ -77,6 +97,7 @@ public class RecordingStore {
     public static func saveTranscription(text: String, for audioURL: URL) {
         let sidecar = audioURL.deletingPathExtension().appendingPathExtension("txt")
         try? text.write(to: sidecar, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sidecar.path)
     }
 
     /// Save raw whisper output before any post-processing, as `<audio>.raw.txt`.
@@ -84,6 +105,7 @@ public class RecordingStore {
     public static func saveRaw(text: String, for audioURL: URL) {
         let sidecar = audioURL.deletingPathExtension().appendingPathExtension("raw.txt")
         try? text.write(to: sidecar, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sidecar.path)
     }
 
     private static func sidecarURL(for audioURL: URL) -> URL {
