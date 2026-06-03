@@ -32,6 +32,10 @@ func printUsage() {
     """)
 }
 
+// sig_atomic_t flag: set-only from signal handler, polled on main RunLoop.
+// NSApp.terminate(nil) MUST be called on the main thread.
+private var sigintReceived: sig_atomic_t = 0
+
 func cmdStart() {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
@@ -39,10 +43,17 @@ func cmdStart() {
     let delegate = AppDelegate()
     app.delegate = delegate
 
-    signal(SIGINT) { _ in
-        print("\nStopping speakfree...")
-        exit(0)
+    // Signal handler only sets the flag — no heap allocation, locks, or Obj-C calls.
+    signal(SIGINT) { _ in sigintReceived = 1 }
+
+    // Main RunLoop timer polls the flag every 0.25s and terminates via NSApp.terminate.
+    let sigintTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+        if sigintReceived != 0 {
+            print("\nStopping speakfree...")
+            NSApp.terminate(nil)
+        }
     }
+    RunLoop.main.add(sigintTimer, forMode: .common)
 
     app.run()
 }
