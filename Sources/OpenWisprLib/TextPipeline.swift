@@ -89,11 +89,53 @@ public enum TextPipeline {
 
     public static func run(_ input: Input) -> Result {
         let prompt = assemblePromptHints(input: input)
+        let sanitized = sanitize(input.raw)
+        let stripped = stripWhisperBracketMarkers(sanitized)
         let hybrid = input.punctuationMode == .hybrid
         let processed = (input.punctuationMode == .off)
-            ? input.raw
-            : TextPostProcessor.process(input.raw, hybrid: hybrid)
+            ? stripped
+            : TextPostProcessor.process(stripped, hybrid: hybrid)
         let final = TextPostProcessor.applyStyle(processed, mode: input.styleMode)
         return Result(promptHints: prompt, processedText: processed, finalText: final)
+    }
+
+    /// Remove ANSI escape sequences and NUL bytes that could corrupt keystroke injection.
+    /// Preserves \n, \r, \t (legitimate whitespace).
+    public static func sanitize(_ text: String) -> String {
+        // Strip ANSI CSI sequences: ESC [ ... <final byte 0x40-0x7E>
+        var result = text.replacingOccurrences(
+            of: "\u{1B}\\[[0-9;]*[A-Za-z]",
+            with: "",
+            options: .regularExpression
+        )
+        // Strip other ESC sequences (ESC followed by any non-[ char)
+        result = result.replacingOccurrences(
+            of: "\u{1B}[^\\[]",
+            with: "",
+            options: .regularExpression
+        )
+        // Strip NUL bytes — they terminate C strings and corrupt clipboard content
+        result = result.replacingOccurrences(of: "\0", with: "")
+        return result
+    }
+
+    /// Remove Whisper non-speech bracket markers embedded in otherwise-real transcriptions.
+    /// Standalone "..." or "…" are also stripped. Preserves ellipsis mid-sentence.
+    public static func stripWhisperBracketMarkers(_ text: String) -> String {
+        var result = text
+        // Known Whisper hallucination markers
+        let markers = [
+            "[BLANK_AUDIO]", "[BLANK AUDIO]", "(silence)", "[SILENCE]",
+            "(noise)", "[NOISE]", "[MUSIC]", "(music)",
+        ]
+        for marker in markers {
+            result = result.replacingOccurrences(of: marker, with: "", options: .caseInsensitive)
+        }
+        // Standalone "..." or "…" at start, end, or surrounded by whitespace
+        result = result.replacingOccurrences(
+            of: #"(?:^|\s)\.\.\.(?:\s|$)"#, with: " ", options: .regularExpression)
+        result = result.replacingOccurrences(
+            of: #"(?:^|\s)…(?:\s|$)"#, with: " ", options: .regularExpression)
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
