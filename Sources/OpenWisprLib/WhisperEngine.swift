@@ -117,6 +117,11 @@ class WhisperEngine {
         params.print_realtime = false
         params.print_timestamps = false
         params.print_special = false
+        // Anti-hallucination: tighter entropy and logprob thresholds suppress low-confidence
+        // segments before they reach the no-speech filter. Evidence: whisper.cpp #1724/#2286,
+        // arXiv 2505.12969. Defaults are 2.4 / -1.0; these are more conservative.
+        params.entropy_thold = 2.8
+        params.logprob_thold = -1.25
 
         // Language
         let langCString = strdup(language)
@@ -216,6 +221,8 @@ class WhisperEngine {
         params.print_timestamps = false
         params.print_special = false
         params.single_segment = false
+        params.entropy_thold = 2.8
+        params.logprob_thold = -1.25
 
         // Language
         let langCString = strdup(language)
