@@ -225,8 +225,12 @@ class WhisperEngine {
             let trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed != cbCtx.lastText {
                 cbCtx.lastText = trimmed
+                // Snapshot value types before crossing the async boundary — cbCtx may
+                // be freed (via Unmanaged.release below) before the block runs.
+                let snapshot = trimmed
+                let cb = cbCtx.onPartialResult
                 DispatchQueue.main.async {
-                    cbCtx.onPartialResult(trimmed)
+                    cb(snapshot)
                 }
             }
         }

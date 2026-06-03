@@ -47,6 +47,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var committedStreamingText: String = ""
     /// Serial queue that ensures streaming and final transcriptions never overlap on the whisper context.
     private let whisperSerialQueue = DispatchQueue(label: "com.speakfree.whisper-serial", qos: .userInitiated)
+    /// Monotonically-increasing token bumped every time streaming stops. Stale partial-result
+    /// callbacks that arrive on main after recording ended compare against this and are dropped.
+    private var streamingGeneration: UInt = 0
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar = StatusBarController()
@@ -671,6 +674,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         streamingText = ""
         committedStreamingText = ""
         isStreamingInFlight = false
+        streamingGeneration &+= 1  // invalidate any in-flight partial-result callbacks
         recordingOverlay.clearStreamingText()
     }
 
@@ -686,6 +690,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let language = config.language
         let suppressRegex = transcriber.suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
 
+        let generation = streamingGeneration
         whisperSerialQueue.async { [weak self] in
             guard let self = self else { return }
             // Re-check: user may have released hotkey while we waited for the queue
@@ -698,8 +703,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     samples: currentSamples,
                     language: language,
                     suppressRegex: suppressRegex,
-                    onPartialResult: { text in
-                        // Build display text with sentence breaks on new lines
+                    onPartialResult: { [weak self, generation] text in
+                        guard let self = self, self.streamingGeneration == generation else { return }
                         let displayText = self.buildStableDisplayText(from: text)
                         self.recordingOverlay.updateStreamingText(displayText)
                     }
