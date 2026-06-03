@@ -166,6 +166,31 @@ APPCAST_EOF
 echo "Installing to /Applications..."
 cp -a "$APP" /Applications/
 
-echo "Done: $APP"
-echo "Done: $DMG (signed, notarized, stapled)"
-echo "Done: $APPCAST (Sparkle appcast updated)"
+# Create a DRAFT GitHub release and upload the DMG.
+# The release is NOT public yet — the appcast.xml is updated locally but NOT pushed.
+# Dogfood the app from /Applications, then run scripts/publish-release.sh to go live.
+echo "Creating draft GitHub release v${VERSION}..."
+gh release create "v${VERSION}" "$DMG" \
+    --repo definitelyreal/speakfree \
+    --title "speakfree v${VERSION}" \
+    --draft \
+    --notes "$(cat <<NOTES_EOF
+## speakfree v${VERSION}
+
+*Draft — not yet published. Run scripts/publish-release.sh after dogfood.*
+NOTES_EOF
+)"
+
+echo ""
+echo "==========================================="
+echo "  BUILD COMPLETE — DOGFOOD BEFORE RELEASE  "
+echo "==========================================="
+echo ""
+echo "  Installed:  /Applications/speakfree.app (v${VERSION})"
+echo "  DMG:        ${DMG} (signed, notarized, stapled)"
+echo "  Appcast:    ${APPCAST} (updated locally, NOT pushed)"
+echo "  GH Release: draft at github.com/definitelyreal/speakfree/releases"
+echo ""
+echo "  Test the app. When ready to ship:"
+echo "    bash scripts/publish-release.sh ${VERSION}"
+echo ""
