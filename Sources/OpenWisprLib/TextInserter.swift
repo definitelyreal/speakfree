@@ -269,33 +269,40 @@ class TextInserter {
 
     /// Insert text by simulating keyboard events with unicode characters.
     /// Works in Electron apps (VS Code, Slack, Discord) without touching the clipboard.
-    /// CGEventKeyboardSetUnicodeString handles up to 20 UTF-16 code units per event,
-    /// so we chunk the text accordingly.
+    /// CGEventKeyboardSetUnicodeString limits input to 20 UTF-16 code units per event.
+    /// Chunks by Unicode scalars to avoid splitting surrogate pairs at chunk boundaries.
     private func typeViaKeyEvents(_ text: String) -> Bool {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
 
-        let utf16 = Array(text.utf16)
-        let chunkSize = 20  // max unicode chars per CGEvent
-        var index = 0
+        let scalars = Array(text.unicodeScalars)
+        var i = 0
 
-        while index < utf16.count {
-            let end = min(index + chunkSize, utf16.count)
-            let chunk = Array(utf16[index..<end])
+        while i < scalars.count {
+            // Build a chunk of scalars whose total UTF-16 length is ≤ 20.
+            // A scalar outside the BMP (U+10000+) encodes as 2 UTF-16 code units (surrogate pair).
+            var chunkUTF16: [UniChar] = []
+            while i < scalars.count {
+                let scalarUTF16 = Array(String(scalars[i]).utf16)
+                if chunkUTF16.count + scalarUTF16.count > 20 { break }
+                chunkUTF16.append(contentsOf: scalarUTF16)
+                i += 1
+            }
+
+            // Safety: a single scalar > 20 UTF-16 units is impossible (max is 2), but guard anyway.
+            if chunkUTF16.isEmpty { i += 1; continue }
 
             guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
                   let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
                 return false
             }
 
-            chunk.withUnsafeBufferPointer { buffer in
+            chunkUTF16.withUnsafeBufferPointer { buffer in
                 keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
                 keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
             }
 
             keyDown.post(tap: .cghidEventTap)
             keyUp.post(tap: .cghidEventTap)
-
-            index = end
         }
 
         return true
