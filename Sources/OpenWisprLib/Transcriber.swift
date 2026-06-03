@@ -7,7 +7,8 @@ public class Transcriber {
 
     let engine = WhisperEngine()
 
-    // Known whisper hallucinations on silence/noise
+    // Known whisper hallucinations on silence/noise.
+    // "So." / "So," are among the most common silence hallucinations across all model sizes.
     private static let hallucinations: Set<String> = [
         "[MUSIC]", "(music)", "[music]", "Music.", "Music",
         "[APPLAUSE]", "(applause)", "[applause]", "Applause.",
@@ -17,7 +18,13 @@ public class Transcriber {
         "Thank you.", "Thanks for watching.",
         "you", "You",
         "...", "\u{2026}",
-        ".", ""
+        ".", "",
+        // Short filler hallucinations common on near-silence
+        "So.", "So,", "So...", "Hmm.", "Hmm,", "Hmm...",
+        "Yeah.", "Yeah,", "Yes.", "No.",
+        "Okay.", "OK.", "Oh.", "Oh,",
+        "Um.", "Um,", "Uh.", "Uh,",
+        "Hello.", "Hi.",
     ]
 
     private func isHallucination(_ text: String) -> Bool {
@@ -33,6 +40,8 @@ public class Transcriber {
             "music", "applause", "blank audio", "silence", "noise",
             "thank you", "thanks for watching", "thanks for listening",
             "you", "the end", "bye",
+            // Single filler words that only appear alone — "so" mid-sentence is real
+            "so", "hmm", "yeah", "okay", "ok", "oh", "um", "uh", "hello", "hi",
         ]
         if hallucinationPatterns.contains(lower) { return true }
 
