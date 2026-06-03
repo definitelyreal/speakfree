@@ -39,9 +39,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordingSourceElement: AXUIElement?
     // Text before cursor at recording start — passed to whisper as context prompt
     private var recordingContextText: String?
-    // Screen OCR text captured at recording start (opt-in)
+    // Screen OCR text captured at recording start (opt-in). Written only on main via
+    // generation-token check, so no lock needed.
     private var screenContextText: String?
-    private let screenContextLock = NSLock()
+    // Generation token: bumped at recording start AND end/cancel. The OCR background task
+    // captures the UUID at dispatch time and writes back only if the token still matches,
+    // discarding stale results from previous recordings.
+    private var screenCaptureGeneration: UUID = UUID()
 
     // Streaming transcription: periodic inference during recording
     private var streamingTimer: Timer?
@@ -460,11 +464,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // which whisper then parrots instead of transcribing speech.
         let isRemoteDesktop = inserter.isRemoteDesktopFrontmost()
         if config.screenContext?.value == true && !isRemoteDesktop {
+            // Bump generation so any in-flight OCR from a previous recording is discarded.
+            let capturedGeneration = UUID()
+            screenCaptureGeneration = capturedGeneration
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let text = ScreenContext.captureAndRecognize()
-                self?.screenContextLock.lock()
-                self?.screenContextText = text
-                self?.screenContextLock.unlock()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, self.screenCaptureGeneration == capturedGeneration else { return }
+                    self.screenContextText = text
+                }
             }
         }
 
@@ -502,9 +510,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         RecordingStore.clearSentinel()
         recordingSourceElement = nil
         recordingContextText = nil
-        screenContextLock.lock()
         screenContextText = nil
-        screenContextLock.unlock()
+        screenCaptureGeneration = UUID()  // invalidate any in-flight OCR
         statusBar.state = .idle
         recordingOverlay.hide()
         statusBar.buildMenu()
@@ -569,10 +576,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         let capturedElement = recordingSourceElement
         let capturedInputText = recordingContextText
-        screenContextLock.lock()
         let capturedScreenText = screenContextText
         screenContextText = nil
-        screenContextLock.unlock()
+        screenCaptureGeneration = UUID()  // invalidate any late-arriving OCR
         recordingSourceElement = nil
         recordingContextText = nil
 
