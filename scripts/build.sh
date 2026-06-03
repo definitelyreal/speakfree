@@ -18,7 +18,12 @@ VENDOR_DIR="$(dirname "$0")/vendor/dylibs"
 echo "Building speakfree v${VERSION}..."
 swift build -c release
 
-echo "Updating Info.plist version to ${VERSION}..."
+# Always regenerate Info.plist from the tracked Resources/Info.plist so the bundle
+# template (speakfree.app, which is gitignored) never drifts out of sync with the
+# canonical plist. This ensures Sparkle keys, entitlements descriptions, and other
+# metadata are never silently dropped from a build.
+echo "Copying canonical Info.plist and setting version to ${VERSION}..."
+cp "Resources/Info.plist" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "$APP/Contents/Info.plist"
 

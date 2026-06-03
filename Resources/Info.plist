@@ -2,33 +2,33 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key>
-    <string>speakfree</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.definitelyreal.speakfree</string>
-    <key>CFBundleName</key>
-    <string>speakfree</string>
-    <key>CFBundleDisplayName</key>
-    <string>speakfree</string>
-    <key>CFBundleVersion</key>
-    <string>1.0.6</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.6</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>speakfree needs microphone access to record your voice.</string>
-    <key>SUFeedURL</key>
-    <string>https://definitelyreal.github.io/speakfree/appcast.xml</string>
-    <key>SUPublicEDKey</key>
-    <string>TNntzjYy93kcEN80zmT8Hp6PPD0BfluqSDl6PmxQArQ=</string>
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
+	<key>CFBundleDisplayName</key>
+	<string>speakfree</string>
+	<key>CFBundleExecutable</key>
+	<string>speakfree</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.definitelyreal.speakfree</string>
+	<key>CFBundleName</key>
+	<string>speakfree</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.3.0</string>
+	<key>CFBundleVersion</key>
+	<string>1.3.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>speakfree needs microphone access to record your voice.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://definitelyreal.github.io/speakfree/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>TNntzjYy93kcEN80zmT8Hp6PPD0BfluqSDl6PmxQArQ=</string>
 </dict>
 </plist>
