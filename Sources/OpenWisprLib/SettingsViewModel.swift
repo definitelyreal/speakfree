@@ -85,6 +85,7 @@ public class SettingsViewModel: ObservableObject {
     /// Returns an estimated RAM usage string for the given Whisper model size.
     /// Benchmarked on M3 Max.
     public static func modelMemoryDescription(_ model: String) -> String {
+        if model == "large-v3-turbo" { return "~1.2 GB" }
         switch normalizedModelBase(model) {
         case "tiny":   return "~230 MB"
         case "base":   return "~330 MB"
@@ -98,6 +99,7 @@ public class SettingsViewModel: ObservableObject {
     /// Returns an estimated transcription speed string for the given Whisper model size.
     /// Benchmarked on M3 Max.
     public static func modelSpeedDescription(_ model: String) -> String {
+        if model == "large-v3-turbo" { return "~0.7s" }
         switch normalizedModelBase(model) {
         case "tiny":   return "~0.6s"
         case "base":   return "~0.6s"
@@ -110,6 +112,7 @@ public class SettingsViewModel: ObservableObject {
 
     /// Returns an estimated model load time string for the given Whisper model size.
     public static func modelLoadTimeDescription(_ model: String) -> String {
+        if model == "large-v3-turbo" { return "~0.8s" }
         switch normalizedModelBase(model) {
         case "tiny":   return "~0.2s"
         case "base":   return "~0.3s"
@@ -122,6 +125,7 @@ public class SettingsViewModel: ObservableObject {
 
     /// Returns the download size string for the given Whisper model size.
     public static func modelDownloadSize(_ model: String) -> String {
+        if model == "large-v3-turbo" { return "1.5 GB" }
         switch normalizedModelBase(model) {
         case "tiny":   return "75 MB"
         case "base":   return "142 MB"
@@ -130,6 +134,11 @@ public class SettingsViewModel: ObservableObject {
         case "large":  return "3.1 GB"
         default:       return "unknown"
         }
+    }
+
+    /// Returns true if this model is the recommended choice for new users.
+    public static func isRecommendedModel(_ model: String) -> Bool {
+        return model == "large-v3-turbo"
     }
 
     /// Check if a model file exists on disk.
