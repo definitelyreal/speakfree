@@ -524,17 +524,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Stop streaming timer and clear streaming state
         stopStreamingTimer()
 
+        // Capture key-release time NOW — finalizeRecording is called 300ms later, so
+        // measuring inside it would undercount the post-buffer delay in the latency log.
+        let keyReleaseTime = CFAbsoluteTimeGetCurrent()
+
         // Keep recording for 300ms after key release to capture trailing audio.
         // AVAudioEngine buffers audio in chunks — releasing fn mid-word loses
         // the tail of the last buffer. This post-buffer ensures the last word
         // isn't cut off.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.finalizeRecording()
+            self?.finalizeRecording(keyReleaseTime: keyReleaseTime)
         }
     }
 
-    private func finalizeRecording() {
-        let stopTime = CFAbsoluteTimeGetCurrent()
+    private func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
+        let stopTime = keyReleaseTime
 
         guard let recording = recorder.stopRecording() else {
             RecordingStore.clearSentinel()
