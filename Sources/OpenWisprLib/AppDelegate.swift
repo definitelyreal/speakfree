@@ -418,9 +418,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Try to get cursor position from selected text range
         var rangeRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-           let rangeValue = rangeRef {
+           let rangeValue = rangeRef,
+           CFGetTypeID(rangeValue) == AXValueGetTypeID() {
             var range = CFRange()
-            // swiftlint:disable:next force_cast
             AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
             let cursorIndex = max(0, range.location)
             if cursorIndex > 0, let swiftIndex = fullText.index(fullText.startIndex, offsetBy: cursorIndex, limitedBy: fullText.endIndex) {

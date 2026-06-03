@@ -21,10 +21,10 @@ class TextInserter {
 
             var rangeRef: CFTypeRef?
             guard AXUIElementCopyAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-                  let rangeValue = rangeRef else { semaphore.signal(); return }
+                  let rangeValue = rangeRef,
+                  CFGetTypeID(rangeValue) == AXValueGetTypeID() else { semaphore.signal(); return }
 
             var range = CFRange()
-            // swiftlint:disable:next force_cast
             AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
 
             guard range.location > 0 else { semaphore.signal(); return }
