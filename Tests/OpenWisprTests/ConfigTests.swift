@@ -158,9 +158,9 @@ final class ConfigTests: XCTestCase {
 
     // MARK: - Default model
 
-    func testDefaultModelIsSmallEn() {
+    func testDefaultModelIsLargeV3Turbo() {
         let config = Config.defaultConfig
-        XCTAssertEqual(config.modelSize, "small.en")
+        XCTAssertEqual(config.modelSize, "large-v3-turbo")
     }
 }
 

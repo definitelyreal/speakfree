@@ -33,7 +33,7 @@ public struct Config: Codable {
     public static let defaultConfig = Config(
         hotkey: HotkeyConfig(keyCode: 63, modifiers: []),
         modelPath: nil,
-        modelSize: "small.en",
+        modelSize: "large-v3-turbo",
         language: "en",
         spokenPunctuation: .hybrid,
         maxRecordings: 30,

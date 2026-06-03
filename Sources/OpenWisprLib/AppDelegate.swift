@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import AVFoundation
+import os
 import Sparkle
 
 public class AppDelegate: NSObject, NSApplicationDelegate {
@@ -10,7 +11,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var transcriber: Transcriber!
     var inserter: TextInserter!
     var config: Config!
-    var isPressed = false
+    private let _isPressed = OSAllocatedUnfairLock(initialState: false)
+    var isPressed: Bool {
+        get { _isPressed.withLock { $0 } }
+        set { _isPressed.withLock { $0 = newValue } }
+    }
     var isReady = false
     public var lastTranscription: String?
     private var recordingOverlay = RecordingOverlay()
@@ -34,9 +39,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordingSourceElement: AXUIElement?
     // Text before cursor at recording start — passed to whisper as context prompt
     private var recordingContextText: String?
-    // Screen OCR text captured at recording start (opt-in)
+    // Screen OCR text captured at recording start (opt-in). Written only on main via
+    // generation-token check, so no lock needed.
     private var screenContextText: String?
-    private let screenContextLock = NSLock()
+    // Generation token: bumped at recording start AND end/cancel. The OCR background task
+    // captures the UUID at dispatch time and writes back only if the token still matches,
+    // discarding stale results from previous recordings.
+    private var screenCaptureGeneration: UUID = UUID()
 
     // Streaming transcription: periodic inference during recording
     private var streamingTimer: Timer?
@@ -47,6 +56,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var committedStreamingText: String = ""
     /// Serial queue that ensures streaming and final transcriptions never overlap on the whisper context.
     private let whisperSerialQueue = DispatchQueue(label: "com.speakfree.whisper-serial", qos: .userInitiated)
+    /// Monotonically-increasing token bumped every time streaming stops. Stale partial-result
+    /// callbacks that arrive on main after recording ended compare against this and are dropped.
+    private var streamingGeneration: UInt = 0
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar = StatusBarController()
@@ -410,9 +422,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Try to get cursor position from selected text range
         var rangeRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-           let rangeValue = rangeRef {
+           let rangeValue = rangeRef,
+           CFGetTypeID(rangeValue) == AXValueGetTypeID() {
             var range = CFRange()
-            // swiftlint:disable:next force_cast
             AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
             let cursorIndex = max(0, range.location)
             if cursorIndex > 0, let swiftIndex = fullText.index(fullText.startIndex, offsetBy: cursorIndex, limitedBy: fullText.endIndex) {
@@ -452,11 +464,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // which whisper then parrots instead of transcribing speech.
         let isRemoteDesktop = inserter.isRemoteDesktopFrontmost()
         if config.screenContext?.value == true && !isRemoteDesktop {
+            // Bump generation so any in-flight OCR from a previous recording is discarded.
+            let capturedGeneration = UUID()
+            screenCaptureGeneration = capturedGeneration
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let text = ScreenContext.captureAndRecognize()
-                self?.screenContextLock.lock()
-                self?.screenContextText = text
-                self?.screenContextLock.unlock()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, self.screenCaptureGeneration == capturedGeneration else { return }
+                    self.screenContextText = text
+                }
             }
         }
 
@@ -494,9 +510,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         RecordingStore.clearSentinel()
         recordingSourceElement = nil
         recordingContextText = nil
-        screenContextLock.lock()
         screenContextText = nil
-        screenContextLock.unlock()
+        screenCaptureGeneration = UUID()  // invalidate any in-flight OCR
         statusBar.state = .idle
         recordingOverlay.hide()
         statusBar.buildMenu()
@@ -509,17 +524,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Stop streaming timer and clear streaming state
         stopStreamingTimer()
 
+        // Capture key-release time NOW — finalizeRecording is called 300ms later, so
+        // measuring inside it would undercount the post-buffer delay in the latency log.
+        let keyReleaseTime = CFAbsoluteTimeGetCurrent()
+
         // Keep recording for 300ms after key release to capture trailing audio.
         // AVAudioEngine buffers audio in chunks — releasing fn mid-word loses
         // the tail of the last buffer. This post-buffer ensures the last word
         // isn't cut off.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.finalizeRecording()
+            self?.finalizeRecording(keyReleaseTime: keyReleaseTime)
         }
     }
 
-    private func finalizeRecording() {
-        let stopTime = CFAbsoluteTimeGetCurrent()
+    private func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
+        let stopTime = keyReleaseTime
 
         guard let recording = recorder.stopRecording() else {
             RecordingStore.clearSentinel()
@@ -561,69 +580,45 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         let capturedElement = recordingSourceElement
         let capturedInputText = recordingContextText
-        screenContextLock.lock()
         let capturedScreenText = screenContextText
         screenContextText = nil
-        screenContextLock.unlock()
+        screenCaptureGeneration = UUID()  // invalidate any late-arriving OCR
         recordingSourceElement = nil
         recordingContextText = nil
+
+        // Snapshot ALL config-derived state on main before crossing into whisperSerialQueue.
+        // Accessing self.config.* from a background queue is a torn-read race — Config is a
+        // struct so reads and writes are not atomic across threads.
+        let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
+        let mode = config.spokenPunctuation ?? .off
+        let glossary = Config.loadVocabulary()
+        let capturedStyleMode = recordingStyleMode
 
         // Use whisperSerialQueue to ensure any in-flight streaming inference finishes first
         whisperSerialQueue.async { [weak self] in
             guard let self = self else { return }
-            let maxRecordings = (self.config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(self.config.maxRecordings)
             do {
-                // Build Whisper prompt. Only the final 224 tokens (~800 chars) matter.
-                // Whisper mimics the style of whatever ENDS the prompt, so put the
-                // user's own text last — this makes output match their writing style
-                // (capitalization, punctuation, formality).
-                let prompt: String? = {
-                    var parts: [String] = []
-                    // Instructions first (furthest from end = least style influence)
-                    let mode = self.config.spokenPunctuation ?? .off
-                    if mode == .spoken || mode == .hybrid {
-                        // Avoid commas in the instruction — whisper mimics prompt style,
-                        // and comma-heavy prompts cause comma spam in output.
-                        parts.append("Spoken punctuation: say the word \"period\" or \"comma\" or \"question mark\" to insert punctuation.")
-                    }
-                    if let vocab = Config.loadVocabulary() {
-                        parts.append("Glossary: \(vocab).")
-                    }
-                    // Screen context: extract only unique words as vocabulary hints.
-                    // Don't pass raw text — whisper parrots it instead of transcribing.
-                    if let screen = capturedScreenText {
-                        let words = Set(screen.components(separatedBy: .whitespacesAndNewlines)
-                            .filter { $0.count > 3 })
-                            .prefix(20)
-                            .joined(separator: ", ")
-                        if !words.isEmpty {
-                            parts.append("Context words: \(words).")
-                        }
-                    }
-                    // Cursor context: extract words-only as vocab hints — do NOT pass raw
-                    // text. Whisper mimics the punctuation style of whatever ENDS the prompt,
-                    // so feeding raw surrounding text (which is often comma/apostrophe-heavy,
-                    // e.g. a prior degraded dictation) makes whisper amplify commas and
-                    // apostrophes — a self-reinforcing spiral. Mirror the screen-context path
-                    // above. (Sentence-position / formality belongs in the post-pass reasoner,
-                    // not in whisper's prompt — whisper parrots style, it doesn't reason.)
-                    if let input = capturedInputText {
-                        let words = Set(input.components(separatedBy: .whitespacesAndNewlines)
-                            .filter { $0.count > 3 })
-                            .prefix(20)
-                            .joined(separator: " ")
-                        if !words.isEmpty {
-                            parts.append("Context words: \(words).")
-                        }
-                    }
-                    return parts.isEmpty ? nil : parts.joined(separator: " ")
-                }()
+                // Build Whisper prompt + run post-processing through the shared
+                // TextPipeline core. Extracting this out of an inline closure is
+                // what lets unit tests cover the same code path the app uses,
+                // preventing the kind of drift that shipped the v1.2.11 comma loop.
+
+                // Build pipeline inputs with placeholder raw; we need promptHints
+                // before whisper runs, then re-run with the real raw text.
+                let makeInput: (String) -> TextPipeline.Input = { raw in
+                    TextPipeline.Input(
+                        raw: raw,
+                        cursorContextText: capturedInputText,
+                        screenContextText: capturedScreenText,
+                        punctuationMode: mode,
+                        styleMode: capturedStyleMode,
+                        glossaryWords: glossary
+                    )
+                }
+                let prompt = TextPipeline.assemblePromptHints(input: makeInput(""))
                 let raw = try self.transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
                 RecordingStore.saveRaw(text: raw, for: audioURL)
-                let mode = self.config.spokenPunctuation ?? .off
-                var text = (mode == .spoken || mode == .hybrid) ? TextPostProcessor.process(raw, hybrid: mode == .hybrid) : raw
-                // Apply per-app style (e.g. strip trailing period for messaging apps)
-                text = TextPostProcessor.applyStyle(text, mode: self.recordingStyleMode)
+                let text = TextPipeline.run(makeInput(raw)).finalText
                 RecordingStore.saveTranscription(text: text, for: audioURL)
 
                 RecordingStore.clearSentinel()
@@ -700,6 +695,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         streamingText = ""
         committedStreamingText = ""
         isStreamingInFlight = false
+        streamingGeneration &+= 1  // invalidate any in-flight partial-result callbacks
         recordingOverlay.clearStreamingText()
     }
 
@@ -715,6 +711,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let language = config.language
         let suppressRegex = transcriber.suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
 
+        let generation = streamingGeneration
         whisperSerialQueue.async { [weak self] in
             guard let self = self else { return }
             // Re-check: user may have released hotkey while we waited for the queue
@@ -727,9 +724,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     samples: currentSamples,
                     language: language,
                     suppressRegex: suppressRegex,
-                    onPartialResult: { text in
-                        // Build display text with sentence breaks on new lines
-                        let displayText = self.buildStableDisplayText(from: text)
+                    onPartialResult: { [weak self, generation] text in
+                        guard let self = self, self.streamingGeneration == generation else { return }
+                        // Strip Whisper hallucination markers so they don't appear in the
+                        // streaming overlay — the finalize path goes through TextPipeline,
+                        // but the preview path calls the engine directly.
+                        let cleaned = TextPipeline.stripWhisperBracketMarkers(text)
+                        let displayText = self.buildStableDisplayText(from: cleaned)
                         self.recordingOverlay.updateStreamingText(displayText)
                     }
                 )

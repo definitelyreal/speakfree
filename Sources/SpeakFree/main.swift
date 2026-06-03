@@ -13,6 +13,7 @@ func printUsage() {
 
     USAGE:
         speakfree start              Start the dictation daemon
+        speakfree process <wav>      Transcribe a wav file; prints JSON {raw, processed, styled}
         speakfree set-hotkey <key>   Set the push-to-talk hotkey
         speakfree get-hotkey         Show current hotkey
         speakfree set-model <size>   Set the Whisper model
@@ -31,6 +32,10 @@ func printUsage() {
     """)
 }
 
+// sig_atomic_t flag: set-only from signal handler, polled on main RunLoop.
+// NSApp.terminate(nil) MUST be called on the main thread.
+private var sigintReceived: sig_atomic_t = 0
+
 func cmdStart() {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
@@ -38,10 +43,17 @@ func cmdStart() {
     let delegate = AppDelegate()
     app.delegate = delegate
 
-    signal(SIGINT) { _ in
-        print("\nStopping speakfree...")
-        exit(0)
+    // Signal handler only sets the flag — no heap allocation, locks, or Obj-C calls.
+    signal(SIGINT) { _ in sigintReceived = 1 }
+
+    // Main RunLoop timer polls the flag every 0.25s and terminates via NSApp.terminate.
+    let sigintTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+        if sigintReceived != 0 {
+            print("\nStopping speakfree...")
+            NSApp.terminate(nil)
+        }
     }
+    RunLoop.main.add(sigintTimer, forMode: .common)
 
     app.run()
 }
@@ -104,6 +116,20 @@ func cmdDownloadModel(_ size: String) {
     }
 }
 
+func cmdProcess(_ wavPath: String) {
+    let wavURL = URL(fileURLWithPath: wavPath)
+    do {
+        let result = try ProcessCommand.run(wavURL: wavURL)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(result)
+        print(String(data: data, encoding: .utf8) ?? "{}")
+    } catch {
+        fputs("Error: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
 func cmdStatus() {
     let config = Config.load()
     let hotkeyDesc = KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)
@@ -124,6 +150,12 @@ let command = args.count > 1 ? args[1] : nil
 switch command {
 case "start":
     cmdStart()
+case "process":
+    guard args.count > 2 else {
+        print("Usage: speakfree process <wav>")
+        exit(1)
+    }
+    cmdProcess(args[2])
 case "set-hotkey":
     guard args.count > 2 else {
         print("Usage: speakfree set-hotkey <key>")

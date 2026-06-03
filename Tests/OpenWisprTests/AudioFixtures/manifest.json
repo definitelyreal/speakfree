@@ -1,0 +1,27 @@
+[
+  {
+    "wav": "fixture-1-clean.wav",
+    "description": "Clean short sentence — no spoken punctuation, no comma spam. Baseline sanity.",
+    "modelSHA": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+    "properties": [
+      { "kind": "noCommaSpam" }
+    ]
+  },
+  {
+    "wav": "fixture-2-spoken-comma.wav",
+    "description": "Spoken 'comma' correctly converted to punctuation, no comma-spam.",
+    "modelSHA": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+    "properties": [
+      { "kind": "noCommaSpam" }
+    ]
+  },
+  {
+    "wav": "fixture-3-spoken-period-end.wav",
+    "description": "Sentence ends with spoken 'period' — styled output must end with '.'.",
+    "modelSHA": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+    "properties": [
+      { "kind": "noCommaSpam" },
+      { "kind": "spokenPeriodAtEnd", "expectedSpokenPeriodEnd": true }
+    ]
+  }
+]

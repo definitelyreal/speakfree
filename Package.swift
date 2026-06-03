@@ -46,7 +46,11 @@ let package = Package(
         .testTarget(
             name: "OpenWisprTests",
             dependencies: ["OpenWisprLib"],
-            path: "Tests/OpenWisprTests"
+            path: "Tests/OpenWisprTests",
+            resources: [
+                .copy("Corpus/cases.json"),
+                .copy("AudioFixtures"),
+            ]
         ),
     ]
 )

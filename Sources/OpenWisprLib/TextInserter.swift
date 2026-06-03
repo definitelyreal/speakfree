@@ -21,10 +21,10 @@ class TextInserter {
 
             var rangeRef: CFTypeRef?
             guard AXUIElementCopyAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-                  let rangeValue = rangeRef else { semaphore.signal(); return }
+                  let rangeValue = rangeRef,
+                  CFGetTypeID(rangeValue) == AXValueGetTypeID() else { semaphore.signal(); return }
 
             var range = CFRange()
-            // swiftlint:disable:next force_cast
             AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
 
             guard range.location > 0 else { semaphore.signal(); return }
@@ -98,6 +98,14 @@ class TextInserter {
     }
 
     private func pasteText(_ text: String) {
+        // Refuse to insert text when Secure Input is active (e.g. password fields).
+        // CGEventTap is not disabled — the tap re-enables itself via kCGEventTapDisabled*
+        // handling in HotkeyManager. We just skip the insertion so passwords stay safe.
+        if IsSecureEventInputEnabled() {
+            DiagnosticLogger.shared.log("TextInserter: skipping insertion — Secure Input is enabled (password field?)")
+            return
+        }
+
         let frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
         let isRemote = isRemoteDesktopFrontmost()
         let isBroken = isElectronApp()
@@ -138,15 +146,22 @@ class TextInserter {
     /// Type text into the frontmost app via AppleScript keystroke.
     /// Used for remote desktop apps where clipboard sync is unreliable.
     private func typeViaAppleScript(_ text: String) {
+        // Multi-line text is slow and lossy as per-line keystrokes on remote desktop.
+        // Fall back to clipboard which remote desktop apps sync correctly.
+        if text.contains("\n") || text.contains("\r") {
+            pasteViaClipboard(text)
+            return
+        }
+
         guard let app = NSWorkspace.shared.frontmostApplication else { return }
-        let processName = app.localizedName ?? ""
+        let pid = app.processIdentifier  // target by PID — process name can be ambiguous
         // Escape double quotes and backslashes for AppleScript
         let escaped = text
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         let script = NSAppleScript(source: """
             tell application "System Events"
-                tell process "\(processName)"
+                tell (first process whose unix id is \(pid))
                     keystroke "\(escaped)"
                 end tell
             end tell
@@ -254,33 +269,40 @@ class TextInserter {
 
     /// Insert text by simulating keyboard events with unicode characters.
     /// Works in Electron apps (VS Code, Slack, Discord) without touching the clipboard.
-    /// CGEventKeyboardSetUnicodeString handles up to 20 UTF-16 code units per event,
-    /// so we chunk the text accordingly.
+    /// CGEventKeyboardSetUnicodeString limits input to 20 UTF-16 code units per event.
+    /// Chunks by Unicode scalars to avoid splitting surrogate pairs at chunk boundaries.
     private func typeViaKeyEvents(_ text: String) -> Bool {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
 
-        let utf16 = Array(text.utf16)
-        let chunkSize = 20  // max unicode chars per CGEvent
-        var index = 0
+        let scalars = Array(text.unicodeScalars)
+        var i = 0
 
-        while index < utf16.count {
-            let end = min(index + chunkSize, utf16.count)
-            let chunk = Array(utf16[index..<end])
+        while i < scalars.count {
+            // Build a chunk of scalars whose total UTF-16 length is ≤ 20.
+            // A scalar outside the BMP (U+10000+) encodes as 2 UTF-16 code units (surrogate pair).
+            var chunkUTF16: [UniChar] = []
+            while i < scalars.count {
+                let scalarUTF16 = Array(String(scalars[i]).utf16)
+                if chunkUTF16.count + scalarUTF16.count > 20 { break }
+                chunkUTF16.append(contentsOf: scalarUTF16)
+                i += 1
+            }
+
+            // Safety: a single scalar > 20 UTF-16 units is impossible (max is 2), but guard anyway.
+            if chunkUTF16.isEmpty { i += 1; continue }
 
             guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
                   let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
                 return false
             }
 
-            chunk.withUnsafeBufferPointer { buffer in
+            chunkUTF16.withUnsafeBufferPointer { buffer in
                 keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
                 keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
             }
 
             keyDown.post(tap: .cghidEventTap)
             keyUp.post(tap: .cghidEventTap)
-
-            index = end
         }
 
         return true
@@ -352,11 +374,11 @@ class TextInserter {
         // the local clipboard before the paste fires. Without this delay, Splashtop
         // pastes the OLD clipboard content on the remote (sync hadn't completed yet).
         if isRemoteDesktopFrontmost(), let app = NSWorkspace.shared.frontmostApplication {
-            let processName = app.localizedName ?? ""
+            let pid = app.processIdentifier  // target by PID — process name can be ambiguous
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                 let script = NSAppleScript(source: """
                     tell application "System Events"
-                        tell process "\(processName)"
+                        tell (first process whose unix id is \(pid))
                             keystroke "v" using command down
                         end tell
                     end tell
