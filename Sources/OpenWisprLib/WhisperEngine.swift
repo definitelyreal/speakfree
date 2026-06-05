@@ -382,37 +382,63 @@ class WhisperEngine {
     // MARK: - Voice Activity Detection (silence trimming)
 
     /// Trim leading and trailing silence from PCM samples.
-    /// Returns the trimmed samples, or the original if no silence detected.
-    func trimSilence(_ samples: [Float], threshold: Float = 0.01) -> [Float] {
+    /// Uses an adaptive threshold — a fraction of the recording's own peak RMS —
+    /// so quiet microphones (AirPods, soft speakers) aren't over-trimmed.
+    func trimSilence(_ samples: [Float]) -> [Float] {
         let windowSize = 1600  // 100ms at 16kHz
         guard samples.count > windowSize * 2 else { return samples }
 
-        // Find first window with energy above threshold
-        var start = 0
-        for i in stride(from: 0, to: samples.count - windowSize, by: windowSize / 2) {
-            let window = samples[i..<min(i + windowSize, samples.count)]
+        // Compute per-window RMS values once
+        var windowRMS: [Float] = []
+        var i = 0
+        while i + windowSize <= samples.count {
+            let window = samples[i..<i + windowSize]
             let rms = sqrt(window.map { $0 * $0 }.reduce(0, +) / Float(window.count))
+            windowRMS.append(rms)
+            i += windowSize / 2
+        }
+
+        // Adaptive threshold: 8% of peak RMS, floored at 0.001 to avoid treating
+        // genuine near-silence as speech when the recording is completely empty.
+        let peakRMS = windowRMS.max() ?? 0
+        let threshold = max(0.001, peakRMS * 0.08)
+
+        // Find first voiced window
+        var startWindow = 0
+        for (idx, rms) in windowRMS.enumerated() {
             if rms > threshold {
-                start = max(0, i - windowSize)  // Include a small buffer before speech
+                startWindow = idx
                 break
             }
         }
 
-        // Find last window with energy above threshold
-        var end = samples.count
-        for i in stride(from: samples.count - windowSize, through: 0, by: -windowSize / 2) {
-            let window = samples[i..<min(i + windowSize, samples.count)]
-            let rms = sqrt(window.map { $0 * $0 }.reduce(0, +) / Float(window.count))
-            if rms > threshold {
-                end = min(samples.count, i + windowSize * 2)  // Include buffer after speech
+        // Find last voiced window
+        var endWindow = windowRMS.count - 1
+        for idx in stride(from: windowRMS.count - 1, through: 0, by: -1) {
+            if windowRMS[idx] > threshold {
+                endWindow = idx
                 break
             }
         }
 
-        if start >= end { return samples }
-        let trimmed = Array(samples[start..<end])
+        // Convert window indices back to sample indices, with safety buffers
+        let startSample = max(0, startWindow * (windowSize / 2) - windowSize)
+        let endSample   = min(samples.count, (endWindow + 1) * (windowSize / 2) + windowSize * 2)
+
+        if startSample >= endSample { return samples }
+
+        // Safety: never trim more than 80% of the recording — if that much would be
+        // cut it means the threshold misfired, and returning the full audio is safer.
+        let kept = endSample - startSample
+        if kept < samples.count / 5 { return samples }
+
+        let trimmed = Array(samples[startSample..<endSample])
         if trimmed.count < samples.count {
-            DiagnosticLogger.shared.log("VAD: trimmed \(samples.count) → \(trimmed.count) samples (\(Int(Double(samples.count - trimmed.count) / 16000.0 * 1000))ms silence removed)")
+            DiagnosticLogger.shared.log(
+                "VAD: trimmed \(samples.count) → \(trimmed.count) samples "
+                + "(\(Int(Double(samples.count - trimmed.count) / 16000.0 * 1000))ms silence removed, "
+                + "threshold=\(String(format: "%.4f", threshold)) peak=\(String(format: "%.4f", peakRMS)))"
+            )
         }
         return trimmed
     }
