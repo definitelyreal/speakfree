@@ -108,7 +108,7 @@ class TextInserter {
 
         let frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
         let isRemote = isRemoteDesktopFrontmost()
-        let isBroken = isElectronApp()
+        let isBroken = shouldUseClipboardPaste()
         DiagnosticLogger.shared.log("TextInserter: inserting \(text.count) chars into \(frontApp) (remoteDesktop=\(isRemote), brokenApp=\(isBroken))")
 
         // Remote desktop: type via AppleScript keystroke (clipboard sync unreliable)
@@ -118,10 +118,10 @@ class TextInserter {
             return
         }
 
-        // Broken apps (Superhuman, Google Docs): AX "succeeds" but changes nothing,
-        // and CGEvent unicode gets mangled/dropped. Go straight to clipboard paste.
+        // Electron / contenteditable apps: CGEvent unicode is slow or mangled.
+        // Use clipboard paste for instant insertion regardless of text length.
         if isBroken {
-            DiagnosticLogger.shared.log("TextInserter: using clipboard paste (broken app)")
+            DiagnosticLogger.shared.log("TextInserter: using clipboard paste (Electron/broken app)")
             pasteViaClipboard(text)
             return
         }
@@ -216,22 +216,46 @@ class TextInserter {
         return remoteKeywords.contains(where: { lower.contains($0) })
     }
 
-    /// Check if the frontmost app mangles CGEvent unicode typing.
-    /// Covers Superhuman (Electron apostrophe/comma garbling) and Google Docs editors
-    /// in any browser (custom contenteditable that ignores synthetic unicode events).
-    private func isElectronApp() -> Bool {
-        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.lowercased() else { return false }
-        let brokenApps = [
-            "superhuman",
-        ]
-        if brokenApps.contains(where: { bundleID.contains($0) }) { return true }
+    /// Apps that should receive text via clipboard paste rather than CGEvent unicode typing.
+    /// Covers Electron apps (where synthetic key events are slow or mangled) and
+    /// contenteditable web apps in browsers (Google Docs etc.).
+    private static let clipboardPasteApps: Set<String> = [
+        // --- Electron / CEF apps (CGEvent typing is slow — clipboard paste is instant) ---
+        "org.whispersystems.signal-desktop",   // Signal
+        "com.tinyspeck.slackmacgap",           // Slack
+        "com.microsoft.VSCode",                // VS Code
+        "com.microsoft.VSCodeInsiders",
+        "com.todesktop.230313mzl4w4u92",       // Cursor
+        "com.hnc.Discord",                     // Discord
+        "com.hnc.Discord.ptb",
+        "com.hnc.Discord.canary",
+        "notion.id",                           // Notion
+        "com.linear",                          // Linear
+        "com.figma.Desktop",                   // Figma
+        "com.spotify.client",                  // Spotify
+        "com.github.GitHubClient",             // GitHub Desktop
+        "com.1password.1password",             // 1Password
+        "md.obsidian",                         // Obsidian
+        "com.superhuman.superhuman",           // Superhuman (already caught by fuzzy match, but explicit)
+        "com.microsoft.teams2",                // Teams
+        "us.zoom.xos",                         // Zoom (chat)
+        "com.loom.desktop",                    // Loom
+    ]
 
-        // Browser-agnostic check: look at the frontmost window title via AX.
-        // Google Docs/Sheets/Slides set the page title to "<doc name> - Google Docs"
-        // (or Sheets/Slides), which appears in the browser's window title.
-        if isBrowser(bundleID: bundleID), let title = frontWindowTitle() {
-            let lower = title.lowercased()
-            if lower.contains("google docs") || lower.contains("google sheets") || lower.contains("google slides") {
+    private func shouldUseClipboardPaste() -> Bool {
+        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return false }
+
+        // Exact match against known Electron / clipboard-paste apps
+        if Self.clipboardPasteApps.contains(bundleID) { return true }
+
+        // Fuzzy match for variants (e.g. "superhuman.superhuman.staging")
+        let lower = bundleID.lowercased()
+        if lower.contains("superhuman") { return true }
+
+        // Browser-agnostic check: Google Docs/Sheets/Slides in any browser
+        if isBrowser(bundleID: lower), let title = frontWindowTitle() {
+            let t = title.lowercased()
+            if t.contains("google docs") || t.contains("google sheets") || t.contains("google slides") {
                 return true
             }
         }
@@ -308,14 +332,44 @@ class TextInserter {
         return true
     }
 
-    /// Legacy clipboard-based insertion. Saves and restores clipboard.
+    /// Clipboard-based insertion with safety check and transient marking.
+    ///
+    /// Safety check: if the clipboard holds large binary data (images, files > 512 KB),
+    /// fall back to CGEvent typing rather than clobbering precious clipboard contents.
+    ///
+    /// Transient marking: writes org.nspasteboard.TransientType + ConcealedType so
+    /// clipboard managers (Maccy, Raycast, Paste) skip recording the dictated text.
     private func pasteViaClipboard(_ text: String) {
         let pasteboard = NSPasteboard.general
+
+        // Safety check: measure existing clipboard binary footprint
+        let clipboardByteSize = pasteboard.pasteboardItems?.reduce(0) { total, item in
+            total + item.types.reduce(0) { $0 + (item.data(forType: $1)?.count ?? 0) }
+        } ?? 0
+        if clipboardByteSize > 512_000 {
+            DiagnosticLogger.shared.log(
+                "TextInserter: clipboard has \(clipboardByteSize / 1024)KB of data — "
+                + "falling back to CGEvent to avoid clobbering it"
+            )
+            _ = typeViaKeyEvents(text)
+            return
+        }
+
         let savedItems = savePasteboard(pasteboard)
         let changeCountBeforePaste = pasteboard.changeCount
 
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+
+        // Transient markers tell clipboard managers to skip recording this write.
+        // org.nspasteboard.TransientType = "don't persist"
+        // org.nspasteboard.ConcealedType = "don't show in history"
+        let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+        let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+        let item = NSPasteboardItem()
+        item.setString(text, forType: .string)
+        item.setData(Data(), forType: transientType)
+        item.setData(Data(), forType: concealedType)
+        pasteboard.writeObjects([item])
 
         simulatePaste()
 
