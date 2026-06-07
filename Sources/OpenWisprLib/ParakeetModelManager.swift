@@ -31,32 +31,55 @@ public final class ParakeetModelManager {
 
     private init() {}
 
-    // MARK: - Download single-flight
+    // MARK: - FluidAudio serial gate
 
-    /// Coalesces concurrent `ensureDownloaded` calls for the same model. Without this, two callers
-    /// hitting `downloadAndLoad` at once would both write into FluidAudio's shared on-disk cache and
-    /// race each other (and the `enforceOffline` flag flip). Keyed by FluidAudio version so a v2 and
-    /// a v3 download can still proceed in parallel. The stored `Task` is removed once it completes.
-    private let inFlightLock = NSLock()
-    private var inFlightDownloads: [AsrModelVersion: InFlightDownload] = [:]
-    private var inFlightCounter: UInt64 = 0
+    /// Serializes ALL FluidAudio calls whose behavior depends on the process-global
+    /// `DownloadUtils.enforceOffline` flag, behind ONE process-wide slot. `ensureDownloaded` flips
+    /// `enforceOffline = false` for the duration of its deliberate fetch; because every download AND
+    /// every cache load runs through this single gate, that false window can never overlap a
+    /// concurrent `loadDownloadedModels` (which would otherwise silently re-download on a
+    /// load/compile failure) or another version's download. There is only ONE global slot — the UI is
+    /// single-select, so parallel v2/v3 acquisition is unnecessary, and a single owner of the
+    /// `enforceOffline` window is the only safe design for a process-global flag.
+    ///
+    /// `isModelDownloaded` (pure on-disk existence, independent of `enforceOffline`) stays un-gated.
+    private actor DownloadGate {
+        /// Runs `op` exclusively: at most one `op` executes at a time, FIFO across awaiting callers.
+        /// Implemented as an async mutex via a busy flag plus a queue of `CheckedContinuation`s, so
+        /// the gate yields the actor between operations (no lock is ever held across the `await op()`).
+        private var busy = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
 
-    /// A running download task plus a unique token, so the cleanup `defer` clears the slot only if it
-    /// still holds *this* task (and not a newer one started after this one failed and was retried).
-    /// `Task` is a value type, so identity has to be carried explicitly rather than via `===`.
-    private struct InFlightDownload {
-        let token: UInt64
-        let task: Task<Void, Error>
+        func run<T>(_ op: () async throws -> T) async rethrows -> T {
+            await acquire()
+            defer { release() }
+            return try await op()
+        }
+
+        private func acquire() async {
+            if !busy {
+                busy = true
+                return
+            }
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+            // Resumed already holding the slot (handed off by `release`); `busy` stays true.
+        }
+
+        private func release() {
+            if waiters.isEmpty {
+                busy = false
+            } else {
+                // Hand the slot directly to the next waiter without clearing `busy`, preserving
+                // mutual exclusion across the handoff.
+                let next = waiters.removeFirst()
+                next.resume()
+            }
+        }
     }
 
-    /// Runs `body` while holding `inFlightLock`. Kept synchronous (and called only from synchronous
-    /// stretches) so the lock is never held across an `await` — NSLock's `lock()`/`unlock()` are
-    /// unavailable from async contexts under the Swift 6 language mode.
-    private func withInFlightLock<T>(_ body: () -> T) -> T {
-        inFlightLock.lock()
-        defer { inFlightLock.unlock() }
-        return body()
-    }
+    private let downloadGate = DownloadGate()
 
     // MARK: - Registry host pinning (security)
 
@@ -111,6 +134,14 @@ public final class ParakeetModelManager {
         EngineCatalog.versionString(forParakeetModelID: modelName) == "v2" ? .v2 : .v3
     }
 
+    /// Whether `modelName` is a known Parakeet catalog id. `version(for:)` silently defaults any
+    /// unknown id to a real v3 download, so a typo'd or tampered id would otherwise trigger a ~600MB
+    /// fetch (or a v3 cache load) for something the catalog never advertised. Callers that touch the
+    /// network/cache validate against this first and throw `modelAssetsMissing` for unknown ids.
+    private func isKnownModelID(_ modelName: String) -> Bool {
+        EngineCatalog.parakeetModels.contains { $0.id == modelName }
+    }
+
     // MARK: - Cache directory
 
     /// FluidAudio's default cache directory for the given speakfree model name.
@@ -137,82 +168,64 @@ public final class ParakeetModelManager {
         _ modelName: String,
         progress: @escaping (Double) -> Void
     ) async throws {
+        // Reject unknown/typo'd/tampered ids up front: `version(for:)` would otherwise silently
+        // default them to a real v3 download.
+        guard isKnownModelID(modelName) else {
+            DiagnosticLogger.shared.log(
+                "ParakeetModelManager: refusing to download unknown model id \(modelName)")
+            throw TranscriptionEngineError.modelAssetsMissing(modelName)
+        }
+
         // Pin the registry host before any FluidAudio network call (see pinRegistryHostIfNeeded).
         Self.pinRegistryHostIfNeeded()
 
         let v = version(for: modelName)
 
+        // Existence is a pure on-disk check independent of `enforceOffline`, so it stays outside the
+        // gate to avoid holding the global slot for a no-op.
         if AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v) {
             progress(1.0)
             return
         }
 
-        // Single-flight: if a download for this version is already running, await it instead of
-        // launching a second `downloadAndLoad` that would race the shared on-disk cache (and the
-        // `enforceOffline` flag). The deduped caller doesn't receive incremental progress (only the
-        // first caller's handler is wired into FluidAudio); it gets `1.0` once the shared task lands.
-        //
-        // Build-or-join under the lock so the check-and-insert is atomic: either we observe an
-        // existing task to await, or we install our own — never both racing to create one.
-        enum Outcome { case join(Task<Void, Error>); case own(token: UInt64, task: Task<Void, Error>) }
-
-        let outcome: Outcome = withInFlightLock {
-            if let existing = inFlightDownloads[v] {
-                return .join(existing.task)
+        // Serialize behind the single global gate so the `enforceOffline = false` window below can
+        // never overlap a concurrent cache load or another download. Re-check existence inside the
+        // gate: a download that completed while we were queued makes ours a no-op.
+        try await downloadGate.run {
+            if AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v) {
+                progress(1.0)
+                return
             }
-            inFlightCounter += 1
-            let token = inFlightCounter
-            let task = Task<Void, Error> {
-                DiagnosticLogger.shared.log(
-                    "ParakeetModelManager: downloading \(modelName) (version \(v))")
-                let start = Date()
 
-                // FluidAudio's progress handler is `@Sendable (DownloadProgress) -> Void`. Map its
-                // `.fractionCompleted` (already a 0..1 Double) onto our `(Double) -> Void`.
-                let handler: DownloadUtils.ProgressHandler = { p in
-                    progress(p.fractionCompleted)
-                }
+            DiagnosticLogger.shared.log(
+                "ParakeetModelManager: downloading \(modelName) (version \(v))")
+            let start = Date()
 
-                // This is the ONLY sanctioned network fetch. Flip `enforceOffline` off for the
-                // duration of the deliberate download and restore it via `defer`, so no other
-                // FluidAudio path (e.g. a `loadFromCache` recovery) can silently hit the network
-                // outside this method.
-                DownloadUtils.enforceOffline = false
-                defer { DownloadUtils.enforceOffline = true }
-
-                // `downloadAndLoad` both fetches and compiles; we discard the loaded result here
-                // since callers that want the loaded models use `loadDownloadedModels(_:)`. The
-                // cache is now warm so a subsequent `loadDownloadedModels` resolves from disk fast.
-                _ = try await AsrModels.downloadAndLoad(version: v, progressHandler: handler)
-
-                let elapsed = Date().timeIntervalSince(start)
-                DiagnosticLogger.shared.log(
-                    "ParakeetModelManager: \(modelName) downloaded + compiled in "
-                        + "\(String(format: "%.1f", elapsed))s")
+            // FluidAudio's progress handler is `@Sendable (DownloadProgress) -> Void`. Map its
+            // `.fractionCompleted` (already a 0..1 Double) onto our `(Double) -> Void`.
+            let handler: DownloadUtils.ProgressHandler = { p in
+                progress(p.fractionCompleted)
             }
-            inFlightDownloads[v] = InFlightDownload(token: token, task: task)
-            return .own(token: token, task: task)
+
+            // This is the ONLY sanctioned network fetch. Flip `enforceOffline` off for the duration
+            // of the deliberate download and restore it via `defer`. The gate guarantees we are the
+            // sole owner of this window, so no other FluidAudio path (e.g. a `loadFromCache`
+            // recovery) can observe `enforceOffline == false` and silently hit the network.
+            DownloadUtils.enforceOffline = false
+            defer { DownloadUtils.enforceOffline = true }
+
+            // `downloadAndLoad` both fetches and compiles; we discard the loaded result here since
+            // callers that want the loaded models use `loadDownloadedModels(_:)`. The cache is now
+            // warm so a subsequent `loadDownloadedModels` resolves from disk fast.
+            _ = try await AsrModels.downloadAndLoad(version: v, progressHandler: handler)
+
+            let elapsed = Date().timeIntervalSince(start)
+            DiagnosticLogger.shared.log(
+                "ParakeetModelManager: \(modelName) downloaded + compiled in "
+                    + "\(String(format: "%.1f", elapsed))s")
         }
 
-        switch outcome {
-        case .join(let existing):
-            try await existing.value
-            progress(1.0)
-
-        case .own(let token, let task):
-            // Always clear the in-flight slot when the task settles, whether it succeeded or threw,
-            // so a failed download doesn't pin a dead task and block retries. Compare by token so a
-            // newer retry installed after us isn't clobbered.
-            defer {
-                withInFlightLock {
-                    if inFlightDownloads[v]?.token == token {
-                        inFlightDownloads[v] = nil
-                    }
-                }
-            }
-            try await task.value
-            progress(1.0)
-        }
+        progress(1.0)
     }
 
     // MARK: - Load
@@ -231,6 +244,14 @@ public final class ParakeetModelManager {
     /// `AsrModels` is a `Sendable` struct in FluidAudio 0.15.1, so it crosses the actor boundary
     /// cleanly.
     public func loadDownloadedModels(_ modelName: String) async throws -> AsrModels {
+        // Reject unknown/typo'd/tampered ids up front (see `isKnownModelID`): otherwise a v3 cache
+        // load would be attempted for an id the catalog never advertised.
+        guard isKnownModelID(modelName) else {
+            DiagnosticLogger.shared.log(
+                "ParakeetModelManager: refusing to load unknown model id \(modelName)")
+            throw TranscriptionEngineError.modelAssetsMissing(modelName)
+        }
+
         // Pin the registry host (and enforce offline) before any FluidAudio load call. See
         // pinRegistryHostIfNeeded.
         Self.pinRegistryHostIfNeeded()
@@ -246,9 +267,13 @@ public final class ParakeetModelManager {
 
         DiagnosticLogger.shared.log("ParakeetModelManager: loading \(modelName) from cache")
         do {
-            // enforceOffline is true here, so this cannot silently re-download on a load/compile
-            // failure — it surfaces the error instead.
-            return try await AsrModels.loadFromCache(version: v)
+            // Route through the single global gate so this load can never run while
+            // `ensureDownloaded` has `enforceOffline` flipped false. `enforceOffline` is true here
+            // (the gate guarantees no concurrent download owns the false window), so `loadFromCache`
+            // cannot silently re-download on a load/compile failure — it surfaces the error instead.
+            return try await downloadGate.run {
+                try await AsrModels.loadFromCache(version: v)
+            }
         } catch {
             DiagnosticLogger.shared.log(
                 "ParakeetModelManager: \(modelName) failed to load from cache: "

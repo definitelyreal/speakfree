@@ -778,6 +778,18 @@ struct SettingsView: View {
             viewModel.save()
             checkPendingDownload()
         }
+        .onChange(of: viewModel.engine) { _ in
+            // Engine onChange lives in EnginePickerView and only refreshes its own
+            // state, so the orange whisper banner can go stale when switching to
+            // Parakeet. Re-run here (early-returns nil for non-whisper engines).
+            checkPendingDownload()
+            reconcilePickerLanguage()
+        }
+        .onChange(of: viewModel.parakeetModel) { _ in
+            // Switching Parakeet variants (v2 English-only <-> v3 multilingual)
+            // can drop the bound language tag out of pickerLanguages.
+            reconcilePickerLanguage()
+        }
         .onChange(of: viewModel.punctuationMode) { _ in viewModel.save() }
         .onChange(of: viewModel.rememberWords) { _ in viewModel.save() }
         .onChange(of: viewModel.maxRecordings) { _ in viewModel.save() }
@@ -811,6 +823,20 @@ struct SettingsView: View {
         } else {
             pendingModelDownload = nil
             previousWorkingModel = viewModel.modelSize
+        }
+    }
+
+    /// Keep the Language picker's bound selection inside the options it actually renders.
+    /// Whisper offers the full list, so its saved language is never out of range. Parakeet
+    /// constrains options to the selected model's `supportedLanguages`; when the current
+    /// language falls outside that set (e.g. v2 is English-only but language=="fr"), the
+    /// Picker would render blank because its tag isn't present. Coerce to "auto", which is
+    /// always offered. Only touches the value for Parakeet, so the saved whisper language
+    /// is left intact.
+    private func reconcilePickerLanguage() {
+        guard let info = selectedParakeetModelInfo else { return }
+        if viewModel.language != "auto" && !info.supportedLanguages.contains(viewModel.language) {
+            viewModel.language = "auto"
         }
     }
 
