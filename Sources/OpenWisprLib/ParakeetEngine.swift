@@ -37,9 +37,19 @@ public final class ParakeetEngine: TranscriptionEngine {
         /// The model identifier currently loaded, e.g. "parakeet-tdt-0.6b-v3". `nil` when unloaded.
         private var loadedModelID: String?
 
-        /// Count of transcriptions currently in flight. `unload` drains this to 0 before tearing
-        /// the manager down so an in-flight `transcribe` never sees a `nil` / cleaned-up manager.
+        /// Count of transcriptions currently in flight. `unload` (and a model-replacing `load`)
+        /// drains this to 0 before tearing the manager down so an in-flight `transcribe` never sees
+        /// a cleaned-up manager. Note: incrementing `active` does NOT by itself protect the manager
+        /// across the `await mgr.transcribe` suspension — the actor is released at every await, so a
+        /// teardown could interleave. Protection comes from the `tearingDown` gate (no new transcribe
+        /// starts once teardown begins) plus the drain (teardown waits for `active == 0`).
         private var active = 0
+
+        /// Set true at the START of any teardown (unload, or a model-replacing load) and cleared
+        /// once teardown completes. While set, no new `transcribe` may begin, which lets the drain
+        /// loop reach `active == 0` and guarantees no transcribe holds a reference to a manager that
+        /// is about to be `cleanup()`'d.
+        private var tearingDown = false
 
         /// In-progress load, if any. Concurrent `load` callers await this single Task instead of
         /// each building their own manager (single-flight). `Task` is a value type, so the paired
@@ -115,12 +125,18 @@ public final class ParakeetEngine: TranscriptionEngine {
             }
 
             // Tear down a previously-loaded (different) manager before replacing it, so its CoreML
-            // state isn't leaked. No in-flight transcriptions can target it: `transcribe` holds the
-            // actor while incrementing `active`, and we're on the actor now.
+            // state isn't leaked. Same discipline as `unload`: an in-flight `transcribe` captured the
+            // old manager via `let mgr = manager` and keeps using it across the `await mgr.transcribe`
+            // suspension, so we must (1) gate new transcribes, (2) publish the mirror false, (3) drain
+            // active to 0, (4) cleanup the OLD manager — all BEFORE assigning the new one.
             if let old = manager {
+                tearingDown = true
+                onLoadedChange(false)
+                while active > 0 { await Task.yield() }
                 manager = nil
                 loadedModelID = nil
                 await old.cleanup()
+                tearingDown = false
             }
 
             manager = mgr
@@ -134,7 +150,9 @@ public final class ParakeetEngine: TranscriptionEngine {
         // MARK: Transcribe
 
         func transcribe(samples: [Float], language: String) async throws -> String {
-            guard let mgr = manager, let modelID = loadedModelID else {
+            // Gate on `tearingDown` BEFORE bumping `active` so no transcribe begins once a teardown
+            // (unload or model-replacing load) has started. This is what lets the drain loop finish.
+            guard let mgr = manager, let modelID = loadedModelID, !tearingDown else {
                 throw TranscriptionEngineError.modelNotLoaded
             }
             active += 1
@@ -170,14 +188,19 @@ public final class ParakeetEngine: TranscriptionEngine {
         // MARK: Unload
 
         func unload() async {
-            // Drain in-flight transcriptions before teardown so none observe a cleaned-up manager.
+            // Gate new transcribes first, then publish the mirror false SYNCHRONOUSLY before niling
+            // the manager — this closes the stale-mirror window where isLoaded == true but the
+            // manager is already gone. Only then drain in-flight transcriptions and cleanup, so none
+            // observe a cleaned-up manager.
+            tearingDown = true
+            onLoadedChange(false)
             while active > 0 { await Task.yield() }
-            guard let m = manager else { return }
+            let m = manager
             manager = nil
             loadedModelID = nil
-            await m.cleanup()
+            await m?.cleanup()
+            tearingDown = false
             DiagnosticLogger.shared.log("ParakeetEngine: model unloaded")
-            onLoadedChange(false)
         }
     }
 
