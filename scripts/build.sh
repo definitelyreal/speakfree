@@ -163,7 +163,27 @@ cat > "$APPCAST" << APPCAST_EOF
 </rss>
 APPCAST_EOF
 
+# Keep the GitHub Pages download link in lockstep with the released binary.
+# build.sh updates appcast.xml but historically NOT index.html, so the public
+# "Download" button drifted to an old version. Rewrite it to this release's DMG.
+echo "Updating GitHub Pages download link to ${DMG}..."
+INDEX="docs/index.html"
+if [ -f "$INDEX" ]; then
+    sed -i '' -E "s#releases/latest/download/speakfree-[0-9][0-9.]*\.dmg#releases/latest/download/speakfree-${VERSION}.dmg#g" "$INDEX"
+    if ! grep -q "speakfree-${VERSION}.dmg" "$INDEX"; then
+        echo "FATAL: failed to update download link in $INDEX to v${VERSION}." >&2
+        exit 1
+    fi
+fi
+
+echo "Force-quitting any running instance and deleting old app before install..."
+osascript -e 'quit app "speakfree"' 2>/dev/null || true
+pkill -x speakfree 2>/dev/null || true
+sleep 1
+pkill -9 -x speakfree 2>/dev/null || true
+sleep 1
 echo "Installing to /Applications..."
+rm -rf /Applications/speakfree.app
 cp -a "$APP" /Applications/
 
 # Create a DRAFT GitHub release and upload the DMG.
