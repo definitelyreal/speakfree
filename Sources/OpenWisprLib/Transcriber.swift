@@ -28,6 +28,15 @@ public class Transcriber {
         _ = sem.wait(timeout: .now() + 2.0)
     }
     public func startMemoryPressureMonitoring() { engine.startMemoryPressureMonitoring() }
+    /// Preload the model so the first dictation isn't a multi-second cold start.
+    /// Parakeet compiles/loads ~470 MB of CoreML onto the Neural Engine on first
+    /// use (~15-20s); warming it at launch makes the first transcription instant.
+    /// No-ops if a model is already loaded; never triggers a download (loadModel
+    /// throws .modelAssetsMissing for Parakeet when assets are absent, swallowed here).
+    public func warmUp() async {
+        if isLoaded { return }
+        try? await engine.loadModel(modelID: modelID)
+    }
 
     // Known whisper hallucinations on silence/noise.
     // "So." / "So," are among the most common silence hallucinations across all model sizes.
