@@ -3,7 +3,12 @@ import CWhisper
 
 /// Wraps the whisper.cpp C library for in-process transcription.
 /// Keeps the model loaded in memory between transcriptions for speed.
-class WhisperEngine {
+///
+/// Conforms to `TranscriptionEngine`. The protocol surface is `async`, but whisper.cpp
+/// is synchronous and runs under a serial `engineQueue`. The async members below are thin
+/// shims that hop the existing serial-queue + `*Locked` machinery; the UAF/Metal-assert
+/// safety (single owner of `context`, deinit drains the queue) is unchanged.
+class WhisperEngine: TranscriptionEngine {
     private var context: OpaquePointer?  // whisper_context*
     private var loadedModelPath: String?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
@@ -18,6 +23,11 @@ class WhisperEngine {
     /// How the model should be managed: "auto", "always", "off"
     var keepModelLoaded: String = "auto"
 
+    // MARK: - TranscriptionEngine identity
+
+    var engineID: String { "whisper" }
+    var supportsStreaming: Bool { true }
+
     var isLoaded: Bool {
         var result = false
         engineQueue.sync { result = self.context != nil }
@@ -29,6 +39,16 @@ class WhisperEngine {
     }
 
     // MARK: - Model Lifecycle
+
+    /// Protocol entry point: load a whisper model identified by a size string
+    /// (e.g. "large-v3-turbo"). Resolves the on-disk GGML path via `Transcriber.findModel`
+    /// and delegates to the existing synchronous `loadModel(path:)`.
+    func loadModel(modelID: String) async throws {
+        guard let modelPath = Transcriber.findModel(modelSize: modelID) else {
+            throw TranscriptionEngineError.modelLoadFailed(modelID)
+        }
+        try loadModel(path: modelPath)
+    }
 
     /// Load a GGML model from disk. Metal GPU is used automatically.
     func loadModel(path: String) throws {
@@ -64,8 +84,9 @@ class WhisperEngine {
         DispatchQueue.main.async { [weak self] in self?.startMemoryPressureMonitoring() }
     }
 
-    /// Free the model from memory.
-    func unloadModel() {
+    /// Free the model from memory. Async shim over the serial-queue body so it satisfies
+    /// the `TranscriptionEngine` protocol; the actual teardown still runs on `engineQueue`.
+    func unloadModel() async {
         engineQueue.sync { unloadModelLocked() }
     }
 
@@ -82,17 +103,19 @@ class WhisperEngine {
     // MARK: - Transcription
 
     /// Transcribe PCM Float32 audio samples (16kHz, mono).
+    /// Async shim conforming to `TranscriptionEngine`; the inference still runs synchronously
+    /// on the serial `engineQueue` via the untouched `transcribeLocked` machinery. The
+    /// internal `threadCount` knob defaults to nil (whisper picks the core count itself).
     func transcribe(
         samples: [Float],
-        language: String = "en",
-        prompt: String? = nil,
-        suppressRegex: String? = nil,
-        threadCount: Int? = nil
-    ) throws -> String {
+        language: String,
+        prompt: String?,
+        suppressRegex: String?
+    ) async throws -> String {
         var result: String = ""
         var thrownError: Error?
         engineQueue.sync {
-            do { result = try transcribeLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, threadCount: threadCount) }
+            do { result = try transcribeLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, threadCount: nil) }
             catch { thrownError = error }
         }
         if let e = thrownError { throw e }
@@ -187,13 +210,16 @@ class WhisperEngine {
     /// Transcribe audio incrementally, calling onPartialResult with each new segment.
     /// Designed to be called periodically with a growing audio buffer during recording.
     /// Returns the final accumulated text.
+    /// Async shim conforming to `TranscriptionEngine`. The streaming inference + C-callback
+    /// machinery is untouched in `transcribeStreamingLocked`; partials are still delivered on
+    /// the main thread by that callback. This wrapper only hops the serial-queue body.
     func transcribeStreaming(
         samples: [Float],
-        language: String = "en",
-        prompt: String? = nil,
-        suppressRegex: String? = nil,
+        language: String,
+        prompt: String?,
+        suppressRegex: String?,
         onPartialResult: @escaping (String) -> Void
-    ) throws -> String {
+    ) async throws -> String {
         var result: String = ""
         var thrownError: Error?
         engineQueue.sync {

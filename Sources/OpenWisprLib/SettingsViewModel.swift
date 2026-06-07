@@ -21,6 +21,8 @@ public class SettingsViewModel: ObservableObject {
     @Published public var diagnosticLogging: Bool
     @Published public var streamingEnabled: Bool
     @Published public var languageModels: [String: String]
+    @Published public var engine: String
+    @Published public var parakeetModel: String
 
     // MARK: - Callback
 
@@ -49,13 +51,15 @@ public class SettingsViewModel: ObservableObject {
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
         self.streamingEnabled = c.streamingEnabled?.value ?? false
         self.languageModels = c.languageModels ?? [:]
+        self.engine = c.engine ?? "whisper"
+        self.parakeetModel = c.parakeetModel ?? "parakeet-tdt-0.6b-v3"
     }
 
     // MARK: - Conversion
 
     /// Convert the current view model state back to a Config struct.
     public func toConfig() -> Config {
-        Config(
+        var config = Config(
             hotkey: HotkeyConfig(keyCode: hotkeyKeyCode, modifiers: hotkeyModifiers),
             modelPath: nil,
             modelSize: modelSize,
@@ -71,6 +75,9 @@ public class SettingsViewModel: ObservableObject {
             streamingEnabled: FlexBool(streamingEnabled),
             languageModels: languageModels.isEmpty ? nil : languageModels
         )
+        config.engine = engine
+        config.parakeetModel = parakeetModel
+        return config
     }
 
     /// Save the current settings to disk and notify the callback.
@@ -78,6 +85,35 @@ public class SettingsViewModel: ObservableObject {
         let config = toConfig()
         try? config.save()
         onSave?()
+    }
+
+    // MARK: - Engine-aware model list
+
+    /// Returns the selectable model identifiers for the currently-selected engine.
+    /// Whisper: size-string IDs (English variants when language=="en", except large);
+    /// Parakeet: the IDs from EngineCatalog.parakeetModels.
+    /// Does not break the existing whisper availableModels(language:) in SettingsWindow.
+    public func availableModelIDs() -> [String] {
+        if engine == "parakeet" {
+            return EngineCatalog.parakeetModels.map(\.id)
+        }
+        return SettingsViewModel.whisperModelIDs(language: language)
+    }
+
+    /// Whisper model IDs for the given language. Mirrors the ID derivation in
+    /// SettingsWindow.availableModels(language:): English-specific variants for
+    /// non-large bases when language=="en", multilingual IDs otherwise.
+    static func whisperModelIDs(language: String) -> [String] {
+        let isEnglish = (language == "en")
+        let raw: [(enId: String, multiId: String, base: String)] = [
+            ("tiny.en",       "tiny",           "tiny"),
+            ("base.en",       "base",           "base"),
+            ("small.en",      "small",          "small"),
+            ("medium.en",     "medium",         "medium"),
+            ("large-v3-turbo", "large-v3-turbo", "turbo"),
+            ("large-v3",      "large-v3",       "large"),
+        ]
+        return raw.map { (isEnglish && $0.base != "large") ? $0.enId : $0.multiId }
     }
 
     // MARK: - Model description helpers

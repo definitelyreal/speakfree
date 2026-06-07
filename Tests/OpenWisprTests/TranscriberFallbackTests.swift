@@ -39,12 +39,12 @@ final class TranscriberFallbackTests: XCTestCase {
 
     func testTranscriberInitDoesNotLoadModel() {
         // Creating a transcriber should not eagerly load the model
-        let transcriber = Transcriber(modelSize: "nonexistent-model-xyz", language: "en")
+        let transcriber = Transcriber(engine: WhisperEngine(), modelID: "nonexistent-model-xyz", language: "en")
         XCTAssertFalse(transcriber.engine.isLoaded)
     }
 
     func testSuppressAutoPunctuationDefault() {
-        let transcriber = Transcriber()
+        let transcriber = Transcriber(engine: WhisperEngine(), modelID: "base.en", language: "en")
         XCTAssertFalse(transcriber.suppressAutoPunctuation)
     }
 }
