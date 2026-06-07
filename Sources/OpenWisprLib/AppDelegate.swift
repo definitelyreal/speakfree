@@ -160,6 +160,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
         transcriber.startMemoryPressureMonitoring()
+        warmUpEngine(engineID)
 
         DispatchQueue.main.async {
             self.statusBar.reprocessHandler = { [weak self] url in
@@ -365,9 +366,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
         transcriber.startMemoryPressureMonitoring()
+        warmUpEngine(effectiveEngineID)
 
         reloadHotkeyAndSettings()
         print("Config reloaded: hotkey=\(KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)) model=\(modelID) engine=\(effectiveEngineID)")
+    }
+
+    /// Warm up the Parakeet model in the background at launch / engine switch so the
+    /// first dictation isn't a ~15-20s cold ANE load. Parakeet only (Whisper's cold
+    /// load is fast and its memory profile differs); no-ops if assets aren't present.
+    private func warmUpEngine(_ engineID: String) {
+        guard engineID == "parakeet" else { return }
+        let t = transcriber
+        Task.detached(priority: .userInitiated) {
+            let start = Date()
+            await t?.warmUp()
+            print("Parakeet warm-up finished in \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
+        }
     }
 
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
