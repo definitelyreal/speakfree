@@ -59,4 +59,11 @@ public enum EngineCatalog {
             supportedLanguages: ["en"]
         )
     ]
+
+    /// Single source of truth for the model-id -> version-string ("v2"/"v3") mapping.
+    /// Returns the matching model's `version` from `parakeetModels`, defaulting to "v3"
+    /// for unknown ids.
+    public static func versionString(forParakeetModelID id: String) -> String {
+        parakeetModels.first { $0.id == id }?.version ?? "v3"
+    }
 }

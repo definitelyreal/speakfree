@@ -548,6 +548,11 @@ struct SettingsView: View {
                                 .pickerStyle(.menu)
                                 .labelsHidden()
                                 .onChange(of: viewModel.language) { newLang in
+                                    // Whisper-only: language switches carry the per-language
+                                    // ggml model selection. Parakeet uses language only as a
+                                    // hint, so skip all hidden model bookkeeping.
+                                    guard viewModel.engine == "whisper" else { return }
+
                                     if previousLanguage != newLang {
                                         viewModel.languageModels[previousLanguage] = viewModel.modelSize
                                     }
@@ -571,19 +576,23 @@ struct SettingsView: View {
                                 }
                             }
 
-                            GridRow {
-                                Text("Model")
-                                Picker("", selection: $viewModel.modelSize) {
-                                    ForEach(availableModels(language: viewModel.language)) { model in
-                                        Text(model.label)
-                                            .lineLimit(1)
-                                            .truncationMode(.tail)
-                                            .tag(model.id)
+                            // Whisper-specific ggml model picker. Parakeet has a single
+                            // bundled model, so this dropdown is hidden for that engine.
+                            if viewModel.engine == "whisper" {
+                                GridRow {
+                                    Text("Model")
+                                    Picker("", selection: $viewModel.modelSize) {
+                                        ForEach(availableModels(language: viewModel.language)) { model in
+                                            Text(model.label)
+                                                .lineLimit(1)
+                                                .truncationMode(.tail)
+                                                .tag(model.id)
+                                        }
                                     }
+                                    .pickerStyle(.menu)
+                                    .labelsHidden()
+                                    .lineLimit(1)
                                 }
-                                .pickerStyle(.menu)
-                                .labelsHidden()
-                                .lineLimit(1)
                             }
 
                             GridRow {
