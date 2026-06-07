@@ -152,7 +152,7 @@ cat > "$APPCAST" << APPCAST_EOF
       <pubDate>${PUB_DATE}</pubDate>
       <sparkle:version>${VERSION}</sparkle:version>
       <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <enclosure
         url="${DOWNLOAD_URL}"
         type="application/octet-stream"
