@@ -48,7 +48,26 @@ public enum ProcessCommand {
         // Whisper keeps its file/CLI path here (samples=nil) so the headless `process` command
         // and golden tests don't spin up the in-process ggml/Metal backend, which aborts in a
         // device-less test process. The GUI app still uses in-process whisper via finalizeRecording.
-        let samples = engine.engineID == "parakeet" ? (try? Self.loadSamples(from: wavURL)) : nil
+        // Parakeet needs decoded samples. Propagate decode failures as
+        // Error.transcriptionFailed rather than swallowing them into a generic failure.
+        let samples: [Float]?
+        if engine.engineID == "parakeet" {
+            let decoded: [Float]
+            do {
+                decoded = try Self.loadSamples(from: wavURL)
+            } catch {
+                throw Error.transcriptionFailed(error)
+            }
+            guard !decoded.isEmpty else {
+                throw Error.transcriptionFailed(NSError(
+                    domain: "ProcessCommand", code: -6,
+                    userInfo: [NSLocalizedDescriptionKey: "Decoded audio is empty"]
+                ))
+            }
+            samples = decoded
+        } else {
+            samples = nil
+        }
 
         let raw: String
         do {
@@ -85,6 +104,10 @@ public enum ProcessCommand {
         return try result.get()
     }
 
+    /// Maximum decodable input duration (seconds). Rejects oversized WAVs before
+    /// allocating buffers, bounding memory use and guarding the UInt32 frame casts.
+    private static let maxInputDurationSeconds: Double = 30 * 60
+
     /// Decode a wav file to 16 kHz mono Float32 samples (the engine audio currency).
     static func loadSamples(from url: URL) throws -> [Float] {
         let file = try AVAudioFile(forReading: url)
@@ -93,8 +116,32 @@ public enum ProcessCommand {
             commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false
         ) else { throw Error.fileNotFound(url.path) }
 
+        // Security: reject oversized inputs before allocating, and guard the
+        // AVAudioFrameCount (UInt32) casts below against overflow.
+        let frameLength = file.length
+        guard srcFormat.sampleRate > 0 else {
+            throw Error.transcriptionFailed(NSError(
+                domain: "ProcessCommand", code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid sample rate"]
+            ))
+        }
+        let durationSeconds = Double(frameLength) / srcFormat.sampleRate
+        guard durationSeconds <= maxInputDurationSeconds else {
+            throw Error.transcriptionFailed(NSError(
+                domain: "ProcessCommand", code: -3,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Audio too long: \(Int(durationSeconds))s exceeds limit of \(Int(maxInputDurationSeconds))s"]
+            ))
+        }
+        guard frameLength >= 0, frameLength <= Int64(AVAudioFrameCount.max) else {
+            throw Error.transcriptionFailed(NSError(
+                domain: "ProcessCommand", code: -4,
+                userInfo: [NSLocalizedDescriptionKey: "Audio frame count out of range"]
+            ))
+        }
+
         guard let inBuf = AVAudioPCMBuffer(
-            pcmFormat: srcFormat, frameCapacity: AVAudioFrameCount(file.length)
+            pcmFormat: srcFormat, frameCapacity: AVAudioFrameCount(frameLength)
         ) else { return [] }
         try file.read(into: inBuf)
 
@@ -107,19 +154,41 @@ public enum ProcessCommand {
         // Otherwise resample/downmix via AVAudioConverter.
         guard let converter = AVAudioConverter(from: srcFormat, to: targetFormat) else { return [] }
         let ratio = 16_000.0 / srcFormat.sampleRate
-        let outCapacity = AVAudioFrameCount(Double(inBuf.frameLength) * ratio) + 1024
+        // Guard the UInt32 cast: clamp the computed output capacity to AVAudioFrameCount.max.
+        let outCapacityDouble = Double(inBuf.frameLength) * ratio + 1024
+        guard outCapacityDouble <= Double(AVAudioFrameCount.max) else {
+            throw Error.transcriptionFailed(NSError(
+                domain: "ProcessCommand", code: -5,
+                userInfo: [NSLocalizedDescriptionKey: "Resampled frame count out of range"]
+            ))
+        }
+        let outCapacity = AVAudioFrameCount(outCapacityDouble)
         guard let outBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outCapacity) else { return [] }
 
         var fed = false
         var convError: NSError?
-        converter.convert(to: outBuf, error: &convError) { _, statusPtr in
-            if fed { statusPtr.pointee = .noDataNow; return nil }
+        // After feeding the single input buffer, signal end-of-stream (not .noDataNow)
+        // so the converter flushes rather than starving — .noDataNow can yield partial
+        // or empty output for resampled conversions.
+        let status = converter.convert(to: outBuf, error: &convError) { _, statusPtr in
+            if fed { statusPtr.pointee = .endOfStream; return nil }
             fed = true
             statusPtr.pointee = .haveData
             return inBuf
         }
         if let convError { throw Error.transcriptionFailed(convError) }
-        guard let ch = outBuf.floatChannelData else { return [] }
+        guard status == .haveData || status == .endOfStream else {
+            throw Error.transcriptionFailed(NSError(
+                domain: "ProcessCommand", code: Int(status.rawValue),
+                userInfo: [NSLocalizedDescriptionKey: "Audio conversion failed (status \(status.rawValue))"]
+            ))
+        }
+        guard let ch = outBuf.floatChannelData, outBuf.frameLength > 0 else {
+            throw Error.transcriptionFailed(NSError(
+                domain: "ProcessCommand", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Audio conversion produced no samples"]
+            ))
+        }
         return Array(UnsafeBufferPointer(start: ch[0], count: Int(outBuf.frameLength)))
     }
 }

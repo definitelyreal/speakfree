@@ -107,7 +107,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Resolve the engine + the model identifier it should load. Whisper uses a model-size
         // string (with multilingual upgrade + on-disk fallback chain); Parakeet uses its own
         // model id (downloaded on first use by FluidAudio — no whisper-style fallback chain).
-        let engineID = config.engine ?? "whisper"
+        // Compute the EFFECTIVE engine id once, honoring SPEAKFREE_ENGINE the same way
+        // EngineFactory does, so engine creation and model-id selection can't disagree.
+        let engineID = ProcessInfo.processInfo.environment["SPEAKFREE_ENGINE"] ?? config.engine ?? "whisper"
         let modelID: String
         if engineID == "parakeet" {
             modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
@@ -166,7 +168,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             self.statusBar.buildMenu()
         }
 
-        if Transcriber.findWhisperBinary() == nil {
+        // Whisper-only startup gate: a Parakeet setup has no whisper-cli/whisper-binary and
+        // must not be blocked here. Gate on the effective engine so permissions/hotkeys still init.
+        if engineID == "whisper" && Transcriber.findWhisperBinary() == nil {
             print("Error: whisper-cpp not found. Install it with: brew install whisper-cpp")
             return
         }
@@ -280,7 +284,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 6. Model file exists (whisper-only — parakeet models live in FluidAudio's own cache
         //    and are validated by the engine on load, not via a ggml-*.bin lookup).
-        if (config.engine ?? "whisper") == "whisper" {
+        //    Gate on the effective engine (honoring SPEAKFREE_ENGINE) so a Parakeet setup
+        //    doesn't trip a whisper ggml-*.bin health check.
+        let effectiveEngineID = ProcessInfo.processInfo.environment["SPEAKFREE_ENGINE"] ?? config.engine ?? "whisper"
+        if effectiveEngineID == "whisper" {
             if Transcriber.findModel(modelSize: transcriber?.modelID ?? config.modelSize) == nil {
                 issues.append("model file missing")
             }
@@ -334,9 +341,19 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finishReloadConfig(modelID: String) {
+        // Capture the outgoing transcriber so its engine's cleanup runs before we drop it.
+        // Without this, switching engine/model leaks the old engine's loaded model (ANE/Metal
+        // residency) until ARC happens to release it — unload it deterministically instead.
+        let old = transcriber
+
         let engine = EngineFactory.make(config: config)
         transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
         activeEngineID = config.engine ?? "whisper"
+
+        // Unload the previous engine off the main thread (async unload); ARC drops `old` after.
+        if let old = old {
+            Task { await old.unloadModel() }
+        }
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
         // Configure model persistence
@@ -627,6 +644,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let glossary = Config.loadVocabulary()
         let capturedStyleMode = recordingStyleMode
 
+        // Snapshot the transcriber on main BEFORE crossing into the async Task. A settings
+        // change mid-finalize (reloadConfig) can swap self.transcriber out from under us; the
+        // snapshot guarantees this recording's audio runs through the engine that was active
+        // when the user spoke, not a freshly-swapped one.
+        guard let transcriber = self.transcriber else {
+            RecordingStore.clearSentinel()
+            statusBar.state = .idle
+            recordingOverlay.hide()
+            return
+        }
+
         // Bridge into async: the transcribe pipeline is now async/await (FluidAudio is
         // async-only; WhisperEngine exposes async shims). The engines serialize access to
         // their own context internally, so we no longer need whisperSerialQueue to gate the
@@ -652,7 +680,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                 }
                 let prompt = TextPipeline.assemblePromptHints(input: makeInput(""))
-                let raw = try await self.transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
+                let raw = try await transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
                 RecordingStore.saveRaw(text: raw, for: audioURL)
                 let text = TextPipeline.run(makeInput(raw)).finalText
                 RecordingStore.saveTranscription(text: text, for: audioURL)
@@ -701,9 +729,34 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 if maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
                 }
+                // Detect a missing engine model (e.g. Parakeet never downloaded) and surface a
+                // clear, actionable message instead of a generic failure. Either way the status
+                // must not stay stuck on .transcribing.
+                let isModelMissing: Bool
+                if case TranscriptionEngineError.modelAssetsMissing = error {
+                    isModelMissing = true
+                } else {
+                    isModelMissing = false
+                }
                 DispatchQueue.main.async {
                     self.recordingOverlay.hide()
-                    print("Error: Transcription failed")
+                    if isModelMissing {
+                        let message = "Parakeet model not downloaded — open Settings to download."
+                        print("Error: \(message)")
+                        DiagnosticLogger.shared.log(message)
+                        NSApp.activate(ignoringOtherApps: true)
+                        let alert = NSAlert()
+                        alert.messageText = "Model Not Downloaded"
+                        alert.informativeText = message
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "Open Settings")
+                        alert.addButton(withTitle: "Later")
+                        if alert.runModal() == .alertFirstButtonReturn {
+                            self.showSettings()
+                        }
+                    } else {
+                        print("Error: Transcription failed")
+                    }
                     self.statusBar.state = .idle
                     self.statusBar.buildMenu()
                 }

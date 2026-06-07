@@ -31,23 +31,50 @@ public final class ParakeetModelManager {
 
     private init() {}
 
+    // MARK: - Registry host pinning (security)
+
+    /// Guards `pinRegistryHostIfNeeded()` so the host is pinned exactly once.
+    nonisolated(unsafe) private static var didPinRegistry = false
+    private static let pinLock = NSLock()
+
+    /// Pins FluidAudio's model-registry host to the canonical HuggingFace origin before the
+    /// first download/load, so the network destination cannot be redirected at runtime.
+    ///
+    /// Defense rationale: FluidAudio's `ModelRegistry.baseURL` resolves its host from, in order,
+    /// a programmatic override → the `REGISTRY_URL` env var → the `MODEL_REGISTRY_URL` env var →
+    /// the default. Without a programmatic override, anyone able to set those env vars could point
+    /// our model downloads at an attacker-controlled host. Combined with FluidAudio's
+    /// `Authorization: Bearer <HF_TOKEN>` header (DownloadUtils reads `HF_TOKEN` /
+    /// `HUGGING_FACE_HUB_TOKEN` / `HUGGINGFACEHUB_API_TOKEN` from the environment), a redirected
+    /// host would receive any HuggingFace token verbatim — a token-exfiltration vector. Setting the
+    /// programmatic override here makes it win the priority chain, neutralizing both the
+    /// REGISTRY_URL/MODEL_REGISTRY_URL redirect and the token-exfil path.
+    ///
+    /// Auth note: the Parakeet v2/v3 CoreML repos are PUBLIC, so no HuggingFace token is required.
+    /// FluidAudio only ingests a token from the environment (there is no programmatic API to clear
+    /// or disable it on the download/load path), so we rely on the public, unauthenticated fetch:
+    /// with the host pinned to huggingface.co, any stray `HF_TOKEN` in the environment is sent only
+    /// to the genuine HuggingFace origin, never to a redirected host.
+    private static func pinRegistryHostIfNeeded() {
+        pinLock.lock()
+        defer { pinLock.unlock() }
+        guard !didPinRegistry else { return }
+        ModelRegistry.baseURL = "https://huggingface.co"
+        didPinRegistry = true
+        DiagnosticLogger.shared.log(
+            "ParakeetModelManager: pinned FluidAudio registry host to https://huggingface.co")
+    }
+
     // MARK: - Model name → version mapping
 
-    /// Maps a speakfree Parakeet model-name string to FluidAudio's `AsrModelVersion`.
+    /// Maps a speakfree Parakeet model-id string to FluidAudio's `AsrModelVersion`.
     ///
-    /// - `parakeet-tdt-0.6b-v2` → `.v2` (English-only)
-    /// - `parakeet-tdt-0.6b-v3` → `.v3` (multilingual, 25 languages) — also the default fallback.
+    /// The model-id → version-string ("v2"/"v3") mapping is owned by
+    /// `EngineCatalog.versionString(forParakeetModelID:)` (single source of truth); this is the
+    /// only place that converts that string into FluidAudio's enum: `"v2"` → `.v2`, else `.v3`
+    /// (so v3 — multilingual — is the default for "v3" and any unknown id).
     private func version(for modelName: String) -> AsrModelVersion {
-        switch modelName {
-        case "parakeet-tdt-0.6b-v2":
-            return .v2
-        case "parakeet-tdt-0.6b-v3":
-            return .v3
-        default:
-            DiagnosticLogger.shared.log(
-                "ParakeetModelManager: unknown model name '\(modelName)', defaulting to v3")
-            return .v3
-        }
+        EngineCatalog.versionString(forParakeetModelID: modelName) == "v2" ? .v2 : .v3
     }
 
     // MARK: - Cache directory
@@ -76,6 +103,9 @@ public final class ParakeetModelManager {
         _ modelName: String,
         progress: @escaping (Double) -> Void
     ) async throws {
+        // Pin the registry host before any FluidAudio network call (see pinRegistryHostIfNeeded).
+        Self.pinRegistryHostIfNeeded()
+
         let v = version(for: modelName)
 
         if AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v) {
@@ -111,6 +141,10 @@ public final class ParakeetModelManager {
     /// `AsrModels` is a `Sendable` struct in FluidAudio 0.15.1, so it crosses the actor boundary
     /// cleanly.
     public func loadedModels(_ modelName: String) async throws -> AsrModels {
+        // Pin the registry host before any FluidAudio load/download call (it may hit the network
+        // on a cache miss). See pinRegistryHostIfNeeded.
+        Self.pinRegistryHostIfNeeded()
+
         let v = version(for: modelName)
         let cacheDir = AsrModels.defaultCacheDirectory(for: v)
 

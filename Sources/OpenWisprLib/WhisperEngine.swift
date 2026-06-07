@@ -47,7 +47,18 @@ class WhisperEngine: TranscriptionEngine {
         guard let modelPath = Transcriber.findModel(modelSize: modelID) else {
             throw TranscriptionEngineError.modelLoadFailed(modelID)
         }
-        try loadModel(path: modelPath)
+        // Dispatch the serial-queue body via `async` + continuation so we don't block a
+        // Swift-concurrency cooperative thread for the full model load (pool starvation).
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            engineQueue.async {
+                do {
+                    try self.loadModelLocked(path: modelPath)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 
     /// Load a GGML model from disk. Metal GPU is used automatically.
@@ -87,7 +98,14 @@ class WhisperEngine: TranscriptionEngine {
     /// Free the model from memory. Async shim over the serial-queue body so it satisfies
     /// the `TranscriptionEngine` protocol; the actual teardown still runs on `engineQueue`.
     func unloadModel() async {
-        engineQueue.sync { unloadModelLocked() }
+        // Dispatch the serial-queue body via `async` + continuation so we don't block a
+        // Swift-concurrency cooperative thread during teardown.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            engineQueue.async {
+                self.unloadModelLocked()
+                continuation.resume()
+            }
+        }
     }
 
     private func unloadModelLocked() {
@@ -112,14 +130,18 @@ class WhisperEngine: TranscriptionEngine {
         prompt: String?,
         suppressRegex: String?
     ) async throws -> String {
-        var result: String = ""
-        var thrownError: Error?
-        engineQueue.sync {
-            do { result = try transcribeLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, threadCount: nil) }
-            catch { thrownError = error }
+        // Dispatch the serial-queue body via `async` + continuation so we don't block a
+        // Swift-concurrency cooperative thread for the full inference (pool starvation).
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            engineQueue.async {
+                do {
+                    let result = try self.transcribeLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, threadCount: nil)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
-        if let e = thrownError { throw e }
-        return result
     }
 
     private func transcribeLocked(
@@ -220,14 +242,20 @@ class WhisperEngine: TranscriptionEngine {
         suppressRegex: String?,
         onPartialResult: @escaping (String) -> Void
     ) async throws -> String {
-        var result: String = ""
-        var thrownError: Error?
-        engineQueue.sync {
-            do { result = try transcribeStreamingLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, onPartialResult: onPartialResult) }
-            catch { thrownError = error }
+        // Dispatch the serial-queue body via `async` + continuation so we don't block a
+        // Swift-concurrency cooperative thread for the full inference (pool starvation).
+        // `onPartialResult` still fires from within `transcribeStreamingLocked` as before;
+        // the continuation resumes once with the final accumulated text.
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            engineQueue.async {
+                do {
+                    let result = try self.transcribeStreamingLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, onPartialResult: onPartialResult)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
-        if let e = thrownError { throw e }
-        return result
     }
 
     private func transcribeStreamingLocked(

@@ -23,7 +23,9 @@ public class Transcriber {
     public func unloadModelSync() {
         let sem = DispatchSemaphore(value: 0)
         Task { await engine.unloadModel(); sem.signal() }
-        sem.wait()
+        // Bound the wait so termination can't hang on a stuck unload — the OS
+        // reclaims ANE/Metal resources on process exit regardless.
+        _ = sem.wait(timeout: .now() + 2.0)
     }
     public func startMemoryPressureMonitoring() { engine.startMemoryPressureMonitoring() }
 
