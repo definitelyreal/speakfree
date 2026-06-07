@@ -3,7 +3,12 @@ import CWhisper
 
 /// Wraps the whisper.cpp C library for in-process transcription.
 /// Keeps the model loaded in memory between transcriptions for speed.
-class WhisperEngine {
+///
+/// Conforms to `TranscriptionEngine`. The protocol surface is `async`, but whisper.cpp
+/// is synchronous and runs under a serial `engineQueue`. The async members below are thin
+/// shims that hop the existing serial-queue + `*Locked` machinery; the UAF/Metal-assert
+/// safety (single owner of `context`, deinit drains the queue) is unchanged.
+class WhisperEngine: TranscriptionEngine {
     private var context: OpaquePointer?  // whisper_context*
     private var loadedModelPath: String?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
@@ -18,6 +23,11 @@ class WhisperEngine {
     /// How the model should be managed: "auto", "always", "off"
     var keepModelLoaded: String = "auto"
 
+    // MARK: - TranscriptionEngine identity
+
+    var engineID: String { "whisper" }
+    var supportsStreaming: Bool { true }
+
     var isLoaded: Bool {
         var result = false
         engineQueue.sync { result = self.context != nil }
@@ -29,6 +39,27 @@ class WhisperEngine {
     }
 
     // MARK: - Model Lifecycle
+
+    /// Protocol entry point: load a whisper model identified by a size string
+    /// (e.g. "large-v3-turbo"). Resolves the on-disk GGML path via `Transcriber.findModel`
+    /// and delegates to the existing synchronous `loadModel(path:)`.
+    func loadModel(modelID: String) async throws {
+        guard let modelPath = Transcriber.findModel(modelSize: modelID) else {
+            throw TranscriptionEngineError.modelLoadFailed(modelID)
+        }
+        // Dispatch the serial-queue body via `async` + continuation so we don't block a
+        // Swift-concurrency cooperative thread for the full model load (pool starvation).
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            engineQueue.async {
+                do {
+                    try self.loadModelLocked(path: modelPath)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
 
     /// Load a GGML model from disk. Metal GPU is used automatically.
     func loadModel(path: String) throws {
@@ -64,9 +95,17 @@ class WhisperEngine {
         DispatchQueue.main.async { [weak self] in self?.startMemoryPressureMonitoring() }
     }
 
-    /// Free the model from memory.
-    func unloadModel() {
-        engineQueue.sync { unloadModelLocked() }
+    /// Free the model from memory. Async shim over the serial-queue body so it satisfies
+    /// the `TranscriptionEngine` protocol; the actual teardown still runs on `engineQueue`.
+    func unloadModel() async {
+        // Dispatch the serial-queue body via `async` + continuation so we don't block a
+        // Swift-concurrency cooperative thread during teardown.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            engineQueue.async {
+                self.unloadModelLocked()
+                continuation.resume()
+            }
+        }
     }
 
     private func unloadModelLocked() {
@@ -82,21 +121,27 @@ class WhisperEngine {
     // MARK: - Transcription
 
     /// Transcribe PCM Float32 audio samples (16kHz, mono).
+    /// Async shim conforming to `TranscriptionEngine`; the inference still runs synchronously
+    /// on the serial `engineQueue` via the untouched `transcribeLocked` machinery. The
+    /// internal `threadCount` knob defaults to nil (whisper picks the core count itself).
     func transcribe(
         samples: [Float],
-        language: String = "en",
-        prompt: String? = nil,
-        suppressRegex: String? = nil,
-        threadCount: Int? = nil
-    ) throws -> String {
-        var result: String = ""
-        var thrownError: Error?
-        engineQueue.sync {
-            do { result = try transcribeLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, threadCount: threadCount) }
-            catch { thrownError = error }
+        language: String,
+        prompt: String?,
+        suppressRegex: String?
+    ) async throws -> String {
+        // Dispatch the serial-queue body via `async` + continuation so we don't block a
+        // Swift-concurrency cooperative thread for the full inference (pool starvation).
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            engineQueue.async {
+                do {
+                    let result = try self.transcribeLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, threadCount: nil)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
-        if let e = thrownError { throw e }
-        return result
     }
 
     private func transcribeLocked(
@@ -187,21 +232,30 @@ class WhisperEngine {
     /// Transcribe audio incrementally, calling onPartialResult with each new segment.
     /// Designed to be called periodically with a growing audio buffer during recording.
     /// Returns the final accumulated text.
+    /// Async shim conforming to `TranscriptionEngine`. The streaming inference + C-callback
+    /// machinery is untouched in `transcribeStreamingLocked`; partials are still delivered on
+    /// the main thread by that callback. This wrapper only hops the serial-queue body.
     func transcribeStreaming(
         samples: [Float],
-        language: String = "en",
-        prompt: String? = nil,
-        suppressRegex: String? = nil,
+        language: String,
+        prompt: String?,
+        suppressRegex: String?,
         onPartialResult: @escaping (String) -> Void
-    ) throws -> String {
-        var result: String = ""
-        var thrownError: Error?
-        engineQueue.sync {
-            do { result = try transcribeStreamingLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, onPartialResult: onPartialResult) }
-            catch { thrownError = error }
+    ) async throws -> String {
+        // Dispatch the serial-queue body via `async` + continuation so we don't block a
+        // Swift-concurrency cooperative thread for the full inference (pool starvation).
+        // `onPartialResult` still fires from within `transcribeStreamingLocked` as before;
+        // the continuation resumes once with the final accumulated text.
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            engineQueue.async {
+                do {
+                    let result = try self.transcribeStreamingLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, onPartialResult: onPartialResult)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
-        if let e = thrownError { throw e }
-        return result
     }
 
     private func transcribeStreamingLocked(

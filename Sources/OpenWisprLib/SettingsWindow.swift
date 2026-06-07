@@ -435,6 +435,30 @@ struct SettingsView: View {
         WhisperLanguage.all.sorted { $0.name < $1.name }
     }
 
+    /// The currently selected Parakeet model's catalog entry (nil when on Whisper or unknown id).
+    private var selectedParakeetModelInfo: ParakeetModelInfo? {
+        guard viewModel.engine == "parakeet" else { return nil }
+        return EngineCatalog.parakeetModels.first(where: { $0.id == viewModel.parakeetModel })
+    }
+
+    /// Languages to offer in the shared Language picker. Whisper supports the full list;
+    /// Parakeet is constrained to its selected model's `supportedLanguages` (v2 = English only,
+    /// v3 = its multilingual set). Falls back to the full list if the model is unknown.
+    private var pickerLanguages: [WhisperLanguage] {
+        guard let info = selectedParakeetModelInfo else { return sortedLanguages }
+        let allowed = Set(info.supportedLanguages)
+        return sortedLanguages.filter { allowed.contains($0.id) }
+    }
+
+    /// Footnote describing the Parakeet language constraint, shown only for Parakeet.
+    private var parakeetLanguageNote: String? {
+        guard let info = selectedParakeetModelInfo else { return nil }
+        if info.supportedLanguages == ["en"] {
+            return "\(info.displayName) supports English only. Other languages are ignored."
+        }
+        return "\(info.displayName) supports a fixed set of languages; unsupported selections are ignored."
+    }
+
     /// Whether current hotkey matches one of the standard options
     private var isCustomHotkey: Bool {
         !standardHotkeyOptions.contains(where: { $0.keyCode == viewModel.hotkeyKeyCode })
@@ -530,6 +554,9 @@ struct SettingsView: View {
                 // -- TRANSCRIPTION -----------------------------------------
                 GroupBox("Transcription") {
                     VStack(alignment: .leading, spacing: 10) {
+                        // Parakeet engine picker
+                        EnginePickerView(viewModel: viewModel)
+
                         modelStatusBanner
 
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
@@ -538,13 +565,18 @@ struct SettingsView: View {
                                 Picker("", selection: $viewModel.language) {
                                     Text("Auto-detect").tag("auto")
                                     Divider()
-                                    ForEach(sortedLanguages) { lang in
+                                    ForEach(pickerLanguages) { lang in
                                         Text(lang.name).tag(lang.id)
                                     }
                                 }
                                 .pickerStyle(.menu)
                                 .labelsHidden()
                                 .onChange(of: viewModel.language) { newLang in
+                                    // Whisper-only: language switches carry the per-language
+                                    // ggml model selection. Parakeet uses language only as a
+                                    // hint, so skip all hidden model bookkeeping.
+                                    guard viewModel.engine == "whisper" else { return }
+
                                     if previousLanguage != newLang {
                                         viewModel.languageModels[previousLanguage] = viewModel.modelSize
                                     }
@@ -568,19 +600,24 @@ struct SettingsView: View {
                                 }
                             }
 
-                            GridRow {
-                                Text("Model")
-                                Picker("", selection: $viewModel.modelSize) {
-                                    ForEach(availableModels(language: viewModel.language)) { model in
-                                        Text(model.label)
-                                            .lineLimit(1)
-                                            .truncationMode(.tail)
-                                            .tag(model.id)
+                            // Whisper-specific ggml model picker. Parakeet's downloadable
+                            // model variants (v2/v3) are chosen in EnginePickerView above, so
+                            // this per-language ggml dropdown is hidden for that engine.
+                            if viewModel.engine == "whisper" {
+                                GridRow {
+                                    Text("Model")
+                                    Picker("", selection: $viewModel.modelSize) {
+                                        ForEach(availableModels(language: viewModel.language)) { model in
+                                            Text(model.label)
+                                                .lineLimit(1)
+                                                .truncationMode(.tail)
+                                                .tag(model.id)
+                                        }
                                     }
+                                    .pickerStyle(.menu)
+                                    .labelsHidden()
+                                    .lineLimit(1)
                                 }
-                                .pickerStyle(.menu)
-                                .labelsHidden()
-                                .lineLimit(1)
                             }
 
                             GridRow {
@@ -596,9 +633,15 @@ struct SettingsView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                        Text("Larger models are more accurate but use more memory.")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
+                        if let note = parakeetLanguageNote {
+                            Text(note)
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("Larger models are more accurate but use more memory.")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
@@ -620,14 +663,21 @@ struct SettingsView: View {
                                 .pickerStyle(.menu)
                                 .labelsHidden()
                                 .frame(width: 120, alignment: .leading)
+                                // Parakeet manages its own model lifecycle; this control has
+                                // no effect for it (memory-pressure policy is a no-op).
+                                .disabled(viewModel.engine != "whisper")
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac.")
-                            Text("Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)).")
-                            Text("Automatic unloads the model whenever your Mac needs the memory.")
+                            if viewModel.engine == "whisper" {
+                                Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac.")
+                                Text("Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)).")
+                                Text("Automatic unloads the model whenever your Mac needs the memory.")
+                            } else {
+                                Text("Parakeet manages model loading automatically; this setting has no effect.")
+                            }
                         }
                         .font(.footnote)
                         .foregroundColor(.secondary)
@@ -728,6 +778,18 @@ struct SettingsView: View {
             viewModel.save()
             checkPendingDownload()
         }
+        .onChange(of: viewModel.engine) { _ in
+            // Engine onChange lives in EnginePickerView and only refreshes its own
+            // state, so the orange whisper banner can go stale when switching to
+            // Parakeet. Re-run here (early-returns nil for non-whisper engines).
+            checkPendingDownload()
+            reconcilePickerLanguage()
+        }
+        .onChange(of: viewModel.parakeetModel) { _ in
+            // Switching Parakeet variants (v2 English-only <-> v3 multilingual)
+            // can drop the bound language tag out of pickerLanguages.
+            reconcilePickerLanguage()
+        }
         .onChange(of: viewModel.punctuationMode) { _ in viewModel.save() }
         .onChange(of: viewModel.rememberWords) { _ in viewModel.save() }
         .onChange(of: viewModel.maxRecordings) { _ in viewModel.save() }
@@ -736,8 +798,14 @@ struct SettingsView: View {
         .onChange(of: viewModel.streamingEnabled) { _ in viewModel.save() }
     }
 
-    /// Check if the currently selected model needs downloading
+    /// Check if the currently selected model needs downloading.
+    /// Whisper-only: `modelExists`/`modelSize` describe the ggml model. Parakeet manages its
+    /// own download state in EnginePickerView, so the orange banner must not appear for it.
     private func checkPendingDownload() {
+        guard viewModel.engine == "whisper" else {
+            pendingModelDownload = nil
+            return
+        }
         if !SettingsViewModel.modelExists(viewModel.modelSize) {
             // Remember the last working model so we can revert on cancel
             if previousWorkingModel == nil || SettingsViewModel.modelExists(previousWorkingModel ?? "") {
@@ -755,6 +823,20 @@ struct SettingsView: View {
         } else {
             pendingModelDownload = nil
             previousWorkingModel = viewModel.modelSize
+        }
+    }
+
+    /// Keep the Language picker's bound selection inside the options it actually renders.
+    /// Whisper offers the full list, so its saved language is never out of range. Parakeet
+    /// constrains options to the selected model's `supportedLanguages`; when the current
+    /// language falls outside that set (e.g. v2 is English-only but language=="fr"), the
+    /// Picker would render blank because its tag isn't present. Coerce to "auto", which is
+    /// always offered. Only touches the value for Parakeet, so the saved whisper language
+    /// is left intact.
+    private func reconcilePickerLanguage() {
+        guard let info = selectedParakeetModelInfo else { return }
+        if viewModel.language != "auto" && !info.supportedLanguages.contains(viewModel.language) {
+            viewModel.language = "auto"
         }
     }
 

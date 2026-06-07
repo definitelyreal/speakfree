@@ -27,7 +27,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // The crash happens in __cxa_finalize_ranges when ggml tries to free Metal
     // residency sets that are still active during static destructor cleanup.
     public func applicationWillTerminate(_ notification: Notification) {
-        transcriber?.engine.unloadModel()
+        // applicationWillTerminate cannot await — bridge the async unload to sync via the
+        // transcriber's synchronous passthrough (semaphore-backed inside Transcriber).
+        transcriber?.unloadModelSync()
         hotkeyManager?.stop()
         recorder?.shutdown()
     }
@@ -54,8 +56,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Text that has been "committed" to display — we won't change it even if re-inference differs.
     /// New sentences start on a new line so existing lines don't reflow.
     private var committedStreamingText: String = ""
-    /// Serial queue that ensures streaming and final transcriptions never overlap on the whisper context.
-    private let whisperSerialQueue = DispatchQueue(label: "com.speakfree.whisper-serial", qos: .userInitiated)
     /// Monotonically-increasing token bumped every time streaming stops. Stale partial-result
     /// callbacks that arrive on main after recording ended compare against this and are dropped.
     private var streamingGeneration: UInt = 0
@@ -104,48 +104,63 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             VocabularyMigration.runIfNeeded()
         }
 
-        // Determine effective model (multilingual if needed)
-        var effectiveModelSize = config.modelSize
-        if config.language != "en" && WhisperLanguage.isEnglishOnly(config.modelSize) {
-            effectiveModelSize = WhisperLanguage.multilingualModel(for: config.modelSize)
-            print("Language \(config.language) requires multilingual model — using \(effectiveModelSize)")
+        // Resolve the engine + the model identifier it should load. Whisper uses a model-size
+        // string (with multilingual upgrade + on-disk fallback chain); Parakeet uses its own
+        // model id (downloaded on first use by FluidAudio — no whisper-style fallback chain).
+        // Compute the EFFECTIVE engine id once, honoring SPEAKFREE_ENGINE the same way
+        // EngineFactory does, so engine creation and model-id selection can't disagree.
+        let engineID = effectiveEngineID
+        let modelID: String
+        if engineID == "parakeet" {
+            modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
+        } else {
+            // Determine effective model (multilingual if needed)
+            var effectiveModelSize = config.modelSize
+            if config.language != "en" && WhisperLanguage.isEnglishOnly(config.modelSize) {
+                effectiveModelSize = WhisperLanguage.multilingualModel(for: config.modelSize)
+                print("Language \(config.language) requires multilingual model — using \(effectiveModelSize)")
+            }
+
+            // Model fallback chain
+            if !Transcriber.modelExists(modelSize: effectiveModelSize) {
+                // Fallback 1: if we wanted multilingual but only have .en, use .en
+                if effectiveModelSize != config.modelSize && Transcriber.modelExists(modelSize: config.modelSize) {
+                    print("Multilingual model \(effectiveModelSize) not found — using \(config.modelSize) as fallback")
+                    effectiveModelSize = config.modelSize
+                }
+                // Fallback 2: try any model already on disk
+                else if let anyModel = findAnyDownloadedModel() {
+                    print("Model \(effectiveModelSize) not found — using \(anyModel) as fallback")
+                    effectiveModelSize = anyModel
+                }
+                // Fallback 3: no model at all — must download with progress dialog
+                else {
+                    let modelToDownload = effectiveModelSize
+                    DispatchQueue.main.sync {
+                        ModelDownloadController.downloadModel(modelToDownload) { _ in }
+                    }
+                    // After download, verify the model is now available
+                    if !Transcriber.modelExists(modelSize: effectiveModelSize) {
+                        print("Model download failed or was cancelled — cannot proceed")
+                    }
+                }
+            }
+            modelID = effectiveModelSize
         }
 
-        // Model fallback chain
-        if !Transcriber.modelExists(modelSize: effectiveModelSize) {
-            // Fallback 1: if we wanted multilingual but only have .en, use .en
-            if effectiveModelSize != config.modelSize && Transcriber.modelExists(modelSize: config.modelSize) {
-                print("Multilingual model \(effectiveModelSize) not found — using \(config.modelSize) as fallback")
-                effectiveModelSize = config.modelSize
-            }
-            // Fallback 2: try any model already on disk
-            else if let anyModel = findAnyDownloadedModel() {
-                print("Model \(effectiveModelSize) not found — using \(anyModel) as fallback")
-                effectiveModelSize = anyModel
-            }
-            // Fallback 3: no model at all — must download with progress dialog
-            else {
-                let modelToDownload = effectiveModelSize
-                DispatchQueue.main.sync {
-                    ModelDownloadController.downloadModel(modelToDownload) { _ in }
-                }
-                // After download, verify the model is now available
-                if !Transcriber.modelExists(modelSize: effectiveModelSize) {
-                    print("Model download failed or was cancelled — cannot proceed")
-                }
-            }
-        }
-
-        transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
+        let engine = EngineFactory.make(config: config)
+        transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
+        activeEngineID = engineID
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
-        DiagnosticLogger.shared.log("Model loaded: \(effectiveModelSize)")
+        DiagnosticLogger.shared.log("Model loaded: \(modelID) (engine: \(engineID))")
 
         // Configure pre-buffer
         recorder.preBufferEnabled = config.preBuffer?.value ?? true
 
         // Configure model persistence
-        transcriber.engine.keepModelLoaded = config.keepModelLoaded ?? "auto"
-        transcriber.engine.startMemoryPressureMonitoring()
+        transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
+        transcriber.startMemoryPressureMonitoring()
+        warmUpEngine(engineID)
 
         DispatchQueue.main.async {
             self.statusBar.reprocessHandler = { [weak self] url in
@@ -154,7 +169,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             self.statusBar.buildMenu()
         }
 
-        if Transcriber.findWhisperBinary() == nil {
+        // Whisper-only startup gate: a Parakeet setup has no whisper-cli/whisper-binary and
+        // must not be blocked here. Gate on the effective engine so permissions/hotkeys still init.
+        if engineID == "whisper" && Transcriber.findWhisperBinary() == nil {
             print("Error: whisper-cpp not found. Install it with: brew install whisper-cpp")
             return
         }
@@ -266,9 +283,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             issues.append("microphone not granted")
         }
 
-        // 6. Model file exists
-        if Transcriber.findModel(modelSize: transcriber?.modelSize ?? config.modelSize) == nil {
-            issues.append("model file missing")
+        // 6. Model file exists (whisper-only — parakeet models live in FluidAudio's own cache
+        //    and are validated by the engine on load, not via a ggml-*.bin lookup).
+        //    Gate on the effective engine (honoring SPEAKFREE_ENGINE) so a Parakeet setup
+        //    doesn't trip a whisper ggml-*.bin health check.
+        if effectiveEngineID == "whisper" {
+            if Transcriber.findModel(modelSize: transcriber?.modelID ?? config.modelSize) == nil {
+                issues.append("model file missing")
+            }
         }
 
         if issues.isEmpty {
@@ -279,18 +301,41 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The model size currently loaded by the transcriber.
-    public var activeModelSize: String { transcriber?.modelSize ?? config.modelSize }
+    /// The model identifier currently loaded by the transcriber.
+    public var activeModelSize: String { transcriber?.modelID ?? config.modelSize }
+
+    /// The engine id ("whisper" | "parakeet") of the currently-built transcriber. Tracked here
+    /// so reloadConfig can detect an engine switch without reaching into transcriber.engine.*.
+    private var activeEngineID: String = "whisper"
+
+    /// The effective engine id, honoring SPEAKFREE_ENGINE the same way EngineFactory does.
+    /// Single source of truth so engine creation, model-id selection, and activeEngineID
+    /// tracking can never disagree (e.g. building Parakeet but loading a whisper model size).
+    private var effectiveEngineID: String {
+        ProcessInfo.processInfo.environment["SPEAKFREE_ENGINE"] ?? config.engine ?? "whisper"
+    }
 
     public func reloadConfig() {
         config = Config.load()
+
+        // Parakeet: no ggml-on-disk gate (FluidAudio downloads/validates its own cache).
+        // Always rebuild the transcriber so an engine switch takes effect.
+        if effectiveEngineID == "parakeet" {
+            let modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
+            finishReloadConfig(modelID: modelID)
+            return
+        }
+
         var effectiveModelSize = config.modelSize
         if config.language != "en" && WhisperLanguage.isEnglishOnly(config.modelSize) {
             effectiveModelSize = WhisperLanguage.multilingualModel(for: config.modelSize)
             print("Language \(config.language) requires multilingual model — using \(effectiveModelSize)")
         }
 
-        if !Transcriber.modelExists(modelSize: effectiveModelSize) {
+        // If we're already on whisper and the model isn't on disk, keep running. But if we're
+        // switching FROM parakeet TO whisper, rebuild regardless so the engine actually swaps.
+        let switchingFromParakeet = activeEngineID != "whisper"
+        if !switchingFromParakeet && !Transcriber.modelExists(modelSize: effectiveModelSize) {
             // Don't auto-download — keep the current transcriber running.
             // The settings UI shows the download prompt inline.
             print("Model \(effectiveModelSize) not on disk — keeping current model (\(activeModelSize))")
@@ -299,19 +344,45 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        finishReloadConfig(effectiveModelSize: effectiveModelSize)
+        finishReloadConfig(modelID: effectiveModelSize)
     }
 
-    private func finishReloadConfig(effectiveModelSize: String) {
-        transcriber = Transcriber(modelSize: effectiveModelSize, language: config.language)
+    private func finishReloadConfig(modelID: String) {
+        // Capture the outgoing transcriber so its engine's cleanup runs before we drop it.
+        // Without this, switching engine/model leaks the old engine's loaded model (ANE/Metal
+        // residency) until ARC happens to release it — unload it deterministically instead.
+        let old = transcriber
+
+        let engine = EngineFactory.make(config: config)
+        transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
+        activeEngineID = effectiveEngineID
+
+        // Unload the previous engine off the main thread (async unload); ARC drops `old` after.
+        if let old = old {
+            Task { await old.unloadModel() }
+        }
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
         // Configure model persistence
-        transcriber.engine.keepModelLoaded = config.keepModelLoaded ?? "auto"
-        transcriber.engine.startMemoryPressureMonitoring()
+        transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
+        transcriber.startMemoryPressureMonitoring()
+        warmUpEngine(effectiveEngineID)
 
         reloadHotkeyAndSettings()
-        print("Config reloaded: hotkey=\(KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)) model=\(effectiveModelSize)")
+        print("Config reloaded: hotkey=\(KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)) model=\(modelID) engine=\(effectiveEngineID)")
+    }
+
+    /// Warm up the Parakeet model in the background at launch / engine switch so the
+    /// first dictation isn't a ~15-20s cold ANE load. Parakeet only (Whisper's cold
+    /// load is fast and its memory profile differs); no-ops if assets aren't present.
+    private func warmUpEngine(_ engineID: String) {
+        guard engineID == "parakeet" else { return }
+        let t = transcriber
+        Task.detached(priority: .userInitiated) {
+            let start = Date()
+            await t?.warmUp()
+            print("Parakeet warm-up finished in \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
+        }
     }
 
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
@@ -586,7 +657,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         recordingSourceElement = nil
         recordingContextText = nil
 
-        // Snapshot ALL config-derived state on main before crossing into whisperSerialQueue.
+        // Snapshot ALL config-derived state on main before crossing into the async Task.
         // Accessing self.config.* from a background queue is a torn-read race — Config is a
         // struct so reads and writes are not atomic across threads.
         let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
@@ -594,8 +665,22 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let glossary = Config.loadVocabulary()
         let capturedStyleMode = recordingStyleMode
 
-        // Use whisperSerialQueue to ensure any in-flight streaming inference finishes first
-        whisperSerialQueue.async { [weak self] in
+        // Snapshot the transcriber on main BEFORE crossing into the async Task. A settings
+        // change mid-finalize (reloadConfig) can swap self.transcriber out from under us; the
+        // snapshot guarantees this recording's audio runs through the engine that was active
+        // when the user spoke, not a freshly-swapped one.
+        guard let transcriber = self.transcriber else {
+            RecordingStore.clearSentinel()
+            statusBar.state = .idle
+            recordingOverlay.hide()
+            return
+        }
+
+        // Bridge into async: the transcribe pipeline is now async/await (FluidAudio is
+        // async-only; WhisperEngine exposes async shims). The engines serialize access to
+        // their own context internally, so we no longer need whisperSerialQueue to gate the
+        // final pass. Results are still marshalled back to main via DispatchQueue.main.async.
+        Task { [weak self] in
             guard let self = self else { return }
             do {
                 // Build Whisper prompt + run post-processing through the shared
@@ -616,7 +701,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                 }
                 let prompt = TextPipeline.assemblePromptHints(input: makeInput(""))
-                let raw = try self.transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
+                let raw = try await transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
                 RecordingStore.saveRaw(text: raw, for: audioURL)
                 let text = TextPipeline.run(makeInput(raw)).finalText
                 RecordingStore.saveTranscription(text: text, for: audioURL)
@@ -665,9 +750,34 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 if maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
                 }
+                // Detect a missing engine model (e.g. Parakeet never downloaded) and surface a
+                // clear, actionable message instead of a generic failure. Either way the status
+                // must not stay stuck on .transcribing.
+                let isModelMissing: Bool
+                if case TranscriptionEngineError.modelAssetsMissing = error {
+                    isModelMissing = true
+                } else {
+                    isModelMissing = false
+                }
                 DispatchQueue.main.async {
                     self.recordingOverlay.hide()
-                    print("Error: Transcription failed")
+                    if isModelMissing {
+                        let message = "Parakeet model not downloaded — open Settings to download."
+                        print("Error: \(message)")
+                        DiagnosticLogger.shared.log(message)
+                        NSApp.activate(ignoringOtherApps: true)
+                        let alert = NSAlert()
+                        alert.messageText = "Model Not Downloaded"
+                        alert.informativeText = message
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "Open Settings")
+                        alert.addButton(withTitle: "Later")
+                        if alert.runModal() == .alertFirstButtonReturn {
+                            self.showSettings()
+                        }
+                    } else {
+                        print("Error: Transcription failed")
+                    }
                     self.statusBar.state = .idle
                     self.statusBar.buildMenu()
                 }
@@ -679,7 +789,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startStreamingTimer() {
         guard config.streamingEnabled?.value ?? true else { return }
-        guard transcriber.engine.isLoaded else { return }
+        // Gate on the transcriber's engine-agnostic passthroughs. Engines that don't support
+        // live preview (parakeet v1) report supportsStreaming == false and are skipped here.
+        guard transcriber.supportsStreaming, transcriber.isLoaded else { return }
         streamingText = ""
         committedStreamingText = ""
         isStreamingInFlight = false
@@ -709,20 +821,32 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         isStreamingInFlight = true
 
         let language = config.language
+
+        // Snapshot the transcriber on main BEFORE crossing into the async Task (mirrors the
+        // finalizeRecording fix). A mid-stream engine swap (reloadConfig) can replace
+        // self.transcriber; the snapshot guarantees this partial runs through the engine that
+        // was active when the chunk was captured, not a freshly-swapped one.
+        guard let transcriber = self.transcriber else {
+            isStreamingInFlight = false
+            return
+        }
         let suppressRegex = transcriber.suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
 
         let generation = streamingGeneration
-        whisperSerialQueue.async { [weak self] in
+        // Bridge into async: streaming now routes through the Transcriber passthrough (no longer
+        // reaches into transcriber.engine.*). Engines serialize their own context internally.
+        Task { [weak self] in
             guard let self = self else { return }
-            // Re-check: user may have released hotkey while we waited for the queue
+            // Re-check: user may have released hotkey while we waited to start
             guard self.isPressed else {
                 DispatchQueue.main.async { self.isStreamingInFlight = false }
                 return
             }
             do {
-                let partial = try self.transcriber.engine.transcribeStreaming(
+                let partial = try await transcriber.transcribeStreaming(
                     samples: currentSamples,
                     language: language,
+                    prompt: nil,
                     suppressRegex: suppressRegex,
                     onPartialResult: { [weak self, generation] text in
                         guard let self = self, self.streamingGeneration == generation else { return }
