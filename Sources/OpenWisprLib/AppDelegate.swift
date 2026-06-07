@@ -109,7 +109,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // model id (downloaded on first use by FluidAudio — no whisper-style fallback chain).
         // Compute the EFFECTIVE engine id once, honoring SPEAKFREE_ENGINE the same way
         // EngineFactory does, so engine creation and model-id selection can't disagree.
-        let engineID = ProcessInfo.processInfo.environment["SPEAKFREE_ENGINE"] ?? config.engine ?? "whisper"
+        let engineID = effectiveEngineID
         let modelID: String
         if engineID == "parakeet" {
             modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
@@ -286,7 +286,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         //    and are validated by the engine on load, not via a ggml-*.bin lookup).
         //    Gate on the effective engine (honoring SPEAKFREE_ENGINE) so a Parakeet setup
         //    doesn't trip a whisper ggml-*.bin health check.
-        let effectiveEngineID = ProcessInfo.processInfo.environment["SPEAKFREE_ENGINE"] ?? config.engine ?? "whisper"
         if effectiveEngineID == "whisper" {
             if Transcriber.findModel(modelSize: transcriber?.modelID ?? config.modelSize) == nil {
                 issues.append("model file missing")
@@ -308,12 +307,19 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// so reloadConfig can detect an engine switch without reaching into transcriber.engine.*.
     private var activeEngineID: String = "whisper"
 
+    /// The effective engine id, honoring SPEAKFREE_ENGINE the same way EngineFactory does.
+    /// Single source of truth so engine creation, model-id selection, and activeEngineID
+    /// tracking can never disagree (e.g. building Parakeet but loading a whisper model size).
+    private var effectiveEngineID: String {
+        ProcessInfo.processInfo.environment["SPEAKFREE_ENGINE"] ?? config.engine ?? "whisper"
+    }
+
     public func reloadConfig() {
         config = Config.load()
 
         // Parakeet: no ggml-on-disk gate (FluidAudio downloads/validates its own cache).
         // Always rebuild the transcriber so an engine switch takes effect.
-        if (config.engine ?? "whisper") == "parakeet" {
+        if effectiveEngineID == "parakeet" {
             let modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
             finishReloadConfig(modelID: modelID)
             return
@@ -348,7 +354,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         let engine = EngineFactory.make(config: config)
         transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
-        activeEngineID = config.engine ?? "whisper"
+        activeEngineID = effectiveEngineID
 
         // Unload the previous engine off the main thread (async unload); ARC drops `old` after.
         if let old = old {
@@ -361,7 +367,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         transcriber.startMemoryPressureMonitoring()
 
         reloadHotkeyAndSettings()
-        print("Config reloaded: hotkey=\(KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)) model=\(modelID) engine=\(config.engine ?? "whisper")")
+        print("Config reloaded: hotkey=\(KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)) model=\(modelID) engine=\(effectiveEngineID)")
     }
 
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
@@ -800,6 +806,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         isStreamingInFlight = true
 
         let language = config.language
+
+        // Snapshot the transcriber on main BEFORE crossing into the async Task (mirrors the
+        // finalizeRecording fix). A mid-stream engine swap (reloadConfig) can replace
+        // self.transcriber; the snapshot guarantees this partial runs through the engine that
+        // was active when the chunk was captured, not a freshly-swapped one.
+        guard let transcriber = self.transcriber else {
+            isStreamingInFlight = false
+            return
+        }
         let suppressRegex = transcriber.suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
 
         let generation = streamingGeneration
@@ -813,7 +828,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             do {
-                let partial = try await self.transcriber.transcribeStreaming(
+                let partial = try await transcriber.transcribeStreaming(
                     samples: currentSamples,
                     language: language,
                     prompt: nil,

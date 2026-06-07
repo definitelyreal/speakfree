@@ -20,7 +20,11 @@ struct EnginePickerView: View {
     @State private var downloadError: String?
     /// Re-checked after downloads / model switches to drive the banner.
     @State private var isModelDownloaded = false
-    /// Retained so the user can cancel an in-flight download (M1).
+    /// Retained so re-opening the picker reflects real in-flight state (M1). NOTE: FluidAudio's
+    /// download/compile path has no cancellation support (no Task.checkCancellation in
+    /// DownloadUtils.download or AsrModels.load), so cancelling this task does NOT stop the
+    /// 600 MB fetch + CoreML compile — they keep running in the background. We therefore
+    /// never expose a "Cancel" control; the only honest action is "Hide" (run in background).
     @State private var downloadTask: Task<Void, Never>?
 
     private let labelWidth: CGFloat = 110
@@ -81,14 +85,30 @@ struct EnginePickerView: View {
         }
         .onChange(of: viewModel.engine) { _ in
             viewModel.save()
+            // M (MID-DOWNLOAD SWITCH): a download may still be running for the previous
+            // selection (FluidAudio can't be cancelled). Clear the transient banner so the
+            // old progress/labels don't bleed into the new selection, then re-evaluate the
+            // on-disk state for the now-selected engine/model. The background task finishes
+            // on its own; its completion handler is a no-op for this view's current state.
+            downloadTask = nil
+            resetTransientDownloadUI()
             refreshDownloadState()
         }
         .onChange(of: viewModel.parakeetModel) { _ in
             viewModel.save()
+            // M (MID-DOWNLOAD SWITCH): same as engine — reset transient UI and re-check the
+            // newly selected model's downloaded state instead of showing stale progress.
+            downloadTask = nil
+            resetTransientDownloadUI()
             refreshDownloadState()
         }
         .onAppear {
-            refreshDownloadState()
+            restoreInFlightState()
+        }
+        .onDisappear {
+            // Keep the background task running but drop the transient banner state so a
+            // re-open starts from a coherent baseline (restoreInFlightState rebuilds it).
+            resetTransientDownloadUI()
         }
     }
 
@@ -98,19 +118,26 @@ struct EnginePickerView: View {
     private var parakeetDownloadBanner: some View {
         if isDownloading {
             VStack(alignment: .leading, spacing: 4) {
-                // L2: single phase-agnostic label so the CoreML compile pause (progress
-                // sits at ~100%) doesn't read as a hang. ParakeetModelManager exposes no
-                // phase signal, so we label the whole operation rather than guess.
+                // L2: single phase-spanning label. FluidAudio does expose a phase signal
+                // (DownloadProgress.phase: .listing/.downloading/.compiling), but our
+                // manager flattens it to a 0..1 fraction. The CoreML compile phase makes
+                // the bar jump near the end, so we use one "Downloading / preparing" label
+                // covering both fetch and compile rather than implying a stalled download.
                 HStack {
                     Text("Downloading / preparing \(parakeetDisplayName)\u{2026} \(Int(downloadProgress * 100))%")
                         .font(.callout.weight(.medium))
                     Spacer()
-                    // M1: cancel an in-flight download.
-                    Button("Cancel") { cancelDownload() }
+                    // M1 (HONEST CANCEL): FluidAudio cannot be cancelled, so we offer "Hide"
+                    // instead of "Cancel" — it dismisses the banner but the download keeps
+                    // running in the background. Re-opening the picker shows real state.
+                    Button("Hide") { hideDownload() }
                         .buttonStyle(.bordered)
                 }
                 ProgressView(value: downloadProgress, total: 1.0)
                     .progressViewStyle(.linear)
+                Text("Download continues in the background \u{2014} it can\u{2019}t be stopped once started. You can close this and keep using the app.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
             }
         } else if !isModelDownloaded {
             HStack(spacing: 8) {
@@ -183,11 +210,30 @@ struct EnginePickerView: View {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
-    private func cancelDownload() {
-        downloadTask?.cancel()
-        downloadTask = nil
+    /// M1 (HONEST CANCEL): Dismiss the in-flight banner WITHOUT cancelling the work.
+    /// FluidAudio's fetch + compile can't be stopped, so we deliberately do not call
+    /// `downloadTask?.cancel()` (it would do nothing but mislead). We keep `downloadTask`
+    /// set so re-opening the picker can restore the live banner via `restoreInFlightState`.
+    private func hideDownload() {
+        isDownloading = false
+    }
+
+    /// Reset only the transient banner UI (progress/error/flag). Does not touch a running
+    /// download task — used on disappear and on engine/model switch to keep UI coherent.
+    private func resetTransientDownloadUI() {
         isDownloading = false
         downloadProgress = 0
+        downloadError = nil
+    }
+
+    /// If a download is still running (task retained), restore the live banner; otherwise
+    /// re-check the on-disk downloaded state.
+    private func restoreInFlightState() {
+        if downloadTask != nil {
+            isDownloading = true
+        } else {
+            isDownloading = false
+        }
         refreshDownloadState()
     }
 
@@ -198,7 +244,8 @@ struct EnginePickerView: View {
         // H3: disk-space precheck before committing to a download. If we can read the
         // volume capacity and it's short, refuse early with a concrete number.
         if let free = availableFreeBytes(for: modelName), free < requiredFreeBytes {
-            downloadError = "Need ~600 MB free, you have \(Self.formatBytes(free))."
+            // L3: message must match the real gate (~1.5 GB: ~600 MB model + CoreML compile scratch).
+            downloadError = "Need ~1.5 GB free (\u{2248}600 MB model + compile scratch), you have \(Self.formatBytes(free))."
             return
         }
 
@@ -242,7 +289,7 @@ struct EnginePickerView: View {
             (nsError.domain == NSPOSIXErrorDomain && nsError.code == 28) ||
             (nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileWriteOutOfSpaceError)
         if isOutOfSpace {
-            return "Ran out of disk space. Free up ~600 MB and try again."
+            return "Ran out of disk space. Free up ~1.5 GB (model + compile scratch) and try again."
         }
         return error.localizedDescription
     }

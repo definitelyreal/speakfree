@@ -108,6 +108,11 @@ public enum ProcessCommand {
     /// allocating buffers, bounding memory use and guarding the UInt32 frame casts.
     private static let maxInputDurationSeconds: Double = 30 * 60
 
+    /// Maximum bytes for any single Float32 PCM allocation (input buffer or
+    /// resampled output). The duration cap alone is insufficient: a 30-min WAV at
+    /// a high sample rate with many channels still over-allocates. ~512 MB.
+    private static let maxDecodedBytes: Double = 512 * 1024 * 1024
+
     /// Decode a wav file to 16 kHz mono Float32 samples (the engine audio currency).
     static func loadSamples(from url: URL) throws -> [Float] {
         let file = try AVAudioFile(forReading: url)
@@ -140,6 +145,19 @@ public enum ProcessCommand {
             ))
         }
 
+        // Memory budget: the duration cap doesn't bound a short-but-dense WAV
+        // (high sample rate × many channels). Reject if the input buffer's
+        // Float32 footprint (frames × channels × 4 bytes) exceeds the budget.
+        let channelCount = Double(srcFormat.channelCount)
+        let inputBytes = Double(frameLength) * channelCount * 4.0
+        guard inputBytes <= maxDecodedBytes else {
+            throw Error.transcriptionFailed(NSError(
+                domain: "ProcessCommand", code: -7,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Audio too large: input buffer (\(Int(inputBytes / (1024 * 1024))) MB) exceeds budget"]
+            ))
+        }
+
         guard let inBuf = AVAudioPCMBuffer(
             pcmFormat: srcFormat, frameCapacity: AVAudioFrameCount(frameLength)
         ) else { return [] }
@@ -162,33 +180,85 @@ public enum ProcessCommand {
                 userInfo: [NSLocalizedDescriptionKey: "Resampled frame count out of range"]
             ))
         }
+        // Memory budget: target is mono Float32, so estimated output bytes are
+        // frames × 4. Reject before allocating the output buffer.
+        let outputBytes = outCapacityDouble * 4.0
+        guard outputBytes <= maxDecodedBytes else {
+            throw Error.transcriptionFailed(NSError(
+                domain: "ProcessCommand", code: -8,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Audio too large: resampled output (\(Int(outputBytes / (1024 * 1024))) MB) exceeds budget"]
+            ))
+        }
         let outCapacity = AVAudioFrameCount(outCapacityDouble)
-        guard let outBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outCapacity) else { return [] }
 
+        // Drain loop: a single converter.convert can truncate the resampled tail.
+        // Feed the input buffer once then signal .endOfStream; call convert into
+        // fresh output buffers repeatedly, appending each pass, until the converter
+        // reports .endOfStream. Mirrors FluidAudio's AudioConverter drain loop.
         var fed = false
-        var convError: NSError?
-        // After feeding the single input buffer, signal end-of-stream (not .noDataNow)
-        // so the converter flushes rather than starving — .noDataNow can yield partial
-        // or empty output for resampled conversions.
-        let status = converter.convert(to: outBuf, error: &convError) { _, statusPtr in
+        let inputBlock: AVAudioConverterInputBlock = { _, statusPtr in
             if fed { statusPtr.pointee = .endOfStream; return nil }
             fed = true
             statusPtr.pointee = .haveData
             return inBuf
         }
+
+        func makeOutputBuffer(_ capacity: AVAudioFrameCount) throws -> AVAudioPCMBuffer {
+            guard let buf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else {
+                throw Error.transcriptionFailed(NSError(
+                    domain: "ProcessCommand", code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Failed to allocate conversion buffer"]
+                ))
+            }
+            return buf
+        }
+
+        func append(_ buffer: AVAudioPCMBuffer, into samples: inout [Float]) {
+            guard let ch = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+            samples.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: Int(buffer.frameLength)))
+        }
+
+        var resampled: [Float] = []
+        resampled.reserveCapacity(Int(outCapacityDouble))
+
+        // First pass: convert the main data using the estimated capacity.
+        var convError: NSError?
+        let firstOut = try makeOutputBuffer(outCapacity)
+        let firstStatus = converter.convert(to: firstOut, error: &convError, withInputFrom: inputBlock)
         if let convError { throw Error.transcriptionFailed(convError) }
-        guard status == .haveData || status == .endOfStream else {
+        guard firstStatus != .error else {
             throw Error.transcriptionFailed(NSError(
-                domain: "ProcessCommand", code: Int(status.rawValue),
-                userInfo: [NSLocalizedDescriptionKey: "Audio conversion failed (status \(status.rawValue))"]
+                domain: "ProcessCommand", code: Int(firstStatus.rawValue),
+                userInfo: [NSLocalizedDescriptionKey: "Audio conversion failed (status \(firstStatus.rawValue))"]
             ))
         }
-        guard let ch = outBuf.floatChannelData, outBuf.frameLength > 0 else {
+        append(firstOut, into: &resampled)
+
+        // Drain remaining frames into fresh buffers until end-of-stream.
+        if firstStatus != .endOfStream {
+            while true {
+                let out = try makeOutputBuffer(4096)
+                let status = converter.convert(to: out, error: &convError, withInputFrom: inputBlock)
+                if let convError { throw Error.transcriptionFailed(convError) }
+                guard status != .error else {
+                    throw Error.transcriptionFailed(NSError(
+                        domain: "ProcessCommand", code: Int(status.rawValue),
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "Audio conversion failed (status \(status.rawValue))"]
+                    ))
+                }
+                append(out, into: &resampled)
+                if status == .endOfStream { break }
+            }
+        }
+
+        guard !resampled.isEmpty else {
             throw Error.transcriptionFailed(NSError(
                 domain: "ProcessCommand", code: -1,
                 userInfo: [NSLocalizedDescriptionKey: "Audio conversion produced no samples"]
             ))
         }
-        return Array(UnsafeBufferPointer(start: ch[0], count: Int(outBuf.frameLength)))
+        return resampled
     }
 }
