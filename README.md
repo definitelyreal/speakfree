@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/definitelyreal/speakfree/releases/latest"><img src="https://img.shields.io/github/v/release/definitelyreal/speakfree?label=download&style=flat-square" alt="Download"></a>
-  <img src="https://img.shields.io/badge/macOS-13%2B-blue?style=flat-square" alt="macOS 13+">
+  <img src="https://img.shields.io/badge/macOS-14%2B-blue?style=flat-square" alt="macOS 14+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT">
 </p>
 

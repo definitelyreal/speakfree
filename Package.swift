@@ -3,9 +3,10 @@ import PackageDescription
 
 let package = Package(
     name: "speakfree",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v14)],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.5.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.1"),
     ],
     targets: [
         // C module wrapping whisper.cpp headers — links against the bundled dylib
@@ -30,7 +31,12 @@ let package = Package(
         ),
         .target(
             name: "OpenWisprLib",
-            dependencies: ["Sparkle", "CWhisper", "CTryCatch"],
+            dependencies: [
+                "Sparkle",
+                "CWhisper",
+                "CTryCatch",
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
             path: "Sources/OpenWisprLib",
             linkerSettings: [
                 .linkedFramework("CoreAudio"),

@@ -19,6 +19,8 @@ public struct Config: Codable {
     public var diagnosticLogging: FlexBool?  // nil = default (off for production, on for beta)
     public var streamingEnabled: FlexBool?  // nil = default (true) — show live preview while recording
     public var languageModels: [String: String]?  // e.g. ["en": "small.en", "auto": "small"]
+    public var engine: String?  // "whisper" | "parakeet" — nil = "whisper"
+    public var parakeetModel: String?  // e.g. "parakeet-tdt-0.6b-v3" — nil = "parakeet-tdt-0.6b-v3"
 
     // Sane shipped default — production builds always cap retained recordings.
     // (Was 0 = keep-everything-forever, which caused unbounded disk growth.)
@@ -37,7 +39,9 @@ public struct Config: Codable {
         language: "en",
         spokenPunctuation: .hybrid,
         maxRecordings: 30,
-        toggleMode: FlexBool(false)
+        toggleMode: FlexBool(false),
+        engine: nil,
+        parakeetModel: nil
     )
 
     public static var configDir: URL {

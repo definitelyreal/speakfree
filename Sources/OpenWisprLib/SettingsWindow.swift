@@ -530,6 +530,9 @@ struct SettingsView: View {
                 // -- TRANSCRIPTION -----------------------------------------
                 GroupBox("Transcription") {
                     VStack(alignment: .leading, spacing: 10) {
+                        // Parakeet engine picker
+                        EnginePickerView(viewModel: viewModel)
+
                         modelStatusBanner
 
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
