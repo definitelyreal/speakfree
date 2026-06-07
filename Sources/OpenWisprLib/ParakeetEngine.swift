@@ -9,31 +9,205 @@ import FluidAudio
 /// `AudioRecorder` already produces, so the Parakeet path needs zero conversion glue.
 ///
 /// Batch-only for v1: `supportsStreaming = false`. Live preview is unsupported.
+///
+/// ## Concurrency model
+/// All mutable model state (the `AsrManager`, the loaded model id, and the in-flight transcription
+/// counter) is owned by a private `actor Core`. The actor serializes lifecycle so a `transcribe`
+/// can never run against a manager that `unload` is tearing down, and two concurrent `load`s can
+/// never both build a manager (load is single-flight via a stored in-progress `Task`). The outer
+/// class is a thin facade that delegates to `Core` and maintains an NSLock-guarded `isLoaded`
+/// mirror for the synchronous protocol getter.
 public final class ParakeetEngine: TranscriptionEngine {
 
-    /// Guards the mutable model-state fields below. They are read/written from `async` methods
-    /// (and the sync `isLoaded` getter) without an actor, so every access is serialized here.
+    // MARK: - Core (owns all mutable model state)
+
+    /// Serializes all model lifecycle and transcription against a single owner. Every mutable
+    /// field lives here; nothing outside the actor touches the manager.
+    private actor Core {
+
+        /// FluidAudio audio constraints (mirror `ASRConstants`): 1 s of trailing silence (16k
+        /// samples) is appended to capture final-word punctuation, but only when staying under the
+        /// 15 s single-chunk encoder cap (240k samples).
+        private static let trailingSilenceSamples = 16_000
+        private static let maxSingleChunkSamples = 240_000
+
+        /// FluidAudio's loaded ASR manager (actor). `nil` until `load` succeeds.
+        private var manager: AsrManager?
+
+        /// The model identifier currently loaded, e.g. "parakeet-tdt-0.6b-v3". `nil` when unloaded.
+        private var loadedModelID: String?
+
+        /// Count of transcriptions currently in flight. `unload` drains this to 0 before tearing
+        /// the manager down so an in-flight `transcribe` never sees a `nil` / cleaned-up manager.
+        private var active = 0
+
+        /// In-progress load, if any. Concurrent `load` callers await this single Task instead of
+        /// each building their own manager (single-flight). `Task` is a value type, so the paired
+        /// `loadToken` (a monotonically increasing id) lets the owning call detect whether it is
+        /// still the in-flight load before clearing the slot.
+        private var loadInFlight: Task<Void, Error>?
+        private var loadToken = 0
+
+        /// Notifies the outer facade so it can update its NSLock-guarded `isLoaded` mirror.
+        private let onLoadedChange: @Sendable (Bool) -> Void
+
+        init(onLoadedChange: @escaping @Sendable (Bool) -> Void) {
+            self.onLoadedChange = onLoadedChange
+        }
+
+        var isLoaded: Bool { manager != nil }
+
+        // MARK: Load (single-flight)
+
+        func load(modelID: String) async throws {
+            // Idempotent: requested model already loaded.
+            if loadedModelID == modelID, manager != nil { return }
+
+            // Coalesce concurrent loads onto one Task. If a load is already running, await it; if it
+            // landed on the model we want, we're done — otherwise fall through and load ours.
+            if let existing = loadInFlight {
+                _ = try? await existing.value
+                if loadedModelID == modelID, manager != nil { return }
+            }
+
+            loadToken += 1
+            let myToken = loadToken
+            let task = Task { try await self.performLoad(modelID: modelID) }
+            loadInFlight = task
+            defer { if loadToken == myToken { loadInFlight = nil } }
+            try await task.value
+        }
+
+        private func performLoad(modelID: String) async throws {
+            // Re-check inside the (now serialized) load: a prior single-flight load may have already
+            // satisfied this request while we were queued.
+            if loadedModelID == modelID, manager != nil { return }
+
+            // Preflight: never trigger a 600MB download inside the transcribe path. Acquisition
+            // happens via the Settings download UI; if assets aren't present, surface the error.
+            guard ParakeetModelManager.shared.isModelDownloaded(modelID) else {
+                throw TranscriptionEngineError.modelAssetsMissing(modelID)
+            }
+
+            DiagnosticLogger.shared.log("ParakeetEngine: loading model \(modelID)")
+            let loadStart = CFAbsoluteTimeGetCurrent()
+
+            // Unit 5 owns download + cache + load. Prefer the load-only entry point (Unit B); fall
+            // back to `loadedModels` until that method lands.
+            let models: AsrModels
+            do {
+                models = try await ParakeetModelManager.shared.loadedModels(modelID)
+            } catch let error as ASRError {
+                throw ParakeetEngine.map(error, modelID: modelID)
+            } catch let error as TranscriptionEngineError {
+                throw error
+            } catch {
+                throw TranscriptionEngineError.modelLoadFailed(modelID)
+            }
+
+            let mgr = AsrManager(config: .default)
+            do {
+                try await mgr.loadModels(models)
+            } catch let error as ASRError {
+                throw ParakeetEngine.map(error, modelID: modelID)
+            } catch {
+                throw TranscriptionEngineError.modelLoadFailed(modelID)
+            }
+
+            // Tear down a previously-loaded (different) manager before replacing it, so its CoreML
+            // state isn't leaked. No in-flight transcriptions can target it: `transcribe` holds the
+            // actor while incrementing `active`, and we're on the actor now.
+            if let old = manager {
+                manager = nil
+                loadedModelID = nil
+                await old.cleanup()
+            }
+
+            manager = mgr
+            loadedModelID = modelID
+
+            let loadTime = CFAbsoluteTimeGetCurrent() - loadStart
+            DiagnosticLogger.shared.log("ParakeetEngine: model loaded in \(String(format: "%.2f", loadTime))s")
+            onLoadedChange(true)
+        }
+
+        // MARK: Transcribe
+
+        func transcribe(samples: [Float], language: String) async throws -> String {
+            guard let mgr = manager, let modelID = loadedModelID else {
+                throw TranscriptionEngineError.modelNotLoaded
+            }
+            active += 1
+            defer { active -= 1 }
+
+            // Trailing-silence pad so the final word's punctuation lands, but only under the
+            // single-chunk encoder cap (FluidAudio auto-chunks anything longer internally).
+            var audio = samples
+            if audio.count + Core.trailingSilenceSamples <= Core.maxSingleChunkSamples {
+                audio += [Float](repeating: 0, count: Core.trailingSilenceSamples)
+            }
+
+            // Language hint: v3 forwards an explicit Language for concrete codes (including "en");
+            // nil only for auto/empty codes or v2 (English-only, ignores the hint).
+            let isV3 = EngineCatalog.versionString(forParakeetModelID: modelID) != "v2"
+            let hint = ParakeetEngine.languageHint(for: language, isV3: isV3)
+
+            // Build a fresh decoder state sized to the loaded model's LSTM layer count.
+            var decoderState = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
+
+            let result: ASRResult
+            do {
+                result = try await mgr.transcribe(audio, decoderState: &decoderState, language: hint)
+            } catch let error as ASRError {
+                throw ParakeetEngine.map(error, modelID: modelID)
+            } catch {
+                throw TranscriptionEngineError.transcriptionFailed
+            }
+
+            return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // MARK: Unload
+
+        func unload() async {
+            // Drain in-flight transcriptions before teardown so none observe a cleaned-up manager.
+            while active > 0 { await Task.yield() }
+            guard let m = manager else { return }
+            manager = nil
+            loadedModelID = nil
+            await m.cleanup()
+            DiagnosticLogger.shared.log("ParakeetEngine: model unloaded")
+            onLoadedChange(false)
+        }
+    }
+
+    // MARK: - Facade state
+
+    /// The serialized owner of all model state. Lazily wired so it can capture `self`'s mirror
+    /// updater without an initializer ordering problem.
+    private var core: Core!
+
+    /// Guards `keepModelLoaded` and the `isLoadedMirror` — the only fields the synchronous protocol
+    /// surface touches. The actor owns everything else.
     private let stateLock = NSLock()
 
-    /// FluidAudio's loaded ASR manager (actor). `nil` until `loadModel` succeeds.
-    /// Access only under `stateLock`.
-    private var manager: AsrManager?
+    /// Synchronous mirror of `Core.isLoaded`, updated under `stateLock` after a load/unload
+    /// completes. The protocol's sync `isLoaded` getter reads this; it can lag a load/unload that is
+    /// still in flight, which is the intended "has a model finished loading" semantics.
+    private var isLoadedMirror = false
 
-    /// The FluidAudio model version currently loaded, used to gate the v3-only language hint.
-    /// Access only under `stateLock`.
-    private var version: AsrModelVersion = .v3
+    /// How the model should be managed: "auto", "always", "off". Stored for parity with
+    /// `WhisperEngine`; FluidAudio caches the compiled CoreML models on disk, so reload is cheap.
+    private var keepModelLoadedStorage = "auto"
 
-    /// The model identifier currently loaded, e.g. "parakeet-tdt-0.6b-v3".
-    /// Access only under `stateLock`.
-    private var loadedModelID: String?
-
-    /// FluidAudio audio constraints (mirror `ASRConstants`): 1 s of trailing silence (16k samples)
-    /// is appended to capture final-word punctuation, but only when staying under the 15 s
-    /// single-chunk encoder cap (240k samples).
-    private let trailingSilenceSamples = 16_000
-    private let maxSingleChunkSamples = 240_000
-
-    public init() {}
+    public init() {
+        self.core = Core(onLoadedChange: { [weak self] loaded in
+            guard let self else { return }
+            self.stateLock.lock()
+            self.isLoadedMirror = loaded
+            self.stateLock.unlock()
+        })
+    }
 
     // MARK: - TranscriptionEngine identity
 
@@ -44,97 +218,37 @@ public final class ParakeetEngine: TranscriptionEngine {
     public var isLoaded: Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return manager != nil
+        return isLoadedMirror
     }
 
-    /// How the model should be managed: "auto", "always", "off". Stored for parity with
-    /// `WhisperEngine`; FluidAudio caches the compiled CoreML models on disk, so reload is cheap.
-    public var keepModelLoaded: String = "auto"
+    public var keepModelLoaded: String {
+        get {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return keepModelLoadedStorage
+        }
+        set {
+            stateLock.lock()
+            keepModelLoadedStorage = newValue
+            stateLock.unlock()
+        }
+    }
 
     // MARK: - Model Lifecycle
 
     /// Ensure the FluidAudio models for `modelID` are downloaded + loaded, then construct and load
-    /// an `AsrManager`. Idempotent: a no-op if the same model is already loaded.
+    /// an `AsrManager`. Idempotent and single-flight: concurrent calls coalesce, and a no-op if the
+    /// same model is already loaded.
     ///
     /// - Parameter modelID: "parakeet-tdt-0.6b-v2" or "parakeet-tdt-0.6b-v3".
     public func loadModel(modelID: String) async throws {
-        // Idempotent: skip if the requested model is already loaded.
-        stateLock.lock()
-        let alreadyLoaded = manager != nil && loadedModelID == modelID
-        let existingManager = manager
-        stateLock.unlock()
-        if alreadyLoaded { return }
-
-        // Preflight: never trigger a 600MB download inside the transcribe path. Acquisition
-        // happens via the Settings download UI; if the assets aren't present, surface the error.
-        guard ParakeetModelManager.shared.isModelDownloaded(modelID) else {
-            throw TranscriptionEngineError.modelAssetsMissing(modelID)
-        }
-
-        // Same-instance switch: a different model was requested while a manager exists. Tear the
-        // old one down before building the replacement so its CoreML state isn't leaked.
-        if let existingManager {
-            await existingManager.cleanup()
-            stateLock.lock()
-            // Only clear if it's still the manager we observed (no concurrent reassignment).
-            if manager === existingManager {
-                manager = nil
-                loadedModelID = nil
-            }
-            stateLock.unlock()
-        }
-
-        // Map the model identifier to a FluidAudio version (defaults to v3 for unknown ids).
-        let resolvedVersion = ParakeetEngine.version(for: modelID)
-
-        DiagnosticLogger.shared.log("ParakeetEngine: loading model \(modelID)")
-        let loadStart = CFAbsoluteTimeGetCurrent()
-
-        let models: AsrModels
-        do {
-            // Unit 5 owns download + cache + load; returns a loaded `AsrModels`.
-            models = try await ParakeetModelManager.shared.loadedModels(modelID)
-        } catch let error as ASRError {
-            throw ParakeetEngine.map(error, modelID: modelID)
-        } catch {
-            throw TranscriptionEngineError.modelLoadFailed(modelID)
-        }
-
-        let mgr = AsrManager(config: .default)
-        do {
-            try await mgr.loadModels(models)
-        } catch let error as ASRError {
-            throw ParakeetEngine.map(error, modelID: modelID)
-        } catch {
-            throw TranscriptionEngineError.modelLoadFailed(modelID)
-        }
-
-        let loadTime = CFAbsoluteTimeGetCurrent() - loadStart
-        DiagnosticLogger.shared.log("ParakeetEngine: model loaded in \(String(format: "%.2f", loadTime))s")
-
-        stateLock.lock()
-        self.manager = mgr
-        self.version = resolvedVersion
-        self.loadedModelID = modelID
-        stateLock.unlock()
+        try await core.load(modelID: modelID)
     }
 
-    /// Release the FluidAudio models and drop the manager.
+    /// Release the FluidAudio models and drop the manager. Waits for in-flight transcriptions to
+    /// drain before teardown.
     public func unloadModel() async {
-        stateLock.lock()
-        let mgr = manager
-        stateLock.unlock()
-        guard let mgr else { return }
-        // `cleanup()` is non-async but actor-isolated → must hop the actor.
-        await mgr.cleanup()
-        stateLock.lock()
-        // Only clear if it's still the manager we tore down (no concurrent reassignment).
-        if manager === mgr {
-            manager = nil
-            loadedModelID = nil
-        }
-        stateLock.unlock()
-        DiagnosticLogger.shared.log("ParakeetEngine: model unloaded")
+        await core.unload()
     }
 
     /// No-op. FluidAudio runs on the Apple Neural Engine via CoreML and manages its own memory;
@@ -154,41 +268,7 @@ public final class ParakeetEngine: TranscriptionEngine {
                            language: String,
                            prompt: String?,
                            suppressRegex: String?) async throws -> String {
-        // Snapshot the loaded state under the lock so it can't be torn down mid-transcribe.
-        stateLock.lock()
-        let mgr = manager
-        let loadedVersion = version
-        let activeModelID = loadedModelID
-        stateLock.unlock()
-
-        guard let mgr else {
-            throw TranscriptionEngineError.modelNotLoaded
-        }
-
-        // Trailing-silence pad so the final word's punctuation lands, but only under the
-        // single-chunk encoder cap (FluidAudio auto-chunks anything longer internally).
-        var audio = samples
-        if audio.count + trailingSilenceSamples <= maxSingleChunkSamples {
-            audio += [Float](repeating: 0, count: trailingSilenceSamples)
-        }
-
-        // Language hint: v3 forwards an explicit Language for concrete codes (including "en");
-        // nil only for auto/empty codes or v2 (English-only, ignores the hint).
-        let hint = languageHint(for: language, version: loadedVersion)
-
-        // Build a fresh decoder state sized to the loaded model's LSTM layer count.
-        var decoderState = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
-
-        let result: ASRResult
-        do {
-            result = try await mgr.transcribe(audio, decoderState: &decoderState, language: hint)
-        } catch let error as ASRError {
-            throw ParakeetEngine.map(error, modelID: activeModelID ?? engineID)
-        } catch {
-            throw TranscriptionEngineError.transcriptionFailed
-        }
-
-        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await core.transcribe(samples: samples, language: language)
     }
 
     /// Parakeet (batch `AsrManager`) does not support live preview. Streaming would require
@@ -203,20 +283,14 @@ public final class ParakeetEngine: TranscriptionEngine {
 
     // MARK: - Helpers
 
-    /// Map a speakfree model identifier to a FluidAudio `AsrModelVersion`, via `EngineCatalog`'s
-    /// single source of truth for the id -> version-string mapping. Unknown ids default to v3.
-    private static func version(for modelID: String) -> AsrModelVersion {
-        EngineCatalog.versionString(forParakeetModelID: modelID) == "v2" ? .v2 : .v3
-    }
-
-    /// Compute the FluidAudio `Language?` hint for the loaded model `version`. For v3, returns an
-    /// explicit `Language(rawValue:)` on the region-stripped code for any concrete code (including
-    /// "en"); returns nil only for auto/empty codes. Always nil for v2 (English-only, ignores it).
-    private func languageHint(for language: String, version: AsrModelVersion) -> Language? {
-        guard version == .v3 else { return nil }
+    /// Compute the FluidAudio `Language?` hint. For v3, returns an explicit `Language(rawValue:)` on
+    /// the region-stripped code for any concrete code (including "en"); returns nil only for
+    /// auto/empty codes. Always nil for v2 (English-only, ignores it).
+    private static func languageHint(for language: String, isV3: Bool) -> Language? {
+        guard isV3 else { return nil }
         let code = language.trimmingCharacters(in: .whitespaces).lowercased()
         guard !code.isEmpty, code != "auto" else { return nil }
-        let primary = ParakeetEngine.stripRegionSubtag(code)
+        let primary = stripRegionSubtag(code)
         return Language(rawValue: primary)
     }
 

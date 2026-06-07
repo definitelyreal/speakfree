@@ -435,6 +435,30 @@ struct SettingsView: View {
         WhisperLanguage.all.sorted { $0.name < $1.name }
     }
 
+    /// The currently selected Parakeet model's catalog entry (nil when on Whisper or unknown id).
+    private var selectedParakeetModelInfo: ParakeetModelInfo? {
+        guard viewModel.engine == "parakeet" else { return nil }
+        return EngineCatalog.parakeetModels.first(where: { $0.id == viewModel.parakeetModel })
+    }
+
+    /// Languages to offer in the shared Language picker. Whisper supports the full list;
+    /// Parakeet is constrained to its selected model's `supportedLanguages` (v2 = English only,
+    /// v3 = its multilingual set). Falls back to the full list if the model is unknown.
+    private var pickerLanguages: [WhisperLanguage] {
+        guard let info = selectedParakeetModelInfo else { return sortedLanguages }
+        let allowed = Set(info.supportedLanguages)
+        return sortedLanguages.filter { allowed.contains($0.id) }
+    }
+
+    /// Footnote describing the Parakeet language constraint, shown only for Parakeet.
+    private var parakeetLanguageNote: String? {
+        guard let info = selectedParakeetModelInfo else { return nil }
+        if info.supportedLanguages == ["en"] {
+            return "\(info.displayName) supports English only. Other languages are ignored."
+        }
+        return "\(info.displayName) supports a fixed set of languages; unsupported selections are ignored."
+    }
+
     /// Whether current hotkey matches one of the standard options
     private var isCustomHotkey: Bool {
         !standardHotkeyOptions.contains(where: { $0.keyCode == viewModel.hotkeyKeyCode })
@@ -541,7 +565,7 @@ struct SettingsView: View {
                                 Picker("", selection: $viewModel.language) {
                                     Text("Auto-detect").tag("auto")
                                     Divider()
-                                    ForEach(sortedLanguages) { lang in
+                                    ForEach(pickerLanguages) { lang in
                                         Text(lang.name).tag(lang.id)
                                     }
                                 }
@@ -576,8 +600,9 @@ struct SettingsView: View {
                                 }
                             }
 
-                            // Whisper-specific ggml model picker. Parakeet has a single
-                            // bundled model, so this dropdown is hidden for that engine.
+                            // Whisper-specific ggml model picker. Parakeet's downloadable
+                            // model variants (v2/v3) are chosen in EnginePickerView above, so
+                            // this per-language ggml dropdown is hidden for that engine.
                             if viewModel.engine == "whisper" {
                                 GridRow {
                                     Text("Model")
@@ -608,9 +633,15 @@ struct SettingsView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                        Text("Larger models are more accurate but use more memory.")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
+                        if let note = parakeetLanguageNote {
+                            Text(note)
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("Larger models are more accurate but use more memory.")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
@@ -632,14 +663,21 @@ struct SettingsView: View {
                                 .pickerStyle(.menu)
                                 .labelsHidden()
                                 .frame(width: 120, alignment: .leading)
+                                // Parakeet manages its own model lifecycle; this control has
+                                // no effect for it (memory-pressure policy is a no-op).
+                                .disabled(viewModel.engine != "whisper")
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac.")
-                            Text("Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)).")
-                            Text("Automatic unloads the model whenever your Mac needs the memory.")
+                            if viewModel.engine == "whisper" {
+                                Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac.")
+                                Text("Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)).")
+                                Text("Automatic unloads the model whenever your Mac needs the memory.")
+                            } else {
+                                Text("Parakeet manages model loading automatically; this setting has no effect.")
+                            }
                         }
                         .font(.footnote)
                         .foregroundColor(.secondary)
@@ -748,8 +786,14 @@ struct SettingsView: View {
         .onChange(of: viewModel.streamingEnabled) { _ in viewModel.save() }
     }
 
-    /// Check if the currently selected model needs downloading
+    /// Check if the currently selected model needs downloading.
+    /// Whisper-only: `modelExists`/`modelSize` describe the ggml model. Parakeet manages its
+    /// own download state in EnginePickerView, so the orange banner must not appear for it.
     private func checkPendingDownload() {
+        guard viewModel.engine == "whisper" else {
+            pendingModelDownload = nil
+            return
+        }
         if !SettingsViewModel.modelExists(viewModel.modelSize) {
             // Remember the last working model so we can revert on cancel
             if previousWorkingModel == nil || SettingsViewModel.modelExists(previousWorkingModel ?? "") {

@@ -87,35 +87,6 @@ public class SettingsViewModel: ObservableObject {
         onSave?()
     }
 
-    // MARK: - Engine-aware model list
-
-    /// Returns the selectable model identifiers for the currently-selected engine.
-    /// Whisper: size-string IDs (English variants when language=="en", except large);
-    /// Parakeet: the IDs from EngineCatalog.parakeetModels.
-    /// Does not break the existing whisper availableModels(language:) in SettingsWindow.
-    public func availableModelIDs() -> [String] {
-        if engine == "parakeet" {
-            return EngineCatalog.parakeetModels.map(\.id)
-        }
-        return SettingsViewModel.whisperModelIDs(language: language)
-    }
-
-    /// Whisper model IDs for the given language. Mirrors the ID derivation in
-    /// SettingsWindow.availableModels(language:): English-specific variants for
-    /// non-large bases when language=="en", multilingual IDs otherwise.
-    static func whisperModelIDs(language: String) -> [String] {
-        let isEnglish = (language == "en")
-        let raw: [(enId: String, multiId: String, base: String)] = [
-            ("tiny.en",       "tiny",           "tiny"),
-            ("base.en",       "base",           "base"),
-            ("small.en",      "small",          "small"),
-            ("medium.en",     "medium",         "medium"),
-            ("large-v3-turbo", "large-v3-turbo", "turbo"),
-            ("large-v3",      "large-v3",       "large"),
-        ]
-        return raw.map { (isEnglish && $0.base != "large") ? $0.enId : $0.multiId }
-    }
-
     // MARK: - Model description helpers
 
     /// Returns an estimated RAM usage string for the given Whisper model size.
