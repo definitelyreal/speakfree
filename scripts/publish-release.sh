@@ -45,12 +45,20 @@ fi
 echo "Promoting draft to public release..."
 gh release edit "$TAG" --repo "$REPO" --draft=false
 
-# 4. Commit and push the appcast — this is the moment existing users see the update
-echo "Pushing appcast to main (users will start receiving the update prompt)..."
+# 4. Commit and push the appcast + Pages download link together — this is the moment
+# existing users see the Sparkle update AND the public Download button points at the new
+# binary. Both MUST ship together or the Pages link goes stale.
+echo "Pushing appcast + Pages download link to main..."
 cd "$REPO_DIR"
-git add "$APPCAST"
-git commit -m "release: publish appcast for v${VERSION}" || echo "(appcast already committed)"
+git add "$APPCAST" docs/index.html
+git commit -m "release: publish appcast + download link for v${VERSION}" || echo "(already committed)"
 git push origin main
+
+# 5. Verify the public Pages download link resolves to THIS release's binary.
+echo "Verifying download link resolves to v${VERSION}..."
+DL_URL="https://github.com/${REPO}/releases/latest/download/speakfree-${VERSION}.dmg"
+HTTP_CODE=$(curl -s -o /dev/null -L -w '%{http_code}' "$DL_URL" || echo "000")
+[ "$HTTP_CODE" = "200" ] && echo "  OK: $DL_URL -> 200" || echo "  WARNING: $DL_URL returned $HTTP_CODE (asset may still be propagating)." >&2
 
 echo ""
 echo "=============================="

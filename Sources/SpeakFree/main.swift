@@ -18,6 +18,8 @@ func printUsage() {
         speakfree get-hotkey         Show current hotkey
         speakfree set-model <size>   Set the Whisper model
         speakfree download-model [size]  Download a Whisper model
+        speakfree set-engine <name>  Set the transcription engine (whisper | parakeet)
+        speakfree download-parakeet [id]  Download a Parakeet model (default parakeet-tdt-0.6b-v3)
         speakfree status             Show configuration and status
         speakfree --help             Show this help message
 
@@ -116,6 +118,52 @@ func cmdDownloadModel(_ size: String) {
     }
 }
 
+func cmdSetEngine(_ name: String) {
+    let valid = ["whisper", "parakeet"]
+    guard valid.contains(name) else {
+        print("Error: Unknown engine '\(name)'. Available: \(valid.joined(separator: ", "))")
+        exit(1)
+    }
+    var config = Config.load()
+    config.engine = name
+    do {
+        try config.save()
+        print("Engine set to: \(name)")
+        if name == "parakeet" {
+            let id = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
+            if !ParakeetModelManager.shared.isModelDownloaded(id) {
+                print("Parakeet model '\(id)' not downloaded. Run: speakfree download-parakeet \(id)")
+            }
+        }
+    } catch {
+        print("Error saving config: \(error.localizedDescription)")
+        exit(1)
+    }
+}
+
+func cmdDownloadParakeet(_ modelID: String) {
+    print("Downloading Parakeet model '\(modelID)' (~600 MB, one time)…")
+    let sem = DispatchSemaphore(value: 0)
+    var failure: Error?
+    Task {
+        do {
+            try await ParakeetModelManager.shared.ensureDownloaded(modelID) { fraction in
+                fputs("\r  \(Int(fraction * 100))%   ", stderr)
+            }
+        } catch {
+            failure = error
+        }
+        sem.signal()
+    }
+    sem.wait()
+    fputs("\n", stderr)
+    if let failure {
+        print("Error: \(failure.localizedDescription)")
+        exit(1)
+    }
+    print("Parakeet model '\(modelID)' ready.")
+}
+
 func cmdProcess(_ wavPath: String) {
     let wavURL = URL(fileURLWithPath: wavPath)
     do {
@@ -134,12 +182,20 @@ func cmdStatus() {
     let config = Config.load()
     let hotkeyDesc = KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)
 
+    let engine = config.engine ?? "whisper"
     print("speakfree v\(version)")
     print("Config:      \(Config.configFile.path)")
     print("Hotkey:      \(hotkeyDesc)")
-    print("Model:       \(config.modelSize)")
-    print("Model ready: \(Transcriber.modelExists(modelSize: config.modelSize) ? "yes" : "no")")
-    print("whisper-cpp: \(Transcriber.findWhisperBinary() != nil ? "yes" : "no")")
+    print("Engine:      \(engine)")
+    if engine == "parakeet" {
+        let id = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
+        print("Model:       \(id)")
+        print("Model ready: \(ParakeetModelManager.shared.isModelDownloaded(id) ? "yes" : "no")")
+    } else {
+        print("Model:       \(config.modelSize)")
+        print("Model ready: \(Transcriber.modelExists(modelSize: config.modelSize) ? "yes" : "no")")
+        print("whisper-cpp: \(Transcriber.findWhisperBinary() != nil ? "yes" : "no")")
+    }
     let toggleMode = config.toggleMode?.value ?? false
     print("Toggle:      \(toggleMode ? "on (press to start/stop)" : "off (hold to talk)")")
 }
@@ -173,6 +229,15 @@ case "get-hotkey":
 case "download-model":
     let size = args.count > 2 ? args[2] : "base.en"
     cmdDownloadModel(size)
+case "set-engine":
+    guard args.count > 2 else {
+        print("Usage: speakfree set-engine <whisper|parakeet>")
+        exit(1)
+    }
+    cmdSetEngine(args[2])
+case "download-parakeet":
+    let id = args.count > 2 ? args[2] : "parakeet-tdt-0.6b-v3"
+    cmdDownloadParakeet(id)
 case "status":
     cmdStatus()
 case "--help", "-h", "help":

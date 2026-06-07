@@ -21,6 +21,8 @@ public class SettingsViewModel: ObservableObject {
     @Published public var diagnosticLogging: Bool
     @Published public var streamingEnabled: Bool
     @Published public var languageModels: [String: String]
+    @Published public var engine: String
+    @Published public var parakeetModel: String
 
     // MARK: - Callback
 
@@ -49,13 +51,15 @@ public class SettingsViewModel: ObservableObject {
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
         self.streamingEnabled = c.streamingEnabled?.value ?? false
         self.languageModels = c.languageModels ?? [:]
+        self.engine = c.engine ?? "whisper"
+        self.parakeetModel = c.parakeetModel ?? "parakeet-tdt-0.6b-v3"
     }
 
     // MARK: - Conversion
 
     /// Convert the current view model state back to a Config struct.
     public func toConfig() -> Config {
-        Config(
+        var config = Config(
             hotkey: HotkeyConfig(keyCode: hotkeyKeyCode, modifiers: hotkeyModifiers),
             modelPath: nil,
             modelSize: modelSize,
@@ -71,6 +75,9 @@ public class SettingsViewModel: ObservableObject {
             streamingEnabled: FlexBool(streamingEnabled),
             languageModels: languageModels.isEmpty ? nil : languageModels
         )
+        config.engine = engine
+        config.parakeetModel = parakeetModel
+        return config
     }
 
     /// Save the current settings to disk and notify the callback.

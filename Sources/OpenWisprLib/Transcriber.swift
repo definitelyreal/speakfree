@@ -1,11 +1,42 @@
 import Foundation
 
 public class Transcriber {
-    let modelSize: String
+    /// Engine-agnostic backend, injected by EngineFactory (whisper or parakeet).
+    public let engine: any TranscriptionEngine
+    /// Model identifier for the active engine (whisper: a size like "large-v3-turbo";
+    /// parakeet: "parakeet-tdt-0.6b-v3"). Doubles as the whisper model size for the CLI path.
+    let modelID: String
     private let language: String
     public var suppressAutoPunctuation: Bool = false
 
-    let engine = WhisperEngine()
+    // MARK: - Engine lifecycle passthroughs (used by AppDelegate)
+
+    public var supportsStreaming: Bool { engine.supportsStreaming }
+    public var isLoaded: Bool { engine.isLoaded }
+    public var keepModelLoaded: String {
+        get { engine.keepModelLoaded }
+        set { engine.keepModelLoaded = newValue }
+    }
+    public func unloadModel() async { await engine.unloadModel() }
+    /// Synchronous unload bridge for non-async contexts (e.g. applicationWillTerminate,
+    /// which cannot await). Blocks the calling thread until the async unload completes.
+    public func unloadModelSync() {
+        let sem = DispatchSemaphore(value: 0)
+        Task { await engine.unloadModel(); sem.signal() }
+        // Bound the wait so termination can't hang on a stuck unload — the OS
+        // reclaims ANE/Metal resources on process exit regardless.
+        _ = sem.wait(timeout: .now() + 2.0)
+    }
+    public func startMemoryPressureMonitoring() { engine.startMemoryPressureMonitoring() }
+    /// Preload the model so the first dictation isn't a multi-second cold start.
+    /// Parakeet compiles/loads ~470 MB of CoreML onto the Neural Engine on first
+    /// use (~15-20s); warming it at launch makes the first transcription instant.
+    /// No-ops if a model is already loaded; never triggers a download (loadModel
+    /// throws .modelAssetsMissing for Parakeet when assets are absent, swallowed here).
+    public func warmUp() async {
+        if isLoaded { return }
+        try? await engine.loadModel(modelID: modelID)
+    }
 
     // Known whisper hallucinations on silence/noise.
     // "So." / "So," are among the most common silence hallucinations across all model sizes.
@@ -64,33 +95,42 @@ public class Transcriber {
         return false
     }
 
-    public init(modelSize: String = "base.en", language: String = "en") {
-        self.modelSize = modelSize
+    public init(engine: any TranscriptionEngine, modelID: String, language: String) {
+        self.engine = engine
+        self.modelID = modelID
         self.language = language
     }
 
     /// Transcribe using the in-process engine (fast, model stays loaded).
-    /// Falls back to CLI if engine fails or samples are not provided.
-    public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil) throws -> String {
+    /// Falls back to CLI (whisper only) if the engine fails or samples are not provided.
+    public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil) async throws -> String {
         let result: String
 
         // Try engine first if we have samples
         if let samples = samples, !samples.isEmpty {
             do {
-                result = try transcribeWithEngine(samples: samples, prompt: prompt)
+                result = try await transcribeWithEngine(samples: samples, prompt: prompt)
             } catch {
-                print("WhisperEngine failed: \(error.localizedDescription) — falling back to CLI")
-                result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
+                // CLI fallback is whisper-only; other engines rethrow.
+                if engine.engineID == "whisper" {
+                    print("WhisperEngine failed: \(error.localizedDescription) — falling back to CLI")
+                    result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
+                } else {
+                    throw error
+                }
             }
-        } else {
-            // Fallback to CLI
+        } else if engine.engineID == "whisper" {
+            // Fallback to CLI (whisper only)
             result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
+        } else {
+            // Non-whisper engines have no CLI fallback and need samples.
+            throw TranscriptionEngineError.transcriptionFailed
         }
 
         // Strip non-speech characters whisper sometimes outputs (bullets, arrows, etc.)
         let cleaned = result.replacingOccurrences(of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
 
-        // Filter known hallucinations from both engine and CLI paths
+        // Filter known hallucinations from all engines + the CLI path
         if isHallucination(cleaned) {
             print("Transcriber: filtered hallucination: \"\(cleaned)\"")
             return ""
@@ -98,18 +138,15 @@ public class Transcriber {
         return cleaned
     }
 
-    private func transcribeWithEngine(samples: [Float], prompt: String?) throws -> String {
-        // Ensure model is loaded
+    private func transcribeWithEngine(samples: [Float], prompt: String?) async throws -> String {
+        // Ensure model is loaded (engine resolves its own on-disk/cache location)
         if !engine.isLoaded {
-            guard let modelPath = Transcriber.findModel(modelSize: modelSize) else {
-                throw TranscriberError.modelNotFound(modelSize)
-            }
-            try engine.loadModel(path: modelPath)
+            try await engine.loadModel(modelID: modelID)
         }
 
         let suppressRegex = suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
 
-        let raw = try engine.transcribe(
+        let raw = try await engine.transcribe(
             samples: samples,
             language: language,
             prompt: prompt,
@@ -123,13 +160,30 @@ public class Transcriber {
             .joined(separator: "\n")
     }
 
+    /// Streaming (live-preview) transcription — passthrough to the engine.
+    /// Engines without native streaming throw TranscriptionEngineError.streamingUnsupported.
+    /// `onPartialResult` is invoked on the main thread by the engine.
+    public func transcribeStreaming(samples: [Float],
+                                    language: String,
+                                    prompt: String?,
+                                    suppressRegex: String?,
+                                    onPartialResult: @escaping (String) -> Void) async throws -> String {
+        return try await engine.transcribeStreaming(
+            samples: samples,
+            language: language,
+            prompt: prompt,
+            suppressRegex: suppressRegex,
+            onPartialResult: onPartialResult
+        )
+    }
+
     private func transcribeWithCLI(audioURL: URL, prompt: String? = nil) throws -> String {
         guard let whisperPath = Transcriber.findWhisperBinary() else {
             throw TranscriberError.whisperNotFound
         }
 
-        guard let modelPath = Transcriber.findModel(modelSize: modelSize) else {
-            throw TranscriberError.modelNotFound(modelSize)
+        guard let modelPath = Transcriber.findModel(modelSize: modelID) else {
+            throw TranscriberError.modelNotFound(modelID)
         }
 
         let process = Process()
