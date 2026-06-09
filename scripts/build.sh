@@ -16,7 +16,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR_DIR="$(dirname "$0")/vendor/dylibs"
 
 echo "Building speakfree v${VERSION}..."
-swift build -c release
+xcrun swift build -c release
 
 # Always regenerate Info.plist from the tracked Resources/Info.plist so the bundle
 # template (speakfree.app, which is gitignored) never drifts out of sync with the
@@ -86,7 +86,7 @@ if [ "$FINAL_WHISPER_REF" != "@rpath/libwhisper.1.dylib" ]; then
 fi
 
 echo "Signing..."
-xattr -cr "$APP"
+find "$APP" -exec xattr -c {} \; 2>/dev/null || true
 # Sign dylibs and whisper-cli first (no entitlements needed for these).
 # Use find -type f to skip symlinks — codesign fails with "timestamp expected"
 # when re-signing an already-signed file via a symlink to it.

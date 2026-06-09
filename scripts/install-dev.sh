@@ -11,7 +11,7 @@ ENTITLEMENTS="$(dirname "$0")/speakfree.entitlements"
 cd "$REPO_DIR"
 
 echo "Building (debug)..."
-swift build
+xcrun swift build
 
 BINARY=".build/debug/speakfree"
 
