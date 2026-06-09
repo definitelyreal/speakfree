@@ -35,6 +35,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         case downloading
         case waitingForPermission
         case copiedToClipboard
+        case noModel
     }
 
     var state: State = .idle {
@@ -132,6 +133,16 @@ class StatusBarController: NSObject, NSMenuDelegate {
         settingsItem.keyEquivalentModifierMask = .command
         menu.addItem(settingsItem)
 
+        // Transcribe audio file
+        let transcribeTarget = MenuItemTarget { FileTranscriptionController.show() }
+        menuItemTargets.append(transcribeTarget)
+        let transcribeItem = NSMenuItem(title: "Transcribe Audio File…",
+                                        action: #selector(MenuItemTarget.invoke),
+                                        keyEquivalent: "t")
+        transcribeItem.target = transcribeTarget
+        transcribeItem.keyEquivalentModifierMask = .command
+        menu.addItem(transcribeItem)
+
         menu.addItem(NSMenuItem.separator())
 
         if let progress = downloadProgress {
@@ -151,6 +162,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
             case .downloading: stateText = "Downloading model..."
             case .waitingForPermission: stateText = "⚠️ Grant Accessibility Permission →"
             case .copiedToClipboard: stateText = "Copied to clipboard"
+            case .noModel: stateText = "⚠️ No model — open Settings to download"
             }
             if case .waitingForPermission = state {
                 let target = MenuItemTarget {
@@ -162,6 +174,15 @@ class StatusBarController: NSObject, NSMenuDelegate {
                     task.waitUntilExit()
                     let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true]
                     AXIsProcessTrustedWithOptions(options)
+                }
+                menuItemTargets.append(target)
+                let stateItem = NSMenuItem(title: stateText, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+                stateItem.target = target
+                menu.addItem(stateItem)
+            } else if case .noModel = state {
+                let target = MenuItemTarget {
+                    guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
+                    delegate.showSettings()
                 }
                 menuItemTargets.append(target)
                 let stateItem = NSMenuItem(title: stateText, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
@@ -271,6 +292,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
             setIcon(StatusBarController.drawLockIcon())
         case .copiedToClipboard:
             setIcon(StatusBarController.drawCheckmarkIcon())
+        case .noModel:
+            setIcon(StatusBarController.drawNoModelIcon())
         }
     }
 
@@ -493,6 +516,36 @@ class StatusBarController: NSObject, NSMenuDelegate {
             shacklePath.lineCapStyle = .round
             shacklePath.stroke()
 
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    static func drawNoModelIcon() -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.black.setStroke()
+
+            let barWidth: CGFloat = 2.0
+            let gap: CGFloat = 2.5
+            let radius: CGFloat = 1.0
+            let centerX = rect.midX
+            let centerY = rect.midY
+
+            let heights: [CGFloat] = [4, 8, 12, 8, 4]
+            let totalWidth = CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * gap
+            let startX = centerX - totalWidth / 2
+
+            for (i, height) in heights.enumerated() {
+                let x = startX + CGFloat(i) * (barWidth + gap)
+                let y = centerY - height / 2
+                let inset: CGFloat = 0.4
+                let barRect = NSRect(x: x + inset, y: y + inset, width: barWidth - inset * 2, height: height - inset * 2)
+                let path = NSBezierPath(roundedRect: barRect, xRadius: radius, yRadius: radius)
+                path.lineWidth = 0.8
+                path.stroke()
+            }
             return true
         }
         image.isTemplate = true

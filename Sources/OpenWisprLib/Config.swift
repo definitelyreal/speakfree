@@ -21,6 +21,8 @@ public struct Config: Codable {
     public var languageModels: [String: String]?  // e.g. ["en": "small.en", "auto": "small"]
     public var engine: String?  // "whisper" | "parakeet" — nil = "whisper"
     public var parakeetModel: String?  // e.g. "parakeet-tdt-0.6b-v3" — nil = "parakeet-tdt-0.6b-v3"
+    public var localAPI: FlexBool?  // nil = false — expose local transcription API
+    public var localAPIPort: Int?   // nil = 5765
 
     // Sane shipped default — production builds always cap retained recordings.
     // (Was 0 = keep-everything-forever, which caused unbounded disk growth.)

@@ -261,4 +261,82 @@ public enum ProcessCommand {
         }
         return resampled
     }
+
+    /// Decode a sub-range of an open audio file to 16 kHz mono Float32 samples.
+    /// No duration cap — designed for the file-transcription chunk loop.
+    /// The caller is responsible for opening and closing the AVAudioFile handle.
+    /// - Parameters:
+    ///   - file: Open AVAudioFile positioned anywhere; this method seeks it to `startFrame`.
+    ///   - startFrame: First frame to read (in the file's native sample rate).
+    ///   - frameCount: Number of frames to read (clamped to the file's remaining frames).
+    static func loadSamplesChunk(from file: AVAudioFile,
+                                 startFrame: AVAudioFramePosition,
+                                 frameCount: AVAudioFrameCount) throws -> [Float] {
+        let srcFormat = file.processingFormat
+        guard let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false
+        ) else {
+            throw Error.transcriptionFailed(NSError(
+                domain: "ProcessCommand", code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Could not create target audio format"]))
+        }
+
+        // Clamp to available frames.
+        let available = max(0, file.length - startFrame)
+        let clampedCount = min(AVAudioFramePosition(frameCount), available)
+        guard clampedCount > 0 else { return [] }
+
+        file.framePosition = startFrame
+
+        guard let inBuf = AVAudioPCMBuffer(
+            pcmFormat: srcFormat, frameCapacity: AVAudioFrameCount(clampedCount)
+        ) else { return [] }
+        try file.read(into: inBuf, frameCount: AVAudioFrameCount(clampedCount))
+
+        // Fast path: already 16k mono float.
+        if srcFormat.sampleRate == 16_000, srcFormat.channelCount == 1,
+           let ch = inBuf.floatChannelData {
+            return Array(UnsafeBufferPointer(start: ch[0], count: Int(inBuf.frameLength)))
+        }
+
+        // Resample/downmix via AVAudioConverter (same drain-loop pattern as loadSamples).
+        guard let converter = AVAudioConverter(from: srcFormat, to: targetFormat) else { return [] }
+        let ratio = 16_000.0 / srcFormat.sampleRate
+        let outCapacity = AVAudioFrameCount(Double(inBuf.frameLength) * ratio + 1024)
+
+        var fed = false
+        let inputBlock: AVAudioConverterInputBlock = { _, statusPtr in
+            if fed { statusPtr.pointee = .endOfStream; return nil }
+            fed = true; statusPtr.pointee = .haveData; return inBuf
+        }
+
+        func makeBuf(_ cap: AVAudioFrameCount) throws -> AVAudioPCMBuffer {
+            guard let b = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: cap) else {
+                throw Error.transcriptionFailed(NSError(domain: "ProcessCommand", code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Failed to allocate conversion buffer"]))
+            }
+            return b
+        }
+
+        var resampled: [Float] = []
+        var convError: NSError?
+        let firstOut = try makeBuf(outCapacity)
+        let firstStatus = converter.convert(to: firstOut, error: &convError, withInputFrom: inputBlock)
+        if let e = convError { throw Error.transcriptionFailed(e) }
+        if let ch = firstOut.floatChannelData, firstOut.frameLength > 0 {
+            resampled.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: Int(firstOut.frameLength)))
+        }
+        if firstStatus != .endOfStream {
+            while true {
+                let out = try makeBuf(4096)
+                let status = converter.convert(to: out, error: &convError, withInputFrom: inputBlock)
+                if let e = convError { throw Error.transcriptionFailed(e) }
+                if let ch = out.floatChannelData, out.frameLength > 0 {
+                    resampled.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength)))
+                }
+                if status == .endOfStream { break }
+            }
+        }
+        return resampled
+    }
 }

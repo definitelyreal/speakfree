@@ -23,6 +23,8 @@ public class SettingsViewModel: ObservableObject {
     @Published public var languageModels: [String: String]
     @Published public var engine: String
     @Published public var parakeetModel: String
+    @Published public var localAPIEnabled: Bool
+    @Published public var localAPIPort: Int
 
     // MARK: - Callback
 
@@ -43,7 +45,7 @@ public class SettingsViewModel: ObservableObject {
         self.language = c.language
         self.punctuationMode = c.spokenPunctuation ?? .hybrid
         self.maxRecordings = c.maxRecordings ?? Config.defaultMaxRecordings
-        self.screenContext = c.screenContext?.value ?? true
+        self.screenContext = c.screenContext?.value ?? false
         self.rememberWords = c.rememberWords?.value ?? true
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
@@ -53,6 +55,8 @@ public class SettingsViewModel: ObservableObject {
         self.languageModels = c.languageModels ?? [:]
         self.engine = c.engine ?? "whisper"
         self.parakeetModel = c.parakeetModel ?? "parakeet-tdt-0.6b-v3"
+        self.localAPIEnabled = c.localAPI?.value ?? false
+        self.localAPIPort = c.localAPIPort ?? 5765
     }
 
     // MARK: - Conversion
@@ -77,6 +81,8 @@ public class SettingsViewModel: ObservableObject {
         )
         config.engine = engine
         config.parakeetModel = parakeetModel
+        config.localAPI = FlexBool(localAPIEnabled)
+        config.localAPIPort = localAPIPort
         return config
     }
 

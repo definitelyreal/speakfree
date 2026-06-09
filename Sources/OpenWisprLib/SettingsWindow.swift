@@ -7,9 +7,19 @@ class SettingsWindowController: NSWindowController {
     private static var shared: SettingsWindowController?
 
     static func show(viewModel: SettingsViewModel) {
-        if shared == nil { shared = SettingsWindowController(viewModel: viewModel) }
+        if shared == nil {
+            shared = SettingsWindowController(viewModel: viewModel)
+            // Hide dock icon when settings window closes
+            if let window = shared?.window {
+                NotificationCenter.default.addObserver(
+                    forName: NSWindow.willCloseNotification,
+                    object: window,
+                    queue: .main
+                ) { _ in NSApp.hideDockIconIfNoWindows() }
+            }
+        }
+        NSApp.showDockIconIfNeeded()
         shared?.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
         shared?.window?.makeKeyAndOrderFront(nil)
 
         // LSUIElement apps don't get standard menus, so Cmd+W doesn't work.
@@ -416,6 +426,7 @@ private class InlineDownloadManager: NSObject, ObservableObject, URLSessionDownl
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var isRecordingHotkey = false
+    @State private var isHoveringGitHub = false
     @State private var pendingModelDownload: String? = nil
     @StateObject private var downloadManager = InlineDownloadManager()
     @State private var launchAtLogin = false
@@ -728,11 +739,34 @@ struct SettingsView: View {
                                 .foregroundColor(.secondary)
                         }
 
+                        localAPIRow
+
                         screenContextRow
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
                 }
+
+                // Footer — scrolls with content, not pinned
+                Divider()
+                    .padding(.top, 8)
+                HStack(spacing: 0) {
+                    Text("Proudly vibe coded. ")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Button {
+                        NSWorkspace.shared.open(URL(string: "https://github.com/definitelyreal/speakfree")!)
+                    } label: {
+                        Text("Let's improve it together →")
+                            .font(.caption)
+                            .foregroundColor(Color(red: 0.6, green: 0.2, blue: 0.8))
+                            .underline(isHoveringGitHub)
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { isHoveringGitHub = $0 }
+                    Spacer()
+                }
+                .padding(.vertical, 12)
                 } // end VStack
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)
@@ -1060,6 +1094,19 @@ struct SettingsView: View {
             }
             Text("Corrected words are added to your vocabulary to improve future transcriptions.")
                 .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    // MARK: - Local API Row
+
+    private var localAPIRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Local Transcription API (Experimental)", isOn: $viewModel.localAPIEnabled)
+                .toggleStyle(.checkbox)
+                .onChange(of: viewModel.localAPIEnabled) { _ in viewModel.save() }
+            Text("Exposes POST http://localhost:\(viewModel.localAPIPort)/v1/audio/transcriptions — works with any OpenAI-compatible audio client. Beta \u{2014} try it and let us know how it works.")
+                .font(.footnote)
                 .foregroundColor(.secondary)
         }
     }

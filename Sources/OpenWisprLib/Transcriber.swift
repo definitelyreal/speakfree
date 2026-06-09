@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 public class Transcriber {
     /// Engine-agnostic backend, injected by EngineFactory (whisper or parakeet).
@@ -307,6 +308,124 @@ public class Transcriber {
         }
 
         return nil
+    }
+
+    // MARK: - File transcription
+
+    /// Transcribe an arbitrary audio file with real progress feedback.
+    ///
+    /// - Whisper: uses `whisper_full_params.progress_callback` — fires 0→100 as it
+    ///   processes internal 30-second windows. No manual chunking needed.
+    /// - Parakeet: chunks at 5-minute intervals with 10-second overlap. Progress is
+    ///   "chunk N of M". One AVAudioFile handle spans all chunks.
+    ///
+    /// `progressHandler(chunkIndex, chunkTotal, whisperPct)` is called on the main thread.
+    /// `isCancelled` is polled between chunks and inside whisper_full.
+    /// On cancellation throws `TranscriptionEngineError.transcriptionFailed`.
+    /// On success returns the full transcript string.
+    public func transcribeFile(
+        url: URL,
+        progressHandler: @escaping (_ chunk: Int, _ totalChunks: Int, _ whisperPct: Int) -> Void,
+        isCancelled: @escaping () -> Bool
+    ) async throws -> String {
+        // Ensure model loaded
+        if !engine.isLoaded {
+            try await engine.loadModel(modelID: modelID)
+        }
+
+        let file = try AVAudioFile(forReading: url)
+        let srcRate = file.processingFormat.sampleRate
+        let totalFrames = file.length
+
+        // 5-minute chunks (at source sample rate) with 10-second overlap
+        let chunkFrames = AVAudioFrameCount(srcRate * 5 * 60)
+        let overlapFrames = AVAudioFrameCount(srcRate * 10)
+        let stepFrames = chunkFrames - overlapFrames
+
+        var chunks: [(start: AVAudioFramePosition, count: AVAudioFrameCount)] = []
+        var pos: AVAudioFramePosition = 0
+        while pos < totalFrames {
+            let remaining = AVAudioFrameCount(min(Int64(chunkFrames), totalFrames - pos))
+            chunks.append((pos, remaining))
+            if remaining < chunkFrames { break }
+            pos += AVAudioFramePosition(stepFrames)
+        }
+        // Single-chunk optimisation: if the file fits in one window, skip overlap logic
+        if chunks.isEmpty { chunks = [(0, AVAudioFrameCount(totalFrames))] }
+
+        let totalChunks = chunks.count
+        var parts: [String] = []
+
+        for (idx, chunk) in chunks.enumerated() {
+            if isCancelled() { throw TranscriptionEngineError.transcriptionFailed }
+
+            let samples = try ProcessCommand.loadSamplesChunk(
+                from: file, startFrame: chunk.start, frameCount: chunk.count
+            )
+            if samples.isEmpty { continue }
+
+            let suppressRegex = suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
+
+            let raw: String
+            if engine.engineID == "whisper", let whisperEngine = engine as? WhisperEngine {
+                raw = try await whisperEngine.transcribeWithProgress(
+                    samples: samples,
+                    language: language,
+                    prompt: parts.last.map { String($0.suffix(200)) },
+                    suppressRegex: suppressRegex,
+                    skipSilenceTrim: true,
+                    progressHandler: { pct in
+                        progressHandler(idx, totalChunks, pct)
+                    },
+                    isCancelled: isCancelled
+                )
+            } else {
+                // Parakeet and other engines: progress by chunk count only
+                progressHandler(idx, totalChunks, 0)
+                raw = try await engine.transcribe(
+                    samples: samples,
+                    language: language,
+                    prompt: parts.last.map { String($0.suffix(200)) },
+                    suppressRegex: suppressRegex
+                )
+                progressHandler(idx + 1, totalChunks, 100)
+            }
+
+            let cleaned = raw
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+
+            // Overlap reconciliation: strip likely-duplicated content at the seam
+            if idx > 0, let prev = parts.last, !prev.isEmpty {
+                let deduped = stripOverlapSeam(new: cleaned, previous: prev)
+                parts.append(deduped)
+            } else {
+                parts.append(cleaned)
+            }
+        }
+
+        return parts.joined(separator: "\n")
+    }
+
+    /// Remove words at the start of `new` that also appear at the end of `previous`
+    /// (the 10-second overlap region). Simple word-match heuristic — V1 acceptable.
+    private func stripOverlapSeam(new: String, previous: String) -> String {
+        let newWords = new.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        let prevWords = previous.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        guard !newWords.isEmpty, !prevWords.isEmpty else { return new }
+
+        // Look for the longest suffix of prevWords that matches a prefix of newWords (up to 40 words)
+        let maxCheck = min(40, min(newWords.count, prevWords.count))
+        for len in stride(from: maxCheck, through: 1, by: -1) {
+            let prevSuffix = prevWords.suffix(len).map { $0.lowercased() }
+            let newPrefix  = Array(newWords.prefix(len)).map { $0.lowercased() }
+            if prevSuffix.elementsEqual(newPrefix) {
+                return newWords.dropFirst(len).joined(separator: " ")
+            }
+        }
+        return new
     }
 }
 
