@@ -228,6 +228,55 @@ public final class ParakeetModelManager {
         progress(1.0)
     }
 
+    /// Downloads model files using `AsrModels.download()`, which fires byte-level progress callbacks
+    /// in [0, 0.5] (FluidAudio reserves the upper half for the load phase internally).
+    /// Does NOT compile or load — call `compileAndCache()` afterward.
+    /// Callers that want a 0–1 display range should multiply the received fraction by 2.
+    public func downloadOnly(
+        _ modelName: String,
+        progress: @escaping (Double) -> Void
+    ) async throws {
+        guard isKnownModelID(modelName) else {
+            DiagnosticLogger.shared.log(
+                "ParakeetModelManager: refusing to download unknown model id \(modelName)")
+            throw TranscriptionEngineError.modelAssetsMissing(modelName)
+        }
+        Self.pinRegistryHostIfNeeded()
+        let v = version(for: modelName)
+
+        if AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v) {
+            return  // already downloaded
+        }
+
+        try await downloadGate.run {
+            if AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v) {
+                return
+            }
+            DiagnosticLogger.shared.log(
+                "ParakeetModelManager: downloading \(modelName) via download-only API")
+            let start = Date()
+            let handler: DownloadUtils.ProgressHandler = { p in progress(p.fractionCompleted) }
+            DownloadUtils.enforceOffline = false
+            defer { DownloadUtils.enforceOffline = true }
+            _ = try await AsrModels.download(version: v, progressHandler: handler)
+            let elapsed = Date().timeIntervalSince(start)
+            DiagnosticLogger.shared.log(
+                "ParakeetModelManager: \(modelName) download done in \(String(format: "%.1f", elapsed))s")
+        }
+    }
+
+    /// Compiles / loads pre-downloaded model files from FluidAudio's cache.
+    /// Call after `downloadOnly()` completes. Discards the loaded model — subsequent
+    /// transcription calls will load from the warm cache.
+    public func compileAndCache(_ modelName: String) async throws {
+        DiagnosticLogger.shared.log("ParakeetModelManager: compiling \(modelName)")
+        let start = Date()
+        _ = try await loadDownloadedModels(modelName)
+        let elapsed = Date().timeIntervalSince(start)
+        DiagnosticLogger.shared.log(
+            "ParakeetModelManager: \(modelName) compiled in \(String(format: "%.1f", elapsed))s")
+    }
+
     // MARK: - Load
 
     /// Loads a fully constructed `AsrModels` for `modelName` STRICTLY from FluidAudio's on-disk

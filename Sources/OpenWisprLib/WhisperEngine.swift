@@ -144,12 +144,47 @@ class WhisperEngine: TranscriptionEngine {
         }
     }
 
+    /// Like `transcribe` but fires `progressHandler(0…100)` as whisper processes its
+    /// internal 30-second windows. Also checks cancellation between windows via `isCancelled`.
+    func transcribeWithProgress(
+        samples: [Float],
+        language: String,
+        prompt: String?,
+        suppressRegex: String?,
+        skipSilenceTrim: Bool = false,
+        progressHandler: @escaping (Int) -> Void,
+        isCancelled: @escaping () -> Bool
+    ) async throws -> String {
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            engineQueue.async {
+                do {
+                    let result = try self.transcribeLocked(
+                        samples: samples,
+                        language: language,
+                        prompt: prompt,
+                        suppressRegex: suppressRegex,
+                        threadCount: nil,
+                        skipSilenceTrim: skipSilenceTrim,
+                        progressHandler: progressHandler,
+                        isCancelled: isCancelled
+                    )
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     private func transcribeLocked(
         samples: [Float],
         language: String = "en",
         prompt: String? = nil,
         suppressRegex: String? = nil,
-        threadCount: Int? = nil
+        threadCount: Int? = nil,
+        skipSilenceTrim: Bool = false,
+        progressHandler: ((Int) -> Void)? = nil,
+        isCancelled: (() -> Bool)? = nil
     ) throws -> String {
         guard let ctx = context else {
             throw WhisperEngineError.modelNotLoaded
@@ -197,8 +232,46 @@ class WhisperEngine: TranscriptionEngine {
         }
         defer { free(regexCString) }
 
-        // Trim leading/trailing silence to improve speed and accuracy
-        let trimmedSamples = trimSilence(samples)
+        // Trim leading/trailing silence (skipped for file-transcription path — long silences
+        // in meetings/lectures are legitimate content, not noise to strip).
+        let trimmedSamples = skipSilenceTrim ? samples : trimSilence(samples)
+
+        // Progress + cancellation callbacks (file-transcription path only).
+        if let progressHandler = progressHandler {
+            let box = ProgressCallbackContext(progressHandler: progressHandler,
+                                              isCancelled: isCancelled ?? { false })
+            let ctx2 = Unmanaged.passRetained(box).toOpaque()
+            params.progress_callback_user_data = ctx2
+            params.progress_callback = { _, _, progress, userdata in
+                let b = Unmanaged<ProgressCallbackContext>.fromOpaque(userdata!).takeUnretainedValue()
+                DispatchQueue.main.async { b.progressHandler(Int(progress)) }
+            }
+            params.abort_callback_user_data = ctx2
+            params.abort_callback = { userdata -> Bool in
+                let b = Unmanaged<ProgressCallbackContext>.fromOpaque(userdata!).takeUnretainedValue()
+                return b.isCancelled()
+            }
+            defer { Unmanaged<ProgressCallbackContext>.fromOpaque(ctx2).release() }
+
+            // Run inference with callbacks
+            DiagnosticLogger.shared.log("WhisperEngine: transcribing \(trimmedSamples.count) samples (\(String(format: "%.1f", Double(trimmedSamples.count) / 16000.0))s audio) [with progress]")
+            let inferenceStart = CFAbsoluteTimeGetCurrent()
+            let result = trimmedSamples.withUnsafeBufferPointer { buffer in
+                whisper_full(ctx, params, buffer.baseAddress, Int32(trimmedSamples.count))
+            }
+            let inferenceTime = CFAbsoluteTimeGetCurrent() - inferenceStart
+            if result != 0 {
+                DiagnosticLogger.shared.log("WhisperEngine: transcription failed (code \(result))")
+                throw WhisperEngineError.transcriptionFailed
+            }
+            let nSegments = whisper_full_n_segments(ctx)
+            let text = collectSegments(ctx: ctx, nSegments: nSegments)
+            checkLanguageMismatch(ctx: ctx, configuredLanguage: language)
+            lastTranscriptionTime = Date()
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            DiagnosticLogger.shared.log("WhisperEngine: inference \(String(format: "%.2f", inferenceTime))s, result \(trimmed.count) chars")
+            return trimmed
+        }
 
         // Run inference
         DiagnosticLogger.shared.log("WhisperEngine: transcribing \(trimmedSamples.count) samples (\(String(format: "%.1f", Double(trimmedSamples.count) / 16000.0))s audio)")
@@ -548,6 +621,16 @@ class WhisperEngine: TranscriptionEngine {
         let diskSize = attrs?[.size] as? UInt64 ?? 0
         // Loaded model is roughly 1.5-2x disk size
         return diskSize * 2
+    }
+}
+
+/// Reference-counted context for file-transcription progress + cancellation C callbacks.
+private class ProgressCallbackContext {
+    let progressHandler: (Int) -> Void
+    let isCancelled: () -> Bool
+    init(progressHandler: @escaping (Int) -> Void, isCancelled: @escaping () -> Bool) {
+        self.progressHandler = progressHandler
+        self.isCancelled = isCancelled
     }
 }
 

@@ -21,6 +21,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordingOverlay = RecordingOverlay()
     private var correctionMonitor = CorrectionMonitor()
     private var settingsViewModel: SettingsViewModel?
+    private var localAPIServer: LocalAPIServer?
     private var recordingStyleMode: TextPostProcessor.StyleMode = .none
 
     // Clean up whisper model before exit to prevent ggml Metal assertion crash.
@@ -32,6 +33,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         transcriber?.unloadModelSync()
         hotkeyManager?.stop()
         recorder?.shutdown()
+        localAPIServer?.stop()
     }
 
     // Sparkle auto-updater — checks for updates on launch and periodically
@@ -70,6 +72,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Handles dock-drag, Finder "Open With", and `speakfree <file>` — all funnel here.
+    public func application(_ application: NSApplication, open urls: [URL]) {
+        let audioExtensions: Set<String> = ["m4a","mp3","wav","flac","aiff","aif","caf","aac","mp4","mov","ogg"]
+        let audioURLs = urls.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
+        guard let first = audioURLs.first else { return }
+        DispatchQueue.main.async {
+            FileTranscriptionController.show(url: first)
+        }
+    }
+
     private func setup() {
         do {
             try setupInner()
@@ -104,15 +116,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             VocabularyMigration.runIfNeeded()
         }
 
-        // Resolve the engine + the model identifier it should load. Whisper uses a model-size
-        // string (with multilingual upgrade + on-disk fallback chain); Parakeet uses its own
-        // model id (downloaded on first use by FluidAudio — no whisper-style fallback chain).
-        // Compute the EFFECTIVE engine id once, honoring SPEAKFREE_ENGINE the same way
-        // EngineFactory does, so engine creation and model-id selection can't disagree.
+        // Resolve the engine + model identifier, then check whether the model is on disk.
+        // If not, show the welcome dialog for both Whisper and Parakeet.
         let engineID = effectiveEngineID
-        let modelID: String
+        var modelID: String
+        var needsDownload = false
+
         if engineID == "parakeet" {
             modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
+            needsDownload = !ParakeetModelManager.shared.isModelDownloaded(modelID)
         } else {
             // Determine effective model (multilingual if needed)
             var effectiveModelSize = config.modelSize
@@ -121,31 +133,53 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 print("Language \(config.language) requires multilingual model — using \(effectiveModelSize)")
             }
 
-            // Model fallback chain
             if !Transcriber.modelExists(modelSize: effectiveModelSize) {
                 // Fallback 1: if we wanted multilingual but only have .en, use .en
                 if effectiveModelSize != config.modelSize && Transcriber.modelExists(modelSize: config.modelSize) {
                     print("Multilingual model \(effectiveModelSize) not found — using \(config.modelSize) as fallback")
                     effectiveModelSize = config.modelSize
                 }
-                // Fallback 2: try any model already on disk
+                // Fallback 2: try any Whisper model already on disk
                 else if let anyModel = findAnyDownloadedModel() {
                     print("Model \(effectiveModelSize) not found — using \(anyModel) as fallback")
                     effectiveModelSize = anyModel
                 }
-                // Fallback 3: no model at all — must download with progress dialog
                 else {
-                    let modelToDownload = effectiveModelSize
-                    DispatchQueue.main.sync {
-                        ModelDownloadController.downloadModel(modelToDownload) { _ in }
-                    }
-                    // After download, verify the model is now available
-                    if !Transcriber.modelExists(modelSize: effectiveModelSize) {
-                        print("Model download failed or was cancelled — cannot proceed")
-                    }
+                    needsDownload = true
                 }
             }
             modelID = effectiveModelSize
+        }
+
+        if needsDownload {
+            var selectedEngine = engineID
+            var selectedModel = modelID
+            var selectedLanguage = config.language
+            var didProceed = false
+            DispatchQueue.main.sync {
+                let result = WelcomeController.show(suggestedEngine: engineID, suggestedModel: modelID)
+                selectedEngine = result.engine
+                selectedModel = result.modelID
+                selectedLanguage = result.language
+                didProceed = result.shouldContinue
+            }
+            guard didProceed else {
+                DispatchQueue.main.async {
+                    self.statusBar.state = .noModel
+                    self.statusBar.buildMenu()
+                }
+                return
+            }
+            config.engine = selectedEngine
+            config.language = selectedLanguage
+            if selectedEngine == "parakeet" {
+                config.parakeetModel = selectedModel
+            } else {
+                config.modelSize = selectedModel
+            }
+            try? config.save()
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.setup() }
+            return
         }
 
         let engine = EngineFactory.make(config: config)
@@ -215,7 +249,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         recorder.warmUp()
 
         DispatchQueue.main.async { [weak self] in
-            self?.startListening()
+            guard let self = self else { return }
+            self.isSetupComplete = true
+            self.startListening()
+            if self.openSettingsAfterSetup {
+                self.openSettingsAfterSetup = false
+                self.showSettings()
+            }
+            self.showTutorialPopoverIfNeeded()
         }
     }
 
@@ -308,6 +349,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// so reloadConfig can detect an engine switch without reaching into transcriber.engine.*.
     private var activeEngineID: String = "whisper"
 
+    /// True once setupInner() has run to completion (hotkey listener started).
+    /// While false, the app is in the "no model" state and reloadConfig triggers a full restart.
+    private var isSetupComplete = false
+
+    /// Set by WelcomeController's Configure button — opens Settings once setup finishes.
+    public var openSettingsAfterSetup = false
+
+    private var tutorialPopover: NSPopover?
+
     /// The effective engine id, honoring SPEAKFREE_ENGINE the same way EngineFactory does.
     /// Single source of truth so engine creation, model-id selection, and activeEngineID
     /// tracking can never disagree (e.g. building Parakeet but loading a whisper model size).
@@ -316,6 +366,27 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func reloadConfig() {
+        // In noModel state: only restart full setup if the user has now downloaded a model.
+        // Without this check, opening Settings (which calls reloadConfig on save) would
+        // re-trigger the welcome dialog even though the user deliberately skipped it.
+        guard isSetupComplete else {
+            let freshConfig = Config.load()
+            let engineID = ProcessInfo.processInfo.environment["SPEAKFREE_ENGINE"]
+                ?? freshConfig.engine ?? "whisper"
+            let modelAvailable: Bool
+            if engineID == "parakeet" {
+                let modelID = freshConfig.parakeetModel ?? "parakeet-tdt-0.6b-v3"
+                modelAvailable = ParakeetModelManager.shared.isModelDownloaded(modelID)
+            } else {
+                modelAvailable = Transcriber.modelExists(modelSize: freshConfig.modelSize)
+                    || findAnyDownloadedModel() != nil
+            }
+            if modelAvailable {
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.setup() }
+            }
+            return
+        }
+
         config = Config.load()
 
         // Parakeet: no ggml-on-disk gate (FluidAudio downloads/validates its own cache).
@@ -405,6 +476,49 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         statusBar.buildMenu()
+
+        // Local API server — start or stop based on config
+        let apiEnabled = config.localAPI?.value ?? false
+        let apiPort = UInt16(config.localAPIPort ?? 5765)
+        if apiEnabled, let t = transcriber {
+            if localAPIServer == nil || localAPIServer?.port != apiPort {
+                localAPIServer?.stop()
+                localAPIServer = LocalAPIServer(port: apiPort)
+            }
+            localAPIServer?.start(transcriber: t)
+        } else {
+            localAPIServer?.stop()
+            localAPIServer = nil
+        }
+    }
+
+    private func showTutorialPopoverIfNeeded() {
+        let key = "speakfree.hasShownTutorial"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        guard let button = statusBar?.statusItem.button else { return }
+
+        let vc = NSViewController()
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 290, height: 58))
+        let label = NSTextField(wrappingLabelWithString:
+            "Click here to access settings, updates, or quit SpeakFree.")
+        label.font = NSFont.systemFont(ofSize: 13)
+        label.isEditable = false; label.isBordered = false; label.backgroundColor = .clear
+        label.frame = NSRect(x: 12, y: 9, width: 266, height: 40)
+        view.addSubview(label)
+        vc.view = view
+
+        let popover = NSPopover()
+        popover.contentViewController = vc
+        popover.contentSize = NSSize(width: 290, height: 58)
+        popover.behavior = .transient
+        tutorialPopover = popover
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+            self?.tutorialPopover?.close()
+            self?.tutorialPopover = nil
+        }
     }
 
     public func showSettings() {
