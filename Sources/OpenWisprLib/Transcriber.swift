@@ -154,11 +154,14 @@ public class Transcriber {
             suppressRegex: suppressRegex
         )
 
-        // Clean up output same way as CLI
+        // Clean up output same way as CLI. Whisper emits one line per acoustic segment;
+        // join them with a SPACE, not "\n" — a multi-segment split is not a user break.
+        // After this, every "\n" reaching insertion is unambiguously a SPOKEN "new line"
+        // (TextPostProcessor maps spoken "new line"/"new paragraph" → \n / \n\n). [Newline policy 2b / Option B]
         return raw.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-            .joined(separator: "\n")
+            .joined(separator: " ")
     }
 
     /// Streaming (live-preview) transcription — passthrough to the engine.
@@ -227,13 +230,15 @@ public class Transcriber {
         group.wait()
         process.waitUntilExit()
 
-        // Whisper outputs one line per segment with leading spaces — clean up but preserve line breaks.
+        // Whisper outputs one line per acoustic segment with leading spaces. Join with a
+        // SPACE, not "\n" — a multi-segment split is not a user break, so it must never
+        // reach insertion as a line break. [Newline policy 2b / Option B]
         let rawOutput = String(data: data, encoding: .utf8) ?? ""
         let output = rawOutput
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-            .joined(separator: "\n")
+            .joined(separator: " ")
 
         if process.terminationStatus != 0 {
             let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -391,11 +396,13 @@ public class Transcriber {
                 progressHandler(idx + 1, totalChunks, 100)
             }
 
+            // Join multi-segment whisper output within a chunk with a SPACE, not "\n" —
+            // a segment split is not a user break. [Newline policy 2b / Option B]
             let cleaned = raw
                 .components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
-                .joined(separator: "\n")
+                .joined(separator: " ")
 
             // Overlap reconciliation: strip likely-duplicated content at the seam
             if idx > 0, let prev = parts.last, !prev.isEmpty {
@@ -406,7 +413,9 @@ public class Transcriber {
             }
         }
 
-        return parts.joined(separator: "\n")
+        // Join reconciled chunks with a SPACE, not "\n" — a chunk boundary is an
+        // arbitrary audio-window split, never a user break. [Newline policy 2b / Option B]
+        return parts.joined(separator: " ")
     }
 
     /// Remove words at the start of `new` that also appear at the end of `previous`

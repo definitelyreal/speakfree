@@ -291,21 +291,38 @@ class TextInserter {
         return title
     }
 
-    /// Insert text by simulating keyboard events with unicode characters.
-    /// Works in Electron apps (VS Code, Slack, Discord) without touching the clipboard.
-    /// CGEventKeyboardSetUnicodeString limits input to 20 UTF-16 code units per event.
-    /// Chunks by Unicode scalars to avoid splitting surrogate pairs at chunk boundaries.
-    private func typeViaKeyEvents(_ text: String) -> Bool {
-        guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
+    /// One emitted keyboard operation on the synthetic-typing path. Pure value type so the
+    /// Option B newline routing can be unit-tested without posting real CGEvents.
+    enum KeystrokeOp: Equatable {
+        /// A chunk of text typed via CGEventKeyboardSetUnicodeString (≤ 20 UTF-16 units).
+        case unicode([UniChar])
+        /// A spoken line break. Newline policy 2b / Option B: Shift+Return — inserts a line
+        /// break and NEVER sends (a bare Return / keyCode 36 alone would send in Slack/Messages).
+        case shiftReturn
+    }
 
+    /// Pure decomposition of `text` into the ordered keystroke ops the typing path will emit.
+    /// Every "\n"/"\r" becomes a `.shiftReturn` (Option B line break, never a bare Return);
+    /// runs of other characters are chunked into ≤ 20 UTF-16-unit `.unicode` ops, splitting on
+    /// Unicode scalar boundaries so surrogate pairs are never broken.
+    static func keystrokeOps(for text: String) -> [KeystrokeOp] {
         let scalars = Array(text.unicodeScalars)
+        var ops: [KeystrokeOp] = []
         var i = 0
 
         while i < scalars.count {
+            if scalars[i].value == 0x0A || scalars[i].value == 0x0D {
+                ops.append(.shiftReturn)
+                i += 1
+                continue
+            }
+
             // Build a chunk of scalars whose total UTF-16 length is ≤ 20.
             // A scalar outside the BMP (U+10000+) encodes as 2 UTF-16 code units (surrogate pair).
             var chunkUTF16: [UniChar] = []
             while i < scalars.count {
+                let sv = scalars[i].value
+                if sv == 0x0A || sv == 0x0D { break }  // newline handled above
                 let scalarUTF16 = Array(String(scalars[i]).utf16)
                 if chunkUTF16.count + scalarUTF16.count > 20 { break }
                 chunkUTF16.append(contentsOf: scalarUTF16)
@@ -314,19 +331,51 @@ class TextInserter {
 
             // Safety: a single scalar > 20 UTF-16 units is impossible (max is 2), but guard anyway.
             if chunkUTF16.isEmpty { i += 1; continue }
+            ops.append(.unicode(chunkUTF16))
+        }
+        return ops
+    }
 
-            guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-                  let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
-                return false
+    /// Insert text by simulating keyboard events with unicode characters.
+    /// Works in Electron apps (VS Code, Slack, Discord) without touching the clipboard.
+    /// CGEventKeyboardSetUnicodeString limits input to 20 UTF-16 code units per event.
+    /// Chunks by Unicode scalars to avoid splitting surrogate pairs at chunk boundaries.
+    private func typeViaKeyEvents(_ text: String) -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
+
+        for op in Self.keystrokeOps(for: text) {
+            switch op {
+            case .shiftReturn:
+                // Newline policy 2b / Option B (Michael, 2026-06-10): a spoken "new line" is a
+                // line break that NEVER sends. By the time text reaches here, every "\n" is a
+                // deliberately-spoken break (Whisper's multi-segment joins are space-joined
+                // upstream in Transcriber). Fire Shift+Return (keyCode 36 + .maskShift) — a
+                // *bare* Return (keyCode 36 alone) would map to "send message" in Slack/Messages,
+                // which Option B forbids. Shift+Return inserts a newline in those apps' compose
+                // box and a plain line break in editors, never a send.
+                guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true),
+                      let keyUp   = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) else {
+                    return false
+                }
+                keyDown.flags = .maskShift
+                keyUp.flags = .maskShift
+                keyDown.post(tap: .cghidEventTap)
+                keyUp.post(tap: .cghidEventTap)
+
+            case .unicode(let chunkUTF16):
+                guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                      let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
+                    return false
+                }
+
+                chunkUTF16.withUnsafeBufferPointer { buffer in
+                    keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
+                    keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
+                }
+
+                keyDown.post(tap: .cghidEventTap)
+                keyUp.post(tap: .cghidEventTap)
             }
-
-            chunkUTF16.withUnsafeBufferPointer { buffer in
-                keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
-                keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
-            }
-
-            keyDown.post(tap: .cghidEventTap)
-            keyUp.post(tap: .cghidEventTap)
         }
 
         return true

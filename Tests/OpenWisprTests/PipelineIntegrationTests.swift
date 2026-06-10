@@ -371,6 +371,72 @@ final class PipelineIntegrationTests: XCTestCase {
         XCTAssertEqual(asm.append("fresh start"), "fresh start")
     }
 
+    // MARK: Newline policy 2b / Option B — Whisper multi-segment output never reaches insertion as \n
+
+    /// (a) A multi-segment engine result (raw "\n"-separated segments, the shape whisper emits)
+    /// must be space-joined by the Transcriber so the text that lands in the inserter contains
+    /// NO "\n", and the MockInserter records no Return-equivalent (the keystroke route is never
+    /// reached for a single space-joined line).
+    func test_newline2b_multiSegmentResult_spaceJoined_noNewlineReachesInserter() async {
+        // Engine returns raw whisper-style multi-segment output: one segment per line.
+        let engine = FakeScriptedEngine(scriptedFinal: " First segment\n Second segment\n Third segment")
+        let inserter = MockInserter()
+        let outcome = await runViaTranscriber(
+            samples: loudSamples(), engine: engine, inserter: inserter,
+            makeInput: makeInputClosure(punctuation: .off)
+        )
+        guard case let .inserted(insertedText, _) = outcome else {
+            return XCTFail("expected .inserted, got \(outcome)")
+        }
+        // Space-joined, not "\n"-joined.
+        XCTAssertEqual(insertedText, "First segment Second segment Third segment")
+        XCTAssertFalse(insertedText.contains("\n"),
+                       "multi-segment whisper output must NOT carry a \\n into insertion")
+        XCTAssertEqual(inserter.insertedTexts, ["First segment Second segment Third segment"])
+        // No newline in the text → keystroke route would emit zero Shift+Return / Return ops.
+        XCTAssertTrue(TextInserter.keystrokeOps(for: insertedText).allSatisfy {
+            if case .shiftReturn = $0 { return false } else { return true }
+        }, "no Return-equivalent op may be produced for space-joined multi-segment text")
+    }
+
+    /// (c) Regression: even when the engine returns many segments, no Whisper-origin "\n" can
+    /// reach the TextInserter. Asserts on the exact string handed to the inserter.
+    func test_newline2b_regression_noWhisperOriginNewlineReachesInserter() async {
+        let engine = FakeScriptedEngine(scriptedFinal: "alpha\nbravo\ncharlie\ndelta\necho")
+        let inserter = MockInserter()
+        let outcome = await runViaTranscriber(
+            samples: loudSamples(), engine: engine, inserter: inserter,
+            makeInput: makeInputClosure(punctuation: .off)
+        )
+        guard case let .inserted(insertedText, _) = outcome else {
+            return XCTFail("expected .inserted, got \(outcome)")
+        }
+        XCTAssertFalse(insertedText.contains("\n"),
+                       "Whisper-origin segment breaks must be space-joined, never \\n")
+        XCTAssertEqual(insertedText, "alpha bravo charlie delta echo")
+        XCTAssertEqual(inserter.insertedTexts.first?.contains("\n"), false)
+    }
+
+    /// (b, pipeline half) A SPOKEN "new line" in the transcript survives the full pipeline as a
+    /// literal "\n" handed to the inserter (TextPostProcessor maps spoken "new line" → \n). The
+    /// keystroke-vs-clipboard *routing* of that "\n" is asserted in NewlinePolicy2bTests.
+    func test_newline2b_spokenNewLine_survivesPipelineAsLiteralNewline() async {
+        // Engine returns ONE line (no segment split); the only "\n" source is the spoken command.
+        let engine = FakeScriptedEngine(scriptedFinal: "first line new line second line")
+        let inserter = MockInserter()
+        let outcome = await runViaTranscriber(
+            samples: loudSamples(), engine: engine, inserter: inserter,
+            makeInput: makeInputClosure(punctuation: .spoken)
+        )
+        guard case let .inserted(insertedText, _) = outcome else {
+            return XCTFail("expected .inserted, got \(outcome)")
+        }
+        XCTAssertTrue(insertedText.contains("\n"),
+                      "spoken \"new line\" must become a literal \\n; got \(insertedText.debugDescription)")
+        XCTAssertEqual(insertedText.filter { $0 == "\n" }.count, 1,
+                       "exactly one spoken break → exactly one \\n")
+    }
+
     func test_streaming_assemblerMatchesExtractedLogicForThreeWaySequence() {
         // A realistic 3-partial growth sequence (the case Tier-1 must not break).
         var asm = StreamingTextAssembler()
