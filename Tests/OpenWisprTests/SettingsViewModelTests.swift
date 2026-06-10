@@ -77,14 +77,14 @@ final class SettingsViewModelTests: XCTestCase {
 
         // nil spokenPunctuation defaults to .hybrid (matching defaultConfig)
         XCTAssertEqual(vm.punctuationMode, .hybrid)
-        // nil maxRecordings defaults to Config.defaultMaxRecordings (0)
+        // nil maxRecordings defaults to Config.defaultMaxRecordings (30)
         XCTAssertEqual(vm.maxRecordings, Config.defaultMaxRecordings)
         // nil toggleMode defaults to false
         XCTAssertFalse(vm.toggleMode)
-        // nil screenContext defaults to false
+        // nil screenContext defaults to false (shipped: SettingsViewModel uses `?? false`)
         XCTAssertFalse(vm.screenContext)
-        // nil rememberWords defaults to false
-        XCTAssertFalse(vm.rememberWords)
+        // nil rememberWords defaults to true (shipped: SettingsViewModel uses `?? true`)
+        XCTAssertTrue(vm.rememberWords)
     }
 
     // MARK: - Model description helpers
