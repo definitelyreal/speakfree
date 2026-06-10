@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
 
 jobs:
   build:
@@ -10,8 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check for Swift changes
+      - name: Check for Swift changes (PR only)
         id: filter
+        if: github.event_name == 'pull_request'
         run: |
           CHANGED=$(gh pr diff ${{ github.event.pull_request.number }} --name-only --repo ${{ github.repository }})
           if echo "$CHANGED" | grep -qE '\.(swift)$|^Package\.swift$'; then
@@ -23,7 +26,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build
-        if: steps.filter.outputs.swift == 'true'
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
         run: swift build -c release
 
   unit-tests:
@@ -31,8 +34,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check for Swift changes
+      - name: Check for Swift changes (PR only)
         id: filter
+        if: github.event_name == 'pull_request'
         run: |
           CHANGED=$(gh pr diff ${{ github.event.pull_request.number }} --name-only --repo ${{ github.repository }})
           if echo "$CHANGED" | grep -qE '\.(swift)$|^Package\.swift$'; then
@@ -43,9 +47,54 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Cache tiny.en whisper model
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        uses: actions/cache@v4
+        id: model-cache
+        with:
+          path: ~/.config/speakfree/models/ggml-tiny.en.bin
+          key: whisper-model-tiny.en-v1
+
+      - name: Download tiny.en whisper model
+        if: (github.event_name == 'push' || steps.filter.outputs.swift == 'true') && steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.config/speakfree/models
+          curl -fL "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin" \
+            -o ~/.config/speakfree/models/ggml-tiny.en.bin
+
+      - name: Write speakfree config for CI (use tiny.en)
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        run: |
+          mkdir -p ~/.config/speakfree
+          cat > ~/.config/speakfree/config.json << 'EOF'
+          {
+            "modelSize": "tiny.en",
+            "engine": "whisper",
+            "language": "en",
+            "maxRecordings": 30,
+            "rememberWords": true,
+            "screenContext": true,
+            "spokenPunctuation": "hybrid"
+          }
+          EOF
+
       - name: Unit tests
-        if: steps.filter.outputs.swift == 'true'
-        run: swift test
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        run: xcrun swift test
+
+  swiftlint:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      - name: SwiftLint (warning-only — non-blocking)
+        # Non-blocking: exit code is ignored. Gate (removing continue-on-error) comes
+        # once the codebase is cleaned up (post-M1).
+        continue-on-error: true
+        run: swiftlint
 
   version-check:
     runs-on: macos-15
