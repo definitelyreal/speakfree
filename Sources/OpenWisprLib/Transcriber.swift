@@ -396,13 +396,16 @@ public class Transcriber {
                 progressHandler(idx + 1, totalChunks, 100)
             }
 
-            // Join multi-segment whisper output within a chunk with a SPACE, not "\n" —
-            // a segment split is not a user break. [Newline policy 2b / Option B]
+            // Preserve multi-segment whisper breaks as newlines HERE. Unlike live dictation
+            // (Transcriber.transcribe → TextInserter), transcribeFile writes a DOCUMENT
+            // (.txt/.md via FileTranscriptionController.writeOutput). Segment newlines are
+            // document STRUCTURE there, not insertion keystrokes, so they must survive — the
+            // Newline-policy-2b/Option-B space-join applies ONLY to insertion paths, never here.
             let cleaned = raw
                 .components(separatedBy: .newlines)
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
-                .joined(separator: " ")
+                .joined(separator: "\n")
 
             // Overlap reconciliation: strip likely-duplicated content at the seam
             if idx > 0, let prev = parts.last, !prev.isEmpty {
@@ -413,9 +416,11 @@ public class Transcriber {
             }
         }
 
-        // Join reconciled chunks with a SPACE, not "\n" — a chunk boundary is an
-        // arbitrary audio-window split, never a user break. [Newline policy 2b / Option B]
-        return parts.joined(separator: " ")
+        // Join reconciled 5-minute chunks with a newline. This is the DOCUMENT path
+        // (transcribeFile → writeOutput), not live dictation, so a chunk boundary becomes a
+        // visible structural break in the saved file rather than collapsing the whole
+        // transcript into one unbroken line. (Insertion paths keep the space-join.)
+        return parts.joined(separator: "\n")
     }
 
     /// Remove words at the start of `new` that also appear at the end of `previous`

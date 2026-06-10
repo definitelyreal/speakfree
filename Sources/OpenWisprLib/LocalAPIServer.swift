@@ -274,7 +274,21 @@ final class LocalAPIServer {
             }
 
             let bodyStart = headerRange.upperBound
-            let contentLength = self.parseContentLength(headers: headerStr)
+
+            // Parse Content-Length DEFENSIVELY before any body arithmetic. A negative or
+            // garbage value (e.g. "Content-Length: -1") would otherwise flow into the body
+            // slice as an inverted Range and crash the whole process — reachable by a single
+            // unauthenticated loopback request, before evaluate()'s Host/token gates run.
+            let contentLength: Int
+            switch Self.parseContentLength(headers: headerStr) {
+            case .invalid:
+                idleTimer.cancel()
+                self.send(conn, status: 400, body: #"{"error":"Invalid Content-Length"}"#); return
+            case .absent:
+                contentLength = 0
+            case .valid(let n):
+                contentLength = n
+            }
 
             // Reject oversize declared bodies up front (don't accumulate to OOM).
             if contentLength > Self.maxBodyBytes {
@@ -500,13 +514,38 @@ final class LocalAPIServer {
         data.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A]))
     }
 
-    private func parseContentLength(headers: String) -> Int {
-        for line in headers.components(separatedBy: "\r\n") {
-            if line.lowercased().hasPrefix("content-length:") {
-                return Int(line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) ?? 0
+    /// Result of parsing the Content-Length header.
+    ///
+    /// The distinction matters for safety: a *present but invalid* value (negative,
+    /// non-numeric, overflowing) must be rejected with 400 BEFORE any buffer arithmetic,
+    /// because a negative length silently produces an inverted `Range` at the body slice
+    /// (`buf[bodyStart..<(bodyStart + (-1))]`) which traps and kills the whole process —
+    /// reachable by a single unauthenticated loopback request, before evaluate() runs.
+    enum ContentLengthParse: Equatable {
+        case absent              // header not present → treat body as 0 bytes
+        case valid(Int)          // a valid, non-negative integer (caller still oversize-checks)
+        case invalid             // present but garbage / negative / overflow → 400
+    }
+
+    /// Parse the Content-Length header defensively.
+    ///
+    /// Accepts ONLY a plain, non-negative base-10 integer (optionally surrounded by
+    /// whitespace). Rejects: negatives ("-1"), non-numeric ("abc", ""), explicit-sign
+    /// forms ("+5"), and anything that overflows `Int`. Static + pure so it is unit-testable
+    /// without a socket.
+    static func parseContentLength(headers: String) -> ContentLengthParse {
+        for line in headers.components(separatedBy: "\r\n") where line.lowercased().hasPrefix("content-length:") {
+            let raw = line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
+            // Require at least one digit and ONLY digits (no sign, no separators, no whitespace
+            // inside). This rejects "-1", "+5", "1 2", "0x10", "", and "abc" up front.
+            guard !raw.isEmpty, raw.allSatisfy({ $0.isASCII && $0.isNumber }) else {
+                return .invalid
             }
+            // `Int(_:)` returns nil on overflow even for an all-digit string.
+            guard let value = Int(raw), value >= 0 else { return .invalid }
+            return .valid(value)
         }
-        return 0
+        return .absent
     }
 
     static func extractBoundary(from line: String) -> String? {
