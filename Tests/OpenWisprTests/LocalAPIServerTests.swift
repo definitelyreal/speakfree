@@ -114,7 +114,7 @@ final class LocalAPIServerTests: XCTestCase {
 
     func testEvaluateRejectsNonMultipartPost() {
         // Header parsing succeeds but there is no multipart boundary => 400.
-        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nContent-Type: application/json"
+        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json"
         let outcome = LocalAPIServer.evaluate(headers: headers, body: Data("{}".utf8), authToken: nil)
         XCTAssertEqual(outcome, .respond(status: 400,
                                          body: #"{"error":"Expected multipart/form-data"}"#,
@@ -127,7 +127,7 @@ final class LocalAPIServerTests: XCTestCase {
             ("file", Data([0xAA, 0xBB])),
             ("response_format", "text".data(using: .utf8)!)
         ])
-        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=\(boundary)"
+        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=\(boundary)"
         let outcome = LocalAPIServer.evaluate(headers: headers, body: body, authToken: nil)
         XCTAssertEqual(outcome, .transcribe(fileData: Data([0xAA, 0xBB]), format: "text"))
     }
@@ -149,13 +149,15 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testEvaluateOptionsPreflight() {
-        let headers = "OPTIONS /v1/audio/transcriptions HTTP/1.1\r\nOrigin: http://example.com"
+        // A loopback Host preflight is accepted (204). The Origin is irrelevant to evaluate();
+        // whether CORS headers are emitted is decided later in corsOrigin(forHeaders:).
+        let headers = "OPTIONS /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:5765"
         let outcome = LocalAPIServer.evaluate(headers: headers, body: Data(), authToken: nil)
         XCTAssertEqual(outcome, .respond(status: 204, body: "", contentType: "application/json"))
     }
 
     func testEvaluateWrongPath404() {
-        let headers = "POST /nope HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=x"
+        let headers = "POST /nope HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=x"
         let outcome = LocalAPIServer.evaluate(headers: headers, body: Data(), authToken: nil)
         XCTAssertEqual(outcome, .respond(status: 404,
                                          body: #"{"error":"POST /v1/audio/transcriptions"}"#,
@@ -165,7 +167,7 @@ final class LocalAPIServerTests: XCTestCase {
     // MARK: - Auth: missing / wrong / correct bearer token (401)
 
     func testEvaluateMissingTokenWhenRequired401() {
-        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=x"
+        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=x"
         let outcome = LocalAPIServer.evaluate(headers: headers, body: Data(), authToken: "secret")
         XCTAssertEqual(outcome, .respond(status: 401,
                                          body: #"{"error":"Unauthorized"}"#,
@@ -173,7 +175,7 @@ final class LocalAPIServerTests: XCTestCase {
     }
 
     func testEvaluateWrongTokenWhenRequired401() {
-        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nAuthorization: Bearer wrong\r\nContent-Type: multipart/form-data; boundary=x"
+        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer wrong\r\nContent-Type: multipart/form-data; boundary=x"
         let outcome = LocalAPIServer.evaluate(headers: headers, body: Data(), authToken: "secret")
         XCTAssertEqual(outcome, .respond(status: 401,
                                          body: #"{"error":"Unauthorized"}"#,
@@ -183,7 +185,7 @@ final class LocalAPIServerTests: XCTestCase {
     func testEvaluateCorrectTokenPasses() {
         let boundary = "AUTHB"
         let body = multipartBody(boundary: boundary, fields: [("file", Data([0x01]))])
-        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Type: multipart/form-data; boundary=\(boundary)"
+        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer secret\r\nContent-Type: multipart/form-data; boundary=\(boundary)"
         let outcome = LocalAPIServer.evaluate(headers: headers, body: body, authToken: "secret")
         XCTAssertEqual(outcome, .transcribe(fileData: Data([0x01]), format: "json"))
     }
@@ -191,7 +193,7 @@ final class LocalAPIServerTests: XCTestCase {
     func testEvaluateBearerSchemeCaseInsensitive() {
         let boundary = "CIB"
         let body = multipartBody(boundary: boundary, fields: [("file", Data([0x02]))])
-        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nauthorization: bEaReR secret\r\nContent-Type: multipart/form-data; boundary=\(boundary)"
+        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: localhost:5765\r\nauthorization: bEaReR secret\r\nContent-Type: multipart/form-data; boundary=\(boundary)"
         let outcome = LocalAPIServer.evaluate(headers: headers, body: body, authToken: "secret")
         XCTAssertEqual(outcome, .transcribe(fileData: Data([0x02]), format: "json"))
     }
@@ -250,5 +252,89 @@ final class LocalAPIServerTests: XCTestCase {
     func testIsLoopbackRejectsArbitraryHostname() {
         let ep = NWEndpoint.hostPort(host: .name("evil.example.com", nil), port: 5765)
         XCTAssertFalse(LocalAPIServer.isLoopback(ep))
+    }
+
+    // MARK: - AR-1: DNS-rebinding defense (Host-header validation)
+
+    /// The core rebinding exploit: a page on evil-attacker.com is rebound to 127.0.0.1, so the
+    /// TCP peer is loopback (passes isLoopback), but the request still carries the attacker's
+    /// Host. evaluate() must reject it 421 BEFORE the handler, even on a well-formed POST.
+    func testEvaluateRejectsNonLoopbackHost421() {
+        let boundary = "REBIND"
+        let body = multipartBody(boundary: boundary, fields: [("file", Data([0x01]))])
+        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: evil-attacker.com\r\nContent-Type: multipart/form-data; boundary=\(boundary)"
+        let outcome = LocalAPIServer.evaluate(headers: headers, body: body, authToken: nil)
+        XCTAssertEqual(outcome,
+            .respond(status: 421,
+                     body: #"{"error":"Misdirected request: Host must be loopback"}"#,
+                     contentType: "application/json"),
+            "A non-loopback Host (DNS rebinding) must be rejected 421 before the handler runs")
+    }
+
+    /// A rebound OPTIONS preflight must ALSO be rejected — otherwise a rebound origin could coax
+    /// CORS headers out of the preflight.
+    func testEvaluateRejectsRebindingPreflight421() {
+        let headers = "OPTIONS /v1/audio/transcriptions HTTP/1.1\r\nHost: evil.com\r\nOrigin: https://evil.com"
+        let outcome = LocalAPIServer.evaluate(headers: headers, body: Data(), authToken: nil)
+        XCTAssertEqual(outcome.statusForTest, 421,
+                       "Rebound preflight must be 421, not a 204 that could carry CORS")
+    }
+
+    /// A missing Host header is also rejected (HTTP/1.1 requires Host; absence is suspicious).
+    func testEvaluateRejectsMissingHost421() {
+        let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=x"
+        let outcome = LocalAPIServer.evaluate(headers: headers, body: Data(), authToken: nil)
+        XCTAssertEqual(outcome.statusForTest, 421)
+    }
+
+    func testEvaluateAcceptsLoopbackHostVariants() {
+        let boundary = "OKHOST"
+        let body = multipartBody(boundary: boundary, fields: [("file", Data([0x07]))])
+        for host in ["127.0.0.1", "127.0.0.1:5765", "localhost", "localhost:5765", "[::1]", "[::1]:5765"] {
+            let headers = "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: \(host)\r\nContent-Type: multipart/form-data; boundary=\(boundary)"
+            let outcome = LocalAPIServer.evaluate(headers: headers, body: body, authToken: nil)
+            XCTAssertEqual(outcome, .transcribe(fileData: Data([0x07]), format: "json"),
+                           "Loopback Host '\(host)' must be accepted")
+        }
+    }
+
+    // MARK: - AR-1: loopback-host / loopback-origin helpers
+
+    func testIsLoopbackHostAcceptsLoopbackForms() {
+        for h in ["127.0.0.1", "127.0.0.1:5765", "localhost", "LOCALHOST:80", "::1", "[::1]", "[::1]:5765"] {
+            XCTAssertTrue(LocalAPIServer.isLoopbackHost(h), "\(h) should be loopback")
+        }
+    }
+
+    func testIsLoopbackHostRejectsNonLoopback() {
+        for h in ["evil.com", "evil-attacker.com:5765", "192.168.1.10", "10.0.0.5:5765",
+                  "8.8.8.8", "127.0.0.1.evil.com", "", "0.0.0.0"] {
+            XCTAssertFalse(LocalAPIServer.isLoopbackHost(h), "\(h) must NOT be loopback")
+        }
+    }
+
+    func testIsLoopbackOriginReflectionGate() {
+        XCTAssertTrue(LocalAPIServer.isLoopbackOrigin("http://127.0.0.1:5765"))
+        XCTAssertTrue(LocalAPIServer.isLoopbackOrigin("http://localhost:5765"))
+        XCTAssertTrue(LocalAPIServer.isLoopbackOrigin("http://[::1]:5765"))
+        XCTAssertFalse(LocalAPIServer.isLoopbackOrigin("https://evil.com"))
+        XCTAssertFalse(LocalAPIServer.isLoopbackOrigin("http://192.168.1.5:5765"))
+        XCTAssertFalse(LocalAPIServer.isLoopbackOrigin(""))
+    }
+
+    // MARK: - AR-1: connection cap constant
+
+    func testMaxConcurrentConnectionsConstant() {
+        XCTAssertEqual(LocalAPIServer.maxConcurrentConnections, 16)
+    }
+}
+
+/// Test-only convenience to read the status code out of a RequestOutcome.
+extension LocalAPIServer.RequestOutcome {
+    var statusForTest: Int {
+        switch self {
+        case .respond(let status, _, _): return status
+        case .transcribe: return 200
+        }
     }
 }

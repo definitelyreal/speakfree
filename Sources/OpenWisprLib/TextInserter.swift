@@ -67,13 +67,15 @@ class TextInserter {
     //
     // Secure Input guard — covers ALL insertion paths (AX, keystroke, clipboard, refocus).
     // When a password field (or any app with Secure Event Input) is active, we must not
-    // inject keystrokes or paste. Fall back to the same copy-only affordance used when
-    // focus is lost: text lands on the clipboard and the caller is notified via onFocusLost.
+    // inject keystrokes or paste. The text is dictated-into-a-password-field — the most
+    // sensitive case — so the fallback uses the CONCEALED clipboard path (audit AR-1):
+    // org.nspasteboard.ConcealedType/TransientType markers + auto-clear, so clipboard-history
+    // tools skip it and the plaintext doesn't linger. The caller is notified via onFocusLost.
     @discardableResult
     func insert(text: String, refocusing element: AXUIElement? = nil, onFocusLost: (() -> Void)? = nil) -> Bool {
         if isSecureInputActive() {
-            DiagnosticLogger.shared.log("TextInserter: Secure Input is active — copying to clipboard instead of inserting")
-            copyToClipboard(text)
+            DiagnosticLogger.shared.log("TextInserter: Secure Input is active — concealed clipboard fallback instead of inserting")
+            secureInputClipboardFallback(text)
             onFocusLost?()
             return false
         }
@@ -91,8 +93,8 @@ class TextInserter {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                         guard let self = self else { return }
                         if self.isSecureInputActive() {
-                            DiagnosticLogger.shared.log("TextInserter: Secure Input became active during focus-settle — copying to clipboard")
-                            self.copyToClipboard(text)
+                            DiagnosticLogger.shared.log("TextInserter: Secure Input became active during focus-settle — concealed clipboard fallback")
+                            self.secureInputClipboardFallback(text)
                             onFocusLost?()
                             return
                         }
@@ -467,6 +469,42 @@ class TextInserter {
     private func copyToClipboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// How long dictated text may sit on the clipboard after a Secure-Input fallback before it
+    /// is auto-cleared. Seam so tests can shrink it. Production default: 30 s — long enough to
+    /// paste manually, short enough not to linger.
+    var secureInputClipboardClearDelay: TimeInterval = 30
+
+    /// Secure-Input clipboard fallback (audit AR-1). Dictating into a password field is the
+    /// worst case, so unlike `copyToClipboard` this:
+    ///   - marks the write org.nspasteboard.ConcealedType + TransientType, so clipboard
+    ///     managers (Maccy, Raycast, Paste) skip recording it;
+    ///   - auto-clears the clipboard after `secureInputClipboardClearDelay`, but ONLY if our
+    ///     write is still the current contents (changeCount unchanged) — if the user copied
+    ///     something else in the meantime we leave their clipboard alone.
+    /// It does NOT restore the prior clipboard (the user explicitly invoked dictation expecting
+    /// the text to be available to paste); the concealment + auto-clear are the protection.
+    func secureInputClipboardFallback(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+
+        let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+        let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+        let item = NSPasteboardItem()
+        item.setString(text, forType: .string)
+        item.setData(Data(), forType: transientType)
+        item.setData(Data(), forType: concealedType)
+        pasteboard.writeObjects([item])
+
+        let writtenChangeCount = pasteboard.changeCount
+        DispatchQueue.main.asyncAfter(deadline: .now() + secureInputClipboardClearDelay) {
+            // Only clear if our concealed write is still the live clipboard content.
+            if pasteboard.changeCount == writtenChangeCount {
+                pasteboard.clearContents()
+                DiagnosticLogger.shared.log("TextInserter: auto-cleared concealed Secure-Input clipboard text")
+            }
+        }
     }
 
     private func savePasteboard(_ pasteboard: NSPasteboard) -> [[(NSPasteboard.PasteboardType, Data)]] {

@@ -124,6 +124,92 @@ final class SecureInputTests: XCTestCase {
         XCTAssertEqual(secureInputChecks, 2, "the async closure must re-check secure input (second seam consultation)")
     }
 
+    // MARK: - AR-1: Secure-Input clipboard fallback is concealed + auto-cleared
+
+    /// The Secure-Input fallback must write the dictated text with the nspasteboard
+    /// Concealed + Transient markers so clipboard-history tools skip it — unlike the old
+    /// bare clearContents()+setString that left plaintext for any app to read.
+    func test_secureInputFallback_setsConcealedAndTransientMarkers() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+
+        let inserter = TextInserter()
+        inserter.secureInputClipboardClearDelay = 60  // don't auto-clear during the assertions
+        inserter.secureInputClipboardFallback("my-secret-password")
+
+        let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+        let transient = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+        let types = pb.pasteboardItems?.first?.types ?? []
+        XCTAssertTrue(types.contains(concealed), "Concealed marker must be present")
+        XCTAssertTrue(types.contains(transient), "Transient marker must be present")
+        XCTAssertEqual(pb.string(forType: .string), "my-secret-password",
+                       "the text is still pasteable while it lives")
+        pb.clearContents()
+    }
+
+    /// The fallback must auto-clear the dictated text after the (test-shortened) delay,
+    /// so the plaintext does not linger on the general pasteboard.
+    func test_secureInputFallback_autoClearsAfterDelay() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+
+        let inserter = TextInserter()
+        inserter.secureInputClipboardClearDelay = 0.2
+        inserter.secureInputClipboardFallback("ephemeral-secret")
+        XCTAssertEqual(pb.string(forType: .string), "ephemeral-secret",
+                       "text present immediately after fallback")
+
+        let exp = expectation(description: "clipboard auto-clears")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            // After the 0.2s clear delay (+ slack), our concealed write must be gone.
+            XCTAssertNil(pb.string(forType: .string),
+                         "dictated text must be auto-cleared from the clipboard")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2.0)
+    }
+
+    /// If the user copies something else after the fallback, auto-clear must NOT clobber it
+    /// (it only clears when its own write is still the live clipboard content).
+    func test_secureInputFallback_doesNotClobberUserCopyAfterwards() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+
+        let inserter = TextInserter()
+        inserter.secureInputClipboardClearDelay = 0.2
+        inserter.secureInputClipboardFallback("dictated-secret")
+
+        // User copies something else before the auto-clear fires.
+        pb.clearContents()
+        pb.setString("user-copied-this", forType: .string)
+
+        let exp = expectation(description: "user clipboard preserved")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            XCTAssertEqual(pb.string(forType: .string), "user-copied-this",
+                           "auto-clear must not wipe the user's later copy")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2.0)
+        pb.clearContents()
+    }
+
+    /// End-to-end: insert() under Secure Input routes through the concealed fallback (markers
+    /// present), proving the worst-case path no longer leaks plaintext via bare copyToClipboard.
+    func test_secureInput_insertRoutesThroughConcealedFallback() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+
+        let inserter = makeInserter(secureInput: true)
+        inserter.secureInputClipboardClearDelay = 60
+        inserter.insert(text: "password-into-secure-field")
+
+        let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+        let types = pb.pasteboardItems?.first?.types ?? []
+        XCTAssertTrue(types.contains(concealed),
+                      "insert() under Secure Input must use the concealed clipboard fallback")
+        pb.clearContents()
+    }
+
     // MARK: - seam default produces a real Bool (smoke test)
 
     /// The default seam compiles and returns a Bool without crashing.

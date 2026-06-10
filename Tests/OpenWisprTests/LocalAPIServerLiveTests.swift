@@ -191,6 +191,91 @@ final class LocalAPIServerLiveTests: XCTestCase {
                        "No server should be listening when API is disabled; lsof unexpectedly shows:\n\(lsofOut)")
     }
 
+    // MARK: - AR-1 live proofs (DNS-rebinding defense + no wildcard CORS)
+
+    /// AR-1 (rebinding): a loopback TCP connection that carries an attacker Host header
+    /// (the exact shape of a DNS-rebound request) is rejected 421 over the wire.
+    func testLiveRebindingHostRejected421() throws {
+        try skipIfDisabled()
+        startServer()
+        let (status, code) = shell("/usr/bin/curl", [
+            "-s", "-S", "--max-time", "8",
+            "-o", "/dev/null", "-w", "%{http_code}",
+            "-X", "POST",
+            "-H", "Host: evil-attacker.com",
+            "-H", "Content-Type: multipart/form-data; boundary=zzz",
+            "--data-binary", "garbage",
+            "http://127.0.0.1:\(Self.livePort)/v1/audio/transcriptions"
+        ])
+        print("PROOF[AR-1 rebind] Host: evil-attacker.com over loopback => status=\(status) exit=\(code)")
+        XCTAssertEqual(code, 0, "curl failed to connect")
+        XCTAssertEqual(status.trimmingCharacters(in: .whitespaces), "421",
+                       "A rebound Host (loopback TCP, attacker Host header) must get 421")
+    }
+
+    /// AR-1 (no wildcard CORS): with allowBrowser ON, a cross-origin (evil.com) preflight gets
+    /// NO Access-Control-Allow-Origin header — the browser therefore can't read the response.
+    /// Note: it's also Host-rejected 421; we assert the absence of any ACAO regardless.
+    func testLiveCrossOriginGetsNoACAOHeader() throws {
+        try skipIfDisabled()
+        startServer(allowBrowser: true)
+        // -D - dumps response headers to stdout. Send a cross-origin Origin + matching evil Host.
+        let (headers, code) = shell("/usr/bin/curl", [
+            "-s", "-S", "--max-time", "8", "-D", "-", "-o", "/dev/null",
+            "-X", "OPTIONS",
+            "-H", "Host: evil.com",
+            "-H", "Origin: https://evil.com",
+            "http://127.0.0.1:\(Self.livePort)/v1/audio/transcriptions"
+        ])
+        print("PROOF[AR-1 cors-evil] allowBrowser=true, Origin: https://evil.com response headers:\n\(headers)")
+        XCTAssertEqual(code, 0)
+        XCTAssertFalse(headers.lowercased().contains("access-control-allow-origin"),
+                       "A cross-origin request must NEVER receive an Access-Control-Allow-Origin header")
+        XCTAssertFalse(headers.contains("Access-Control-Allow-Origin: *"),
+                       "Wildcard ACAO must never be emitted")
+    }
+
+    /// AR-1 (CORS allowlist positive): with allowBrowser ON, a *loopback* origin (the only
+    /// legitimate browser caller) IS reflected back in Access-Control-Allow-Origin — and it is
+    /// the exact origin, never a wildcard.
+    func testLiveLoopbackOriginIsReflectedNotWildcard() throws {
+        try skipIfDisabled()
+        startServer(allowBrowser: true)
+        let origin = "http://127.0.0.1:\(Self.livePort)"
+        let (headers, code) = shell("/usr/bin/curl", [
+            "-s", "-S", "--max-time", "8", "-D", "-", "-o", "/dev/null",
+            "-X", "OPTIONS",
+            "-H", "Host: 127.0.0.1:\(Self.livePort)",
+            "-H", "Origin: \(origin)",
+            "http://127.0.0.1:\(Self.livePort)/v1/audio/transcriptions"
+        ])
+        print("PROOF[AR-1 cors-loopback] allowBrowser=true, Origin: \(origin) response headers:\n\(headers)")
+        XCTAssertEqual(code, 0)
+        XCTAssertTrue(headers.contains("Access-Control-Allow-Origin: \(origin)"),
+                      "Loopback origin must be reflected exactly")
+        XCTAssertFalse(headers.contains("Access-Control-Allow-Origin: *"),
+                       "Must reflect the exact origin, never a wildcard")
+    }
+
+    /// AR-1 (CORS off by default): with allowBrowser OFF (default), even a loopback origin gets
+    /// no CORS headers.
+    func testLiveNoCORSWhenBrowserOptInOff() throws {
+        try skipIfDisabled()
+        startServer(allowBrowser: false)
+        let origin = "http://127.0.0.1:\(Self.livePort)"
+        let (headers, code) = shell("/usr/bin/curl", [
+            "-s", "-S", "--max-time", "8", "-D", "-", "-o", "/dev/null",
+            "-X", "OPTIONS",
+            "-H", "Host: 127.0.0.1:\(Self.livePort)",
+            "-H", "Origin: \(origin)",
+            "http://127.0.0.1:\(Self.livePort)/v1/audio/transcriptions"
+        ])
+        print("PROOF[AR-1 cors-off] allowBrowser=false, Origin: \(origin) response headers:\n\(headers)")
+        XCTAssertEqual(code, 0)
+        XCTAssertFalse(headers.lowercased().contains("access-control-allow-origin"),
+                       "No CORS headers when the browser opt-in is off")
+    }
+
     // (d) With a token set, an unauthenticated 127.0.0.1 request -> 401.
     func testLiveTokenUnauthenticatedRequestGets401() throws {
         try skipIfDisabled()
