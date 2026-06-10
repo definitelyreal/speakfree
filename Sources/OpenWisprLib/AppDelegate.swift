@@ -291,6 +291,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         print("Ready.")
         DiagnosticLogger.shared.log("Ready — hotkey=\(hotkeyDesc) model=\(config.modelSize)")
 
+        // Start LocalAPIServer on launch if enabled in config (T1.2).
+        syncLocalAPIServerState()
+
         // Verify all subsystems after startup
         verifySubsystems(context: "startup")
     }
@@ -479,7 +482,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusBar.buildMenu()
 
-        // Local API server — start or stop based on config
+        syncLocalAPIServerState()
+    }
+
+    /// Start or stop the LocalAPIServer based on the current config.
+    /// Called from both `reloadHotkeyAndSettings` (settings-save path) and
+    /// `startListening` (launch path) so the server comes up on launch when enabled.
+    private func syncLocalAPIServerState() {
         let apiEnabled = config.localAPI?.value ?? false
         let apiPort = UInt16(config.localAPIPort ?? 5765)
         if apiEnabled, let t = transcriber {
