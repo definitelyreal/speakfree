@@ -77,8 +77,17 @@ class TextInserter {
             if !sameElement {
                 let refocused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
                 if refocused {
-                    // Use non-blocking delay for focus to settle, then insert
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    // Use non-blocking delay for focus to settle, then insert.
+                    // Re-check secure input inside the closure: the system could enable it
+                    // during the 150ms focus-settle window (e.g. user tabs into a password field).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                        guard let self = self else { return }
+                        if self.isSecureInputActive() {
+                            DiagnosticLogger.shared.log("TextInserter: Secure Input became active during focus-settle — copying to clipboard")
+                            self.copyToClipboard(text)
+                            onFocusLost?()
+                            return
+                        }
                         // Try direct AX insertion on the refocused element first
                         var settable: DarwinBoolean = false
                         if AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
