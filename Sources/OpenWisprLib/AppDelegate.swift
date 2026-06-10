@@ -55,9 +55,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var streamingTimer: Timer?
     private var streamingText: String = ""
     private var isStreamingInFlight = false  // prevents overlapping inference runs
-    /// Text that has been "committed" to display — we won't change it even if re-inference differs.
-    /// New sentences start on a new line so existing lines don't reflow.
-    private var committedStreamingText: String = ""
+    /// Streaming-overlay text assembler. Owns the "committed" display text (sentences that
+    /// have ended and won't reflow) and the stable-append logic, extracted to
+    /// `StreamingTextAssembler` so the assembly is unit-testable. Behavior is byte-identical
+    /// to the prior inline `committedStreamingText` + `buildStableDisplayText`.
+    private var streamingAssembler = StreamingTextAssembler()
     /// Monotonically-increasing token bumped every time streaming stops. Stale partial-result
     /// callbacks that arrive on main after recording ended compare against this and are dropped.
     private var streamingGeneration: UInt = 0
@@ -907,7 +909,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // live preview (parakeet v1) report supportsStreaming == false and are skipped here.
         guard transcriber.supportsStreaming, transcriber.isLoaded else { return }
         streamingText = ""
-        committedStreamingText = ""
+        streamingAssembler.reset()
         isStreamingInFlight = false
         streamingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.processStreamingChunk()
@@ -919,7 +921,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         streamingTimer?.invalidate()
         streamingTimer = nil
         streamingText = ""
-        committedStreamingText = ""
+        streamingAssembler.reset()
         isStreamingInFlight = false
         streamingGeneration &+= 1  // invalidate any in-flight partial-result callbacks
         recordingOverlay.clearStreamingText()
@@ -993,48 +995,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Build stable display text: committed sentences are frozen, new content is appended.
     /// Each sentence starts on a new line so existing lines don't reflow.
     private func buildStableDisplayText(from rawText: String) -> String {
-        let trimmed = rawText.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return committedStreamingText }
-
-        // If the new text is shorter than committed, keep committed (prevents regression)
-        guard trimmed.count >= committedStreamingText.replacingOccurrences(of: "\n", with: " ").count else {
-            return committedStreamingText
-        }
-
-        // Find the portion of text beyond what we've committed
-        let committedFlat = committedStreamingText.replacingOccurrences(of: "\n", with: " ")
-        let newPortion: String
-        if trimmed.hasPrefix(committedFlat) {
-            newPortion = String(trimmed.dropFirst(committedFlat.count)).trimmingCharacters(in: .whitespaces)
-        } else if trimmed.count > committedFlat.count {
-            // Text diverged slightly but is longer — take the new tail
-            newPortion = String(trimmed.dropFirst(committedFlat.count)).trimmingCharacters(in: .whitespaces)
-        } else {
-            // Text is same length or shorter — show committed
-            return committedStreamingText
-        }
-
-        if newPortion.isEmpty { return committedStreamingText }
-
-        // Check if the new portion contains complete sentences (ends with .!?)
-        // If so, commit everything up to the last sentence end
-        var result = committedStreamingText
-        if !result.isEmpty && !newPortion.isEmpty {
-            result += "\n"
-        }
-        result += newPortion
-
-        // Commit text through the last sentence-ending punctuation
-        if let lastPunct = newPortion.lastIndex(where: { ".!?".contains($0) }) {
-            let throughPunct = String(newPortion[...lastPunct])
-            if committedStreamingText.isEmpty {
-                committedStreamingText = throughPunct
-            } else {
-                committedStreamingText += "\n" + throughPunct
-            }
-        }
-
-        return result
+        return streamingAssembler.append(rawText)
     }
 
     public func reprocess(audioURL: URL) {
