@@ -84,12 +84,65 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Setup failure seam
+
+    /// Injectable executor: tests replace this to simulate a throw without running the full setup.
+    /// Production code leaves it nil — `setup()` calls `setupInner()` directly.
+    var _setupExecutor: (() throws -> Void)?
+
     private func setup() {
         do {
-            try setupInner()
+            if let executor = _setupExecutor {
+                try executor()
+            } else {
+                try setupInner()
+            }
         } catch {
-            print("Fatal setup error: \(error.localizedDescription)")
+            let message = error.localizedDescription
+            DiagnosticLogger.shared.log("Fatal setup error: \(message)")
+
+            // Transition the menu bar to the visible error state.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.statusBar.state = .setupFailed(message: message)
+                self.statusBar.buildMenu()
+            }
+
+            // Surface a modal alert. Runs on main so we block the setup thread here
+            // until the user dismisses — the process stays alive and in the error state.
+            DispatchQueue.main.sync { [weak self] in
+                guard let self else { return }
+                self.showSetupFailureAlert(message: message)
+            }
         }
+    }
+
+    /// Shows a blocking NSAlert describing the setup failure.
+    /// Separated from `setup()` so it can be replaced by a seam in tests.
+    var _alertPresenter: ((String) -> Void)?
+
+    func showSetupFailureAlert(message: String) {
+        if let presenter = _alertPresenter {
+            presenter(message)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "speakfree failed to start"
+        alert.informativeText = message
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Continue Anyway")
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            NSApplication.shared.terminate(nil)
+        }
+        // If the user clicked "Continue Anyway" the app stays alive in the error state.
+    }
+
+    /// Test-only bridge — calls `setup()` directly so tests can exercise the failure path
+    /// without going through `applicationDidFinishLaunching`. Not called by production code.
+    func runSetupForTesting() {
+        setup()
     }
 
     private func setupInner() throws {
@@ -235,8 +288,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
             Permissions.promptAccessibility()
             print("Waiting for Accessibility permission...")
+            // Bounded wait: re-surface the system dialog every 60 s so the user is never
+            // left with a silent infinite poll. Each 60-second cycle consists of 0.5-second
+            // checks so we respond quickly when the user grants permission.
+            let recheckInterval = 0.5
+            let repromptCycle = 60.0
+            var elapsed = 0.0
             while !AXIsProcessTrusted() {
-                Thread.sleep(forTimeInterval: 0.5)
+                Thread.sleep(forTimeInterval: recheckInterval)
+                elapsed += recheckInterval
+                if elapsed >= repromptCycle {
+                    elapsed = 0.0
+                    print("Accessibility: still waiting — re-prompting...")
+                    Permissions.promptAccessibility()
+                }
             }
             print("Accessibility: granted")
             DispatchQueue.main.async {
