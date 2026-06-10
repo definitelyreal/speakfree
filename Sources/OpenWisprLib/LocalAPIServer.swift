@@ -1,0 +1,485 @@
+// ai:processed · session: 5b06900b-1498-4764-a786-48f408c36626 · 2026-06-10
+import Network
+import Foundation
+import AVFoundation
+
+/// Minimal loopback-only HTTP server exposing POST /v1/audio/transcriptions.
+/// Compatible with OpenAI-format clients. EXPERIMENTAL — for local integrations only.
+///
+/// Hardening (audit T1.1):
+///  - Loopback enforced two ways: connections from a non-loopback remote endpoint are
+///    cancelled before any bytes are read (primary), and the listener requests the
+///    `.loopback` interface type (secondary). We do NOT use `requiredLocalEndpoint`
+///    (wrong API for a listener).
+///  - No wildcard CORS. Access-Control-* headers are only emitted when
+///    `localAPIAllowBrowser` is enabled.
+///  - Request body capped at 32 MB (413 over).
+///  - Per-connection idle timeout cancels stalled reads.
+///  - Optional `Authorization: Bearer <token>` when `localAPIToken` is set (else loopback-only).
+final class LocalAPIServer {
+
+    /// Maximum accumulated request size before a 413 is returned.
+    static let maxBodyBytes = 32 * 1_024 * 1_024
+    /// Idle timeout: a connection that sends no bytes for this long is cancelled.
+    static let idleTimeout: TimeInterval = 30
+
+    private var listener: NWListener?
+    private weak var transcriber: Transcriber?
+    private let listenPort: UInt16
+    private let serverQueue = DispatchQueue(label: "com.speakfree.localapi.server")
+    private let requestQueue = DispatchQueue(label: "com.speakfree.localapi.requests", attributes: .concurrent)
+
+    // Hardening config, captured at start().
+    private var allowBrowser = false
+    private var authToken: String?
+
+    init(port: UInt16 = 5765) {
+        self.listenPort = port
+    }
+
+    var port: UInt16 { listenPort }
+
+    // MARK: - Lifecycle
+
+    func start(transcriber: Transcriber, allowBrowser: Bool = false, authToken: String? = nil) {
+        stop()
+        self.transcriber = transcriber
+        self.allowBrowser = allowBrowser
+        // Treat empty/whitespace token as "no auth".
+        let trimmed = authToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.authToken = (trimmed?.isEmpty == false) ? trimmed : nil
+
+        guard let endpointPort = NWEndpoint.Port(rawValue: listenPort) else { return }
+
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        // Secondary loopback control: bias the listener to the loopback interface.
+        // The primary control is the per-connection remote-endpoint check in accept().
+        params.requiredInterfaceType = .loopback
+
+        do {
+            listener = try NWListener(using: params, on: endpointPort)
+        } catch {
+            print("LocalAPI: failed to create listener on port \(listenPort): \(error)")
+            return
+        }
+
+        listener?.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                print("LocalAPI (experimental): http://127.0.0.1:\(self?.listenPort ?? 0)/v1/audio/transcriptions")
+            case .failed(let error):
+                print("LocalAPI: listener failed: \(error)")
+            default:
+                break
+            }
+        }
+
+        listener?.newConnectionHandler = { [weak self] conn in
+            self?.accept(conn)
+        }
+
+        listener?.start(queue: serverQueue)
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+    }
+
+    // MARK: - Loopback enforcement
+
+    /// Returns true only if the connection's remote endpoint is loopback (127.0.0.1 / ::1).
+    /// Anything else (LAN, public) is rejected before any bytes are read.
+    static func isLoopback(_ endpoint: NWEndpoint) -> Bool {
+        switch endpoint {
+        case .hostPort(let host, _):
+            switch host {
+            case .ipv4(let addr):
+                return addr.isLoopback
+            case .ipv6(let addr):
+                return addr.isLoopback
+            case .name(let name, _):
+                let lower = name.lowercased()
+                return lower == "localhost" || lower == "127.0.0.1" || lower == "::1"
+            @unknown default:
+                return false
+            }
+        default:
+            // Unknown endpoint kind — fail closed.
+            return false
+        }
+    }
+
+    // MARK: - Connection handling
+
+    private func accept(_ conn: NWConnection) {
+        // PRIMARY loopback control: reject non-loopback remotes before reading bytes.
+        if !Self.isLoopback(conn.endpoint) {
+            print("LocalAPI: rejected non-loopback connection from \(conn.endpoint)")
+            conn.cancel()
+            return
+        }
+
+        // Per-connection idle timeout: cancel if no progress within idleTimeout.
+        let timer = DispatchSource.makeTimerSource(queue: requestQueue)
+        timer.schedule(deadline: .now() + Self.idleTimeout)
+        timer.setEventHandler { [weak conn] in
+            conn?.cancel()
+        }
+        timer.resume()
+
+        conn.start(queue: requestQueue)
+        accumulate(conn, data: Data(), idleTimer: timer)
+    }
+
+    private func accumulate(_ conn: NWConnection, data: Data, idleTimer: DispatchSourceTimer) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] chunk, _, isComplete, error in
+            guard let self = self else { idleTimer.cancel(); return }
+            if error != nil { idleTimer.cancel(); conn.cancel(); return }
+
+            // Bytes arrived — push the idle deadline forward.
+            idleTimer.schedule(deadline: .now() + Self.idleTimeout)
+
+            var buf = data
+            if let chunk = chunk { buf.append(chunk) }
+
+            if buf.count > Self.maxBodyBytes {
+                idleTimer.cancel()
+                self.send(conn, status: 413, body: #"{"error":"Request too large"}"#); return
+            }
+
+            guard let headerRange = self.findHeaderEnd(buf) else {
+                if isComplete { idleTimer.cancel(); conn.cancel(); return }
+                self.accumulate(conn, data: buf, idleTimer: idleTimer); return
+            }
+
+            let headerData = buf[buf.startIndex..<headerRange.lowerBound]
+            guard let headerStr = String(data: headerData, encoding: .utf8) else {
+                idleTimer.cancel()
+                self.send(conn, status: 400, body: #"{"error":"Bad headers"}"#); return
+            }
+
+            let bodyStart = headerRange.upperBound
+            let contentLength = self.parseContentLength(headers: headerStr)
+
+            // Reject oversize declared bodies up front (don't accumulate to OOM).
+            if contentLength > Self.maxBodyBytes {
+                idleTimer.cancel()
+                self.send(conn, status: 413, body: #"{"error":"Request too large"}"#); return
+            }
+
+            let bodyAvailable = buf.endIndex - bodyStart
+
+            if bodyAvailable < contentLength {
+                if isComplete { idleTimer.cancel(); conn.cancel(); return }
+                self.accumulate(conn, data: buf, idleTimer: idleTimer); return
+            }
+
+            idleTimer.cancel()
+            let body = Data(buf[bodyStart..<(bodyStart + contentLength)])
+            self.handle(conn: conn, headers: headerStr, body: body)
+        }
+    }
+
+    // MARK: - Request dispatch (pure decision split out for testing)
+
+    /// What the server should do with a parsed request. Pure, side-effect-free
+    /// so it can be unit-tested without a live socket.
+    enum RequestOutcome: Equatable {
+        case respond(status: Int, body: String, contentType: String)
+        case transcribe(fileData: Data, format: String)
+    }
+
+    /// Decide the outcome of a request from its already-parsed header string and body.
+    /// `authToken` nil => no auth required; non-nil => require matching bearer token.
+    static func evaluate(headers: String, body: Data, authToken: String?) -> RequestOutcome {
+        let lines = headers.components(separatedBy: "\r\n")
+        guard let requestLine = lines.first else {
+            return .respond(status: 400, body: #"{"error":"Bad request"}"#, contentType: "application/json")
+        }
+        let parts = requestLine.components(separatedBy: " ")
+        let method = parts.first?.uppercased() ?? ""
+        let path = parts.count >= 2 ? parts[1] : ""
+
+        if method == "OPTIONS" {
+            return .respond(status: 204, body: "", contentType: "application/json")
+        }
+
+        // Auth gate (applies to all non-preflight requests when a token is configured).
+        if let token = authToken {
+            if !bearerTokenMatches(headers: lines, expected: token) {
+                return .respond(status: 401,
+                                body: #"{"error":"Unauthorized"}"#,
+                                contentType: "application/json")
+            }
+        }
+
+        guard method == "POST", path.hasPrefix("/v1/audio/transcriptions") else {
+            return .respond(status: 404,
+                            body: #"{"error":"POST /v1/audio/transcriptions"}"#,
+                            contentType: "application/json")
+        }
+
+        var contentTypeLine = ""
+        for line in lines where line.lowercased().hasPrefix("content-type:") {
+            contentTypeLine = line; break
+        }
+
+        guard let boundary = extractBoundary(from: contentTypeLine) else {
+            return .respond(status: 400,
+                            body: #"{"error":"Expected multipart/form-data"}"#,
+                            contentType: "application/json")
+        }
+
+        let fields = parseMultipart(body: body, boundary: boundary)
+
+        guard let fileData = fields["file"], !fileData.isEmpty else {
+            return .respond(status: 400,
+                            body: #"{"error":"Missing 'file' field"}"#,
+                            contentType: "application/json")
+        }
+
+        let responseFormat = fields["response_format"].flatMap { String(data: $0, encoding: .utf8) } ?? "json"
+        return .transcribe(fileData: fileData, format: responseFormat)
+    }
+
+    /// Case-insensitive `Authorization: Bearer <token>` match.
+    static func bearerTokenMatches(headers lines: [String], expected: String) -> Bool {
+        for line in lines where line.lowercased().hasPrefix("authorization:") {
+            let value = line.dropFirst("authorization:".count).trimmingCharacters(in: .whitespaces)
+            // Expect "Bearer <token>" (scheme case-insensitive).
+            let comps = value.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard comps.count == 2, comps[0].lowercased() == "bearer" else { return false }
+            let presented = String(comps[1]).trimmingCharacters(in: .whitespaces)
+            return constantTimeEquals(presented, expected)
+        }
+        return false
+    }
+
+    /// Length-then-constant-time string comparison to avoid token timing leaks.
+    private static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+        let ab = Array(a.utf8)
+        let bb = Array(b.utf8)
+        if ab.count != bb.count { return false }
+        var diff: UInt8 = 0
+        for i in 0..<ab.count { diff |= ab[i] ^ bb[i] }
+        return diff == 0
+    }
+
+    private func handle(conn: NWConnection, headers: String, body: Data) {
+        switch Self.evaluate(headers: headers, body: body, authToken: authToken) {
+        case .respond(let status, let respBody, let ct):
+            send(conn, status: status, body: respBody, contentType: ct)
+        case .transcribe(let fileData, let format):
+            transcribeData(fileData, format: format, conn: conn)
+        }
+    }
+
+    // MARK: - Transcription
+
+    private func transcribeData(_ fileData: Data, format: String, conn: NWConnection) {
+        guard let transcriber = transcriber else {
+            send(conn, status: 503, body: #"{"error":"Transcription engine not ready"}"#); return
+        }
+
+        let tmpDir = Config.configDir.appendingPathComponent("tmp/api")
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        let tmpFile = tmpDir.appendingPathComponent("\(UUID().uuidString).audio")
+
+        do { try fileData.write(to: tmpFile) } catch {
+            send(conn, status: 500, body: #"{"error":"Failed to write temp file"}"#); return
+        }
+
+        Task {
+            defer { try? FileManager.default.removeItem(at: tmpFile) }
+            do {
+                let samples = try Self.decodePCM(from: tmpFile)
+                let text = try await transcriber.transcribe(audioURL: tmpFile, samples: samples)
+                let body: String
+                switch format {
+                case "text":
+                    body = text
+                default:
+                    body = #"{"text":"\#(Self.jsonEscape(text))"}"#
+                }
+                let ct = format == "text" ? "text/plain" : "application/json"
+                self.send(conn, status: 200, body: body, contentType: ct)
+            } catch {
+                self.send(conn, status: 500,
+                          body: #"{"error":"\#(Self.jsonEscape(error.localizedDescription))"}"#)
+            }
+        }
+    }
+
+    // MARK: - Audio decoding
+
+    static func decodePCM(from url: URL) throws -> [Float] {
+        let targetFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                      sampleRate: 16_000, channels: 1, interleaved: false)!
+        let srcFile = try AVAudioFile(forReading: url)
+        let srcFmt = srcFile.processingFormat
+        let srcFrames = AVAudioFrameCount(srcFile.length)
+
+        guard let srcBuf = AVAudioPCMBuffer(pcmFormat: srcFmt, frameCapacity: srcFrames) else {
+            throw LocalAPIError.audioDecodeFailed
+        }
+        try srcFile.read(into: srcBuf)
+
+        guard let converter = AVAudioConverter(from: srcFmt, to: targetFmt) else {
+            throw LocalAPIError.audioDecodeFailed
+        }
+
+        let ratio = targetFmt.sampleRate / srcFmt.sampleRate
+        let outCapacity = AVAudioFrameCount(Double(srcFrames) * ratio) + 1
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: targetFmt, frameCapacity: outCapacity) else {
+            throw LocalAPIError.audioDecodeFailed
+        }
+
+        var fed = false
+        var convErr: NSError?
+        converter.convert(to: outBuf, error: &convErr) { _, status in
+            if fed { status.pointee = .endOfStream; return nil }
+            fed = true; status.pointee = .haveData; return srcBuf
+        }
+        if let e = convErr { throw e }
+
+        let n = Int(outBuf.frameLength)
+        guard n > 0, let ch = outBuf.floatChannelData?[0] else { return [] }
+        return Array(UnsafeBufferPointer(start: ch, count: n))
+    }
+
+    // MARK: - HTTP parsing
+
+    private func findHeaderEnd(_ data: Data) -> Range<Data.Index>? {
+        data.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A]))
+    }
+
+    private func parseContentLength(headers: String) -> Int {
+        for line in headers.components(separatedBy: "\r\n") {
+            if line.lowercased().hasPrefix("content-length:") {
+                return Int(line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) ?? 0
+            }
+        }
+        return 0
+    }
+
+    static func extractBoundary(from line: String) -> String? {
+        for part in line.components(separatedBy: ";") {
+            let t = part.trimmingCharacters(in: .whitespaces)
+            if t.lowercased().hasPrefix("boundary=") {
+                return String(t.dropFirst("boundary=".count))
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Multipart parser
+
+    static func parseMultipart(body: Data, boundary: String) -> [String: Data] {
+        var result: [String: Data] = [:]
+        guard let delimData = ("--" + boundary).data(using: .utf8),
+              let crlf2 = "\r\n\r\n".data(using: .utf8) else { return result }
+
+        var search = body.startIndex..<body.endIndex
+
+        while let delimRange = body.range(of: delimData, in: search) {
+            let afterDelim = delimRange.upperBound
+
+            // Terminal boundary: ends with "--"
+            if afterDelim + 2 <= body.endIndex,
+               body[afterDelim..<(afterDelim + 2)] == Data([0x2D, 0x2D]) { break }
+
+            guard afterDelim + 2 <= body.endIndex else { break }
+            let hdrStart = afterDelim + 2  // skip \r\n after boundary line
+
+            guard let hdrEndRange = body.range(of: crlf2, in: hdrStart..<body.endIndex) else { break }
+            guard let hdrStr = String(data: body[hdrStart..<hdrEndRange.lowerBound], encoding: .utf8),
+                  let name = extractFieldName(from: hdrStr) else {
+                search = delimRange.upperBound..<body.endIndex; continue
+            }
+
+            let partBodyStart = hdrEndRange.upperBound
+
+            if let nextDelim = body.range(of: delimData, in: partBodyStart..<body.endIndex) {
+                let end = nextDelim.lowerBound - 2  // strip trailing \r\n before next boundary
+                result[name] = end > partBodyStart ? Data(body[partBodyStart..<end]) : Data()
+                search = nextDelim.lowerBound..<body.endIndex
+            } else {
+                result[name] = Data(body[partBodyStart...])
+                break
+            }
+        }
+
+        return result
+    }
+
+    static func extractFieldName(from headers: String) -> String? {
+        for line in headers.components(separatedBy: "\r\n") {
+            guard line.lowercased().contains("content-disposition:") else { continue }
+            for part in line.components(separatedBy: ";") {
+                let t = part.trimmingCharacters(in: .whitespaces)
+                if t.lowercased().hasPrefix("name=") {
+                    return String(t.dropFirst("name=".count))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                }
+            }
+        }
+        return nil
+    }
+
+    // MARK: - HTTP response
+
+    private func send(_ conn: NWConnection, status: Int, body: String,
+                      contentType: String = "application/json") {
+        let bodyData = body.data(using: .utf8) ?? Data()
+        let statusText: String
+        switch status {
+        case 200: statusText = "OK"
+        case 204: statusText = "No Content"
+        case 400: statusText = "Bad Request"
+        case 401: statusText = "Unauthorized"
+        case 404: statusText = "Not Found"
+        case 413: statusText = "Payload Too Large"
+        case 500: statusText = "Internal Server Error"
+        case 503: statusText = "Service Unavailable"
+        default:  statusText = "Unknown"
+        }
+        var headerLines = [
+            "HTTP/1.1 \(status) \(statusText)",
+            "Content-Type: \(contentType); charset=utf-8",
+            "Content-Length: \(bodyData.count)",
+            "Connection: close"
+        ]
+        // CORS only when the experimental browser opt-in is enabled.
+        if allowBrowser {
+            headerLines.append("Access-Control-Allow-Origin: *")
+            headerLines.append("Access-Control-Allow-Methods: POST, OPTIONS")
+            headerLines.append("Access-Control-Allow-Headers: Content-Type, Authorization")
+        }
+        if status == 401 {
+            headerLines.append("WWW-Authenticate: Bearer")
+        }
+        headerLines.append("")
+        headerLines.append("")
+        let header = headerLines.joined(separator: "\r\n")
+
+        var response = header.data(using: .utf8)!
+        response.append(bodyData)
+        conn.send(content: response, completion: .contentProcessed { _ in conn.cancel() })
+    }
+
+    private static func jsonEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "\"", with: "\\\"")
+         .replacingOccurrences(of: "\n", with: "\\n")
+         .replacingOccurrences(of: "\r", with: "\\r")
+         .replacingOccurrences(of: "\t", with: "\\t")
+    }
+}
+
+enum LocalAPIError: LocalizedError {
+    case audioDecodeFailed
+    var errorDescription: String? { "Failed to decode audio to PCM samples" }
+}

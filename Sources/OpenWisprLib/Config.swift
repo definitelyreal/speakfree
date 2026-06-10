@@ -23,6 +23,9 @@ public struct Config: Codable {
     public var parakeetModel: String?  // e.g. "parakeet-tdt-0.6b-v3" — nil = "parakeet-tdt-0.6b-v3"
     public var localAPI: FlexBool?  // nil = false — expose local transcription API
     public var localAPIPort: Int?   // nil = 5765
+    // Experimental local API hardening. The server is loopback-only regardless of these.
+    public var localAPIAllowBrowser: FlexBool?  // nil = false — gate any CORS (Access-Control-*) headers
+    public var localAPIToken: String?           // nil = no auth — when set, require "Authorization: Bearer <token>"
 
     // Sane shipped default — production builds always cap retained recordings.
     // (Was 0 = keep-everything-forever, which caused unbounded disk growth.)

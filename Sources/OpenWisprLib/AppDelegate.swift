@@ -487,7 +487,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 localAPIServer?.stop()
                 localAPIServer = LocalAPIServer(port: apiPort)
             }
-            localAPIServer?.start(transcriber: t)
+            localAPIServer?.start(transcriber: t,
+                                  allowBrowser: config.localAPIAllowBrowser?.value ?? false,
+                                  authToken: config.localAPIToken)
         } else {
             localAPIServer?.stop()
             localAPIServer = nil
