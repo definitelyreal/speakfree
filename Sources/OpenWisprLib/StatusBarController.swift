@@ -133,16 +133,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         settingsItem.keyEquivalentModifierMask = .command
         menu.addItem(settingsItem)
 
-        // Transcribe audio file
-        let transcribeTarget = MenuItemTarget { FileTranscriptionController.show() }
-        menuItemTargets.append(transcribeTarget)
-        let transcribeItem = NSMenuItem(title: "Transcribe Audio File…",
-                                        action: #selector(MenuItemTarget.invoke),
-                                        keyEquivalent: "t")
-        transcribeItem.target = transcribeTarget
-        transcribeItem.keyEquivalentModifierMask = .command
-        menu.addItem(transcribeItem)
-
         menu.addItem(NSMenuItem.separator())
 
         if let progress = downloadProgress {
@@ -248,6 +238,18 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         recentParent.submenu = recentMenu
         menu.addItem(recentParent)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Transcribe audio file — below Recent Dictations
+        let transcribeTarget = MenuItemTarget { FileTranscriptionController.show() }
+        menuItemTargets.append(transcribeTarget)
+        let transcribeItem = NSMenuItem(title: "Transcribe Audio File…",
+                                        action: #selector(MenuItemTarget.invoke),
+                                        keyEquivalent: "t")
+        transcribeItem.target = transcribeTarget
+        transcribeItem.keyEquivalentModifierMask = .command
+        menu.addItem(transcribeItem)
 
         menu.addItem(NSMenuItem.separator())
 

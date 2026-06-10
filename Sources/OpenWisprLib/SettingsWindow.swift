@@ -19,6 +19,7 @@ class SettingsWindowController: NSWindowController {
             }
         }
         NSApp.showDockIconIfNeeded()
+        NSApp.activate(ignoringOtherApps: true)
         shared?.showWindow(nil)
         shared?.window?.makeKeyAndOrderFront(nil)
 
