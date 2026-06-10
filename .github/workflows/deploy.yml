@@ -4,12 +4,11 @@ on:
   push:
     branches: [main]
     paths:
-      - 'index.html'
+      - 'docs/index.html'
       - 'demo.html'
       - 'robots.txt'
       - 'sitemap.xml'
       - 'logo.svg'
-      - 'og.png'
       - '_headers'
       - 'llms.txt'
 

@@ -9,6 +9,7 @@
 *.dmg
 *.psd
 *.png
+*.jsonl
 *conflicted*
 .playwright-mcp/
 .vscode/
