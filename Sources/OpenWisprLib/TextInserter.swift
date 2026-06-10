@@ -22,6 +22,14 @@ class TextInserter {
         AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
     }
 
+    /// Seam for the production text-insertion mechanism — the synthetic CGEvent keystrokes,
+    /// AX SelectedText writes, and clipboard paste performed by `pasteText`. Production leaves
+    /// this nil so the real `pasteText` runs. Tests inject a no-op (optionally recording the
+    /// text) so the suite can NEVER post real keyboard events or paste into whatever window is
+    /// frontmost on the developer's machine — the "ghost typing" failure mode where a unit test
+    /// types its own fixture text into the foreground app (see SecureInputTests).
+    var performInsertion: ((String) -> Void)?
+
     /// Check if a space should be prepended before inserting text.
     /// Returns true if the character before the cursor is a non-whitespace character.
     /// Runs AX queries with a 300ms timeout to avoid blocking on slow apps (Electron).
@@ -115,11 +123,11 @@ class TextInserter {
                     return false
                 }
             } else {
-                pasteText(text)
+                (performInsertion ?? pasteText)(text)
                 return true
             }
         } else {
-            pasteText(text)
+            (performInsertion ?? pasteText)(text)
             return true
         }
     }
