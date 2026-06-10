@@ -152,7 +152,14 @@ public final class ParakeetModelManager {
     // MARK: - Download state
 
     /// Whether the given model's weights are already present in FluidAudio's cache.
+    ///
+    /// Unknown ids return `false` up front: `version(for:)` silently maps any unrecognized id to
+    /// `.v3`, so without this guard a typo'd/tampered id would report "downloaded" whenever the real
+    /// v3 weights happen to be cached — falsely claiming an asset the catalog never advertised exists.
+    /// This mirrors the `isKnownModelID` guard already enforced by `ensureDownloaded`,
+    /// `downloadOnly`, and `loadDownloadedModels` (which throw `modelAssetsMissing` for unknown ids).
     public func isModelDownloaded(_ modelName: String) -> Bool {
+        guard isKnownModelID(modelName) else { return false }
         let v = version(for: modelName)
         return AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v)
     }
