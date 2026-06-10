@@ -28,7 +28,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         buildMenu()
     }
 
-    enum State {
+    enum State: Equatable {
         case idle
         case recording
         case transcribing
@@ -36,6 +36,9 @@ class StatusBarController: NSObject, NSMenuDelegate {
         case waitingForPermission
         case copiedToClipboard
         case noModel
+        /// Setup threw a fatal error. The process stays alive so the user can read the
+        /// error text in the menu and quit cleanly.
+        case setupFailed(message: String)
     }
 
     var state: State = .idle {
@@ -153,8 +156,17 @@ class StatusBarController: NSObject, NSMenuDelegate {
             case .waitingForPermission: stateText = "⚠️ Grant Accessibility Permission →"
             case .copiedToClipboard: stateText = "Copied to clipboard"
             case .noModel: stateText = "⚠️ No model — open Settings to download"
+            case .setupFailed(let message): stateText = "⛔ Setup failed: \(message)"
             }
-            if case .waitingForPermission = state {
+            if case .setupFailed = state {
+                // Show the error message as a disabled item so the user can read it.
+                // The process stays alive; the Quit item at the bottom of the menu lets the
+                // user exit cleanly.
+                let errorItem = NSMenuItem(title: stateText, action: nil, keyEquivalent: "")
+                errorItem.isEnabled = false
+                menu.addItem(errorItem)
+                menu.addItem(NSMenuItem.separator())
+            } else if case .waitingForPermission = state {
                 let target = MenuItemTarget {
                     // Clear the stale TCC entry then re-prompt
                     let task = Process()
@@ -296,6 +308,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
             setIcon(StatusBarController.drawCheckmarkIcon())
         case .noModel:
             setIcon(StatusBarController.drawNoModelIcon())
+        case .setupFailed:
+            setIcon(StatusBarController.drawErrorIcon())
         }
     }
 
@@ -548,6 +562,41 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 path.lineWidth = 0.8
                 path.stroke()
             }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    /// Exclamation mark in a circle — drawn for the `.setupFailed` state.
+    static func drawErrorIcon() -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.black.setStroke()
+            NSColor.black.setFill()
+
+            let centerX = rect.midX
+            let centerY = rect.midY
+            let radius: CGFloat = 7.0
+
+            // Circle outline
+            let circlePath = NSBezierPath(ovalIn: NSRect(x: centerX - radius, y: centerY - radius,
+                                                         width: radius * 2, height: radius * 2))
+            circlePath.lineWidth = 1.5
+            circlePath.stroke()
+
+            // Exclamation bar
+            let barPath = NSBezierPath()
+            barPath.move(to: NSPoint(x: centerX, y: centerY + 3.5))
+            barPath.line(to: NSPoint(x: centerX, y: centerY - 0.5))
+            barPath.lineWidth = 2.0
+            barPath.lineCapStyle = .round
+            barPath.stroke()
+
+            // Exclamation dot
+            let dotRect = NSRect(x: centerX - 1.0, y: centerY - 3.5, width: 2.0, height: 2.0)
+            NSBezierPath(ovalIn: dotRect).fill()
+
             return true
         }
         image.isTemplate = true
