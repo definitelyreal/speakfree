@@ -18,6 +18,10 @@ final class SecureInputTests: XCTestCase {
     private func makeInserter(secureInput: Bool) -> TextInserter {
         let inserter = TextInserter()
         inserter.isSecureInputActive = { secureInput }
+        // Ghost-typing guard: stub the real insertion mechanism so NO test can ever post
+        // synthetic CGEvent keystrokes or paste into whatever window happens to be frontmost
+        // on the dev's machine. Tests that need to observe the inserted text override this.
+        inserter.performInsertion = { _ in }
         return inserter
     }
 
@@ -65,10 +69,20 @@ final class SecureInputTests: XCTestCase {
     /// (Focus might still be lost for other reasons, but not from the secure-input guard.)
     func test_noSecureInput_guardDoesNotFireCallback() {
         let inserter = makeInserter(secureInput: false)
+        // Override the ghost-typing stub to RECORD what gets routed to insertion. Without the
+        // performInsertion seam this line would post real keystrokes / paste "normal text" into
+        // the frontmost window on the host (the bug that started this whole investigation).
+        var inserted: String?
+        inserter.performInsertion = { inserted = $0 }
+
         var callbackFired = false
         // No element → pasteText() path → secure-input guard must not fire the callback.
         inserter.insert(text: "normal text", onFocusLost: { callbackFired = true })
-        XCTAssertFalse(callbackFired, "onFocusLost must not be called by the secure-input guard when secure input is off")
+
+        XCTAssertEqual(inserted, "normal text",
+                       "guard-off path must route the text to the (stubbed) insertion mechanism")
+        XCTAssertFalse(callbackFired,
+                       "onFocusLost must not be called by the secure-input guard when secure input is off")
     }
 
     // MARK: - async refocus path re-checks secure input after focus-settle delay
