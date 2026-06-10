@@ -66,17 +66,17 @@ jobs:
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
         run: |
           mkdir -p ~/.config/speakfree
-          cat > ~/.config/speakfree/config.json << 'EOF'
-          {
-            "modelSize": "tiny.en",
-            "engine": "whisper",
-            "language": "en",
-            "maxRecordings": 30,
-            "rememberWords": true,
-            "screenContext": true,
-            "spokenPunctuation": "hybrid"
-          }
-          EOF
+          printf '%s\n' \
+            '{' \
+            '  "hotkey": {"keyCode": 63, "modifiers": []},' \
+            '  "modelSize": "tiny.en",' \
+            '  "engine": "whisper",' \
+            '  "language": "en",' \
+            '  "maxRecordings": 30,' \
+            '  "rememberWords": true,' \
+            '  "screenContext": true,' \
+            '  "spokenPunctuation": "hybrid"' \
+            '}' > ~/.config/speakfree/config.json
 
       - name: Unit tests
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
