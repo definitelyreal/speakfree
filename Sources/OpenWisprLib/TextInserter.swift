@@ -9,6 +9,11 @@ class TextInserter {
     private var cachedVKeyCode: CGKeyCode?
     private var cachedInputSourceID: String?
 
+    /// Seam for Secure Input detection. Defaults to the real Carbon API so production
+    /// behaviour is unchanged. Tests can inject `{ false }` or `{ true }` to simulate a
+    /// password field without needing a real secure-input context.
+    var isSecureInputActive: () -> Bool = { IsSecureEventInputEnabled() }
+
     /// Check if a space should be prepended before inserting text.
     /// Returns true if the character before the cursor is a non-whitespace character.
     /// Runs AX queries with a 300ms timeout to avoid blocking on slow apps (Electron).
@@ -51,8 +56,20 @@ class TextInserter {
 
     // Paste text, optionally refocusing the element that was active when recording started.
     // Returns true if text was pasted, false if focus couldn't be restored (text copied to clipboard instead).
+    //
+    // Secure Input guard — covers ALL insertion paths (AX, keystroke, clipboard, refocus).
+    // When a password field (or any app with Secure Event Input) is active, we must not
+    // inject keystrokes or paste. Fall back to the same copy-only affordance used when
+    // focus is lost: text lands on the clipboard and the caller is notified via onFocusLost.
     @discardableResult
     func insert(text: String, refocusing element: AXUIElement? = nil, onFocusLost: (() -> Void)? = nil) -> Bool {
+        if isSecureInputActive() {
+            DiagnosticLogger.shared.log("TextInserter: Secure Input is active — copying to clipboard instead of inserting")
+            copyToClipboard(text)
+            onFocusLost?()
+            return false
+        }
+
         if let element = element {
             let currentElement = currentFocusedElement()
             let sameElement = currentElement.map { CFEqual($0, element) } ?? false
@@ -98,14 +115,8 @@ class TextInserter {
     }
 
     private func pasteText(_ text: String) {
-        // Refuse to insert text when Secure Input is active (e.g. password fields).
-        // CGEventTap is not disabled — the tap re-enables itself via kCGEventTapDisabled*
-        // handling in HotkeyManager. We just skip the insertion so passwords stay safe.
-        if IsSecureEventInputEnabled() {
-            DiagnosticLogger.shared.log("TextInserter: skipping insertion — Secure Input is enabled (password field?)")
-            return
-        }
-
+        // Note: Secure Input is checked at insert() — the entry point for all paths — so it
+        // is guaranteed inactive by the time pasteText() is reached.
         let frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
         let isRemote = isRemoteDesktopFrontmost()
         let isBroken = shouldUseClipboardPaste()
