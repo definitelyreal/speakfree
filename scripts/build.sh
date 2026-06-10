@@ -15,6 +15,9 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # at model load. See scripts/vendor/dylibs/README.md.
 VENDOR_DIR="$(dirname "$0")/vendor/dylibs"
 
+echo "Checking version consistency..."
+bash "$(dirname "$0")/check-version.sh"
+
 echo "Building speakfree v${VERSION}..."
 xcrun swift build -c release
 
