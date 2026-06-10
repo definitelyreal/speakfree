@@ -25,6 +25,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install whisper-cpp
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        run: brew install whisper-cpp
+
       - name: Build
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
         run: swift build -c release
@@ -46,6 +50,10 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install whisper-cpp
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        run: brew install whisper-cpp
 
       - name: Cache tiny.en whisper model
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
@@ -111,6 +119,9 @@ jobs:
 
       - name: Install shellcheck
         run: brew install shellcheck
+
+      - name: Install whisper-cpp
+        run: brew install whisper-cpp
 
       - name: Install smoke test
         run: bash scripts/test-install.sh
