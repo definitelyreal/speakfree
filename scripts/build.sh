@@ -33,6 +33,13 @@ cp "Resources/Info.plist" "$APP/Contents/Info.plist"
 echo "Copying main binary..."
 cp .build/release/speakfree "$APP/Contents/MacOS/speakfree"
 
+echo "Verifying vendored dylib checksums..."
+# Fail the build if any vendored binary has been tampered with or accidentally replaced.
+# To regenerate after an intentional vendor update:
+#   cd scripts/vendor/dylibs && shasum -a 256 *.dylib whisper-cli > checksums.sha256
+(cd "$VENDOR_DIR" && shasum -a 256 -c checksums.sha256 --strict)
+echo "Vendored dylib checksums OK."
+
 echo "Bundling whisper-cli..."
 mkdir -p "$APP/Contents/Frameworks"
 cp "$VENDOR_DIR/whisper-cli" "$APP/Contents/MacOS/whisper-cli"
