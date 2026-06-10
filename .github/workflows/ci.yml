@@ -47,6 +47,14 @@ jobs:
         if: steps.filter.outputs.swift == 'true'
         run: swift test
 
+  version-check:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version consistency check
+        run: bash scripts/check-version.sh
+
   install-test:
     runs-on: macos-15
     steps:
