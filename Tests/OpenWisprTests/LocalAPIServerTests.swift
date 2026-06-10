@@ -327,6 +327,74 @@ final class LocalAPIServerTests: XCTestCase {
     func testMaxConcurrentConnectionsConstant() {
         XCTAssertEqual(LocalAPIServer.maxConcurrentConnections, 16)
     }
+
+    // MARK: - AR-1 round 2: Content-Length parsing must be crash-proof
+    //
+    // Regression for the High finding: parseContentLength previously returned
+    // `Int(...) ?? 0` with no lower-bound check, so "Content-Length: -1" yielded -1,
+    // which slid past the oversize (line: -1 > 32MB == false) and under-read
+    // (line: bodyAvailable < -1 == false) gates and reached the body slice as an
+    // INVERTED Range (`buf[bodyStart..<(bodyStart - 1)]`), trapping with
+    // "Range requires lowerBound <= upperBound" and killing the whole dictation app —
+    // from a single unauthenticated loopback request, BEFORE the Host/token gates.
+
+    private func headerWith(contentLength raw: String) -> String {
+        // The accumulate() path hands parseContentLength the header block (CRLF-joined).
+        return [
+            "POST /v1/audio/transcriptions HTTP/1.1",
+            "Host: 127.0.0.1",
+            "Content-Length: \(raw)",
+        ].joined(separator: "\r\n")
+    }
+
+    /// A negative Content-Length is rejected as `.invalid` — never returned as a negative Int
+    /// that could form an inverted body Range. THIS is the crash that took down the app.
+    func testParseContentLength_negative_isInvalid() {
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headerWith(contentLength: "-1")), .invalid)
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headerWith(contentLength: "-9999999")), .invalid)
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headerWith(contentLength: "-100")), .invalid)
+    }
+
+    /// Non-numeric / malformed values are `.invalid` (→ 400), not silently coerced to 0.
+    func testParseContentLength_garbage_isInvalid() {
+        for bad in ["abc", "1.5", "0x10", "1 2", "12abc", "+5", " ", "\t", "１２３" /* full-width */] {
+            XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headerWith(contentLength: bad)),
+                           .invalid, "expected .invalid for \(bad.debugDescription)")
+        }
+    }
+
+    /// An empty Content-Length value is `.invalid` (present-but-garbage), not absent.
+    func testParseContentLength_emptyValue_isInvalid() {
+        // "Content-Length:" with nothing after → trimmed to "" → invalid.
+        let headers = "POST / HTTP/1.1\r\nContent-Length:\r\nHost: 127.0.0.1"
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headers), .invalid)
+    }
+
+    /// A value that overflows Int is `.invalid`, not a wrapped/negative number.
+    func testParseContentLength_overflow_isInvalid() {
+        let huge = "99999999999999999999999999999999"  // > Int.max
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headerWith(contentLength: huge)), .invalid)
+    }
+
+    /// A valid non-negative integer parses to `.valid(n)` (the caller still oversize-checks it).
+    func testParseContentLength_validValues() {
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headerWith(contentLength: "0")), .valid(0))
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headerWith(contentLength: "4")), .valid(4))
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headerWith(contentLength: "  42  ")), .valid(42))
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headerWith(contentLength: "\(Int.max)")), .valid(Int.max))
+    }
+
+    /// When the header is absent entirely, parsing reports `.absent` (caller treats body as 0).
+    func testParseContentLength_absent() {
+        let headers = "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain"
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headers), .absent)
+    }
+
+    /// Header-name match is case-insensitive (HTTP allows any casing).
+    func testParseContentLength_caseInsensitiveName() {
+        let headers = "POST / HTTP/1.1\r\nCONTENT-LENGTH: 7\r\nHost: 127.0.0.1"
+        XCTAssertEqual(LocalAPIServer.parseContentLength(headers: headers), .valid(7))
+    }
 }
 
 /// Test-only convenience to read the status code out of a RequestOutcome.

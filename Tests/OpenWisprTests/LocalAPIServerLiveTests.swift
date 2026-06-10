@@ -276,6 +276,63 @@ final class LocalAPIServerLiveTests: XCTestCase {
                        "No CORS headers when the browser opt-in is off")
     }
 
+    // MARK: - AR-1 round 2: negative Content-Length must NOT crash the process
+
+    /// Send a raw HTTP request with `Content-Length: -1` (the exact crash probe) over a real
+    /// loopback socket and confirm: (1) the server process is still alive afterwards, and
+    /// (2) it answered 400 "Invalid Content-Length" rather than trapping on an inverted Range.
+    ///
+    /// Before the fix this killed the whole test process with
+    /// "Fatal error: Range requires lowerBound <= upperBound" (signal 5) — and crucially it
+    /// fired BEFORE the Host/token gates, so even `Host: evil.com` with no bearer token crashed.
+    func testLiveNegativeContentLengthDoesNotCrash() throws {
+        try skipIfDisabled()
+        startServer(token: "s3cr3t-token")  // token set AND attacker Host below → must still NOT crash
+
+        // Raw socket write via python3: send the literal malicious request and read the reply.
+        // Host is an attacker origin and there's NO Authorization header — proving the crash
+        // path is reachable before either gate, so the fix must short-circuit even here.
+        let script = """
+        import socket, sys
+        s = socket.create_connection(("127.0.0.1", \(Self.livePort)), timeout=5)
+        req = (b"POST /v1/audio/transcriptions HTTP/1.1\\r\\n"
+               b"Host: evil.com\\r\\n"
+               b"Content-Length: -1\\r\\n"
+               b"\\r\\n"
+               b"ABCD")
+        s.sendall(req)
+        try:
+            data = s.recv(4096)
+        except Exception as e:
+            data = b""
+        sys.stdout.write(data.decode("latin-1"))
+        """
+        let (out, code) = shell("/usr/bin/python3", ["-c", script], timeout: 12)
+        print("PROOF[AR-1 r2 neg-CL] raw 'Content-Length: -1' over loopback => exit=\(code) reply:\n\(out)")
+
+        // The server must have replied (not died mid-handshake) with a 400.
+        XCTAssertTrue(out.contains("400"),
+                      "Negative Content-Length must yield 400, got reply:\n\(out)")
+        XCTAssertTrue(out.contains("Invalid Content-Length"),
+                      "Expected the Invalid Content-Length body, got:\n\(out)")
+
+        // PROOF the process survived: issue a SECOND well-formed request and get a normal answer.
+        // If the negative-CL request had crashed the listener, this would fail to connect.
+        let (status2, code2) = shell("/usr/bin/curl", [
+            "-s", "-S", "--max-time", "8",
+            "-o", "/dev/null", "-w", "%{http_code}",
+            "-X", "POST",
+            "-H", "Authorization: Bearer s3cr3t-token",
+            "-H", "Content-Type: multipart/form-data; boundary=zzz",
+            "--data-binary", "garbage",
+            "http://127.0.0.1:\(Self.livePort)/v1/audio/transcriptions"
+        ])
+        print("PROOF[AR-1 r2 survives] post-attack request status=\(status2) exit=\(code2)")
+        XCTAssertEqual(code2, 0, "Server died after the negative-CL request — listener no longer reachable")
+        XCTAssertEqual(status2.trimmingCharacters(in: .whitespaces), "400",
+                       "Server should still serve normal requests after a negative-CL probe")
+    }
+
     // (d) With a token set, an unauthenticated 127.0.0.1 request -> 401.
     func testLiveTokenUnauthenticatedRequestGets401() throws {
         try skipIfDisabled()
