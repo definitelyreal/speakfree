@@ -5,8 +5,11 @@ final class ConfigTests: XCTestCase {
 
     // MARK: - effectiveMaxRecordings
 
-    func testEffectiveMaxRecordingsNilDefaultsToZero() {
-        XCTAssertEqual(Config.effectiveMaxRecordings(nil), 0)
+    func testEffectiveMaxRecordingsNilDefaultsToDefaultMaxRecordings() {
+        // Shipped default: nil maxRecordings falls back to Config.defaultMaxRecordings (30),
+        // so production builds always prune. (Was 0 = keep-forever, which grew disk unbounded.)
+        XCTAssertEqual(Config.effectiveMaxRecordings(nil), Config.defaultMaxRecordings)
+        XCTAssertEqual(Config.effectiveMaxRecordings(nil), 30)
     }
 
     func testEffectiveMaxRecordingsZero() {
@@ -85,7 +88,8 @@ final class ConfigTests: XCTestCase {
         """.data(using: .utf8)!
         let config = try Config.decode(from: json)
         XCTAssertNil(config.maxRecordings)
-        XCTAssertEqual(Config.effectiveMaxRecordings(config.maxRecordings), 0)
+        // A config that omits maxRecordings resolves to the shipped default (30), not 0.
+        XCTAssertEqual(Config.effectiveMaxRecordings(config.maxRecordings), Config.defaultMaxRecordings)
     }
 
     // MARK: - toggleMode decoding
