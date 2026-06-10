@@ -77,39 +77,51 @@ final class SecureInputTests: XCTestCase {
     /// synchronous guard passes but before the async closure fires), the closure must
     /// fall back to the copy-only affordance rather than posting AX or paste events.
     ///
-    /// Setup: seam starts false (sync guard passes, async path is dispatched), then
-    /// flips to true before the async closure executes. We verify that onFocusLost
-    /// is called from the async closure (the clipboard fallback fires).
+    /// Setup: the secure-input seam starts false (the sync guard at insert() entry
+    /// passes) and the refocus seam is injected to return true, so the 150ms
+    /// focus-settle closure IS dispatched. The secure-input seam then flips to true
+    /// before the closure executes. The closure's re-check must consult the seam a
+    /// second time and fall back to copy-only (onFocusLost fires asynchronously)
+    /// without touching AX or paste.
     func test_secureInput_asyncRefocusPathRechecksBeforeInserting() {
-        let exp = expectation(description: "async re-check fires onFocusLost")
+        let exp = expectation(description: "async re-check fires onFocusLost from the closure")
         let inserter = TextInserter()
 
-        // Start with secure input OFF so the synchronous guard is passed.
+        // Start with secure input OFF so the synchronous guard at insert() entry passes.
         var secureInputIsOn = false
-        inserter.isSecureInputActive = { secureInputIsOn }
+        var secureInputChecks = 0
+        inserter.isSecureInputActive = {
+            secureInputChecks += 1
+            return secureInputIsOn
+        }
+        // Force the refocus branch to "succeed" so the async closure is dispatched —
+        // a real AX refocus can never succeed in a headless test runner.
+        var refocusCalled = false
+        inserter.refocusElement = { _ in
+            refocusCalled = true
+            return true
+        }
 
-        // Use a system-wide AX element as the "refocus" target so the refocus branch is taken.
-        // The refocus itself will fail (system-wide element is not focusable) which means
-        // the async DispatchQueue.main.asyncAfter is NOT dispatched — only the refocused==true
-        // branch dispatches it. To reach the async path we need a refocused==true scenario.
-        //
-        // Because we cannot actually refocus a real element in headless tests, we verify the
-        // seam contract at the sync guard level: when secureInputIsOn is toggled to true
-        // BEFORE the call, the guard fires immediately and onFocusLost is invoked.
-        // The async re-check (added in this patch) is integration-tested implicitly —
-        // its correctness is guaranteed by the fact that self.isSecureInputActive() in the
-        // closure references the same mutable seam, which tests can toggle.
-        secureInputIsOn = true
         var callbackFired = false
         let bogusElement = AXUIElementCreateSystemWide()
-        inserter.insert(text: "secret", refocusing: bogusElement, onFocusLost: {
+        let scheduled = inserter.insert(text: "secret", refocusing: bogusElement, onFocusLost: {
             callbackFired = true
             exp.fulfill()
         })
 
-        // onFocusLost fires synchronously when guard trips at entry.
-        wait(for: [exp], timeout: 1.0)
-        XCTAssertTrue(callbackFired, "onFocusLost must fire when secure input is active at call time")
+        // The sync guard passed and the async path was scheduled.
+        XCTAssertTrue(scheduled, "insert must return true when the refocus path is scheduled")
+        XCTAssertTrue(refocusCalled, "the refocus seam must be consulted")
+        XCTAssertFalse(callbackFired, "onFocusLost must NOT have fired synchronously")
+        XCTAssertEqual(secureInputChecks, 1, "exactly one secure-input check (entry guard) before the closure runs")
+
+        // Secure input becomes active during the 150ms focus-settle window.
+        secureInputIsOn = true
+
+        // The closure's re-check must consult the seam again and fall back to copy-only.
+        wait(for: [exp], timeout: 2.0)
+        XCTAssertTrue(callbackFired, "the async re-check must fire onFocusLost when secure input became active mid-settle")
+        XCTAssertEqual(secureInputChecks, 2, "the async closure must re-check secure input (second seam consultation)")
     }
 
     // MARK: - seam default produces a real Bool (smoke test)
