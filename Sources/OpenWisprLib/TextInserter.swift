@@ -14,6 +14,14 @@ class TextInserter {
     /// password field without needing a real secure-input context.
     var isSecureInputActive: () -> Bool = { IsSecureEventInputEnabled() }
 
+    /// Seam for the AX refocus operation. Defaults to the real AX call so production
+    /// behaviour is unchanged. Tests inject `{ _ in true }` to reach the async
+    /// focus-settle closure, which is otherwise unreachable headless (a real refocus
+    /// never succeeds in a test runner).
+    var refocusElement: (AXUIElement) -> Bool = { element in
+        AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+    }
+
     /// Check if a space should be prepended before inserting text.
     /// Returns true if the character before the cursor is a non-whitespace character.
     /// Runs AX queries with a 300ms timeout to avoid blocking on slow apps (Electron).
@@ -75,7 +83,7 @@ class TextInserter {
             let sameElement = currentElement.map { CFEqual($0, element) } ?? false
 
             if !sameElement {
-                let refocused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+                let refocused = refocusElement(element)
                 if refocused {
                     // Use non-blocking delay for focus to settle, then insert.
                     // Re-check secure input inside the closure: the system could enable it
