@@ -31,8 +31,10 @@ public class ModelDownloader {
     // MARK: - SHA256 verification (seam-injectable for testing)
 
     /// Compute the SHA256 hex digest of a file on disk.
-    /// This closure is overridable in tests to inject deterministic behaviour without disk I/O.
-    public static var computeSHA256: (URL) throws -> String = { url in
+    /// This closure is a TEST SEAM, overridable in tests to inject deterministic behaviour
+    /// without disk I/O. Audit AR-1: the setter is `internal` so external code cannot swap the
+    /// hasher to bypass integrity checks — only this module (and `@testable` tests) can.
+    public internal(set) static var computeSHA256: (URL) throws -> String = { url in
         var hasher = SHA256()
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
@@ -51,7 +53,13 @@ public class ModelDownloader {
     /// - Throws `ModelDownloadError.hashMismatch` if a known hash exists and does not match.
     public static func verifySHA256(modelSize: String, at url: URL) throws {
         guard let expected = knownSHA256[modelSize] else {
-            // No entry in the table — can't verify, pass through.
+            // No entry in the table — can't verify, pass through. This is intentional and
+            // scoped: every shipped whisper model size IS in `knownSHA256`; Parakeet models go
+            // through FluidAudio's own integrity path, not here. Audit AR-1: make the
+            // unverified case observable rather than silent, so a typo / new model name that
+            // slips past the table is visible in diagnostics instead of failing open quietly.
+            DiagnosticLogger.shared.log(
+                "ModelDownloader: no known SHA256 for '\(modelSize)' — integrity NOT verified (table-scoped)")
             return
         }
         let actual = try computeSHA256(url)

@@ -11,10 +11,19 @@ import AVFoundation
 ///    cancelled before any bytes are read (primary), and the listener requests the
 ///    `.loopback` interface type (secondary). We do NOT use `requiredLocalEndpoint`
 ///    (wrong API for a listener).
-///  - No wildcard CORS. Access-Control-* headers are only emitted when
-///    `localAPIAllowBrowser` is enabled.
+///  - DNS-rebinding defense (audit AR-1): the HTTP `Host` header is validated against a
+///    loopback allowlist (127.0.0.1 / localhost / [::1], any port). A browser page on
+///    `evil.com` rebound to 127.0.0.1 IS a loopback TCP peer, so the remote-endpoint check
+///    alone cannot stop it — but its requests still carry `Host: evil.com`, which we reject
+///    with `421 Misdirected Request` before any handler runs.
+///  - No wildcard CORS (audit AR-1). When `localAPIAllowBrowser` is enabled we reflect the
+///    request `Origin` back in `Access-Control-Allow-Origin` ONLY if that origin is itself a
+///    loopback origin; all other origins get no CORS headers, so a cross-origin page cannot
+///    read the response even if it reaches the socket.
 ///  - Request body capped at 32 MB (413 over).
 ///  - Per-connection idle timeout cancels stalled reads.
+///  - Concurrent connections capped (audit AR-1); excess connections are dropped before any
+///    buffer is allocated, bounding worst-case memory.
 ///  - Optional `Authorization: Bearer <token>` when `localAPIToken` is set (else loopback-only).
 final class LocalAPIServer {
 
@@ -22,6 +31,9 @@ final class LocalAPIServer {
     static let maxBodyBytes = 32 * 1_024 * 1_024
     /// Idle timeout: a connection that sends no bytes for this long is cancelled.
     static let idleTimeout: TimeInterval = 30
+    /// Maximum simultaneously-accepted connections. Excess connections are cancelled
+    /// immediately (before any 32 MB buffer can be allocated) to bound memory under abuse.
+    static let maxConcurrentConnections = 16
 
     private var listener: NWListener?
     private weak var transcriber: Transcriber?
@@ -32,6 +44,11 @@ final class LocalAPIServer {
     // Hardening config, captured at start().
     private var allowBrowser = false
     private var authToken: String?
+
+    // Concurrent-connection cap (audit AR-1). Mutated only on `serverQueue` (the listener's
+    // newConnectionHandler queue) and decremented from the same queue, so no extra locking.
+    private var activeConnections = 0
+    private let connectionCountLock = NSLock()
 
     init(port: UInt16 = 5765) {
         self.listenPort = port
@@ -85,6 +102,9 @@ final class LocalAPIServer {
     func stop() {
         listener?.cancel()
         listener = nil
+        connectionCountLock.lock()
+        activeConnections = 0
+        connectionCountLock.unlock()
     }
 
     // MARK: - Loopback enforcement
@@ -111,6 +131,51 @@ final class LocalAPIServer {
         }
     }
 
+    // MARK: - DNS-rebinding defense (audit AR-1)
+
+    /// True if `host` (an HTTP `Host` header value or the host part of an `Origin`) names a
+    /// loopback address. Accepts an optional `:port` suffix and bracketed IPv6 literals.
+    /// Examples that pass: `127.0.0.1`, `127.0.0.1:5765`, `localhost`, `localhost:5765`,
+    /// `[::1]`, `[::1]:5765`. Anything else (a rebound `evil.com`, a LAN IP) fails closed.
+    static func isLoopbackHost(_ host: String) -> Bool {
+        var h = host.trimmingCharacters(in: .whitespaces).lowercased()
+        if h.isEmpty { return false }
+
+        // Bracketed IPv6 literal: [::1] or [::1]:port
+        if h.hasPrefix("[") {
+            guard let close = h.firstIndex(of: "]") else { return false }
+            let inner = String(h[h.index(after: h.startIndex)..<close])
+            return inner == "::1" || inner == "0:0:0:0:0:0:0:1"
+        }
+
+        // Strip a trailing :port (only one colon — bare IPv6 without brackets is invalid in Host).
+        if let colon = h.lastIndex(of: ":"), h.firstIndex(of: ":") == colon {
+            h = String(h[h.startIndex..<colon])
+        }
+
+        return h == "127.0.0.1" || h == "localhost" || h == "::1"
+        // Note: 127.0.0.0/8 is all loopback, but browsers/clients use 127.0.0.1; keep the
+        // allowlist tight rather than parsing the whole /8.
+    }
+
+    /// True if `origin` (a full `Origin` header value, e.g. `http://127.0.0.1:5765`) is a
+    /// loopback origin. Used to decide whether to reflect it in `Access-Control-Allow-Origin`.
+    static func isLoopbackOrigin(_ origin: String) -> Bool {
+        let o = origin.trimmingCharacters(in: .whitespaces)
+        guard let url = URL(string: o), let host = url.host else { return false }
+        // Reconstruct host[:port] the way isLoopbackHost expects (bracket IPv6 if needed).
+        return isLoopbackHost(host.contains(":") ? "[\(host)]" : host)
+    }
+
+    /// Extract the value of the first header line matching `name:` (case-insensitive).
+    static func headerValue(_ name: String, in lines: [String]) -> String? {
+        let prefix = name.lowercased() + ":"
+        for line in lines where line.lowercased().hasPrefix(prefix) {
+            return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+        }
+        return nil
+    }
+
     // MARK: - Connection handling
 
     private func accept(_ conn: NWConnection) {
@@ -119,6 +184,31 @@ final class LocalAPIServer {
             print("LocalAPI: rejected non-loopback connection from \(conn.endpoint)")
             conn.cancel()
             return
+        }
+
+        // Concurrent-connection cap (audit AR-1): reject before allocating any read buffer so a
+        // flood of stalled connections can't each pin up to 32 MB. We reserve a slot atomically;
+        // if the cap is hit, drop immediately.
+        guard reserveConnectionSlot() else {
+            print("LocalAPI: connection cap (\(Self.maxConcurrentConnections)) reached — dropping")
+            conn.cancel()
+            return
+        }
+
+        // Release the slot exactly once when the connection leaves the active state.
+        var slotReleased = false
+        let releaseSlot: () -> Void = { [weak self] in
+            if slotReleased { return }
+            slotReleased = true
+            self?.releaseConnectionSlot()
+        }
+        conn.stateUpdateHandler = { state in
+            switch state {
+            case .cancelled, .failed:
+                releaseSlot()
+            default:
+                break
+            }
         }
 
         // Per-connection idle timeout: cancel if no progress within idleTimeout.
@@ -131,6 +221,29 @@ final class LocalAPIServer {
 
         conn.start(queue: requestQueue)
         accumulate(conn, data: Data(), idleTimer: timer)
+    }
+
+    /// Atomically reserve a connection slot. Returns false if the cap is already reached.
+    private func reserveConnectionSlot() -> Bool {
+        connectionCountLock.lock()
+        defer { connectionCountLock.unlock() }
+        if activeConnections >= Self.maxConcurrentConnections { return false }
+        activeConnections += 1
+        return true
+    }
+
+    /// Release a previously-reserved connection slot.
+    private func releaseConnectionSlot() {
+        connectionCountLock.lock()
+        defer { connectionCountLock.unlock() }
+        if activeConnections > 0 { activeConnections -= 1 }
+    }
+
+    /// Current active-connection count (test/observability helper).
+    var currentActiveConnections: Int {
+        connectionCountLock.lock()
+        defer { connectionCountLock.unlock() }
+        return activeConnections
     }
 
     private func accumulate(_ conn: NWConnection, data: Data, idleTimer: DispatchSourceTimer) {
@@ -202,6 +315,17 @@ final class LocalAPIServer {
         let method = parts.first?.uppercased() ?? ""
         let path = parts.count >= 2 ? parts[1] : ""
 
+        // DNS-rebinding defense (audit AR-1): the TCP peer being loopback is NOT sufficient —
+        // a page on evil.com rebound to 127.0.0.1 connects over loopback but sends
+        // `Host: evil.com`. Require a loopback Host before any handler (including the OPTIONS
+        // preflight, so a rebound origin can never coax CORS headers out of us).
+        let hostHeader = headerValue("Host", in: lines) ?? ""
+        if !isLoopbackHost(hostHeader) {
+            return .respond(status: 421,
+                            body: #"{"error":"Misdirected request: Host must be loopback"}"#,
+                            contentType: "application/json")
+        }
+
         if method == "OPTIONS" {
             return .respond(status: 204, body: "", contentType: "application/json")
         }
@@ -268,19 +392,38 @@ final class LocalAPIServer {
     }
 
     private func handle(conn: NWConnection, headers: String, body: Data) {
+        // Decide the CORS reflection target for this request (audit AR-1). Only when the
+        // browser opt-in is on AND the request carries a *loopback* Origin do we echo it back;
+        // any other origin (a rebound evil.com) gets no Access-Control-Allow-Origin, so the
+        // browser's same-origin policy blocks it from reading the response.
+        let allowedOrigin = corsOrigin(forHeaders: headers)
+
         switch Self.evaluate(headers: headers, body: body, authToken: authToken) {
         case .respond(let status, let respBody, let ct):
-            send(conn, status: status, body: respBody, contentType: ct)
+            send(conn, status: status, body: respBody, contentType: ct, allowOrigin: allowedOrigin)
         case .transcribe(let fileData, let format):
-            transcribeData(fileData, format: format, conn: conn)
+            transcribeData(fileData, format: format, conn: conn, allowOrigin: allowedOrigin)
         }
+    }
+
+    /// The value to put in `Access-Control-Allow-Origin`, or nil to emit no CORS headers.
+    /// nil unless `allowBrowser` is on and the request's `Origin` is itself loopback.
+    private func corsOrigin(forHeaders headers: String) -> String? {
+        guard allowBrowser else { return nil }
+        let lines = headers.components(separatedBy: "\r\n")
+        guard let origin = Self.headerValue("Origin", in: lines), !origin.isEmpty else {
+            // No Origin header => not a CORS request (e.g. curl, native client). No CORS needed.
+            return nil
+        }
+        return Self.isLoopbackOrigin(origin) ? origin : nil
     }
 
     // MARK: - Transcription
 
-    private func transcribeData(_ fileData: Data, format: String, conn: NWConnection) {
+    private func transcribeData(_ fileData: Data, format: String, conn: NWConnection, allowOrigin: String?) {
         guard let transcriber = transcriber else {
-            send(conn, status: 503, body: #"{"error":"Transcription engine not ready"}"#); return
+            send(conn, status: 503, body: #"{"error":"Transcription engine not ready"}"#,
+                 allowOrigin: allowOrigin); return
         }
 
         let tmpDir = Config.configDir.appendingPathComponent("tmp/api")
@@ -288,7 +431,8 @@ final class LocalAPIServer {
         let tmpFile = tmpDir.appendingPathComponent("\(UUID().uuidString).audio")
 
         do { try fileData.write(to: tmpFile) } catch {
-            send(conn, status: 500, body: #"{"error":"Failed to write temp file"}"#); return
+            send(conn, status: 500, body: #"{"error":"Failed to write temp file"}"#,
+                 allowOrigin: allowOrigin); return
         }
 
         Task {
@@ -304,10 +448,11 @@ final class LocalAPIServer {
                     body = #"{"text":"\#(Self.jsonEscape(text))"}"#
                 }
                 let ct = format == "text" ? "text/plain" : "application/json"
-                self.send(conn, status: 200, body: body, contentType: ct)
+                self.send(conn, status: 200, body: body, contentType: ct, allowOrigin: allowOrigin)
             } catch {
                 self.send(conn, status: 500,
-                          body: #"{"error":"\#(Self.jsonEscape(error.localizedDescription))"}"#)
+                          body: #"{"error":"\#(Self.jsonEscape(error.localizedDescription))"}"#,
+                          allowOrigin: allowOrigin)
             }
         }
     }
@@ -432,7 +577,7 @@ final class LocalAPIServer {
     // MARK: - HTTP response
 
     private func send(_ conn: NWConnection, status: Int, body: String,
-                      contentType: String = "application/json") {
+                      contentType: String = "application/json", allowOrigin: String? = nil) {
         let bodyData = body.data(using: .utf8) ?? Data()
         let statusText: String
         switch status {
@@ -442,6 +587,8 @@ final class LocalAPIServer {
         case 401: statusText = "Unauthorized"
         case 404: statusText = "Not Found"
         case 413: statusText = "Payload Too Large"
+        case 421: statusText = "Misdirected Request"
+        case 429: statusText = "Too Many Requests"
         case 500: statusText = "Internal Server Error"
         case 503: statusText = "Service Unavailable"
         default:  statusText = "Unknown"
@@ -452,9 +599,14 @@ final class LocalAPIServer {
             "Content-Length: \(bodyData.count)",
             "Connection: close"
         ]
-        // CORS only when the experimental browser opt-in is enabled.
-        if allowBrowser {
-            headerLines.append("Access-Control-Allow-Origin: *")
+        // CORS (audit AR-1): never a wildcard. `allowOrigin` is non-nil only when the browser
+        // opt-in is on AND the request's Origin was itself a loopback origin (validated in
+        // corsOrigin(forHeaders:)). We reflect exactly that origin and send Vary: Origin so
+        // intermediaries don't cache the response under the wrong origin. A cross-origin page
+        // (rebound evil.com) gets no ACAO header and therefore cannot read the response.
+        if let origin = allowOrigin {
+            headerLines.append("Access-Control-Allow-Origin: \(origin)")
+            headerLines.append("Vary: Origin")
             headerLines.append("Access-Control-Allow-Methods: POST, OPTIONS")
             headerLines.append("Access-Control-Allow-Headers: Content-Type, Authorization")
         }
