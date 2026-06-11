@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CONFIG_FILE="$HOME/.config/open-wispr/config.json"
+CONFIG_FILE="$HOME/.config/speakfree/config.json"
 
 # Read a JSON value using grep/sed (no python dependency)
 read_config() {
@@ -109,7 +109,7 @@ parse_hotkey_input() {
     echo "${code}|${mods_json}"
 }
 
-echo "open-wispr dev build"
+echo "speakfree dev build"
 echo "────────────────────"
 
 # Read current config values
@@ -234,12 +234,12 @@ echo "────────────────────"
 
 # Kill any running instances
 echo "  Stopping running instances..."
-pkill -f "open-wispr start" 2>/dev/null || true
-brew services stop open-wispr 2>/dev/null || true
+pkill -f "speakfree start" 2>/dev/null || true
+brew services stop speakfree 2>/dev/null || true
 sleep 1
 
 # Uninstall brew version
-if brew list open-wispr &>/dev/null; then
+if brew list open-wispr &>/dev/null; then  # legacy upstream install
     echo "  Removing brew installation..."
     brew uninstall --force open-wispr 2>/dev/null || true
 fi
@@ -255,13 +255,13 @@ swift build -c release 2>&1 | tail -1
 
 # Bundle the app
 echo "  Bundling app..."
-bash scripts/bundle-app.sh .build/release/open-wispr OpenWispr.app dev
+bash scripts/bundle-app.sh .build/release/speakfree speakfree.app dev
 
 # Copy to ~/Applications so macOS recognizes it for permissions
-rm -rf ~/Applications/OpenWispr.app
-cp -R OpenWispr.app ~/Applications/OpenWispr.app
-rm -rf OpenWispr.app
+rm -rf ~/Applications/speakfree.app
+cp -R speakfree.app ~/Applications/speakfree.app
+rm -rf speakfree.app
 
 # Run
 echo "  Starting..."
-~/Applications/OpenWispr.app/Contents/MacOS/open-wispr start
+~/Applications/speakfree.app/Contents/MacOS/speakfree start

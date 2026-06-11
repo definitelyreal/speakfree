@@ -31,7 +31,7 @@
 
 import Foundation
 import AVFoundation
-import OpenWisprLib
+import SpeakFreeLib
 
 enum Divergence {
 

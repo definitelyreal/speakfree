@@ -4,24 +4,6 @@
 <dict>
 	<key>CFBundleDisplayName</key>
 	<string>speakfree</string>
-	<key>CFBundleExecutable</key>
-	<string>speakfree</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.definitelyreal.speakfree</string>
-	<key>CFBundleName</key>
-	<string>speakfree</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
-	<key>CFBundleShortVersionString</key>
-	<string>1.5.0</string>
-	<key>CFBundleVersion</key>
-	<string>1.5.0</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
-	<key>LSUIElement</key>
-	<true/>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -45,6 +27,24 @@
 			</array>
 		</dict>
 	</array>
+	<key>CFBundleExecutable</key>
+	<string>speakfree</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.definitelyreal.speakfree</string>
+	<key>CFBundleName</key>
+	<string>speakfree</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.6.0</string>
+	<key>CFBundleVersion</key>
+	<string>1.6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>speakfree needs microphone access to record your voice.</string>
 	<key>SUEnableAutomaticChecks</key>

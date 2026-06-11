@@ -8,7 +8,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # --- Extract version from each source ---
 
-VERSION_SWIFT=$(grep 'let version' "$REPO_DIR/Sources/OpenWisprLib/Version.swift" \
+VERSION_SWIFT=$(grep 'let version' "$REPO_DIR/Sources/SpeakFreeLib/Version.swift" \
     | sed 's/.*"\(.*\)".*/\1/')
 
 VERSION_PLIST=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \

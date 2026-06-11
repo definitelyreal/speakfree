@@ -2,7 +2,7 @@
 set -e
 
 APP="speakfree.app"
-VERSION=$(grep 'let version' Sources/OpenWisprLib/Version.swift | sed 's/.*"\(.*\)".*/\1/')
+VERSION=$(grep 'let version' Sources/SpeakFreeLib/Version.swift | sed 's/.*"\(.*\)".*/\1/')
 DMG="speakfree-${VERSION}.dmg"
 SIGN_ID="Developer ID Application: Michael Morgenstern (AZ53Y7V4UZ)"
 ENTITLEMENTS="$(dirname "$0")/speakfree.entitlements"

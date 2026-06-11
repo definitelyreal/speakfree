@@ -7,7 +7,7 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1"; }
 
-echo "open-wispr transcription integration tests"
+echo "speakfree transcription integration tests"
 echo "--------------------------------------------"
 
 # Check whisper-cli is installed
@@ -31,7 +31,7 @@ MODEL_FILE="ggml-${MODEL_SIZE}.bin"
 MODEL_PATH=""
 
 for dir in \
-    "$HOME/.config/open-wispr/models" \
+    "$HOME/.config/speakfree/models" \
     "/opt/homebrew/share/whisper-cpp/models" \
     "/usr/local/share/whisper-cpp/models" \
     "$HOME/.cache/whisper"; do
@@ -43,7 +43,7 @@ done
 
 if [ -z "$MODEL_PATH" ]; then
     echo "Downloading $MODEL_SIZE model..."
-    MODEL_DIR="$HOME/.config/open-wispr/models"
+    MODEL_DIR="$HOME/.config/speakfree/models"
     mkdir -p "$MODEL_DIR"
     MODEL_PATH="$MODEL_DIR/$MODEL_FILE"
     curl -L --progress-bar -o "$MODEL_PATH" \
@@ -51,7 +51,7 @@ if [ -z "$MODEL_PATH" ]; then
 fi
 pass "Model available: $MODEL_PATH"
 
-TMPDIR_TEST=$(mktemp -d /tmp/open-wispr-test.XXXXXX)
+TMPDIR_TEST=$(mktemp -d /tmp/speakfree-test.XXXXXX)
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
 
 # Generate test audio using macOS text-to-speech
@@ -87,7 +87,7 @@ else
 fi
 
 # Test 3: Transcriber class via the built binary
-BIN=".build/release/open-wispr"
+BIN=".build/release/speakfree"
 if [ -x "$BIN" ]; then
     if $BIN status 2>&1 | grep -q "whisper-cpp: yes"; then
         pass "Binary detects whisper-cpp"

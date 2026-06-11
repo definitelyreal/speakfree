@@ -337,7 +337,7 @@ jobs:
         # bundle-app.sh uses 'codesign --sign -' (ad-hoc) — no Developer ID
         # certificate or notarization required.
         run: |
-          VERSION=$(grep 'let version' Sources/OpenWisprLib/Version.swift \
+          VERSION=$(grep 'let version' Sources/SpeakFreeLib/Version.swift \
             | sed 's/.*"\(.*\)".*/\1/')
           bash scripts/bundle-app.sh \
             .build/release/speakfree \

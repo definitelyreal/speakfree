@@ -1,11 +1,11 @@
 import AppKit
 import Foundation
-import OpenWisprLib
+import SpeakFreeLib
 
 setvbuf(stdout, nil, _IOLBF, 0)
 setvbuf(stderr, nil, _IOLBF, 0)
 
-let version = OpenWispr.version
+let version = SpeakFree.version
 
 func printUsage() {
     print("""

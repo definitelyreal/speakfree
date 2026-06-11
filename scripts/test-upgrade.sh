@@ -7,8 +7,8 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-APP_DIR=~/Applications/OpenWispr.app
-SERVICE_LOG=/opt/homebrew/var/log/open-wispr.log
+APP_DIR=~/Applications/speakfree.app
+SERVICE_LOG=/opt/homebrew/var/log/speakfree.log
 
 step() { printf "\n${BOLD}==> %s${NC}\n" "$1"; }
 ok()   { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
@@ -21,13 +21,13 @@ build_and_install() {
     swift build -c release 2>&1 | tail -1
 
     info "Bundling app..."
-    bash scripts/bundle-app.sh .build/release/open-wispr OpenWispr.app dev
+    bash scripts/bundle-app.sh .build/release/speakfree speakfree.app dev
 
     info "Copying to ~/Applications (same as post_install)..."
     mkdir -p ~/Applications
     rm -rf "$APP_DIR"
-    cp -R OpenWispr.app "$APP_DIR"
-    rm -rf OpenWispr.app
+    cp -R speakfree.app "$APP_DIR"
+    rm -rf speakfree.app
 
     /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$APP_DIR"
     ok "Installed to $APP_DIR"
@@ -55,8 +55,8 @@ print_service_log() {
 
 # ── Phase 1: Establish baseline ──────────────────────────────────────
 step "Stopping any running instances"
-brew services stop open-wispr 2>/dev/null || true
-pkill -f "open-wispr start" 2>/dev/null || true
+brew services stop speakfree 2>/dev/null || true
+pkill -f "speakfree start" 2>/dev/null || true
 sleep 1
 ok "Stopped"
 
@@ -64,7 +64,7 @@ build_and_install "baseline"
 
 step "Starting via brew services (baseline)"
 true > "$SERVICE_LOG" 2>/dev/null || true
-brew services start open-wispr 2>/dev/null || true
+brew services start speakfree 2>/dev/null || true
 
 if wait_for_log "Ready\." 30; then
     ok "App is ready"
@@ -76,15 +76,15 @@ else
     exit 1
 fi
 
-brew services stop open-wispr 2>/dev/null || true
+brew services stop speakfree 2>/dev/null || true
 sleep 1
 
 # ── Phase 2: Simulate upgrade ───────────────────────────────────────
 step "Simulating upgrade"
 info "Modifying source to produce a different binary..."
-VERSION_FILE="Sources/OpenWisprLib/Version.swift"
+VERSION_FILE="Sources/SpeakFreeLib/Version.swift"
 cp "$VERSION_FILE" "${VERSION_FILE}.bak"
-printf 'public enum OpenWispr {\n    public static let version = "0.19.0-test"\n}\n' > "$VERSION_FILE"
+printf 'public enum SpeakFree {\n    public static let version = "0.19.0-test"\n}\n' > "$VERSION_FILE"
 
 build_and_install "upgrade"
 
@@ -92,7 +92,7 @@ mv "${VERSION_FILE}.bak" "$VERSION_FILE"
 
 step "Starting via brew services (upgrade)"
 true > "$SERVICE_LOG" 2>/dev/null || true
-brew services start open-wispr 2>/dev/null || true
+brew services start speakfree 2>/dev/null || true
 
 if wait_for_log "Ready\." 30; then
     ok "App is ready"
@@ -111,5 +111,5 @@ printf "  - 'upgrade detected' = binary hash change was detected\n"
 printf "\n"
 
 step "Cleaning up"
-brew services stop open-wispr 2>/dev/null || true
+brew services stop speakfree 2>/dev/null || true
 ok "Done"
