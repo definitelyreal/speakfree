@@ -114,7 +114,9 @@ public enum ProcessCommand {
     private static let maxDecodedBytes: Double = 512 * 1024 * 1024
 
     /// Decode a wav file to 16 kHz mono Float32 samples (the engine audio currency).
-    static func loadSamples(from url: URL) throws -> [Float] {
+    /// Public so the perf-regression harness (T2.0) can decode the audio golden fixtures
+    /// through the exact same production decode path the app uses.
+    public static func loadSamples(from url: URL) throws -> [Float] {
         let file = try AVAudioFile(forReading: url)
         let srcFormat = file.processingFormat
         guard let targetFormat = AVAudioFormat(
