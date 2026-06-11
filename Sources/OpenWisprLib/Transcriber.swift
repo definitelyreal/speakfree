@@ -158,10 +158,8 @@ public class Transcriber {
         // join them with a SPACE, not "\n" — a multi-segment split is not a user break.
         // After this, every "\n" reaching insertion is unambiguously a SPOKEN "new line"
         // (TextPostProcessor maps spoken "new line"/"new paragraph" → \n / \n\n). [Newline policy 2b / Option B]
-        return raw.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+        // The T2.3 reuse path applies the IDENTICAL collapse to the reused streaming partial.
+        return TextPipeline.collapseSegmentNewlines(raw)
     }
 
     /// Streaming (live-preview) transcription — passthrough to the engine.

@@ -143,13 +143,17 @@ case "compare":
     let candidatePath = positionals[positionals.startIndex]
     let baselinePath = positionals[positionals.index(after: positionals.startIndex)]
     let threshold = Double(value(for: "--threshold", in: args) ?? "") ?? Compare.defaultThresholdPct
+    let requireBaseline = args.contains("--require-baseline")
     do {
         let candidate = try PerfJSON.decode(PerfReport.self, from: URL(fileURLWithPath: candidatePath))
         let baseline = try PerfJSON.decode(PerfReport.self, from: URL(fileURLWithPath: baselinePath))
-        let gate = Compare.gate(candidate: candidate, baseline: baseline, thresholdPct: threshold)
+        let gate = Compare.gate(candidate: candidate, baseline: baseline,
+                                thresholdPct: threshold, requireBaseline: requireBaseline)
         print(Table.render(gate: gate, thresholdPct: threshold))
-        if case .regression = gate { exit(1) }
-        exit(0)
+        switch gate {
+        case .regression, .noComparableBaseline: exit(1)
+        case .pass: exit(0)
+        }
     } catch {
         fail("compare failed: \(error)")
     }
@@ -159,6 +163,7 @@ case "bench-and-gate":
     let iters = max(5, Int(value(for: "--iterations", in: args) ?? "5") ?? 5)
     let engineList = value(for: "--engines", in: args, default: "whisper")!
     let threshold = Double(value(for: "--threshold", in: args) ?? "") ?? Compare.defaultThresholdPct
+    let requireBaseline = args.contains("--require-baseline")
     let policy = postBufferPolicy(in: args)
     let specs = resolveEngineSpecs(engineList)
     let candidate = runBenchmark(iterations: iters, engines: specs, postBuffer: policy)
@@ -166,19 +171,31 @@ case "bench-and-gate":
     if let out = value(for: "--out", in: args) { writeReport(candidate, to: out) }
 
     guard let baselinePath = value(for: "--baseline", in: args) else {
+        // AR-2 #3: with --require-baseline, "no baseline at all" must also fail, not silently pass.
+        if requireBaseline {
+            print("GATE: FAIL — --require-baseline set but no --baseline given (CI must supply a baseline)")
+            exit(1)
+        }
         FileHandle.standardError.write(Data("perf-harness: no --baseline given — benchmark only, gate skipped\n".utf8))
         exit(0)
     }
     guard FileManager.default.fileExists(atPath: baselinePath) else {
+        if requireBaseline {
+            print("GATE: FAIL — required baseline file \(baselinePath) does not exist (commit a baseline to enable the gate)")
+            exit(1)
+        }
         print("GATE: SKIP — baseline file \(baselinePath) does not exist (commit a baseline to enable the gate)")
         exit(0)
     }
     do {
         let baseline = try PerfJSON.decode(PerfReport.self, from: URL(fileURLWithPath: baselinePath))
-        let gate = Compare.gate(candidate: candidate, baseline: baseline, thresholdPct: threshold)
+        let gate = Compare.gate(candidate: candidate, baseline: baseline,
+                                thresholdPct: threshold, requireBaseline: requireBaseline)
         print(Table.render(gate: gate, thresholdPct: threshold))
-        if case .regression = gate { exit(1) }
-        exit(0)
+        switch gate {
+        case .regression, .noComparableBaseline: exit(1)
+        case .pass: exit(0)
+        }
     } catch {
         fail("bench-and-gate: could not read baseline \(baselinePath): \(error)")
     }
@@ -360,9 +377,19 @@ case "reuse":
     let fullThreads = nCores
     let halfThreads = max(nCores / 2, 1)
 
+    // AR-2 R1, finding 1: the LIVE final pass passes the production initial_prompt (spoken-
+    // punctuation instruction + any cursor/screen/glossary bias); the streaming pass passes nil.
+    // Model that asymmetry so the harness exercises the prompt the production reuse path skips.
+    // Use the hybrid-punctuation instruction line (the default dictation mode) as the representative
+    // prompt — the same string AppDelegate.finalizeRecording assembles for a no-context dictation.
+    let finalPrompt = TextPipeline.assemblePromptHints(
+        input: TextPipeline.Input(punctuationMode: .hybrid))
+    let maxGrowthFraction = StreamingReuse.defaultMaxSampleGrowthFraction
+
     FileHandle.standardError.write(Data("""
     reuse: model=\(modelSize), whisper=\(URL(fileURLWithPath: whisperPath).lastPathComponent)
     reuse: fullThreads=\(fullThreads) halfThreads=\(halfThreads) iterations=\(iters)
+    reuse: maxGrowthFraction=\(String(format: "%.0f", maxGrowthFraction * 100))% finalPrompt=\(finalPrompt != nil)
     reuse: fixturesDir=\(fixturesDir.path)
     reuse: workDir=\(workDir.path)
     \n
@@ -376,7 +403,9 @@ case "reuse":
         modelPath: modelPath,
         fullThreads: fullThreads,
         halfThreads: halfThreads,
-        workDir: workDir
+        workDir: workDir,
+        maxGrowthFraction: maxGrowthFraction,
+        finalPrompt: finalPrompt
     ) else {
         fail("reuse: measurement failed")
     }
@@ -393,7 +422,9 @@ case "reuse":
         modelPath: modelPath,
         fullThreads: fullThreads,
         halfThreads: halfThreads,
-        machine: machine
+        machine: machine,
+        maxGrowthFraction: maxGrowthFraction,
+        finalPrompt: finalPrompt
     )
 
     if let outPath = value(for: "--out", in: args) {
@@ -436,16 +467,21 @@ case "-h", "--help", "help":
 
     USAGE:
       perf-harness run [--iterations N] [--engines whisper,parakeet] [--policy flat|adaptive] [--out PATH]
-      perf-harness compare <candidate.json> <baseline.json> [--threshold PCT]
-      perf-harness bench-and-gate [--iterations N] [--engines …] [--policy flat|adaptive] [--out PATH] --baseline PATH [--threshold PCT]
+      perf-harness compare <candidate.json> <baseline.json> [--threshold PCT] [--require-baseline]
+      perf-harness bench-and-gate [--iterations N] [--engines …] [--policy flat|adaptive] [--out PATH] --baseline PATH [--threshold PCT] [--require-baseline]
       perf-harness divergence [--out PATH] [--fixtures-dir DIR] [--work-dir DIR]
       perf-harness reuse [--iterations N] [--out PATH] [--fixtures-dir DIR] [--work-dir DIR]
 
     --policy: flat = legacy 300ms tax on every dictation (default, = pre-T2.1 baseline);
               adaptive = T2.1 — stop on ~150ms trailing silence, hard cap 300ms.
 
-    Gate fails (exit 1) only on a >+threshold% median regression vs a FINGERPRINT-MATCHING
-    baseline. A non-comparable baseline prints a note and passes (exit 0). Default threshold 15%.
+    --require-baseline: a fingerprint-MISMATCHED (or missing) baseline FAILS (exit 1) instead of
+              silently passing. CI passes this so the +threshold gate can never be a no-op
+              (AR-2 #3). Omit it for ad-hoc local compares on a machine with no matching baseline.
+
+    Gate fails (exit 1) on a >+threshold% median regression vs a FINGERPRINT-MATCHING baseline.
+    A non-comparable baseline prints a note and passes (exit 0) UNLESS --require-baseline is set,
+    which makes it a hard failure. Default threshold 15%.
 
     divergence: exit 0 = T2.3-PRE cleared (<1% aggregate word divergence); exit 1 = cancelled.
     reuse:      exit 0 = T2.3 accuracy delta < 1% AND final inference skipped; exit 1 = delta ≥ 1%.

@@ -2,10 +2,17 @@
 //
 // T2.0 — The regression gate.
 //
-// compare(candidate, baseline):
-//   * If the candidate's fingerprint is NOT comparable to the baseline's → PRINT a
-//     "no comparable baseline" note and PASS (exit 0). CI runners differ from a dev Mac;
-//     a CI-fingerprint baseline gets committed separately and the gate then compares.
+// compare(candidate, baseline, requireBaseline:):
+//   * If the candidate's fingerprint is NOT comparable to the baseline's:
+//       - requireBaseline == false → PRINT a "no comparable baseline" note and PASS (exit 0).
+//         (Local/dev use: a one-off compare on a machine with no matching baseline shouldn't
+//          hard-fail.)
+//       - requireBaseline == true  → FAIL (exit 1) with a "no comparable baseline" error.
+//         (CI use: a fingerprint mismatch must NOT green-wash. AR-2 finding #3: with the skip
+//          path always taken on the runner, a genuine +50% regression passed the gate. CI now
+//          passes --require-baseline so a missing CI-fingerprint baseline FAILS loudly instead
+//          of silently passing. Either a matching baseline exists and the gate enforces, or CI
+//          is red until one is committed — the gate can never be a permanent no-op.)
 //   * If comparable → for every (engine, fixture), compare candidate median vs baseline median
 //     for BOTH inferenceMs and endToEndMs. Any metric exceeding +`thresholdPct`% is a regression.
 //     One or more regressions → FAIL (exit 1) after printing every offending row.
@@ -17,6 +24,9 @@ import Foundation
 enum GateResult {
     case pass(note: String)
     case regression(rows: [RegressionRow])
+    /// No fingerprint-comparable baseline AND `requireBaseline` was set — a hard failure so CI
+    /// can never silently pass on a non-matching baseline (AR-2 finding #3).
+    case noComparableBaseline(note: String)
 }
 
 struct RegressionRow {
@@ -33,16 +43,20 @@ enum Compare {
     static let defaultThresholdPct: Double = 15.0
 
     static func gate(candidate: PerfReport, baseline: PerfReport,
-                     thresholdPct: Double = defaultThresholdPct) -> GateResult {
+                     thresholdPct: Double = defaultThresholdPct,
+                     requireBaseline: Bool = false) -> GateResult {
         guard candidate.fingerprint.isComparable(to: baseline.fingerprint) else {
+            let verb = requireBaseline ? "gate FAILS — required baseline missing" : "gate skipped, PASS"
             let note = """
-            no comparable baseline — fingerprint mismatch (gate skipped, PASS):
+            no comparable baseline — fingerprint mismatch (\(verb)):
               candidate: \(candidate.fingerprint.matchKey)
               baseline:  \(baseline.fingerprint.matchKey)
             A baseline tagged with the candidate's fingerprint must be committed before the gate
             can fail on regressions for this machine (e.g. a CI runner generates + commits its own).
             """
-            return .pass(note: note)
+            // AR-2 #3: with requireBaseline (CI), a non-matching baseline is a HARD FAILURE so the
+            // +threshold gate can never become a permanent no-op that green-washes regressions.
+            return requireBaseline ? .noComparableBaseline(note: note) : .pass(note: note)
         }
 
         // Index baseline medians by (engine, fixture).

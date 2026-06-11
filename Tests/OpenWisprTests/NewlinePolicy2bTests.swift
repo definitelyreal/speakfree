@@ -59,6 +59,28 @@ final class NewlinePolicy2bTests: XCTestCase {
         ])
     }
 
+    /// AR-1 Low #7 regression: a CRLF ("\r\n") is ONE line break, not two. Before the fix each of
+    /// \r and \n independently emitted a `.shiftReturn`, so "a\r\nb" produced two breaks.
+    func test_keystrokeRoute_crlf_firesExactlyOneShiftReturn() {
+        let ops = TextInserter.keystrokeOps(for: "a\r\nb")
+        XCTAssertEqual(ops.filter { $0 == .shiftReturn }.count, 1,
+                       "a CRLF pair must collapse to exactly one line break")
+        XCTAssertEqual(ops, [
+            .unicode(Array("a".utf16)),
+            .shiftReturn,
+            .unicode(Array("b".utf16)),
+        ])
+    }
+
+    /// A lone CR collapses to one break; a deliberate double LF ("\n\n", spoken "new paragraph")
+    /// must STILL produce two breaks — only CR/LF *pairs* collapse, not distinct same-char breaks.
+    func test_keystrokeRoute_loneCR_and_doubleLF_distinction() {
+        XCTAssertEqual(TextInserter.keystrokeOps(for: "a\rb").filter { $0 == .shiftReturn }.count, 1,
+                       "a lone CR is one break")
+        XCTAssertEqual(TextInserter.keystrokeOps(for: "a\n\nb").filter { $0 == .shiftReturn }.count, 2,
+                       "a deliberate \\n\\n (new paragraph) must remain two breaks")
+    }
+
     /// No newline → zero line-break ops (the multi-segment space-joined case never sends).
     /// The text is longer than 20 UTF-16 units, so it is split into multiple `.unicode` chunks;
     /// none of them is a line break, and concatenating the chunks reproduces the input exactly.

@@ -43,6 +43,23 @@ final class LocalAPIServerLiveTests: XCTestCase {
         return Transcriber(engine: engine, modelID: "fake", language: "en")
     }
 
+    /// A transcriber whose `transcribe` takes `delay` seconds — used to prove the connection
+    /// lifetime cap does NOT cut a legitimate long transcription (AR-2 R1 Medium).
+    private func makeSlowTranscriber(delay: TimeInterval) -> Transcriber {
+        let engine = FakeEngine(engineID: "fake", cannedTranscript: "slow transcript")
+        engine.transcribeDelay = delay
+        return Transcriber(engine: engine, modelID: "fake", language: "en")
+    }
+
+    /// A 16kHz mono fixture WAV `decodePCM` can read, returned as raw bytes for a multipart POST.
+    private func fixtureWavData() -> Data? {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("AudioFixtures")
+            .appendingPathComponent("fixture-1-clean.wav")
+        return try? Data(contentsOf: url)
+    }
+
     /// Run a shell command, return (stdout+stderr, exitCode).
     @discardableResult
     private func shell(_ launchPath: String, _ args: [String], timeout: TimeInterval = 10) -> (output: String, code: Int32) {
@@ -422,6 +439,58 @@ final class LocalAPIServerLiveTests: XCTestCase {
            let elapsed = Double(elapsedStr) {
             XCTAssertLessThan(elapsed, 4.5, "Lifetime cap should have fired around t=2 s, not at the end of the 5 s drip loop")
         }
+    }
+
+    /// AR-2 R1 Medium regression: a COMPLETE, well-formed transcription request whose transcription
+    /// takes LONGER than the connection-lifetime cap must STILL get its 200 response. Previously the
+    /// lifetime timer was only cancelled in the connection state handler, so it kept ticking through
+    /// transcription and cut a legitimate long-audio request at the 120s (here: 2s) mark. The fix
+    /// cancels BOTH read timers the instant the full request is received, before transcribing.
+    func testLiveLifetimeCapDoesNotCutLongTranscription() throws {
+        try skipIfDisabled()
+        guard let wav = fixtureWavData() else {
+            throw XCTSkip("fixture-1-clean.wav not available in bundle")
+        }
+
+        // Lifetime cap 2 s; transcription deliberately takes ~4 s (> the cap).
+        // Retain the transcriber: LocalAPIServer holds it weakly.
+        let slow = makeSlowTranscriber(delay: 4.0)
+        self.transcriber = slow
+        let s = LocalAPIServer(port: Self.livePort)
+        s.connectionLifetimeOverride = 2.0
+        s.start(transcriber: slow)
+        self.server = s
+
+        // Wait for the listener to bind.
+        let bindDeadline = Date().addingTimeInterval(3)
+        while Date() < bindDeadline {
+            let (out, _) = shell("/usr/sbin/lsof", ["-iTCP:\(Self.livePort)", "-sTCP:LISTEN", "-P", "-n"])
+            if out.contains("\(Self.livePort)") { break }
+            usleep(50_000)
+        }
+
+        // Write the fixture to a scratch file for curl -F (multipart) upload.
+        let scratch = Config.configDir.appendingPathComponent("tmp/api-test")
+        try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        let wavFile = scratch.appendingPathComponent("lifetime-regression-\(UUID().uuidString).wav")
+        try wav.write(to: wavFile)
+        defer { try? FileManager.default.removeItem(at: wavFile) }
+
+        // Full multipart POST. curl --max-time 12 > the 4s transcription, so curl itself won't be the
+        // limiter; if the server's lifetime cap cut the connection at 2s, curl would see exit 52/56
+        // (empty/abORTED reply) instead of a 200.
+        let (status, code) = shell("/usr/bin/curl", [
+            "-s", "-S", "--max-time", "12",
+            "-o", "/dev/null", "-w", "%{http_code}",
+            "-X", "POST",
+            "-F", "file=@\(wavFile.path);type=audio/wav",
+            "-F", "response_format=json",
+            "http://127.0.0.1:\(Self.livePort)/v1/audio/transcriptions",
+        ], timeout: 15)
+
+        print("PROOF[M-lifetime-not-cut] complete request, 2s lifetime cap, 4s transcription: status=\(status) curl_exit=\(code)")
+        XCTAssertEqual(code, 0, "curl must complete (lifetime cap must NOT cut a request mid-transcription). exit=\(code)")
+        XCTAssertEqual(status, "200", "a complete request whose transcription outlasts the lifetime cap must still return 200, got \(status)")
     }
 
     // (d) With a token set, an unauthenticated 127.0.0.1 request -> 401.

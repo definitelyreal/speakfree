@@ -437,6 +437,116 @@ final class PipelineIntegrationTests: XCTestCase {
                        "exactly one spoken break → exactly one \\n")
     }
 
+    // MARK: T2.3 reuse path — Newline Policy 2b regression (AR-2 R1, finding 3)
+
+    /// Drive FinalizePipeline through the REUSE branch with a given raw streaming partial.
+    /// `transcribe` is wired to fail loudly so a regression that runs the final pass instead of
+    /// reusing is caught immediately.
+    private func runReuse(
+        rawPartial: String,
+        samples: [Float]? = nil,
+        inserter: MockInserter,
+        makeInput: @escaping (String) -> TextPipeline.Input
+    ) async -> FinalizePipeline.Outcome {
+        return await FinalizePipeline.run(
+            samples: samples ?? loudSamples(),
+            audioURL: audioURL,
+            makeInput: makeInput,
+            transcribe: { _, _, _ in
+                XCTFail("reuse path must SKIP the final inference")
+                return ""
+            },
+            inserter: inserter,
+            element: nil,
+            reuseDecision: .reusePartial(rawPartial: rawPartial)
+        )
+    }
+
+    /// The streaming partial is RAW collectSegments output — it can carry embedded "\n" between
+    /// acoustic segments (whisper emits one line per segment, concatenated with no normalization).
+    /// The reuse path must apply the SAME space-join the final pass applies, so NO Whisper-origin
+    /// "\n" survives into the inserter and fires a `.shiftReturn`. This is the exact 2b footgun the
+    /// reuse path was previously unguarded against.
+    func test_newline2b_reusePath_multiSegmentPartial_spaceJoined_noNewlineReachesInserter() async {
+        let inserter = MockInserter()
+        let outcome = await runReuse(
+            rawPartial: "hello there\nhow are you",
+            inserter: inserter,
+            makeInput: makeInputClosure(punctuation: .off)
+        )
+        guard case let .reusedPartial(insertedText, _) = outcome else {
+            return XCTFail("expected .reusedPartial, got \(outcome)")
+        }
+        XCTAssertEqual(insertedText, "hello there how are you",
+                       "reused multi-segment partial must be space-joined, not \\n-joined")
+        XCTAssertFalse(insertedText.contains("\n"),
+                       "reuse path must NOT carry a Whisper-origin \\n into insertion")
+        XCTAssertTrue(TextInserter.keystrokeOps(for: insertedText).allSatisfy {
+            if case .shiftReturn = $0 { return false } else { return true }
+        }, "no Return-equivalent op may be produced for the space-joined reused partial")
+    }
+
+    /// Many-segment partial: still no "\n" survives the reuse path.
+    func test_newline2b_reusePath_regression_noWhisperOriginNewlineReachesInserter() async {
+        let inserter = MockInserter()
+        let outcome = await runReuse(
+            rawPartial: "alpha\nbravo\ncharlie\ndelta\necho",
+            inserter: inserter,
+            makeInput: makeInputClosure(punctuation: .off)
+        )
+        guard case let .reusedPartial(insertedText, _) = outcome else {
+            return XCTFail("expected .reusedPartial, got \(outcome)")
+        }
+        XCTAssertEqual(insertedText, "alpha bravo charlie delta echo")
+        XCTAssertFalse(insertedText.contains("\n"))
+    }
+
+    /// The reuse path and the final path must produce the IDENTICAL inserted text for the same raw
+    /// multi-segment string — proving they are byte-equivalent for newline handling (the code's own
+    /// "SAME TextPipeline / identical post-processing" claim is now actually true).
+    func test_newline2b_reusePath_matchesFinalPath_forMultiSegment() async {
+        let raw = " First segment\n Second segment\n Third segment"
+
+        let finalInserter = MockInserter()
+        let finalEngine = FakeScriptedEngine(scriptedFinal: raw)
+        let finalOutcome = await runViaTranscriber(
+            samples: loudSamples(), engine: finalEngine, inserter: finalInserter,
+            makeInput: makeInputClosure(punctuation: .off)
+        )
+        guard case let .inserted(finalText, _) = finalOutcome else {
+            return XCTFail("expected .inserted, got \(finalOutcome)")
+        }
+
+        let reuseInserter = MockInserter()
+        let reuseOutcome = await runReuse(
+            rawPartial: raw, inserter: reuseInserter,
+            makeInput: makeInputClosure(punctuation: .off)
+        )
+        guard case let .reusedPartial(reuseText, _) = reuseOutcome else {
+            return XCTFail("expected .reusedPartial, got \(reuseOutcome)")
+        }
+
+        XCTAssertEqual(reuseText, finalText,
+                       "reuse path must produce byte-identical text to the final path for multi-segment input")
+    }
+
+    /// A genuinely SPOKEN "new line" must still survive the reuse path as a literal "\n" — the
+    /// segment-collapse must only remove acoustic splits, never the deliberate spoken break.
+    func test_newline2b_reusePath_spokenNewLine_survivesAsLiteralNewline() async {
+        let inserter = MockInserter()
+        // One segment (no "\n" split); the only "\n" source is the spoken command.
+        let outcome = await runReuse(
+            rawPartial: "first line new line second line",
+            inserter: inserter,
+            makeInput: makeInputClosure(punctuation: .spoken)
+        )
+        guard case let .reusedPartial(insertedText, _) = outcome else {
+            return XCTFail("expected .reusedPartial, got \(outcome)")
+        }
+        XCTAssertEqual(insertedText.filter { $0 == "\n" }.count, 1,
+                       "spoken \"new line\" must still become exactly one literal \\n on the reuse path")
+    }
+
     func test_streaming_assemblerMatchesExtractedLogicForThreeWaySequence() {
         // A realistic 3-partial growth sequence (the case Tier-1 must not break).
         var asm = StreamingTextAssembler()

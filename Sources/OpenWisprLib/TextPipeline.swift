@@ -144,6 +144,27 @@ public enum TextPipeline {
         return Result(promptHints: prompt, processedText: processed, finalText: final)
     }
 
+    /// Collapse Whisper's multi-segment line splits into spaces — the Newline Policy 2b / Option B
+    /// guarantee that every `\n` reaching insertion is a deliberately-spoken break, never an
+    /// acoustic-segment boundary.
+    ///
+    /// Whisper emits one line per acoustic segment; `WhisperEngine.collectSegments` concatenates
+    /// that raw segment text WITHOUT normalization, so a multi-segment partial can carry embedded
+    /// `\n`. The FINAL inference path normalizes these away in `Transcriber.transcribeWithEngine`
+    /// before `TextPipeline.run`. The T2.3 reuse path (which reuses the streaming partial and SKIPS
+    /// that final pass) MUST apply the SAME normalization, or an embedded `\n` survives into
+    /// `TextInserter.keystrokeOps` and fires a `.shiftReturn` — the exact send/line-break footgun 2b
+    /// was built to prevent (an unspoken segment split would inject a line break).
+    ///
+    /// `TextPostProcessor`'s spoken-newline substitution still runs downstream, so a genuinely
+    /// spoken "new line"/"new paragraph" still produces a `\n`/`\n\n` AFTER this collapse.
+    public static func collapseSegmentNewlines(_ raw: String) -> String {
+        raw.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
     /// Remove ANSI escape sequences and NUL bytes that could corrupt keystroke injection.
     /// Preserves \n, \r, \t (legitimate whitespace).
     public static func sanitize(_ text: String) -> String {

@@ -155,17 +155,22 @@ enum Divergence {
 
     // MARK: - Whisper CLI runner
 
-    /// Run whisper-cli on a WAV file with the given thread count. Returns the trimmed
-    /// transcript or empty string on error/empty output.
+    /// Run whisper-cli on a WAV file with the given thread count and optional initial prompt.
+    /// Returns the trimmed transcript or empty string on error/empty output.
+    ///
+    /// `prompt` mirrors the production `initial_prompt` bias (cursor/screen/glossary priming) the
+    /// LIVE final pass passes but the streaming pass passes as nil — so the reuse harness can model
+    /// the prompt asymmetry the production reuse path actually exhibits (AR-2 R1, finding 1).
     static func runWhisperCLI(
         whisperPath: String,
         modelPath: String,
         wavPath: String,
-        threads: Int
+        threads: Int,
+        prompt: String? = nil
     ) -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: whisperPath)
-        process.arguments = [
+        var arguments = [
             "-m", modelPath,
             "-f", wavPath,
             "-l", "en",
@@ -173,6 +178,10 @@ enum Divergence {
             "-nt",
             "-t", "\(threads)",
         ]
+        if let prompt, !prompt.isEmpty {
+            arguments.append(contentsOf: ["--prompt", prompt])
+        }
+        process.arguments = arguments
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
