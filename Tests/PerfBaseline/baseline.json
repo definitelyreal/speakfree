@@ -6,19 +6,19 @@
         {
           "audioSeconds" : 11.1,
           "endToEndMs" : {
-            "iterations" : 11,
-            "max" : 965.650708,
-            "mean" : 909.3446134545454,
-            "median" : 891.0185409999999,
-            "min" : 879.534
+            "iterations" : 7,
+            "max" : 979.115332,
+            "mean" : 933.6524818571428,
+            "median" : 910.029,
+            "min" : 895.269041
           },
           "fixture" : "fixture-1-clean.wav",
           "inferenceMs" : {
-            "iterations" : 11,
-            "max" : 664.1655,
-            "mean" : 608.5008258181819,
-            "median" : 590.625333,
-            "min" : 579.132792
+            "iterations" : 7,
+            "max" : 677.367041,
+            "mean" : 632.5448867142857,
+            "median" : 609.129917,
+            "min" : 593.860666
           },
           "postBufferMs" : 300,
           "transcript" : "I do think you're right and we shouldn't come"
@@ -26,19 +26,19 @@
         {
           "audioSeconds" : 9.4,
           "endToEndMs" : {
-            "iterations" : 11,
-            "max" : 967.971708,
-            "mean" : 908.1585492727271,
-            "median" : 888.804125,
-            "min" : 883.932417
+            "iterations" : 7,
+            "max" : 988.779417,
+            "mean" : 946.6937918571429,
+            "median" : 962.92,
+            "min" : 905.4456670000001
           },
           "fixture" : "fixture-2-spoken-comma.wav",
           "inferenceMs" : {
-            "iterations" : 11,
-            "max" : 666.84825,
-            "mean" : 607.427162909091,
-            "median" : 588.360167,
-            "min" : 583.055167
+            "iterations" : 7,
+            "max" : 687.885375,
+            "mean" : 645.7530954285714,
+            "median" : 662.042375,
+            "min" : 604.3445
           },
           "postBufferMs" : 300,
           "transcript" : "Especially that we aren't using the CLI, talking about the changes we made in architecture to speed things up are really important."
@@ -46,19 +46,19 @@
         {
           "audioSeconds" : 11,
           "endToEndMs" : {
-            "iterations" : 11,
-            "max" : 894.571583,
-            "mean" : 884.7712991818181,
-            "median" : 886.288542,
-            "min" : 871.274083
+            "iterations" : 7,
+            "max" : 971.717084,
+            "mean" : 919.1686372857142,
+            "median" : 900.445416,
+            "min" : 893.8506669999999
           },
           "fixture" : "fixture-3-spoken-period-end.wav",
           "inferenceMs" : {
-            "iterations" : 11,
-            "max" : 594.132708,
-            "mean" : 584.1846893636364,
-            "median" : 585.573167,
-            "min" : 570.805375
+            "iterations" : 7,
+            "max" : 670.877167,
+            "mean" : 618.1093692857145,
+            "median" : 599.312709,
+            "min" : 592.895375
           },
           "postBufferMs" : 300,
           "transcript" : "What's a more felt way to present the RSVP button question mark for the big chunky button feels too promotional period."
@@ -66,27 +66,27 @@
         {
           "audioSeconds" : 11.4,
           "endToEndMs" : {
-            "iterations" : 11,
-            "max" : 956.0545000000001,
-            "mean" : 898.806587090909,
-            "median" : 887.8005420000001,
-            "min" : 884.0034999999999
+            "iterations" : 7,
+            "max" : 829.6648329999999,
+            "mean" : 793.9735117142857,
+            "median" : 821.280875,
+            "min" : 750.8093739999999
           },
           "fixture" : "fixture-4-trailing-silence-period.wav",
           "inferenceMs" : {
-            "iterations" : 11,
-            "max" : 655.13125,
-            "mean" : 598.0624242727273,
-            "median" : 586.795417,
-            "min" : 583.195
+            "iterations" : 7,
+            "max" : 678.610792,
+            "mean" : 643.0444344285714,
+            "median" : 670.455041,
+            "min" : 599.786208
           },
-          "postBufferMs" : 300,
+          "postBufferMs" : 150,
           "transcript" : "What's a more felt way to present the RSVP button question mark for the big chunky button feels too promotional period."
         }
       ],
       "model" : "tiny.en",
       "postBufferMs" : 300,
-      "postBufferPolicy" : "flat"
+      "postBufferPolicy" : "adaptive"
     }
   ],
   "fingerprint" : {
@@ -95,7 +95,7 @@
     "cpu" : "Apple M3 Max",
     "os" : "macOS Version 26.0 (Build 25A354)"
   },
-  "generatedAt" : "2026-06-11T05:32:10Z",
-  "iterations" : 11,
+  "generatedAt" : "2026-06-11T05:55:46Z",
+  "iterations" : 7,
   "schemaVersion" : 1
 }
