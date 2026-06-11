@@ -29,10 +29,10 @@
   },
   {
     "name": "trailing-comma-with-space",
-    "note": "Trailing comma followed by whitespace should still become a period.",
+    "note": "Trailing comma should become a period. Updated 2026-06-11: harness now mirrors the full app pipeline, which always trims trailing whitespace (stripWhisperBracketMarkers) — the old 'Done. ' expectation was an artifact of testing process() in isolation.",
     "mode": "hybrid",
     "input": "Done, ",
-    "expected": "Done. "
+    "expected": "Done."
   },
   {
     "name": "legit-comma-lowercase-stays",
@@ -118,10 +118,10 @@
   },
   {
     "name": "real-multi-spoken-period-eaten-2026-04-29",
-    "note": "Live capture: user said 'period' three times mid-utterance. Each ', period.' collapsed to just ',' — both the spoken 'period' and the whisper auto-period got dropped, leaving the wrong comma. Each 'period' should produce '.'. Source: recording-2026-04-29-024401-1D17F289.",
+    "note": "Live capture: user said 'period' three times mid-utterance. Each ', period.' collapsed to just ',' — both the spoken 'period' and the whisper auto-period got dropped, leaving the wrong comma. Each 'period' should produce '.'. Source: recording-2026-04-29-024401-1D17F289. Updated 2026-06-11: pause ellipses now stripped ('So... You' -> 'So you').",
     "mode": "hybrid",
     "input": "What happened was, \"composer 1\" would finish and then give everything to the next person, period. Then that person would either build on top or modify, period. Sometimes we were telling the original composer to not include a stem, comma, sometimes the second composer modified, or sometimes they just got added together, period. So... You could also do a compare per stem for further ambiguity. I think this is definitely the direction to go.",
-    "expected": "What happened was, \"composer 1\" would finish and then give everything to the next person. Then that person would either build on top or modify. Sometimes we were telling the original composer to not include a stem, sometimes the second composer modified, or sometimes they just got added together. So... You could also do a compare per stem for further ambiguity. I think this is definitely the direction to go."
+    "expected": "What happened was, \"composer 1\" would finish and then give everything to the next person. Then that person would either build on top or modify. Sometimes we were telling the original composer to not include a stem, sometimes the second composer modified, or sometimes they just got added together. So you could also do a compare per stem for further ambiguity. I think this is definitely the direction to go."
   },
   {
     "name": "real-comma-before-capital-I-stays-2026-04-29",
@@ -167,9 +167,30 @@
   },
   {
     "name": "real-ellipsis-no-capitalize-2026-05-21",
-    "note": "capitalizeAfterSentenceEnd capitalized the word after an ellipsis ('could... do' -> 'could... Do'). Lookbehind (?<!\\.) now skips the trailing dot of '...'. Source: recording-2026-05-21-163804-7A812263.",
+    "note": "Originally pinned '...' preservation. Overruled 2026-06-11: Michael never wants pause ellipses in output — stripPauseEllipses now joins 'could... do' to 'could do'.",
     "mode": "hybrid",
     "input": "Is that what you could... do together",
-    "expected": "Is that what you could... do together"
+    "expected": "Is that what you could do together"
+  },
+  {
+    "name": "real-ellipsis-pause-and-restart-2026-06-11",
+    "note": "Live capture (tiny.en fallback day): hesitation pauses became 'and... If' / a restarted word became 'are... Are'. Michael: never any pause indication. ‘I’t’ and 'come up' (comma homophone) are upstream ASR errors — not regex-fixable, expected unchanged here. Source: recording-2026-06-11-104037-A34F49FF.",
+    "mode": "hybrid",
+    "input": "I’t, if you could make it, and... If you think there are... Are other people who should be there, come up? Let's chat, period.",
+    "expected": "I’t, if you could make it, and if you think there are other people who should be there, come up? Let's chat."
+  },
+  {
+    "name": "real-ellipsis-trailing-2026-06-11",
+    "note": "Live capture: utterance ended on a trail-off pause; '...' must become '.'. 'Kamo' is an upstream comma-homophone — logged in the ledger, not fixable here. Source: recording-2026-06-11-103153-9940B078.",
+    "mode": "hybrid",
+    "input": "We are planning a screening in DC for America's 250th birthday as a media moment, Kamo. I think you'd have a lot of...",
+    "expected": "We are planning a screening in DC for America's 250th birthday as a media moment. Kamo. I think you'd have a lot of."
+  },
+  {
+    "name": "real-ellipsis-midsentence-spoken-comma-2026-06-11",
+    "note": "Live capture: spoken 'comma' correctly converted, trailing pause '...' stripped to '.'. Source: recording-2026-06-11-102357-DF68EA71.",
+    "mode": "hybrid",
+    "input": "If you're interested, comma, I would love to find a time to...",
+    "expected": "If you're interested, I would love to find a time to."
   }
 ]

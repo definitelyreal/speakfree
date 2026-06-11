@@ -31,6 +31,9 @@ final class SecureInputTests: XCTestCase {
         inserter.performInsertion = { _ in }
         // Clipboard guard: all clipboard paths write a private named pasteboard, never .general.
         inserter.pasteboard = makeTestPasteboard()
+        // AX guard: never perform the real focused-element WindowServer IPC from a test —
+        // it blocks forever on headless CI (this exact call hung the CI suite for 17 min).
+        inserter.focusedElementProvider = { nil }
         return inserter
     }
 
@@ -110,6 +113,7 @@ final class SecureInputTests: XCTestCase {
         let exp = expectation(description: "async re-check fires onFocusLost from the closure")
         let inserter = TextInserter()
         inserter.pasteboard = makeTestPasteboard()
+        inserter.focusedElementProvider = { nil }
 
         // Start with secure input OFF so the synchronous guard at insert() entry passes.
         var secureInputIsOn = false

@@ -36,6 +36,14 @@ class TextInserter {
     /// developer's real clipboard (test-host-safety rule, PLAN.md P-1).
     var pasteboard: NSPasteboard = .general
 
+    /// Seam for the focused-element AX lookup (`AXUIElementCopyAttributeValue` on the
+    /// system-wide element). That call is a synchronous WindowServer IPC that can block
+    /// FOREVER in a session without a window server — it hung the CI unit-tests job for
+    /// 17 silent minutes (test-host-safety, PLAN.md P-1). Production default = the real
+    /// query; tests inject `{ nil }` or a fixture element so no AX IPC ever leaves the
+    /// test process.
+    var focusedElementProvider: () -> AXUIElement? = { TextInserter.queryFocusedElement() }
+
     /// Pure check: should a space be prepended given the text ALREADY captured before
     /// the cursor at record-start?
     ///
@@ -173,6 +181,10 @@ class TextInserter {
     }
 
     private func currentFocusedElement() -> AXUIElement? {
+        focusedElementProvider()
+    }
+
+    private static func queryFocusedElement() -> AXUIElement? {
         let systemWide = AXUIElementCreateSystemWide()
         var elementRef: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef)
