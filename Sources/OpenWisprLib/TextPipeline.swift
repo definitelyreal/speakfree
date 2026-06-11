@@ -148,8 +148,56 @@ public enum TextPipeline {
         let processed = (input.punctuationMode == .off)
             ? stripped
             : TextPostProcessor.process(stripped, hybrid: hybrid)
-        let final = TextPostProcessor.applyStyle(processed, mode: input.styleMode)
+        let styled = TextPostProcessor.applyStyle(processed, mode: input.styleMode)
+        // Mid-sentence insertion must not start with a capital (Michael 2026-06-11:
+        // "I really want it to be lowercase if I'm in the middle of the sentence").
+        // Whisper sentence-cases every utterance; when the cursor context shows we're
+        // continuing a sentence, undo that leading capital — glossary names, "I",
+        // all-caps, and internal-caps words keep their case.
+        let final = adjustCaseForInsertion(styled,
+                                           contextBefore: input.cursorContextText,
+                                           glossaryWords: input.glossaryWords)
         return Result(promptHints: prompt, processedText: processed, finalText: final)
+    }
+
+    /// True when the text immediately before the cursor leaves us mid-sentence —
+    /// i.e. the next inserted word should NOT be capitalized. Trailing spaces/tabs
+    /// are ignored; an empty field, a newline, or a sentence terminator (optionally
+    /// wrapped in closing quotes/brackets) means a fresh sentence.
+    public static func isMidSentence(contextBefore text: String?) -> Bool {
+        guard let text = text else { return false }
+        var s = Substring(text)
+        while let last = s.last, last == " " || last == "\t" { s = s.dropLast() }
+        guard var last = s.last else { return false }
+        if last.isNewline { return false }
+        let terminators: Set<Character> = [".", "!", "?", "\u{2026}"]
+        // Skip closing quotes/brackets to find the effective terminator: «He said "stop."» ends a sentence.
+        let closers: Set<Character> = ["\"", "'", "\u{201D}", "\u{2019}", ")", "]"]
+        while closers.contains(last) {
+            s = s.dropLast()
+            guard let prev = s.last else { return true }  // lone closer — treat as mid-sentence
+            last = prev
+        }
+        return !terminators.contains(last)
+    }
+
+    /// Lowercase the first letter of `text` when inserting mid-sentence, unless the
+    /// leading word's capitalization is deliberate (glossary term, "I", all-caps,
+    /// internal caps).
+    public static func adjustCaseForInsertion(_ text: String,
+                                              contextBefore: String?,
+                                              glossaryWords: String? = nil) -> String {
+        guard isMidSentence(contextBefore: contextBefore) else { return text }
+        guard let first = text.first, first.isUppercase else { return text }
+        // Leading word = letters/digits/apostrophes up to the first other character.
+        let firstWord = text.prefix(while: { $0.isLetter || $0.isNumber || $0 == "'" || $0 == "\u{2019}" })
+        if let glossary = glossaryWords, !glossary.isEmpty {
+            let glossarySet = Set(glossary.components(separatedBy: ", "))
+            if glossarySet.contains(String(firstWord)) { return text }
+        }
+        let adjusted = lowercaseFirstUnlessDeliberate(String(firstWord))
+        guard adjusted != String(firstWord) else { return text }
+        return adjusted + text.dropFirst(firstWord.count)
     }
 
     /// Collapse Whisper's multi-segment line splits into spaces — the Newline Policy 2b / Option B

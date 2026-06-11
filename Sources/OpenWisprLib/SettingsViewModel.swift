@@ -15,7 +15,6 @@ public class SettingsViewModel: ObservableObject {
     @Published public var punctuationMode: PunctuationMode
     @Published public var maxRecordings: Int
     @Published public var screenContext: Bool
-    @Published public var rememberWords: Bool
     @Published public var preBuffer: Bool
     @Published public var keepModelLoaded: String
     @Published public var diagnosticLogging: Bool
@@ -32,11 +31,18 @@ public class SettingsViewModel: ObservableObject {
     /// AppDelegate can use this to reload the running configuration.
     public var onSave: (() -> Void)?
 
+    /// The config this view model was initialized from. toConfig() overlays the
+    /// published fields onto this, so config keys the Settings UI doesn't manage
+    /// (preserveAllRecordings, reuseStreamingPartial, localAPIToken, modelPath, …)
+    /// survive a Settings save. Building a fresh Config used to drop them silently.
+    private var baseConfig: Config
+
     // MARK: - Init
 
     /// Initialize from an existing Config, or load from disk.
     public init(config: Config? = nil) {
         let c = config ?? Config.load()
+        self.baseConfig = c
 
         self.hotkeyKeyCode = c.hotkey.keyCode
         self.hotkeyModifiers = c.hotkey.modifiers
@@ -44,9 +50,8 @@ public class SettingsViewModel: ObservableObject {
         self.modelSize = c.modelSize
         self.language = c.language
         self.punctuationMode = c.spokenPunctuation ?? .hybrid
-        self.maxRecordings = c.maxRecordings ?? Config.defaultMaxRecordings
+        self.maxRecordings = c.maxRecordings ?? 0  // 0 = keep everything (default)
         self.screenContext = c.screenContext?.value ?? false
-        self.rememberWords = c.rememberWords?.value ?? true
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
@@ -62,23 +67,21 @@ public class SettingsViewModel: ObservableObject {
     // MARK: - Conversion
 
     /// Convert the current view model state back to a Config struct.
+    /// Overlays the published fields onto baseConfig — see baseConfig doc.
     public func toConfig() -> Config {
-        var config = Config(
-            hotkey: HotkeyConfig(keyCode: hotkeyKeyCode, modifiers: hotkeyModifiers),
-            modelPath: nil,
-            modelSize: modelSize,
-            language: language,
-            spokenPunctuation: punctuationMode,
-            maxRecordings: maxRecordings,
-            toggleMode: FlexBool(toggleMode),
-            screenContext: FlexBool(screenContext),
-            rememberWords: FlexBool(rememberWords),
-            preBuffer: FlexBool(preBuffer),
-            keepModelLoaded: keepModelLoaded,
-            diagnosticLogging: FlexBool(diagnosticLogging),
-            streamingEnabled: FlexBool(streamingEnabled),
-            languageModels: languageModels.isEmpty ? nil : languageModels
-        )
+        var config = baseConfig
+        config.hotkey = HotkeyConfig(keyCode: hotkeyKeyCode, modifiers: hotkeyModifiers)
+        config.modelSize = modelSize
+        config.language = language
+        config.spokenPunctuation = punctuationMode
+        config.maxRecordings = maxRecordings
+        config.toggleMode = FlexBool(toggleMode)
+        config.screenContext = FlexBool(screenContext)
+        config.preBuffer = FlexBool(preBuffer)
+        config.keepModelLoaded = keepModelLoaded
+        config.diagnosticLogging = FlexBool(diagnosticLogging)
+        config.streamingEnabled = FlexBool(streamingEnabled)
+        config.languageModels = languageModels.isEmpty ? nil : languageModels
         config.engine = engine
         config.parakeetModel = parakeetModel
         config.localAPI = FlexBool(localAPIEnabled)
@@ -90,6 +93,7 @@ public class SettingsViewModel: ObservableObject {
     public func save() {
         let config = toConfig()
         try? config.save()
+        baseConfig = config
         onSave?()
     }
 

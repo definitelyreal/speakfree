@@ -144,14 +144,15 @@ private func availableModels(language: String) -> [ModelInfo] {
 
 // MARK: - Max Recordings Options
 
-// No "Off"/unlimited option — production always prunes. The keep-everything escape
-// hatch is the hidden `preserveAllRecordings` config key (edit config.json directly).
+// Keep-everything is the default: recordings are the dictation corpus that makes
+// accuracy regressions diagnosable. Pruning is the explicit opt-in.
 private let maxRecordingsOptions: [(label: String, value: Int)] = [
-    ("10", 10),
-    ("20", 20),
-    ("30", 30),
-    ("50", 50),
-    ("100", 100),
+    ("Keep everything", 0),
+    ("Last 10", 10),
+    ("Last 20", 20),
+    ("Last 30", 30),
+    ("Last 50", 50),
+    ("Last 100", 100),
 ]
 
 // MARK: - Key Recorder Monitor
@@ -485,7 +486,7 @@ struct SettingsView: View {
                                 }
                                 .pickerStyle(.menu)
                                 .labelsHidden()
-                                .frame(width: 80, alignment: .leading)
+                                .frame(width: 150, alignment: .leading)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -637,7 +638,6 @@ struct SettingsView: View {
                 // -- VOCABULARY & CONTEXT ----------------------------------
                 GroupBox("Vocabulary & Context") {
                     VStack(alignment: .leading, spacing: 14) {
-                        correctionsRow
                         vocabularyStatusRow
                     }
                     .padding(.vertical, 6)
@@ -761,7 +761,6 @@ struct SettingsView: View {
             reconcilePickerLanguage()
         }
         .onChange(of: viewModel.punctuationMode) { _ in viewModel.save() }
-        .onChange(of: viewModel.rememberWords) { _ in viewModel.save() }
         .onChange(of: viewModel.maxRecordings) { _ in viewModel.save() }
         .onChange(of: viewModel.preBuffer) { _ in viewModel.save() }
         .onChange(of: viewModel.keepModelLoaded) { _ in viewModel.save() }
@@ -1017,23 +1016,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Corrections Row
-
-    private var correctionsRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Toggle("Learn From My Corrections", isOn: $viewModel.rememberWords)
-                    .toggleStyle(.checkbox)
-                Spacer()
-                Button("Reset") { WordMemory.resetAll() }
-                    .controlSize(.small)
-            }
-            Text("Corrected words are added to your vocabulary to improve future transcriptions.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-    }
-
     // MARK: - Local API Row
 
     private var localAPIRow: some View {
@@ -1101,7 +1083,7 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(width: 80, alignment: .leading)
+                .frame(width: 150, alignment: .leading)
             Spacer()
             }
             Text("Shows recent dictations in the toolbar menu.")

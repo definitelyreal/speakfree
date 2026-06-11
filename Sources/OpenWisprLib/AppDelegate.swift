@@ -19,7 +19,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var isReady = false
     public var lastTranscription: String?
     private var recordingOverlay = RecordingOverlay()
-    private var correctionMonitor = CorrectionMonitor()
     private var settingsViewModel: SettingsViewModel?
     private var localAPIServer: LocalAPIServer?
     private var recordingStyleMode: TextPostProcessor.StyleMode = .none
@@ -208,17 +207,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             if !Transcriber.modelExists(modelSize: effectiveModelSize) {
-                // Fallback 1: if we wanted multilingual but only have .en, use .en
+                // Fallback: if we wanted multilingual but only have .en, use .en —
+                // same size class, so transcription quality is unchanged.
                 if effectiveModelSize != config.modelSize && Transcriber.modelExists(modelSize: config.modelSize) {
-                    print("Multilingual model \(effectiveModelSize) not found — using \(config.modelSize) as fallback")
+                    DiagnosticLogger.shared.log("Multilingual model \(effectiveModelSize) not found — using \(config.modelSize) as fallback")
                     effectiveModelSize = config.modelSize
                 }
-                // Fallback 2: try any Whisper model already on disk
-                else if let anyModel = findAnyDownloadedModel() {
-                    print("Model \(effectiveModelSize) not found — using \(anyModel) as fallback")
-                    effectiveModelSize = anyModel
-                }
                 else {
+                    // NO silent quality fallback. Substituting "any model on disk" once
+                    // swapped tiny.en in for a missing large-v3-turbo and silently degraded
+                    // every dictation for days (2026-06-11 collapse). A missing model gets
+                    // the explicit download dialog, pre-set to the configured model.
+                    DiagnosticLogger.shared.log("Configured model \(effectiveModelSize) missing from disk — showing download dialog (no silent fallback)")
                     needsDownload = true
                 }
             }
@@ -917,6 +917,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let mode = config.spokenPunctuation ?? .off
         let glossary = Config.loadVocabulary()
         let capturedStyleMode = recordingStyleMode
+        // Provenance snapshot for the .meta.json sidecar — engine/model from the ACTIVE
+        // transcriber (not config, which can disagree after a model fallback).
+        let metaEngine = activeEngineID
+        let metaDevice = AudioRecorder.defaultInputDeviceName()
 
         // Snapshot the transcriber on main BEFORE crossing into the async Task. A settings
         // change mid-finalize (reloadConfig) can swap self.transcriber out from under us; the
@@ -1003,6 +1007,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 RecordingStore.saveRaw(text: raw, for: audioURL)
                 let text = TextPipeline.run(makeInput(raw), precomputedPrompt: .some(prompt)).finalText
                 RecordingStore.saveTranscription(text: text, for: audioURL)
+                RecordingStore.saveMeta(RecordingStore.RecordingMeta(
+                    appVersion: OpenWispr.version,
+                    engine: metaEngine,
+                    model: transcriber.modelID,
+                    inputDevice: metaDevice,
+                    date: ISO8601DateFormatter().string(from: Date()),
+                    durationSeconds: Double(samples.count) / 16000.0,
+                    transcriptChars: text.count
+                ), for: audioURL)
 
                 RecordingStore.clearSentinel()
                 if maxRecordings > 0 {
@@ -1046,12 +1059,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             DiagnosticLogger.shared.log("Transcription complete: \(String(format: "%.2f", elapsed))s from key-release to text-inserted, \(text.count) chars")
                             self.statusBar.state = .idle
                             self.statusBar.buildMenu()
-                            // Monitor for word corrections for 10 seconds (opt-in)
-                            if self.config.rememberWords?.value == true, let el = capturedElement {
-                                self.correctionMonitor.start(element: el, pastedText: text) { wrong, right in
-                                    self.offerCorrection(wrong: wrong, right: right)
-                                }
-                            }
                         }
                     } else {
                         self.statusBar.state = .idle
@@ -1248,17 +1255,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func offerCorrection(wrong: String, right: String) {
-        WordMemory.remember(wrong: wrong, right: right)
-        print("Remembered: \(wrong) → \(right)")
-        statusBar.buildMenu()
-    }
-
-    /// Find any downloaded model on disk, returning the model size string (e.g. "base.en").
+    /// Find the LARGEST downloaded whisper model on disk, returning the model size
+    /// string (e.g. "base.en"). Largest-by-file-size, never directory order — used
+    /// only as an availability check; model selection itself never silently
+    /// substitutes (see the no-silent-fallback rule in setupInner).
     private func findAnyDownloadedModel() -> String? {
         let modelsDir = Config.configDir.appendingPathComponent("models")
-        return (try? FileManager.default.contentsOfDirectory(atPath: modelsDir.path))?
-            .first(where: { $0.hasPrefix("ggml-") && $0.hasSuffix(".bin") })
+        let fm = FileManager.default
+        return (try? fm.contentsOfDirectory(atPath: modelsDir.path))?
+            .filter { $0.hasPrefix("ggml-") && $0.hasSuffix(".bin") }
+            .max(by: { a, b in
+                let sizeA = (try? fm.attributesOfItem(atPath: modelsDir.appendingPathComponent(a).path))?[.size] as? Int ?? 0
+                let sizeB = (try? fm.attributesOfItem(atPath: modelsDir.appendingPathComponent(b).path))?[.size] as? Int ?? 0
+                return sizeA < sizeB
+            })
             .map { String($0.dropFirst(5).dropLast(4)) }  // "ggml-base.en.bin" → "base.en"
     }
 }

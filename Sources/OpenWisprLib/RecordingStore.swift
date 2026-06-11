@@ -116,6 +116,51 @@ public class RecordingStore {
         audioURL.deletingPathExtension().appendingPathExtension("raw.txt")
     }
 
+    private static func metaSidecarURL(for audioURL: URL) -> URL {
+        audioURL.deletingPathExtension().appendingPathExtension("meta.json")
+    }
+
+    // MARK: - Provenance sidecar
+
+    /// Provenance for a recording: which app version, engine, model, and input device
+    /// produced it. Written as `<audio>.meta.json` next to the wav so quality
+    /// regressions can be attributed to a specific build or capture device later.
+    public struct RecordingMeta: Codable {
+        public let appVersion: String
+        public let engine: String
+        public let model: String
+        public let inputDevice: String?
+        public let date: String  // ISO 8601
+        public let durationSeconds: Double
+        public let transcriptChars: Int
+
+        public init(appVersion: String, engine: String, model: String,
+                    inputDevice: String?, date: String,
+                    durationSeconds: Double, transcriptChars: Int) {
+            self.appVersion = appVersion
+            self.engine = engine
+            self.model = model
+            self.inputDevice = inputDevice
+            self.date = date
+            self.durationSeconds = durationSeconds
+            self.transcriptChars = transcriptChars
+        }
+    }
+
+    public static func saveMeta(_ meta: RecordingMeta, for audioURL: URL) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(meta) else { return }
+        let sidecar = metaSidecarURL(for: audioURL)
+        try? data.write(to: sidecar)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sidecar.path)
+    }
+
+    public static func loadMeta(for audioURL: URL) -> RecordingMeta? {
+        guard let data = try? Data(contentsOf: metaSidecarURL(for: audioURL)) else { return nil }
+        return try? JSONDecoder().decode(RecordingMeta.self, from: data)
+    }
+
     // MARK: - Listing and pruning
 
     public static func listRecordings() -> [Recording] {
@@ -149,6 +194,7 @@ public class RecordingStore {
                 try FileManager.default.removeItem(at: recording.url)
                 try? FileManager.default.removeItem(at: sidecarURL(for: recording.url))
                 try? FileManager.default.removeItem(at: rawSidecarURL(for: recording.url))
+                try? FileManager.default.removeItem(at: metaSidecarURL(for: recording.url))
             } catch {
                 fputs("Warning: could not remove old recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
             }
@@ -161,6 +207,7 @@ public class RecordingStore {
                 try FileManager.default.removeItem(at: recording.url)
                 try? FileManager.default.removeItem(at: sidecarURL(for: recording.url))
                 try? FileManager.default.removeItem(at: rawSidecarURL(for: recording.url))
+                try? FileManager.default.removeItem(at: metaSidecarURL(for: recording.url))
             } catch {
                 fputs("Warning: could not remove recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
             }

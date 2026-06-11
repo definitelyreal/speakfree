@@ -350,4 +350,77 @@ final class TextPipelineTests: XCTestCase {
         XCTAssertTrue(result.processedText.hasSuffix("?"),
                       ".hybrid mode: processedText should end with '?' after spoken 'question mark'. Got: \(result.processedText)")
     }
+
+    // MARK: - Mid-sentence insertion lowercasing (Michael 2026-06-11)
+
+    func test_isMidSentence_positions() {
+        // Mid-sentence: continuing after a word, comma, colon, dash, open paren
+        XCTAssertTrue(TextPipeline.isMidSentence(contextBefore: "I'd love"))
+        XCTAssertTrue(TextPipeline.isMidSentence(contextBefore: "make it,"))
+        XCTAssertTrue(TextPipeline.isMidSentence(contextBefore: "make it, "))
+        XCTAssertTrue(TextPipeline.isMidSentence(contextBefore: "note:"))
+        XCTAssertTrue(TextPipeline.isMidSentence(contextBefore: "wait \u{2014}"))
+        XCTAssertTrue(TextPipeline.isMidSentence(contextBefore: "see ("))
+        // Fresh sentence: empty field, terminator, terminator+quote, newline
+        XCTAssertFalse(TextPipeline.isMidSentence(contextBefore: nil))
+        XCTAssertFalse(TextPipeline.isMidSentence(contextBefore: ""))
+        XCTAssertFalse(TextPipeline.isMidSentence(contextBefore: "Done."))
+        XCTAssertFalse(TextPipeline.isMidSentence(contextBefore: "Done. "))
+        XCTAssertFalse(TextPipeline.isMidSentence(contextBefore: "Really?"))
+        XCTAssertFalse(TextPipeline.isMidSentence(contextBefore: "Stop!"))
+        XCTAssertFalse(TextPipeline.isMidSentence(contextBefore: "He said \u{201C}stop.\u{201D}"))
+        XCTAssertFalse(TextPipeline.isMidSentence(contextBefore: "new line\n"))
+        XCTAssertFalse(TextPipeline.isMidSentence(contextBefore: "para\n\n"))
+    }
+
+    func test_run_midSentence_lowercasesLeadingCapital() {
+        // The exact failure Michael hit: dictating a continuation mid-sentence,
+        // whisper sentence-cases it ("If you think…"), insertion must lowercase.
+        let input = TextPipeline.Input(raw: "If you think there are other people",
+                                       punctuationMode: .hybrid,
+                                       cursorContextText: "I'd love if you could make it, and")
+        let result = TextPipeline.run(input)
+        XCTAssertTrue(result.finalText.hasPrefix("if you think"),
+                      "mid-sentence insertion must start lowercase. Got: \(result.finalText)")
+    }
+
+    func test_run_freshSentence_keepsCapital() {
+        let input = TextPipeline.Input(raw: "If you think so, come.",
+                                       punctuationMode: .hybrid,
+                                       cursorContextText: "That was great. ")
+        let result = TextPipeline.run(input)
+        XCTAssertTrue(result.finalText.hasPrefix("If you think"),
+                      "fresh sentence keeps its capital. Got: \(result.finalText)")
+    }
+
+    func test_run_midSentence_keepsDeliberateCase() {
+        // "I" and contractions stay capitalized
+        let i = TextPipeline.run(TextPipeline.Input(raw: "I'll be there",
+                                                    punctuationMode: .hybrid,
+                                                    cursorContextText: "and then "))
+        XCTAssertTrue(i.finalText.hasPrefix("I'll"), "pronoun I keeps case. Got: \(i.finalText)")
+        // Glossary names stay capitalized
+        let g = TextPipeline.run(TextPipeline.Input(raw: "Bexx is coming too",
+                                                    punctuationMode: .hybrid,
+                                                    cursorContextText: "and maybe ",
+                                                    glossaryWords: "Claude, Zander, Bexx"))
+        XCTAssertTrue(g.finalText.hasPrefix("Bexx"), "glossary name keeps case. Got: \(g.finalText)")
+        // All-caps and internal-caps words stay
+        let a = TextPipeline.run(TextPipeline.Input(raw: "OK let's do it",
+                                                    punctuationMode: .hybrid,
+                                                    cursorContextText: "and "))
+        XCTAssertTrue(a.finalText.hasPrefix("OK"), "all-caps word keeps case. Got: \(a.finalText)")
+        let ic = TextPipeline.run(TextPipeline.Input(raw: "AirPods sound weird",
+                                                     punctuationMode: .hybrid,
+                                                     cursorContextText: "my "))
+        XCTAssertTrue(ic.finalText.hasPrefix("AirPods"), "internal-caps word keeps case. Got: \(ic.finalText)")
+    }
+
+    func test_run_noContext_unchanged() {
+        // No cursor context (unknown field) — never touch the case.
+        let input = TextPipeline.Input(raw: "If you think so", punctuationMode: .hybrid)
+        let result = TextPipeline.run(input)
+        XCTAssertTrue(result.finalText.hasPrefix("If"),
+                      "no context = no case adjustment. Got: \(result.finalText)")
+    }
 }
