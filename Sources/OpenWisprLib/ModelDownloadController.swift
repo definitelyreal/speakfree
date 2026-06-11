@@ -3,7 +3,10 @@ import Foundation
 
 /// A modal, non-closeable dialog that shows model download progress.
 /// Replaces the old ModelPickerController for download-only use cases.
-class ModelDownloadController: NSObject, URLSessionDownloadDelegate {
+///
+/// T2.4: the URLSession + delegate were extracted into ModelDownloadCoordinator;
+/// this controller now owns only its panel UI and drives a coordinator.
+class ModelDownloadController: NSObject {
 
     // MARK: - Known model sizes for display
 
@@ -36,7 +39,7 @@ class ModelDownloadController: NSObject, URLSessionDownloadDelegate {
 
     private var modelSize: String = ""
     private var completion: ((Bool) -> Void)?
-    private var downloadTask: URLSessionDownloadTask?
+    private var coordinator: ModelDownloadCoordinator?
 
     // MARK: - Public API
 
@@ -112,96 +115,30 @@ class ModelDownloadController: NSObject, URLSessionDownloadDelegate {
     // MARK: - Download
 
     private func startDownload() {
-        let modelFileName = "ggml-\(modelSize).bin"
-        let urlString = "\(ModelDownloader.baseURL)/\(modelFileName)"
-        guard let url = URL(string: urlString) else {
-            showError("Invalid download URL")
-            return
+        let coordinator = ModelDownloadCoordinator()
+        self.coordinator = coordinator
+
+        coordinator.onProgress = { [weak self] fraction, _, _ in
+            self?.progressBar.doubleValue = fraction
+            self?.percentLabel.stringValue = "\(Int(fraction * 100))%"
+        }
+        coordinator.onSuccess = { [weak self] _ in self?.finishSuccess() }
+        coordinator.onFailure = { [weak self] error in
+            self?.showError(ModelDownloadController.errorMessage(error))
         }
 
-        // Ensure models directory exists
-        let modelsDir = Config.configDir.appendingPathComponent("models")
-        try? FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
-
-        // Clean up any partial download
-        let destPath = modelsDir.appendingPathComponent(modelFileName)
-        let tmpPath = destPath.appendingPathExtension("downloading")
-        try? FileManager.default.removeItem(at: tmpPath)
-
-        // If model already exists, succeed immediately
-        if FileManager.default.fileExists(atPath: destPath.path) {
-            print("Model '\(modelSize)' already exists at \(destPath.path)")
-            finishSuccess()
-            return
-        }
-
-        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-        downloadTask = session.downloadTask(with: url)
-        downloadTask?.resume()
+        coordinator.start(modelSize: modelSize)
     }
 
-    // MARK: - URLSessionDownloadDelegate
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didWriteData bytesWritten: Int64,
-                    totalBytesWritten: Int64,
-                    totalBytesExpectedToWrite: Int64) {
-        let progress: Double
-        if totalBytesExpectedToWrite > 0 {
-            progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        } else {
-            progress = 0
-        }
-        DispatchQueue.main.async { [weak self] in
-            self?.progressBar.doubleValue = progress
-            self?.percentLabel.stringValue = "\(Int(progress * 100))%"
-        }
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didFinishDownloadingTo location: URL) {
-        let modelFileName = "ggml-\(modelSize).bin"
-        let modelsDir = Config.configDir.appendingPathComponent("models")
-        let destPath = modelsDir.appendingPathComponent(modelFileName)
-        let tmpPath = destPath.appendingPathExtension("downloading")
-
-        do {
-            // Move downloaded file to tmp path first (URLSession's location is ephemeral)
-            try? FileManager.default.removeItem(at: tmpPath)
-            try FileManager.default.moveItem(at: location, to: tmpPath)
-
-            // Validate: GGML files should be at least 1MB
-            let attrs = try? FileManager.default.attributesOfItem(atPath: tmpPath.path)
-            let fileSize = attrs?[.size] as? Int ?? 0
-            if fileSize < 1_000_000 {
-                try? FileManager.default.removeItem(at: tmpPath)
-                DispatchQueue.main.async { [weak self] in
-                    self?.showError("Downloaded file is not a valid Whisper model")
-                }
-                return
-            }
-
-            // Atomically move to final destination
-            try? FileManager.default.removeItem(at: destPath)
-            try FileManager.default.moveItem(at: tmpPath, to: destPath)
-            print("Model downloaded to \(destPath.path)")
-
-            DispatchQueue.main.async { [weak self] in
-                self?.finishSuccess()
-            }
-        } catch {
-            try? FileManager.default.removeItem(at: tmpPath)
-            DispatchQueue.main.async { [weak self] in
-                self?.showError("Failed to save model: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error {
-            DispatchQueue.main.async { [weak self] in
-                self?.showError("Download failed: \(error.localizedDescription)")
-            }
+    /// Map a coordinator error to this dialog's prior copy.
+    private static func errorMessage(_ error: Error) -> String {
+        switch error {
+        case ModelDownloadError.invalidModel:
+            return "Downloaded file is not a valid Whisper model"
+        case ModelDownloadError.hashMismatch:
+            return (error as? LocalizedError)?.errorDescription ?? "Download failed integrity check"
+        default:
+            return "Download failed: \(error.localizedDescription)"
         }
     }
 
