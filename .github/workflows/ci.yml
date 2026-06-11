@@ -90,6 +90,90 @@ jobs:
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
         run: xcrun swift test
 
+  perf:
+    # T2.0 perf-regression harness. Benchmarks the audio golden fixtures and gates against the
+    # tracked baseline (Tests/PerfBaseline/baseline.json). The committed baseline is fingerprinted
+    # to a dev Mac (Apple M3 Max); a CI runner's fingerprint differs, so the gate prints
+    # "no comparable baseline" and PASSES until a CI-fingerprint baseline is committed (download
+    # the uploaded perf-report.json from a green run, commit it as baseline-ci.json, and point
+    # --baseline at it to make the gate enforce on CI). Locked threshold: +15% median regression.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for Swift changes (PR only)
+        id: filter
+        if: github.event_name == 'pull_request'
+        run: |
+          CHANGED=$(gh pr diff ${{ github.event.pull_request.number }} --name-only --repo ${{ github.repository }})
+          if echo "$CHANGED" | grep -qE '\.(swift)$|^Package\.swift$'; then
+            echo "swift=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "swift=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install whisper-cpp
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        run: brew install whisper-cpp
+
+      - name: Cache tiny.en whisper model
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        uses: actions/cache@v4
+        id: model-cache
+        with:
+          path: ~/.config/speakfree/models/ggml-tiny.en.bin
+          key: whisper-model-tiny.en-v1
+
+      - name: Download tiny.en whisper model
+        if: (github.event_name == 'push' || steps.filter.outputs.swift == 'true') && steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.config/speakfree/models
+          curl -fL "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin" \
+            -o ~/.config/speakfree/models/ggml-tiny.en.bin
+
+      - name: Write speakfree config for CI (use tiny.en)
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        run: |
+          mkdir -p ~/.config/speakfree
+          printf '%s\n' \
+            '{' \
+            '  "hotkey": {"keyCode": 63, "modifiers": []},' \
+            '  "modelSize": "tiny.en",' \
+            '  "engine": "whisper",' \
+            '  "language": "en",' \
+            '  "maxRecordings": 30,' \
+            '  "rememberWords": true,' \
+            '  "screenContext": true,' \
+            '  "spokenPunctuation": "hybrid"' \
+            '}' > ~/.config/speakfree/config.json
+
+      - name: Build perf-harness
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        run: xcrun swift build -c release --product perf-harness
+
+      - name: Perf benchmark + regression gate
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        # Whisper only (parakeet auto-skips when its multi-GB CoreML assets aren't on the runner).
+        # Gate enforces +15% median against a fingerprint-MATCHING baseline; a non-matching one
+        # (today: the dev-Mac baseline vs a CI runner) prints a note and passes (exit 0).
+        run: |
+          .build/release/perf-harness bench-and-gate \
+            --iterations 7 \
+            --engines whisper \
+            --out perf-report.json \
+            --baseline Tests/PerfBaseline/baseline.json \
+            --threshold 15
+
+      - name: Upload perf report
+        if: (github.event_name == 'push' || steps.filter.outputs.swift == 'true') && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-report
+          path: perf-report.json
+          if-no-files-found: ignore
+
   swiftlint:
     runs-on: macos-15
     steps:

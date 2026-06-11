@@ -49,6 +49,15 @@ let package = Package(
             dependencies: ["OpenWisprLib"],
             path: "Sources/SpeakFree"
         ),
+        // Performance-regression harness (T2.0): benchmarks per-fixture inference time +
+        // simulated end-to-end latency over the audio golden fixtures, writes a fingerprinted
+        // baseline JSON, and gates regressions (>+15% median) against a matching baseline.
+        // `swift run perf-harness run` / `swift run perf-harness compare <candidate> <baseline>`.
+        .executableTarget(
+            name: "perf-harness",
+            dependencies: ["OpenWisprLib"],
+            path: "Sources/PerfHarness"
+        ),
         .testTarget(
             name: "OpenWisprTests",
             dependencies: ["OpenWisprLib"],

@@ -1,0 +1,77 @@
+{
+  "engines" : [
+    {
+      "engine" : "whisper",
+      "fixtures" : [
+        {
+          "audioSeconds" : 11.1,
+          "endToEndMs" : {
+            "iterations" : 11,
+            "max" : 1515.093041,
+            "mean" : 1068.7425757272729,
+            "median" : 978.6839160000001,
+            "min" : 915.8302920000001
+          },
+          "fixture" : "fixture-1-clean.wav",
+          "inferenceMs" : {
+            "iterations" : 11,
+            "max" : 1213.780083,
+            "mean" : 767.695340909091,
+            "median" : 678.004166,
+            "min" : 615.080084
+          },
+          "transcript" : "I do think you're right and we shouldn't come"
+        },
+        {
+          "audioSeconds" : 9.4,
+          "endToEndMs" : {
+            "iterations" : 11,
+            "max" : 1508.179916,
+            "mean" : 1070.4632044545453,
+            "median" : 1011.481333,
+            "min" : 976.01225
+          },
+          "fixture" : "fixture-2-spoken-comma.wav",
+          "inferenceMs" : {
+            "iterations" : 11,
+            "max" : 1207.013833,
+            "mean" : 769.2359355454545,
+            "median" : 710.330166,
+            "min" : 674.922375
+          },
+          "transcript" : "Especially that we aren't using the CLI, talking about the changes we made in architecture to speed things up are really important."
+        },
+        {
+          "audioSeconds" : 11,
+          "endToEndMs" : {
+            "iterations" : 11,
+            "max" : 1503.718042,
+            "mean" : 976.6567764545454,
+            "median" : 919.442542,
+            "min" : 912.3407080000001
+          },
+          "fixture" : "fixture-3-spoken-period-end.wav",
+          "inferenceMs" : {
+            "iterations" : 11,
+            "max" : 1202.841083,
+            "mean" : 675.8068559999999,
+            "median" : 617.69125,
+            "min" : 611.609458
+          },
+          "transcript" : "What's a more felt way to present the RSVP button question mark for the big chunky button feels too promotional period."
+        }
+      ],
+      "model" : "tiny.en",
+      "postBufferMs" : 300
+    }
+  ],
+  "fingerprint" : {
+    "arch" : "arm64",
+    "cores" : 16,
+    "cpu" : "Apple M3 Max",
+    "os" : "macOS Version 26.0 (Build 25A354)"
+  },
+  "generatedAt" : "2026-06-11T01:52:51Z",
+  "iterations" : 11,
+  "schemaVersion" : 1
+}
