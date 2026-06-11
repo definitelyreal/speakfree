@@ -35,6 +35,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
         case downloading
         case waitingForPermission
         case copiedToClipboard
+        /// Secure-Input fallback: dictated text was copied with concealment markers and will
+        /// auto-clear after the configured delay. Shows a distinct notification so the user
+        /// knows the clipboard will self-clean (audit M2).
+        case secureInputCopied
         case noModel
         /// Setup threw a fatal error. The process stays alive so the user can read the
         /// error text in the menu and quit cleanly.
@@ -155,6 +159,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
             case .downloading: stateText = "Downloading model..."
             case .waitingForPermission: stateText = "⚠️ Grant Accessibility Permission →"
             case .copiedToClipboard: stateText = "Copied to clipboard"
+            case .secureInputCopied: stateText = "Copied — auto-clears in 15s (Secure Input)"
             case .noModel: stateText = "⚠️ No model — open Settings to download"
             case .setupFailed(let message): stateText = "⛔ Setup failed: \(message)"
             }
@@ -304,7 +309,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
             startDownloadingAnimation()
         case .waitingForPermission:
             setIcon(StatusBarController.drawLockIcon())
-        case .copiedToClipboard:
+        case .copiedToClipboard, .secureInputCopied:
             setIcon(StatusBarController.drawCheckmarkIcon())
         case .noModel:
             setIcon(StatusBarController.drawNoModelIcon())

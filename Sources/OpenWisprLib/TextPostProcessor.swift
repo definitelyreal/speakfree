@@ -96,6 +96,16 @@ public struct TextPostProcessor {
             )
         }
 
+        // 2a. Trim spaces adjacent to spoken line-breaks (audit M2).
+        // The alwaysReplace lookbehind/lookahead for "new line"/"new paragraph" are
+        // non-consuming: they match on a word boundary but leave the adjacent spaces in place,
+        // producing " \n " (trailing space on the prior word, leading space on the next).
+        // Trim those artifact spaces so the break is clean: "hello \n world" → "hello\nworld".
+        // This runs after alwaysReplace so it only touches \n characters that arrived from
+        // spoken-command substitution (Whisper multi-segment \n are already space-joined
+        // upstream in Transcriber before the text reaches TextPostProcessor).
+        result = trimSpacesAroundNewlines(result)
+
         // 2. Replace ambiguous words — strategy depends on mode
         let ambiguous = hybrid ? contextReplace : spokenFallback
         for (pattern, replacement) in ambiguous {
@@ -351,6 +361,29 @@ public struct TextPostProcessor {
                     result.replaceSubrange(range, with: replacement)
                 }
             }
+        }
+        return result
+    }
+
+    /// Trim spaces that are immediately adjacent to a newline character (audit M2).
+    /// The spoken-command regex for "new line" / "new paragraph" uses non-consuming
+    /// lookbehind/lookahead, leaving the surrounding spaces in place: "hello \n world".
+    /// This pass collapses those artifact spaces: "hello \n world" → "hello\nworld",
+    /// "hello \n\n world" → "hello\n\nworld".
+    /// Only spaces (U+0020) directly before or after `\n` are removed — other
+    /// whitespace (tabs, multiple spaces from sentence spacing) is left untouched.
+    /// `internal` (not `private`) so tests can cover it directly via @testable import.
+    static func trimSpacesAroundNewlines(_ text: String) -> String {
+        var result = text
+        // Strip one or more spaces immediately before each \n.
+        if let pre = try? NSRegularExpression(pattern: " +(?=\\n)", options: []) {
+            result = pre.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
+        }
+        // Strip one or more spaces immediately after each \n.
+        if let post = try? NSRegularExpression(pattern: "(?<=\\n) +", options: []) {
+            result = post.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
         }
         return result
     }

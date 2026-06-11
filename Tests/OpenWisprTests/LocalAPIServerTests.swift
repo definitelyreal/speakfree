@@ -216,6 +216,16 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(LocalAPIServer.idleTimeout, 30, accuracy: 0.001)
     }
 
+    // MARK: - M2: Absolute connection-lifetime cap
+
+    /// The per-connection lifetime cap must be 120 s (audit M2: no absolute lifetime in AR-1).
+    /// This constant is the contract; live enforcement is integration-tested in
+    /// LocalAPIServerLiveTests (byte-trickling connection gets cut).
+    func testMaxConnectionLifetimeIs120Seconds() {
+        XCTAssertEqual(LocalAPIServer.maxConnectionLifetime, 120, accuracy: 0.001,
+                       "Lifetime cap must be 120 s — a legit upload+transcription fits inside this window")
+    }
+
     // MARK: - Loopback enforcement
 
     func testIsLoopbackAcceptsIPv4Loopback() {

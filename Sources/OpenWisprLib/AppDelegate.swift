@@ -912,12 +912,26 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         // Record usage stats
                         let audioSeconds = Double(samples.count) / 16000.0
                         UsageStats.shared.recordDictation(characters: text.count, audioSeconds: audioSeconds)
-                        let pasted = self.inserter.insert(text: insertText, refocusing: capturedElement, onFocusLost: {
-                            self.statusBar.state = .copiedToClipboard
+                        // Secure-Input fallback notification (audit M2): if the insertion falls back
+                        // because Secure Input is active (e.g. a password field), show a distinct
+                        // "auto-clears" notification so the user knows the clipboard is self-cleaning.
+                        self.inserter.onSecureInputFallback = {
+                            self.statusBar.state = .secureInputCopied
                             self.statusBar.buildMenu()
                             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                                 self.statusBar.state = .idle
                                 self.statusBar.buildMenu()
+                            }
+                        }
+                        let pasted = self.inserter.insert(text: insertText, refocusing: capturedElement, onFocusLost: {
+                            // Only update state if it wasn't already set by onSecureInputFallback.
+                            if self.statusBar.state != .secureInputCopied {
+                                self.statusBar.state = .copiedToClipboard
+                                self.statusBar.buildMenu()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                    self.statusBar.state = .idle
+                                    self.statusBar.buildMenu()
+                                }
                             }
                         })
                         if pasted {

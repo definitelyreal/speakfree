@@ -22,6 +22,8 @@ import AVFoundation
 ///    read the response even if it reaches the socket.
 ///  - Request body capped at 32 MB (413 over).
 ///  - Per-connection idle timeout cancels stalled reads.
+///  - Absolute per-connection lifetime cap (audit M2): 120 s regardless of activity.
+///    A byte-trickling sender can reschedule the idle timer but never the lifetime timer.
 ///  - Concurrent connections capped (audit AR-1); excess connections are dropped before any
 ///    buffer is allocated, bounding worst-case memory.
 ///  - Optional `Authorization: Bearer <token>` when `localAPIToken` is set (else loopback-only).
@@ -31,6 +33,11 @@ final class LocalAPIServer {
     static let maxBodyBytes = 32 * 1_024 * 1_024
     /// Idle timeout: a connection that sends no bytes for this long is cancelled.
     static let idleTimeout: TimeInterval = 30
+    /// Absolute per-connection lifetime cap (audit M2). A connection is cancelled once this
+    /// deadline elapses regardless of ongoing activity. Prevents a slow-dripping sender from
+    /// holding a slot (and up to 32 MB of buffer) indefinitely — a legitimate transcription
+    /// upload + processing fits comfortably inside 120 s.
+    static let maxConnectionLifetime: TimeInterval = 120
     /// Maximum simultaneously-accepted connections. Excess connections are cancelled
     /// immediately (before any 32 MB buffer can be allocated) to bound memory under abuse.
     static let maxConcurrentConnections = 16
@@ -40,6 +47,10 @@ final class LocalAPIServer {
     private let listenPort: UInt16
     private let serverQueue = DispatchQueue(label: "com.speakfree.localapi.server")
     private let requestQueue = DispatchQueue(label: "com.speakfree.localapi.requests", attributes: .concurrent)
+
+    /// Per-instance lifetime override. Seam so tests can shorten the 120 s production default
+    /// without waiting that long. Nil = use the static `maxConnectionLifetime`.
+    var connectionLifetimeOverride: TimeInterval? = nil
 
     // Hardening config, captured at start().
     private var allowBrowser = false
@@ -195,32 +206,46 @@ final class LocalAPIServer {
             return
         }
 
-        // Release the slot exactly once when the connection leaves the active state.
-        var slotReleased = false
-        let releaseSlot: () -> Void = { [weak self] in
-            if slotReleased { return }
-            slotReleased = true
-            self?.releaseConnectionSlot()
+        // Per-connection idle timeout: cancel if no progress within idleTimeout.
+        // The idle timer is rescheduled on every received byte (see accumulate).
+        let idleTimer = DispatchSource.makeTimerSource(queue: requestQueue)
+        idleTimer.schedule(deadline: .now() + Self.idleTimeout)
+        idleTimer.setEventHandler { [weak conn] in
+            conn?.cancel()
         }
-        conn.stateUpdateHandler = { state in
+        idleTimer.resume()
+
+        // Absolute lifetime cap (audit M2): cancel regardless of activity after the lifetime limit.
+        // A slow-dripping attacker can keep rescheduling the idle timer but cannot extend this one,
+        // so a connection that trickles bytes forever still gets cut.
+        // Production uses maxConnectionLifetime (120 s); tests can shorten via connectionLifetimeOverride.
+        let lifetime = connectionLifetimeOverride ?? Self.maxConnectionLifetime
+        let lifetimeTimer = DispatchSource.makeTimerSource(queue: requestQueue)
+        lifetimeTimer.schedule(deadline: .now() + lifetime)
+        lifetimeTimer.setEventHandler { [weak conn] in
+            DiagnosticLogger.shared.log("LocalAPI: connection lifetime cap (\(lifetime)s) reached — cancelling")
+            conn?.cancel()
+        }
+        lifetimeTimer.resume()
+
+        // Single state handler: release the slot AND cancel both timers when the connection ends.
+        var slotReleased = false
+        conn.stateUpdateHandler = { [weak self] state in
             switch state {
             case .cancelled, .failed:
-                releaseSlot()
+                idleTimer.cancel()
+                lifetimeTimer.cancel()
+                if !slotReleased {
+                    slotReleased = true
+                    self?.releaseConnectionSlot()
+                }
             default:
                 break
             }
         }
 
-        // Per-connection idle timeout: cancel if no progress within idleTimeout.
-        let timer = DispatchSource.makeTimerSource(queue: requestQueue)
-        timer.schedule(deadline: .now() + Self.idleTimeout)
-        timer.setEventHandler { [weak conn] in
-            conn?.cancel()
-        }
-        timer.resume()
-
         conn.start(queue: requestQueue)
-        accumulate(conn, data: Data(), idleTimer: timer)
+        accumulate(conn, data: Data(), idleTimer: idleTimer)
     }
 
     /// Atomically reserve a connection slot. Returns false if the cap is already reached.
