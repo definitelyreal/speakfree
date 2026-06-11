@@ -15,6 +15,13 @@ final class SecureInputTests: XCTestCase {
 
     // MARK: - helpers
 
+    /// A throwaway named pasteboard so tests never read or write NSPasteboard.general —
+    /// the developer's real clipboard locally, and a hang risk on headless CI (the pboard
+    /// daemon can block indefinitely outside a full Aqua session). Test-host-safety, PLAN.md P-1.
+    private func makeTestPasteboard() -> NSPasteboard {
+        NSPasteboard(name: NSPasteboard.Name("speakfree-test-" + UUID().uuidString))
+    }
+
     private func makeInserter(secureInput: Bool) -> TextInserter {
         let inserter = TextInserter()
         inserter.isSecureInputActive = { secureInput }
@@ -22,6 +29,8 @@ final class SecureInputTests: XCTestCase {
         // synthetic CGEvent keystrokes or paste into whatever window happens to be frontmost
         // on the dev's machine. Tests that need to observe the inserted text override this.
         inserter.performInsertion = { _ in }
+        // Clipboard guard: all clipboard paths write a private named pasteboard, never .general.
+        inserter.pasteboard = makeTestPasteboard()
         return inserter
     }
 
@@ -100,6 +109,7 @@ final class SecureInputTests: XCTestCase {
     func test_secureInput_asyncRefocusPathRechecksBeforeInserting() {
         let exp = expectation(description: "async re-check fires onFocusLost from the closure")
         let inserter = TextInserter()
+        inserter.pasteboard = makeTestPasteboard()
 
         // Start with secure input OFF so the synchronous guard at insert() entry passes.
         var secureInputIsOn = false
@@ -144,10 +154,11 @@ final class SecureInputTests: XCTestCase {
     /// Concealed + Transient markers so clipboard-history tools skip it — unlike the old
     /// bare clearContents()+setString that left plaintext for any app to read.
     func test_secureInputFallback_setsConcealedAndTransientMarkers() {
-        let pb = NSPasteboard.general
+        let pb = makeTestPasteboard()
         pb.clearContents()
 
         let inserter = TextInserter()
+        inserter.pasteboard = pb
         inserter.secureInputClipboardClearDelay = 60  // don't auto-clear during the assertions
         inserter.secureInputClipboardFallback("my-secret-password")
 
@@ -164,10 +175,11 @@ final class SecureInputTests: XCTestCase {
     /// The fallback must auto-clear the dictated text after the (test-shortened) delay,
     /// so the plaintext does not linger on the general pasteboard.
     func test_secureInputFallback_autoClearsAfterDelay() {
-        let pb = NSPasteboard.general
+        let pb = makeTestPasteboard()
         pb.clearContents()
 
         let inserter = TextInserter()
+        inserter.pasteboard = pb
         inserter.secureInputClipboardClearDelay = 0.2
         inserter.secureInputClipboardFallback("ephemeral-secret")
         XCTAssertEqual(pb.string(forType: .string), "ephemeral-secret",
@@ -186,10 +198,11 @@ final class SecureInputTests: XCTestCase {
     /// If the user copies something else after the fallback, auto-clear must NOT clobber it
     /// (it only clears when its own write is still the live clipboard content).
     func test_secureInputFallback_doesNotClobberUserCopyAfterwards() {
-        let pb = NSPasteboard.general
+        let pb = makeTestPasteboard()
         pb.clearContents()
 
         let inserter = TextInserter()
+        inserter.pasteboard = pb
         inserter.secureInputClipboardClearDelay = 0.2
         inserter.secureInputClipboardFallback("dictated-secret")
 
@@ -210,10 +223,10 @@ final class SecureInputTests: XCTestCase {
     /// End-to-end: insert() under Secure Input routes through the concealed fallback (markers
     /// present), proving the worst-case path no longer leaks plaintext via bare copyToClipboard.
     func test_secureInput_insertRoutesThroughConcealedFallback() {
-        let pb = NSPasteboard.general
+        let inserter = makeInserter(secureInput: true)
+        let pb = inserter.pasteboard
         pb.clearContents()
 
-        let inserter = makeInserter(secureInput: true)
         inserter.secureInputClipboardClearDelay = 60
         inserter.insert(text: "password-into-secure-field")
 
