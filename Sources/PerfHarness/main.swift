@@ -183,6 +183,132 @@ case "bench-and-gate":
         fail("bench-and-gate: could not read baseline \(baselinePath): \(error)")
     }
 
+case "divergence":
+    // T2.3-PRE — measure streaming-partial vs final-pass word divergence on short clips.
+    // Usage: perf-harness divergence [--out PATH] [--fixtures-dir DIR] [--work-dir DIR]
+    //
+    // --out PATH        write the markdown report to PATH (default: stdout)
+    // --fixtures-dir    override fixtures dir (default: Tests/OpenWisprTests/AudioFixtures)
+    // --work-dir        directory for temp WAV clips (default: build/T2.3-PRE-clips in repo root)
+    //
+    // Exit codes: 0 = divergence < 1% (T2.3 cleared); 1 = divergence >= 1% (T2.3 cancelled); 2 = error.
+
+    let fixturesDir: URL
+    if let fd = value(for: "--fixtures-dir", in: args) {
+        fixturesDir = URL(fileURLWithPath: fd)
+    } else {
+        fixturesDir = Benchmark.fixturesDir()
+    }
+
+    // Resolve work dir for temp WAV clips
+    let workDir: URL
+    if let wd = value(for: "--work-dir", in: args) {
+        workDir = URL(fileURLWithPath: wd)
+    } else {
+        // Repo root is 3 levels up from this source file
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // PerfHarness
+            .deletingLastPathComponent()   // Sources
+            .deletingLastPathComponent()   // repo root
+        workDir = repoRoot.appendingPathComponent("build/T2.3-PRE-clips")
+    }
+    do {
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+    } catch {
+        fail("divergence: could not create work dir \(workDir.path): \(error)")
+    }
+
+    // Resolve whisper-cli binary
+    guard let whisperPath = Transcriber.findWhisperBinary() else {
+        fail("divergence: whisper-cli not found; install with: brew install whisper-cpp")
+    }
+
+    // Resolve model path (tiny.en — the plan's specified model for this measurement).
+    // Use Transcriber.modelExists (public) to check, then resolve the path from the
+    // same candidate list Transcriber.findModel uses (internal, so we duplicate it here).
+    let modelSize = "tiny.en"
+    let modelFileName = "ggml-\(modelSize).bin"
+    let modelCandidates: [String] = [
+        "\(Config.configDir.path)/models/\(modelFileName)",
+        "/opt/homebrew/share/whisper-cpp/models/\(modelFileName)",
+        "/usr/local/share/whisper-cpp/models/\(modelFileName)",
+        "\(FileManager.default.homeDirectoryForCurrentUser.path)/.cache/whisper/\(modelFileName)",
+    ]
+    guard let modelPath = modelCandidates.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+        fail("divergence: whisper model '\(modelSize)' not found; run: open-wispr download-model \(modelSize)")
+    }
+
+    let nCores = ProcessInfo.processInfo.activeProcessorCount
+    let fullThreads = nCores
+    let halfThreads = max(nCores / 2, 1)
+
+    FileHandle.standardError.write(Data("""
+    divergence: model=\(modelSize), whisper=\(URL(fileURLWithPath: whisperPath).lastPathComponent)
+    divergence: fullThreads=\(fullThreads) halfThreads=\(halfThreads)
+    divergence: fixturesDir=\(fixturesDir.path)
+    divergence: workDir=\(workDir.path)
+    \n
+    """.utf8))
+
+    guard let results = Divergence.measure(
+        fixturesDir: fixturesDir,
+        shortDurationsSeconds: [2.0, 3.0],
+        whisperPath: whisperPath,
+        modelPath: modelPath,
+        fullThreads: fullThreads,
+        halfThreads: halfThreads,
+        workDir: workDir
+    ) else {
+        fail("divergence: measurement failed")
+    }
+
+    if results.isEmpty {
+        fail("divergence: no short clips produced (are fixtures shorter than 2 s?)")
+    }
+
+    let machine = Fingerprint.current()
+    let md = Divergence.renderMarkdown(
+        results: results,
+        whisperPath: whisperPath,
+        modelPath: modelPath,
+        fullThreads: fullThreads,
+        halfThreads: halfThreads,
+        machine: machine
+    )
+
+    // Write markdown output
+    if let outPath = value(for: "--out", in: args) {
+        let url = URL(fileURLWithPath: outPath)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try md.write(to: url, atomically: true, encoding: String.Encoding.utf8)
+            FileHandle.standardError.write(Data("divergence: wrote \(outPath)\n".utf8))
+        } catch {
+            fail("divergence: could not write report to \(outPath): \(error)")
+        }
+    } else {
+        print(md)
+    }
+
+    // Compute aggregate divergence to set exit code
+    let totalEditDist = results.map { $0.editDistance }.reduce(0, +)
+    let totalFinalWords = results.map { $0.finalWordCount }.reduce(0, +)
+    let aggregateDivPct: Double = totalFinalWords > 0
+        ? Double(totalEditDist) / Double(totalFinalWords) * 100.0
+        : 0.0
+
+    FileHandle.standardError.write(Data(
+        "divergence: aggregate word divergence = \(String(format: "%.4f", aggregateDivPct))% (threshold 1%)\n".utf8))
+
+    if aggregateDivPct < 1.0 {
+        FileHandle.standardError.write(Data("divergence: PROCEED — T2.3 cleared\n".utf8))
+        exit(0)
+    } else {
+        FileHandle.standardError.write(Data("divergence: CANCEL — T2.3 not cleared\n".utf8))
+        exit(1)
+    }
+
 case "-h", "--help", "help":
     print("""
     perf-harness — speakfree performance-regression harness (T2.0)
@@ -191,15 +317,18 @@ case "-h", "--help", "help":
       perf-harness run [--iterations N] [--engines whisper,parakeet] [--policy flat|adaptive] [--out PATH]
       perf-harness compare <candidate.json> <baseline.json> [--threshold PCT]
       perf-harness bench-and-gate [--iterations N] [--engines …] [--policy flat|adaptive] [--out PATH] --baseline PATH [--threshold PCT]
+      perf-harness divergence [--out PATH] [--fixtures-dir DIR] [--work-dir DIR]
 
     --policy: flat = legacy 300ms tax on every dictation (default, = pre-T2.1 baseline);
               adaptive = T2.1 — stop on ~150ms trailing silence, hard cap 300ms.
 
     Gate fails (exit 1) only on a >+threshold% median regression vs a FINGERPRINT-MATCHING
     baseline. A non-comparable baseline prints a note and passes (exit 0). Default threshold 15%.
+
+    divergence: exit 0 = T2.3 cleared (<1% aggregate word divergence); exit 1 = cancelled.
     """)
     exit(0)
 
 default:
-    fail("unknown command '\(command)' (run | compare | bench-and-gate | help)")
+    fail("unknown command '\(command)' (run | compare | bench-and-gate | divergence | help)")
 }
