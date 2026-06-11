@@ -282,133 +282,72 @@ private struct KeyRecorderOverlay: View {
 
 // MARK: - Inline Model Download Manager
 
-/// Manages inline model downloads for the settings panel using URLSession with progress.
-private class InlineDownloadManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
+/// Manages inline model downloads for the settings panel.
+///
+/// T2.4: this is now a thin SwiftUI-facing shell over `ModelDownloadCoordinator`.
+/// It owns only the `@Published` UI state + status-bar text; the coordinator owns
+/// the URLSession, progress, SHA256 verification (T1.5), and the atomic install.
+private class InlineDownloadManager: NSObject, ObservableObject {
     @Published var isDownloading = false
     @Published var progress: Double = 0
     @Published var errorMessage: String?
 
-    private var downloadTask: URLSessionDownloadTask?
+    private var coordinator: ModelDownloadCoordinator?
     private var modelSize: String = ""
-    private var onComplete: (() -> Void)?
 
     /// The StatusBarController to update with download progress (set by the view).
     weak var statusBarController: StatusBarController?
 
     func startDownload(modelSize: String, onComplete: @escaping () -> Void) {
         self.modelSize = modelSize
-        self.onComplete = onComplete
         self.errorMessage = nil
+        self.progress = 0
 
-        let modelFileName = "ggml-\(modelSize).bin"
-        let urlString = "\(ModelDownloader.baseURL)/\(modelFileName)"
-        guard let url = URL(string: urlString) else {
-            self.errorMessage = "Invalid download URL"
-            return
+        let coordinator = ModelDownloadCoordinator()
+        self.coordinator = coordinator
+
+        coordinator.onProgress = { [weak self] fraction, _, _ in
+            guard let self = self else { return }
+            self.progress = fraction
+            self.updateStatusBar("Downloading \(self.modelSize)... \(Int(fraction * 100))%")
         }
-
-        // Ensure models directory exists
-        let modelsDir = Config.configDir.appendingPathComponent("models")
-        try? FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
-
-        // Clean up any partial download
-        let destPath = modelsDir.appendingPathComponent(modelFileName)
-        let tmpPath = destPath.appendingPathExtension("downloading")
-        try? FileManager.default.removeItem(at: tmpPath)
-
-        // If model already exists, succeed immediately
-        if FileManager.default.fileExists(atPath: destPath.path) {
+        coordinator.onSuccess = { [weak self] _ in
+            guard let self = self else { return }
+            self.isDownloading = false
+            self.progress = 1.0
+            self.updateStatusBar(nil)
             onComplete()
-            return
+        }
+        coordinator.onFailure = { [weak self] error in
+            guard let self = self else { return }
+            self.errorMessage = self.userMessage(for: error)
+            self.isDownloading = false
+            self.updateStatusBar(nil)
         }
 
+        // Mark downloading up front; the coordinator's already-exists short-circuit
+        // will immediately fire onSuccess (which clears it) when nothing to fetch.
         isDownloading = true
-        progress = 0
-
-        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-        downloadTask = session.downloadTask(with: url)
-        downloadTask?.resume()
+        coordinator.start(modelSize: modelSize)
     }
 
     func cancelDownload() {
-        downloadTask?.cancel()
-        downloadTask = nil
+        coordinator?.cancel()
+        coordinator = nil
         isDownloading = false
         progress = 0
         updateStatusBar(nil)
     }
 
-    // MARK: - URLSessionDownloadDelegate
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didWriteData bytesWritten: Int64,
-                    totalBytesWritten: Int64,
-                    totalBytesExpectedToWrite: Int64) {
-        let prog: Double
-        if totalBytesExpectedToWrite > 0 {
-            prog = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        } else {
-            prog = 0
-        }
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.progress = prog
-            let pct = Int(prog * 100)
-            self.updateStatusBar("Downloading \(self.modelSize)... \(pct)%")
-        }
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didFinishDownloadingTo location: URL) {
-        let modelFileName = "ggml-\(modelSize).bin"
-        let modelsDir = Config.configDir.appendingPathComponent("models")
-        let destPath = modelsDir.appendingPathComponent(modelFileName)
-        let tmpPath = destPath.appendingPathExtension("downloading")
-
-        do {
-            try? FileManager.default.removeItem(at: tmpPath)
-            try FileManager.default.moveItem(at: location, to: tmpPath)
-
-            // Validate: GGML files should be at least 1MB
-            let attrs = try? FileManager.default.attributesOfItem(atPath: tmpPath.path)
-            let fileSize = attrs?[.size] as? Int ?? 0
-            if fileSize < 1_000_000 {
-                try? FileManager.default.removeItem(at: tmpPath)
-                DispatchQueue.main.async { [weak self] in
-                    self?.errorMessage = "Downloaded file is not a valid Whisper model"
-                    self?.isDownloading = false
-                    self?.updateStatusBar(nil)
-                }
-                return
-            }
-
-            try? FileManager.default.removeItem(at: destPath)
-            try FileManager.default.moveItem(at: tmpPath, to: destPath)
-            print("Model downloaded to \(destPath.path)")
-
-            DispatchQueue.main.async { [weak self] in
-                self?.isDownloading = false
-                self?.progress = 1.0
-                self?.updateStatusBar(nil)
-                self?.onComplete?()
-            }
-        } catch {
-            try? FileManager.default.removeItem(at: tmpPath)
-            DispatchQueue.main.async { [weak self] in
-                self?.errorMessage = "Failed to save model: \(error.localizedDescription)"
-                self?.isDownloading = false
-                self?.updateStatusBar(nil)
-            }
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error, (error as NSError).code != NSURLErrorCancelled {
-            DispatchQueue.main.async { [weak self] in
-                self?.errorMessage = "Download failed: \(error.localizedDescription)"
-                self?.isDownloading = false
-                self?.updateStatusBar(nil)
-            }
+    /// Preserve the prior per-error copy: invalid-model and save-failure wording.
+    private func userMessage(for error: Error) -> String {
+        switch error {
+        case ModelDownloadError.invalidModel:
+            return "Downloaded file is not a valid Whisper model"
+        case ModelDownloadError.hashMismatch:
+            return (error as? LocalizedError)?.errorDescription ?? "Download failed integrity check"
+        default:
+            return "Download failed: \(error.localizedDescription)"
         }
     }
 
