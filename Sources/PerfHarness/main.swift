@@ -309,6 +309,127 @@ case "divergence":
         exit(1)
     }
 
+case "reuse":
+    // T2.3 — prove (1) near-zero final inference on a reuse and (2) corpus accuracy delta < 1%.
+    // Usage: perf-harness reuse [--iterations N] [--out PATH] [--fixtures-dir DIR] [--work-dir DIR]
+    //
+    // Exit codes: 0 = accuracy delta < 1% (T2.3 acceptance met); 1 = delta >= 1%; 2 = error.
+
+    let iters = max(5, Int(value(for: "--iterations", in: args) ?? "5") ?? 5)
+
+    let fixturesDir: URL
+    if let fd = value(for: "--fixtures-dir", in: args) {
+        fixturesDir = URL(fileURLWithPath: fd)
+    } else {
+        fixturesDir = Benchmark.fixturesDir()
+    }
+
+    let workDir: URL
+    if let wd = value(for: "--work-dir", in: args) {
+        workDir = URL(fileURLWithPath: wd)
+    } else {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // PerfHarness
+            .deletingLastPathComponent()   // Sources
+            .deletingLastPathComponent()   // repo root
+        workDir = repoRoot.appendingPathComponent("build/T2.3-reuse-clips")
+    }
+    do {
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+    } catch {
+        fail("reuse: could not create work dir \(workDir.path): \(error)")
+    }
+
+    guard let whisperPath = Transcriber.findWhisperBinary() else {
+        fail("reuse: whisper-cli not found; install with: brew install whisper-cpp")
+    }
+
+    let modelSize = "tiny.en"
+    let modelFileName = "ggml-\(modelSize).bin"
+    let modelCandidates: [String] = [
+        "\(Config.configDir.path)/models/\(modelFileName)",
+        "/opt/homebrew/share/whisper-cpp/models/\(modelFileName)",
+        "/usr/local/share/whisper-cpp/models/\(modelFileName)",
+        "\(FileManager.default.homeDirectoryForCurrentUser.path)/.cache/whisper/\(modelFileName)",
+    ]
+    guard let modelPath = modelCandidates.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+        fail("reuse: whisper model '\(modelSize)' not found; run: open-wispr download-model \(modelSize)")
+    }
+
+    let nCores = ProcessInfo.processInfo.activeProcessorCount
+    let fullThreads = nCores
+    let halfThreads = max(nCores / 2, 1)
+
+    FileHandle.standardError.write(Data("""
+    reuse: model=\(modelSize), whisper=\(URL(fileURLWithPath: whisperPath).lastPathComponent)
+    reuse: fullThreads=\(fullThreads) halfThreads=\(halfThreads) iterations=\(iters)
+    reuse: fixturesDir=\(fixturesDir.path)
+    reuse: workDir=\(workDir.path)
+    \n
+    """.utf8))
+
+    guard let results = Reuse.measure(
+        fixturesDir: fixturesDir,
+        shortDurationsSeconds: [2.0, 3.0],
+        iterations: iters,
+        whisperPath: whisperPath,
+        modelPath: modelPath,
+        fullThreads: fullThreads,
+        halfThreads: halfThreads,
+        workDir: workDir
+    ) else {
+        fail("reuse: measurement failed")
+    }
+
+    if results.isEmpty {
+        fail("reuse: no short clips produced (are fixtures shorter than 2 s?)")
+    }
+
+    let machine = Fingerprint.current()
+    let md = Reuse.renderMarkdown(
+        results: results,
+        iterations: iters,
+        whisperPath: whisperPath,
+        modelPath: modelPath,
+        fullThreads: fullThreads,
+        halfThreads: halfThreads,
+        machine: machine
+    )
+
+    if let outPath = value(for: "--out", in: args) {
+        let url = URL(fileURLWithPath: outPath)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try md.write(to: url, atomically: true, encoding: String.Encoding.utf8)
+            FileHandle.standardError.write(Data("reuse: wrote \(outPath)\n".utf8))
+        } catch {
+            fail("reuse: could not write report to \(outPath): \(error)")
+        }
+    } else {
+        print(md)
+    }
+
+    let totalEdit = results.map { $0.editDistance }.reduce(0, +)
+    let totalWords = results.map { $0.finalWordCount }.reduce(0, +)
+    let aggDiv = totalWords > 0 ? Double(totalEdit) / Double(totalWords) * 100.0 : 0.0
+    let aggFinalMed = Stat.medianOf(results.map { $0.finalInferMedianMs }.sorted())
+    let aggReuseMed = Stat.medianOf(results.map { $0.reuseMedianMs }.sorted())
+
+    FileHandle.standardError.write(Data("""
+    reuse: aggregate final-inference median = \(String(format: "%.1f", aggFinalMed)) ms → reuse median = \(String(format: "%.3f", aggReuseMed)) ms
+    reuse: aggregate accuracy delta = \(String(format: "%.4f", aggDiv))% (threshold 1%)
+    \n
+    """.utf8))
+
+    if aggDiv < 1.0 {
+        FileHandle.standardError.write(Data("reuse: PASS — accuracy delta < 1% and final inference skipped\n".utf8))
+        exit(0)
+    } else {
+        FileHandle.standardError.write(Data("reuse: FAIL — accuracy delta >= 1%\n".utf8))
+        exit(1)
+    }
+
 case "-h", "--help", "help":
     print("""
     perf-harness — speakfree performance-regression harness (T2.0)
@@ -318,6 +439,7 @@ case "-h", "--help", "help":
       perf-harness compare <candidate.json> <baseline.json> [--threshold PCT]
       perf-harness bench-and-gate [--iterations N] [--engines …] [--policy flat|adaptive] [--out PATH] --baseline PATH [--threshold PCT]
       perf-harness divergence [--out PATH] [--fixtures-dir DIR] [--work-dir DIR]
+      perf-harness reuse [--iterations N] [--out PATH] [--fixtures-dir DIR] [--work-dir DIR]
 
     --policy: flat = legacy 300ms tax on every dictation (default, = pre-T2.1 baseline);
               adaptive = T2.1 — stop on ~150ms trailing silence, hard cap 300ms.
@@ -325,10 +447,11 @@ case "-h", "--help", "help":
     Gate fails (exit 1) only on a >+threshold% median regression vs a FINGERPRINT-MATCHING
     baseline. A non-comparable baseline prints a note and passes (exit 0). Default threshold 15%.
 
-    divergence: exit 0 = T2.3 cleared (<1% aggregate word divergence); exit 1 = cancelled.
+    divergence: exit 0 = T2.3-PRE cleared (<1% aggregate word divergence); exit 1 = cancelled.
+    reuse:      exit 0 = T2.3 accuracy delta < 1% AND final inference skipped; exit 1 = delta ≥ 1%.
     """)
     exit(0)
 
 default:
-    fail("unknown command '\(command)' (run | compare | bench-and-gate | divergence | help)")
+    fail("unknown command '\(command)' (run | compare | bench-and-gate | divergence | reuse | help)")
 }
