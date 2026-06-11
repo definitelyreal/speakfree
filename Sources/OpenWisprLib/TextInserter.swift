@@ -30,6 +30,12 @@ class TextInserter {
     /// types its own fixture text into the foreground app (see SecureInputTests).
     var performInsertion: ((String) -> Void)?
 
+    /// Seam for the pasteboard all clipboard paths write to (`pasteViaClipboard`,
+    /// `copyToClipboard`, `secureInputClipboardFallback`). Production stays on
+    /// `.general`; tests inject a named pasteboard so the suite never touches the
+    /// developer's real clipboard (test-host-safety rule, PLAN.md P-1).
+    var pasteboard: NSPasteboard = .general
+
     /// Pure check: should a space be prepended given the text ALREADY captured before
     /// the cursor at record-start?
     ///
@@ -146,8 +152,9 @@ class TextInserter {
                            AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success {
                             return
                         }
-                        // Fall back to clipboard paste
-                        self.pasteViaClipboard(text)
+                        // Fall back to clipboard paste (through the test seam so a unit test
+                        // reaching this closure can never fire a real Cmd+V — PLAN.md P-1).
+                        (self.performInsertion ?? self.pasteViaClipboard)(text)
                     }
                     return true
                 } else {
@@ -469,7 +476,7 @@ class TextInserter {
     /// Transient marking: writes org.nspasteboard.TransientType + ConcealedType so
     /// clipboard managers (Maccy, Raycast, Paste) skip recording the dictated text.
     private func pasteViaClipboard(_ text: String) {
-        let pasteboard = NSPasteboard.general
+        let pasteboard = self.pasteboard
 
         // Safety check: measure existing clipboard binary footprint
         let clipboardByteSize = pasteboard.pasteboardItems?.reduce(0) { total, item in
@@ -513,8 +520,8 @@ class TextInserter {
     }
 
     private func copyToClipboard(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     /// How long dictated text may sit on the clipboard after a Secure-Input fallback before it
@@ -539,7 +546,7 @@ class TextInserter {
     /// It does NOT restore the prior clipboard (the user explicitly invoked dictation expecting
     /// the text to be available to paste); the concealment + auto-clear are the protection.
     func secureInputClipboardFallback(_ text: String) {
-        let pasteboard = NSPasteboard.general
+        let pasteboard = self.pasteboard
         pasteboard.clearContents()
 
         let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
