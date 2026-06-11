@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 /// First-run onboarding dialog. Shown when the selected model is not downloaded.
-class WelcomeController: NSObject, NSWindowDelegate, URLSessionDownloadDelegate {
+class WelcomeController: NSObject, NSWindowDelegate {
 
     // MARK: - UI
 
@@ -32,7 +32,7 @@ class WelcomeController: NSObject, NSWindowDelegate, URLSessionDownloadDelegate 
     private var isDownloading = false
     private var isPaused = false
     private var isModelReady = false
-    private var whisperDownloadTask: URLSessionDownloadTask?
+    private var whisperCoordinator: ModelDownloadCoordinator?
     private var parakeetTask: Task<Void, Never>?
     private var completion: ((String, String, String, Bool) -> Void)?
 
@@ -441,14 +441,14 @@ class WelcomeController: NSObject, NSWindowDelegate, URLSessionDownloadDelegate 
                 showDownloadingUI(label: "Downloading \(model)…", indeterminate: false)
                 beginParakeetDownload(modelName: model)
             } else {
-                whisperDownloadTask?.resume(); statusLabel.stringValue = "Downloading…"
+                whisperCoordinator?.resume(); statusLabel.stringValue = "Downloading…"
             }
         } else {
             isPaused = true; pauseButton.title = "▶︎ Resume"
             if selectedEngine == "parakeet" {
                 parakeetTask?.cancel(); parakeetTask = nil
             } else {
-                whisperDownloadTask?.suspend()
+                whisperCoordinator?.pause()
             }
             statusLabel.stringValue = "Paused."
         }
@@ -499,7 +499,7 @@ class WelcomeController: NSObject, NSWindowDelegate, URLSessionDownloadDelegate 
     }
 
     private func cancelCurrentDownload() {
-        whisperDownloadTask?.cancel(); whisperDownloadTask = nil
+        whisperCoordinator?.cancel(); whisperCoordinator = nil
         parakeetTask?.cancel(); parakeetTask = nil
         isDownloading = false; isPaused = false
     }
@@ -557,74 +557,44 @@ class WelcomeController: NSObject, NSWindowDelegate, URLSessionDownloadDelegate 
         }
     }
 
-    // MARK: - Whisper download (URLSession with real byte progress)
+    // MARK: - Whisper download (T2.4: via ModelDownloadCoordinator)
 
     private func beginWhisperDownload(modelSize: String) {
         let sizeStr = WelcomeController.modelSizes[modelSize] ?? "unknown size"
         showDownloadingUI(label: "Downloading \(modelSize) (\(sizeStr))…", indeterminate: false)
 
-        let modelFileName = "ggml-\(modelSize).bin"
-        guard let url = URL(string: "\(ModelDownloader.baseURL)/\(modelFileName)") else {
-            showError("Invalid download URL"); return
-        }
-        let modelsDir = Config.configDir.appendingPathComponent("models")
-        try? FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
-        let destPath = modelsDir.appendingPathComponent(modelFileName)
-        let tmpPath = destPath.appendingPathExtension("downloading")
-        try? FileManager.default.removeItem(at: tmpPath)
-        if FileManager.default.fileExists(atPath: destPath.path) { markDownloaded(); return }
-        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-        whisperDownloadTask = session.downloadTask(with: url)
-        whisperDownloadTask?.resume()
-    }
+        let coordinator = ModelDownloadCoordinator()
+        whisperCoordinator = coordinator
 
-    // MARK: - URLSessionDownloadDelegate
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
-                    totalBytesExpectedToWrite: Int64) {
-        let progress = totalBytesExpectedToWrite > 0
-            ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) : 0
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.progressBar.doubleValue = progress
-            self.percentLabel.stringValue = "\(Int(progress * 100))%"
-            if totalBytesExpectedToWrite > 0 {
-                let written = WelcomeController.formatBytes(totalBytesWritten)
-                let total = WelcomeController.formatBytes(totalBytesExpectedToWrite)
-                self.bytesLabel.stringValue = "\(written) of \(total)"
+        coordinator.onProgress = { [weak self] fraction, written, total in
+            guard let self = self, !self.isPaused else { return }
+            self.progressBar.doubleValue = fraction
+            self.percentLabel.stringValue = "\(Int(fraction * 100))%"
+            if total > 0 {
+                self.bytesLabel.stringValue =
+                    "\(WelcomeController.formatBytes(written)) of \(WelcomeController.formatBytes(total))"
                 self.bytesLabel.isHidden = false
             }
             self.progressBar.display(); self.percentLabel.display(); self.bytesLabel.display()
         }
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didFinishDownloadingTo location: URL) {
-        let modelSize = selectedWhisperModel
-        let destPath = Config.configDir.appendingPathComponent("models/ggml-\(modelSize).bin")
-        let tmpPath = destPath.appendingPathExtension("downloading")
-        do {
-            try? FileManager.default.removeItem(at: tmpPath)
-            try FileManager.default.moveItem(at: location, to: tmpPath)
-            let size = (try? FileManager.default.attributesOfItem(atPath: tmpPath.path))?[.size] as? Int ?? 0
-            guard size >= 1_000_000 else {
-                try? FileManager.default.removeItem(at: tmpPath)
-                DispatchQueue.main.async { [weak self] in self?.showError("Downloaded file is not a valid model") }
-                return
-            }
-            try? FileManager.default.removeItem(at: destPath)
-            try FileManager.default.moveItem(at: tmpPath, to: destPath)
-            DispatchQueue.main.async { [weak self] in self?.markDownloaded() }
-        } catch {
-            try? FileManager.default.removeItem(at: tmpPath)
-            DispatchQueue.main.async { [weak self] in self?.showError("Failed to save: \(error.localizedDescription)") }
+        coordinator.onSuccess = { [weak self] _ in self?.markDownloaded() }
+        coordinator.onFailure = { [weak self] error in
+            self?.showError(WelcomeController.whisperErrorMessage(error))
         }
+
+        coordinator.start(modelSize: modelSize)
     }
 
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let error = error, (error as NSError).code != NSURLErrorCancelled else { return }
-        DispatchQueue.main.async { [weak self] in self?.showError("Download failed: \(error.localizedDescription)") }
+    /// Map a coordinator error to the Welcome panel's prior copy.
+    private static func whisperErrorMessage(_ error: Error) -> String {
+        switch error {
+        case ModelDownloadError.invalidModel:
+            return "Downloaded file is not a valid model"
+        case ModelDownloadError.hashMismatch:
+            return (error as? LocalizedError)?.errorDescription ?? "Download failed integrity check"
+        default:
+            return "Download failed: \(error.localizedDescription)"
+        }
     }
 }
 
