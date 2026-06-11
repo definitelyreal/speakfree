@@ -22,7 +22,7 @@
 // streaming = max(N/2, 1)), which mirrors transcribeLocked vs transcribeStreamingLocked.
 
 import Foundation
-import OpenWisprLib
+import SpeakFreeLib
 
 enum Reuse {
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BINARY="${1:-.build/release/speakfree}"
-APP_DIR="${2:-OpenWispr.app}"
+APP_DIR="${2:-speakfree.app}"
 VERSION="${3:-0.3.0}"
 
 rm -rf "$APP_DIR"

@@ -19,7 +19,7 @@
 // Exit codes: 0 = pass / no comparable baseline; 1 = regression; 2 = usage/runtime error.
 
 import Foundation
-import OpenWisprLib
+import SpeakFreeLib
 
 let args = Array(CommandLine.arguments.dropFirst())
 let command = args.first ?? "run"
@@ -205,7 +205,7 @@ case "divergence":
     // Usage: perf-harness divergence [--out PATH] [--fixtures-dir DIR] [--work-dir DIR]
     //
     // --out PATH        write the markdown report to PATH (default: stdout)
-    // --fixtures-dir    override fixtures dir (default: Tests/OpenWisprTests/AudioFixtures)
+    // --fixtures-dir    override fixtures dir (default: Tests/SpeakFreeTests/AudioFixtures)
     // --work-dir        directory for temp WAV clips (default: build/T2.3-PRE-clips in repo root)
     //
     // Exit codes: 0 = divergence < 1% (T2.3 cleared); 1 = divergence >= 1% (T2.3 cancelled); 2 = error.
@@ -252,7 +252,7 @@ case "divergence":
         "\(FileManager.default.homeDirectoryForCurrentUser.path)/.cache/whisper/\(modelFileName)",
     ]
     guard let modelPath = modelCandidates.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-        fail("divergence: whisper model '\(modelSize)' not found; run: open-wispr download-model \(modelSize)")
+        fail("divergence: whisper model '\(modelSize)' not found; run: speakfree download-model \(modelSize)")
     }
 
     let nCores = ProcessInfo.processInfo.activeProcessorCount
@@ -370,7 +370,7 @@ case "reuse":
         "\(FileManager.default.homeDirectoryForCurrentUser.path)/.cache/whisper/\(modelFileName)",
     ]
     guard let modelPath = modelCandidates.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-        fail("reuse: whisper model '\(modelSize)' not found; run: open-wispr download-model \(modelSize)")
+        fail("reuse: whisper model '\(modelSize)' not found; run: speakfree download-model \(modelSize)")
     }
 
     let nCores = ProcessInfo.processInfo.activeProcessorCount

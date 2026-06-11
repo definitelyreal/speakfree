@@ -30,14 +30,14 @@ let package = Package(
             publicHeadersPath: "include"
         ),
         .target(
-            name: "OpenWisprLib",
+            name: "SpeakFreeLib",
             dependencies: [
                 "Sparkle",
                 "CWhisper",
                 "CTryCatch",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
-            path: "Sources/OpenWisprLib",
+            path: "Sources/SpeakFreeLib",
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AVFoundation"),
@@ -46,7 +46,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "speakfree",
-            dependencies: ["OpenWisprLib"],
+            dependencies: ["SpeakFreeLib"],
             path: "Sources/SpeakFree"
         ),
         // Performance-regression harness (T2.0): benchmarks per-fixture inference time +
@@ -55,13 +55,13 @@ let package = Package(
         // `swift run perf-harness run` / `swift run perf-harness compare <candidate> <baseline>`.
         .executableTarget(
             name: "perf-harness",
-            dependencies: ["OpenWisprLib"],
+            dependencies: ["SpeakFreeLib"],
             path: "Sources/PerfHarness"
         ),
         .testTarget(
-            name: "OpenWisprTests",
-            dependencies: ["OpenWisprLib"],
-            path: "Tests/OpenWisprTests",
+            name: "SpeakFreeTests",
+            dependencies: ["SpeakFreeLib"],
+            path: "Tests/SpeakFreeTests",
             resources: [
                 .copy("Corpus/cases.json"),
                 .copy("AudioFixtures"),

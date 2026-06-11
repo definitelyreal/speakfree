@@ -18,7 +18,7 @@
 // Metal-pipeline / ANE-compile cost doesn't pollute the steady-state median.
 
 import Foundation
-import OpenWisprLib
+import SpeakFreeLib
 
 enum Benchmark {
 
@@ -59,7 +59,7 @@ enum Benchmark {
         let language: String
     }
 
-    /// Resolve the fixtures directory (Tests/OpenWisprTests/AudioFixtures) relative to the repo
+    /// Resolve the fixtures directory (Tests/SpeakFreeTests/AudioFixtures) relative to the repo
     /// root. The harness binary lives in .build/…; we locate the repo by walking up from the
     /// source file path, then fall back to CWD.
     static func fixturesDir() -> URL {
@@ -69,11 +69,11 @@ enum Benchmark {
             .deletingLastPathComponent()   // Sources
             .deletingLastPathComponent()   // repo root
         let fromSource = repoRoot
-            .appendingPathComponent("Tests/OpenWisprTests/AudioFixtures")
+            .appendingPathComponent("Tests/SpeakFreeTests/AudioFixtures")
         if FileManager.default.fileExists(atPath: fromSource.path) { return fromSource }
         // Fallback: CWD-relative (when run from the repo root).
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("Tests/OpenWisprTests/AudioFixtures")
+            .appendingPathComponent("Tests/SpeakFreeTests/AudioFixtures")
     }
 
     static func fixtureWavs(in dir: URL) -> [URL] {

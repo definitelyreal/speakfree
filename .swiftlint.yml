@@ -9,7 +9,7 @@ excluded:
   - .build
   - build
   - windows
-  - Tests/OpenWisprTests/AudioFixtures
+  - Tests/SpeakFreeTests/AudioFixtures
   - Sources/CWhisper
   - Sources/CTryCatch
 

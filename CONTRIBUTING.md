@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to open-wispr.
+Thanks for your interest in contributing to speakfree.
 
 ## Getting started
 
@@ -12,19 +12,19 @@ Thanks for your interest in contributing to open-wispr.
 
 The dev script handles everything you need to build and run from source:
 
-1. **Configure** -- prompts you to pick a Whisper model size (tiny through medium, English-only or multilingual), language, spoken punctuation, and hotkey. Press enter on any prompt to keep the current value from `~/.config/open-wispr/config.json`.
-2. **Clean up** -- stops any running open-wispr instances and removes the Homebrew-installed version (if present) so it doesn't conflict with your local build. Installs `whisper-cpp` via Homebrew if needed.
+1. **Configure** -- prompts you to pick a Whisper model size (tiny through medium, English-only or multilingual), language, spoken punctuation, and hotkey. Press enter on any prompt to keep the current value from `~/.config/speakfree/config.json`.
+2. **Clean up** -- stops any running speakfree instances and removes the Homebrew-installed version (if present) so it doesn't conflict with your local build. Installs `whisper-cpp` via Homebrew if needed.
 3. **Build** -- runs `swift build -c release` from source.
-4. **Bundle** -- packages the binary into a macOS app bundle (`OpenWispr.app`) and copies it to `~/Applications/` so macOS properly recognizes it for accessibility and microphone permissions.
+4. **Bundle** -- packages the binary into a macOS app bundle (`speakfree.app`) and copies it to `~/Applications/` so macOS properly recognizes it for accessibility and microphone permissions.
 5. **Start** -- launches the app directly so you can test immediately.
 
 ## Project structure
 
 ```
-Sources/OpenWisprLib/
+Sources/SpeakFreeLib/
 ├── AppDelegate.swift       # App lifecycle, hotkey listener, menu bar
 ├── AudioRecorder.swift     # Microphone recording
-├── Config.swift            # Config loading/saving (~/.config/open-wispr/config.json)
+├── Config.swift            # Config loading/saving (~/.config/speakfree/config.json)
 ├── HotkeyManager.swift     # Global hotkey detection via CGEvent taps
 ├── KeyCodes.swift          # Key name/code mapping and parsing
 ├── ModelDownloader.swift   # Whisper model download from HuggingFace
@@ -35,7 +35,7 @@ Sources/OpenWisprLib/
 ├── TextPostProcessor.swift # Spoken punctuation replacement
 ├── Transcriber.swift       # Whisper CLI wrapper
 └── Version.swift           # Version constant
-Sources/OpenWispr/
+Sources/SpeakFree/
 └── main.swift              # CLI entry point
 scripts/
 ├── dev.sh                  # Build & run from source
@@ -53,7 +53,7 @@ All changes should include applicable tests. The test suite has two layers:
 
 ### Unit tests
 
-Location: `Tests/OpenWisprTests/`
+Location: `Tests/SpeakFreeTests/`
 
 Pure logic tests with no external dependencies. Run with:
 
@@ -68,7 +68,7 @@ swift test
 | `TextPostProcessorTests.swift` | Spoken punctuation replacement, spacing fixes, edge cases |
 | `KeyCodesTests.swift` | Key name/code mapping, `parse()`, `describe()`, round-trip consistency |
 
-When adding new logic to `OpenWisprLib`, add unit tests here. Good candidates for unit tests are pure functions, data transformations, parsing, and anything that doesn't require hardware (microphone, display, accessibility).
+When adding new logic to `SpeakFreeLib`, add unit tests here. Good candidates for unit tests are pure functions, data transformations, parsing, and anything that doesn't require hardware (microphone, display, accessibility).
 
 ### Integration tests
 
@@ -108,7 +108,7 @@ CI runs automatically on pull requests via GitHub Actions (`.github/workflows/ci
 
 ### Adding tests
 
-- **New pure logic** (parsing, transformations, config handling) -- add a unit test in `Tests/OpenWisprTests/`
+- **New pure logic** (parsing, transformations, config handling) -- add a unit test in `Tests/SpeakFreeTests/`
 - **New CLI commands** -- add assertions to `scripts/test-install.sh`
 - **Changes to transcription pipeline** -- add cases to `scripts/test-transcription.sh`
 - **New shell scripts** -- add the script path to the shellcheck list in `test-install.sh`
@@ -127,11 +127,11 @@ CI runs automatically on pull requests via GitHub Actions (`.github/workflows/ci
 
 ## What to work on
 
-Check the [open issues](https://github.com/human37/open-wispr/issues) for bugs and feature requests. The [roadmap](https://github.com/users/human37/projects/2) shows what's planned or in progress. If you want to work on something not listed, open an issue first to discuss it.
+Check the [open issues](https://github.com/definitelyreal/speakfree/issues) for bugs and feature requests. If you want to work on something not listed, open an issue first to discuss it.
 
 ## Guidelines
 
-- Keep it simple. open-wispr is intentionally minimal.
+- Keep it simple. speakfree is intentionally minimal.
 - No cloud dependencies. Everything must run on-device.
 - Test on Apple Silicon. Intel Macs are not supported.
 - Match the existing code style.
