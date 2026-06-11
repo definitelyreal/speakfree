@@ -15,15 +15,16 @@ enum Table {
         out += "when    : \(report.generatedAt)\n"
 
         for eng in report.engines {
-            out += "\nengine: \(eng.engine) (\(eng.model))   postBuffer=\(ms(eng.postBufferMs))\n"
-            out += row("fixture", "audio", "infer(med)", "infer(min/max)", "e2e(med)", header: true)
+            let policy = eng.postBufferPolicy ?? "flat"
+            out += "\nengine: \(eng.engine) (\(eng.model))   post-buffer policy=\(policy)  cap=\(ms(eng.postBufferMs))\n"
+            out += row("fixture", "audio", "infer(med)", "postBuf", "e2e(med)", header: true)
             out += divider()
             for f in eng.fixtures {
                 out += row(
                     f.fixture,
                     String(format: "%.1fs", f.audioSeconds),
                     ms(f.inferenceMs.median),
-                    "\(ms(f.inferenceMs.min))/\(ms(f.inferenceMs.max))",
+                    f.postBufferMs.map { ms($0) } ?? ms(eng.postBufferMs),
                     ms(f.endToEndMs.median)
                 )
             }

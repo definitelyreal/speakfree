@@ -22,10 +22,26 @@ import OpenWisprLib
 
 enum Benchmark {
 
-    /// The flat post-key-release wait the app applies today (AppDelegate.finalizeRecording).
-    /// PLAN T2.1 replaces this with an adaptive ~150 ms; the harness records it explicitly so a
-    /// later adaptive-buffer win shows up in endToEnd medians.
-    static let postBufferMs: Double = 300.0
+    /// The post-key-release CAP (worst case). PLAN T2.1: the FLAT policy always pays this; the
+    /// ADAPTIVE policy stops on ~150ms trailing silence and only pays up to this cap. The harness
+    /// records the per-fixture wait so the adaptive win shows up in endToEnd medians.
+    static let postBufferMs: Double = PostBufferPolicy.defaultCapMs
+
+    /// Post-key-release buffer policy under test.
+    enum PostBuffer: String {
+        case flat       // legacy 300ms tax on every dictation (the BEFORE baseline)
+        case adaptive   // stop on ~150ms trailing silence, hard cap 300ms (T2.1)
+    }
+
+    /// The trailing-audio window the live app actually polls after key release: the LAST `capMs`
+    /// of the recording approximates the tail captured between key-release and finalize. The
+    /// adaptive policy is scored over exactly this slice via the SAME PostBufferPolicy the app uses.
+    static func adaptiveBufferMs(forSamples samples: [Float], sampleRate: Double = 16_000.0) -> Double {
+        let capMs = PostBufferPolicy.defaultCapMs
+        let tailSamples = Int((capMs / 1000.0) * sampleRate)
+        let tail = samples.count > tailSamples ? Array(samples.suffix(tailSamples)) : samples
+        return PostBufferPolicy.decideWaitMs(trailingSamples: tail, sampleRate: sampleRate)
+    }
 
     struct EngineSpec {
         let engineID: String     // "whisper" | "parakeet"
@@ -68,7 +84,8 @@ enum Benchmark {
     /// Run the benchmark for one engine over all fixtures. `iterations` is the number of TIMED
     /// iterations (a warm-up iteration is run and discarded first). Returns nil if the engine's
     /// model isn't available (so callers can skip parakeet when its CoreML assets are absent).
-    static func runEngine(_ spec: EngineSpec, fixtures: [URL], iterations: Int) -> EngineReport? {
+    static func runEngine(_ spec: EngineSpec, fixtures: [URL], iterations: Int,
+                          postBuffer: PostBuffer = .flat) -> EngineReport? {
         precondition(iterations >= 5, "T2.0 requires medians over ≥5 iterations")
 
         let engine = EngineFactory.make(config: configForEngine(spec))
@@ -109,6 +126,14 @@ enum Benchmark {
             let audioSeconds = Double(samples.count) / 16_000.0
             // Whisper → CLI path (samples=nil); Parakeet → in-process ANE (samples required).
             let transcribeSamples: [Float]? = usesInProcessSamples ? samples : nil
+
+            // T2.1 — the post-key-release wait baked into THIS fixture's e2e. Flat = the 300ms cap
+            // on every dictation; adaptive = the SAME PostBufferPolicy decision the app runs over
+            // this fixture's trailing audio (≤cap). The fixture's tail stands in for the live tail
+            // captured between key-release and finalize.
+            let fixtureBufferMs: Double = (postBuffer == .adaptive)
+                ? adaptiveBufferMs(forSamples: samples)
+                : postBufferMs
 
             // Warm-up (discarded): cold model load / Metal-pipeline / ANE compile.
             var lastTranscript = ""
@@ -153,8 +178,8 @@ enum Benchmark {
                 let postProcMs = elapsedMs(since: p0)
 
                 inferenceSamplesMs.append(inferenceMs)
-                // Simulated key-release → text-ready latency.
-                endToEndSamplesMs.append(postBufferMs + inferenceMs + postProcMs)
+                // Simulated key-release → text-ready latency (per-fixture post-buffer + infer + post).
+                endToEndSamplesMs.append(fixtureBufferMs + inferenceMs + postProcMs)
             }
 
             fixtureResults.append(FixtureResult(
@@ -162,7 +187,8 @@ enum Benchmark {
                 audioSeconds: audioSeconds,
                 transcript: lastTranscript,
                 inferenceMs: Stat(samplesMs: inferenceSamplesMs),
-                endToEndMs: Stat(samplesMs: endToEndSamplesMs)
+                endToEndMs: Stat(samplesMs: endToEndSamplesMs),
+                postBufferMs: fixtureBufferMs
             ))
         }
 
@@ -174,6 +200,7 @@ enum Benchmark {
             engine: spec.engineID,
             model: spec.model,
             postBufferMs: postBufferMs,
+            postBufferPolicy: postBuffer.rawValue,
             fixtures: fixtureResults
         )
     }
