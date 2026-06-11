@@ -1,10 +1,123 @@
 import AppKit
 
+// MARK: - Pure screen selection
+
+/// Returns the index into `screenFrames` of the screen that best contains `windowFrame`.
+///
+/// Selection rules (in order):
+///  1. The screen whose frame has the largest intersection area with `windowFrame`.
+///  2. Returns `nil` when `windowFrame` is nil, `screenFrames` is empty, or no screen
+///     overlaps `windowFrame` at all (caller falls back to its preferred default).
+///
+/// This function is purely geometric — it takes rects, not `NSScreen` objects — so it
+/// is fully unit-testable without a display attached or any AppKit side effects.
+func bestScreenIndex(windowFrame: NSRect?, screenFrames: [NSRect]) -> Int? {
+    guard let frame = windowFrame, !screenFrames.isEmpty else { return nil }
+    var bestIndex: Int? = nil
+    var bestArea: CGFloat = 0
+    for (i, screenFrame) in screenFrames.enumerated() {
+        let intersection = frame.intersection(screenFrame)
+        if !intersection.isNull {
+            let area = intersection.width * intersection.height
+            if area > bestArea {
+                bestArea = area
+                bestIndex = i
+            }
+        }
+    }
+    return bestIndex
+}
+
+/// Returns the `NSScreen` that best contains `windowFrame`.
+///
+/// Wraps `bestScreenIndex` with real `NSScreen` objects; falls back to `mainScreen`
+/// when no screen overlaps the window.
+func overlayScreen(
+    windowFrame: NSRect?,
+    screens: [NSScreen],
+    mainScreen: NSScreen?
+) -> NSScreen? {
+    let frames = screens.map { $0.frame }
+    if let idx = bestScreenIndex(windowFrame: windowFrame, screenFrames: frames) {
+        return screens[idx]
+    }
+    return mainScreen
+}
+
+// MARK: - AX focused-window frame helper
+
+/// Returns the screen-coordinate frame of the frontmost application's focused window
+/// using the Accessibility API, without blocking if the app is non-AX.
+///
+/// Returns `nil` when:
+///  - The frontmost application PID cannot be determined.
+///  - AX permission is not granted (or the target app rejects AX).
+///  - The focused element's position/size attributes are unavailable.
+///
+/// This is intentionally a free function (no class coupling) so it can be replaced
+/// with an injection seam in tests if needed.
+func focusedWindowFrame() -> NSRect? {
+    guard let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
+        return nil
+    }
+    let appElement = AXUIElementCreateApplication(frontPID)
+    var focusedWindowValue: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindowValue) == .success,
+          let windowElement = focusedWindowValue else {
+        return nil
+    }
+    // swiftlint:disable:next force_cast — CF bridging, type checked by AX attribute contract
+    let axWindow = windowElement as! AXUIElement
+
+    var posValue: CFTypeRef?
+    var sizeValue: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &posValue) == .success,
+          AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &sizeValue) == .success else {
+        return nil
+    }
+    var position = CGPoint.zero
+    var size = CGSize.zero
+    // AXValue wraps CGPoint / CGSize — extract via AXValueGetValue
+    if let posAX = posValue, CFGetTypeID(posAX) == AXValueGetTypeID() {
+        AXValueGetValue(posAX as! AXValue, .cgPoint, &position)
+    } else {
+        return nil
+    }
+    if let sizeAX = sizeValue, CFGetTypeID(sizeAX) == AXValueGetTypeID() {
+        AXValueGetValue(sizeAX as! AXValue, .cgSize, &size)
+    } else {
+        return nil
+    }
+    // AX coordinates are Cocoa-flipped (top-left origin); NSScreen uses bottom-left.
+    // Convert: screenY = totalHeight - axY - windowHeight.
+    let totalHeight = NSScreen.screens.reduce(CGFloat(0)) { max($0, $1.frame.maxY) }
+    let screenY = totalHeight - position.y - size.height
+    return NSRect(origin: CGPoint(x: position.x, y: screenY), size: size)
+}
+
+// MARK: - RecordingOverlay
+
 class RecordingOverlay {
     private var window: NSWindow?
     private var animationTimer: Timer?
     private var contentView: OverlayContentView?
     private weak var recorder: AudioRecorder?
+
+    // Seam for unit tests: override to inject a known window frame without real AX.
+    var windowFrameProvider: (() -> NSRect?)? = nil
+
+    private func activeWindowFrame() -> NSRect? {
+        if let provider = windowFrameProvider { return provider() }
+        return focusedWindowFrame()
+    }
+
+    private func targetScreen() -> NSScreen? {
+        overlayScreen(
+            windowFrame: activeWindowFrame(),
+            screens: NSScreen.screens,
+            mainScreen: NSScreen.main
+        )
+    }
 
     func show(state: OverlayState, recorder: AudioRecorder? = nil) {
         // Hard kill any existing window (no animation)
@@ -15,7 +128,7 @@ class RecordingOverlay {
         contentView = nil
         self.recorder = recorder
 
-        guard let screen = NSScreen.main else { return }
+        guard let screen = targetScreen() else { return }
 
         let pillSize = OverlayContentView.pillSize(for: state)
         let bottomMargin: CGFloat = 48
@@ -60,7 +173,7 @@ class RecordingOverlay {
     }
 
     func update(state: OverlayState) {
-        guard let view = contentView, let win = window, let screen = NSScreen.main else {
+        guard let view = contentView, let win = window, let screen = targetScreen() else {
             show(state: state)
             return
         }
@@ -78,7 +191,7 @@ class RecordingOverlay {
     /// Update the overlay with streaming transcription text.
     /// Called from the main thread during recording as partial results arrive.
     func updateStreamingText(_ text: String) {
-        guard let view = contentView, let win = window, let screen = NSScreen.main else { return }
+        guard let view = contentView, let win = window, let screen = targetScreen() else { return }
 
         // Only grow the text, never shrink — prevents flickering from re-processing
         if text.count < view.streamingText.count { return }
