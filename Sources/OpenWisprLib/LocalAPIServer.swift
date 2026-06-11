@@ -245,7 +245,7 @@ final class LocalAPIServer {
         }
 
         conn.start(queue: requestQueue)
-        accumulate(conn, data: Data(), idleTimer: idleTimer)
+        accumulate(conn, data: Data(), idleTimer: idleTimer, lifetimeTimer: lifetimeTimer)
     }
 
     /// Atomically reserve a connection slot. Returns false if the cap is already reached.
@@ -271,10 +271,20 @@ final class LocalAPIServer {
         return activeConnections
     }
 
-    private func accumulate(_ conn: NWConnection, data: Data, idleTimer: DispatchSourceTimer) {
+    private func accumulate(_ conn: NWConnection, data: Data,
+                            idleTimer: DispatchSourceTimer, lifetimeTimer: DispatchSourceTimer) {
+        // The lifetime + idle caps exist to defeat slow-drip read DoS while a request is still being
+        // RECEIVED. Once the full request is parsed (or rejected), those caps must no longer fire:
+        // otherwise the 120s lifetime cap can cancel the connection MID-TRANSCRIPTION of a legitimate
+        // long-audio file (the request is fully in; the only remaining work is our own inference) —
+        // the client then never receives the result. So every terminal/dispatch point cancels BOTH
+        // timers. (AR-2 R1 Medium: lifetimeTimer was previously cancelled only in the state handler,
+        // so it kept ticking through transcription.)
+        func stopReadTimers() { idleTimer.cancel(); lifetimeTimer.cancel() }
+
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] chunk, _, isComplete, error in
-            guard let self = self else { idleTimer.cancel(); return }
-            if error != nil { idleTimer.cancel(); conn.cancel(); return }
+            guard let self = self else { stopReadTimers(); return }
+            if error != nil { stopReadTimers(); conn.cancel(); return }
 
             // Bytes arrived — push the idle deadline forward.
             idleTimer.schedule(deadline: .now() + Self.idleTimeout)
@@ -283,18 +293,18 @@ final class LocalAPIServer {
             if let chunk = chunk { buf.append(chunk) }
 
             if buf.count > Self.maxBodyBytes {
-                idleTimer.cancel()
+                stopReadTimers()
                 self.send(conn, status: 413, body: #"{"error":"Request too large"}"#); return
             }
 
             guard let headerRange = self.findHeaderEnd(buf) else {
-                if isComplete { idleTimer.cancel(); conn.cancel(); return }
-                self.accumulate(conn, data: buf, idleTimer: idleTimer); return
+                if isComplete { stopReadTimers(); conn.cancel(); return }
+                self.accumulate(conn, data: buf, idleTimer: idleTimer, lifetimeTimer: lifetimeTimer); return
             }
 
             let headerData = buf[buf.startIndex..<headerRange.lowerBound]
             guard let headerStr = String(data: headerData, encoding: .utf8) else {
-                idleTimer.cancel()
+                stopReadTimers()
                 self.send(conn, status: 400, body: #"{"error":"Bad headers"}"#); return
             }
 
@@ -307,7 +317,7 @@ final class LocalAPIServer {
             let contentLength: Int
             switch Self.parseContentLength(headers: headerStr) {
             case .invalid:
-                idleTimer.cancel()
+                stopReadTimers()
                 self.send(conn, status: 400, body: #"{"error":"Invalid Content-Length"}"#); return
             case .absent:
                 contentLength = 0
@@ -317,18 +327,20 @@ final class LocalAPIServer {
 
             // Reject oversize declared bodies up front (don't accumulate to OOM).
             if contentLength > Self.maxBodyBytes {
-                idleTimer.cancel()
+                stopReadTimers()
                 self.send(conn, status: 413, body: #"{"error":"Request too large"}"#); return
             }
 
             let bodyAvailable = buf.endIndex - bodyStart
 
             if bodyAvailable < contentLength {
-                if isComplete { idleTimer.cancel(); conn.cancel(); return }
-                self.accumulate(conn, data: buf, idleTimer: idleTimer); return
+                if isComplete { stopReadTimers(); conn.cancel(); return }
+                self.accumulate(conn, data: buf, idleTimer: idleTimer, lifetimeTimer: lifetimeTimer); return
             }
 
-            idleTimer.cancel()
+            // Full request received — the slow-drip DoS window is over. Cancel BOTH read caps so the
+            // (potentially long) transcription that follows is never cut by the 120s lifetime timer.
+            stopReadTimers()
             let body = Data(buf[bodyStart..<(bodyStart + contentLength)])
             self.handle(conn: conn, headers: headerStr, body: body)
         }

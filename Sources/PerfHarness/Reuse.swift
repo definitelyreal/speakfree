@@ -28,15 +28,19 @@ enum Reuse {
 
     struct ClipResult {
         let clipName: String
-        let actualSeconds: Double
+        let actualSeconds: Double       // streamed clip duration (what the partial saw)
+        let finalSeconds: Double        // grown clip duration the FINAL pass saw (≥ actualSeconds)
+        let growthFraction: Double      // (finalSeconds - actualSeconds) / actualSeconds
 
         // (1) latency win
         let finalInferMedianMs: Double   // median fresh final-pass wall-clock (what reuse skips)
         let reuseMedianMs: Double        // median reuse-path work (TextPipeline only)
         let speedupX: Double             // finalInferMedianMs / max(reuseMedianMs, ε)
 
-        // (2) accuracy delta — both texts post-TextPipeline
-        let finalPipelineText: String    // final-pass raw → TextPipeline.run
+        // (2) accuracy delta — both texts post-TextPipeline. The reuse path inserts the STREAMING
+        // partial (base clip, no prompt, half threads); the final path is what would have run
+        // instead (GROWN clip up to the gate's max growth, WITH the production prompt, full threads).
+        let finalPipelineText: String    // grown+prompted final-pass raw → TextPipeline.run
         let reusePipelineText: String    // streaming-partial raw → TextPipeline.run
         let editDistance: Int            // word-level Levenshtein
         let finalWordCount: Int
@@ -44,6 +48,15 @@ enum Reuse {
     }
 
     /// Run the reuse measurement over the audio golden fixtures, slicing each to short clips.
+    ///
+    /// AR-2 R1, finding 1: the harness now models the REAL reuse scenario the production gate
+    /// permits, not just a thread-count delta on identical audio:
+    ///   - the STREAMING partial sees the base clip (`duration`s), no prompt, half threads —
+    ///     exactly what `transcribeStreaming` produced and the reuse path inserts;
+    ///   - the FINAL pass it replaced sees a GROWN clip (base × (1 + maxGrowthFraction), capped at
+    ///     the fixture length), WITH the production initial-prompt bias, full threads — exactly the
+    ///     pass `StreamingReuse.decide` skips. The divergence between these is the accuracy cost the
+    ///     10%-growth + prompt gate actually permits.
     static func measure(
         fixturesDir: URL,
         shortDurationsSeconds: [Double] = [2.0, 3.0],
@@ -52,7 +65,9 @@ enum Reuse {
         modelPath: String,
         fullThreads: Int,
         halfThreads: Int,
-        workDir: URL
+        workDir: URL,
+        maxGrowthFraction: Double = StreamingReuse.defaultMaxSampleGrowthFraction,
+        finalPrompt: String? = nil
     ) -> [ClipResult]? {
         let wavFiles = Benchmark.fixtureWavs(in: fixturesDir)
         guard !wavFiles.isEmpty else {
@@ -87,26 +102,45 @@ enum Reuse {
                     continue
                 }
 
+                // The STREAMING partial saw the base clip.
                 let nSamples = Int(duration * sampleRate)
-                let clip = Array(fullSamples.prefix(nSamples))
-                let actualSec = Double(clip.count) / sampleRate
+                let streamClip = Array(fullSamples.prefix(nSamples))
+                let actualSec = Double(streamClip.count) / sampleRate
+
+                // The FINAL pass it replaced saw a GROWN clip: base × (1 + maxGrowthFraction),
+                // capped at the fixture length. This is the new audio the streamed partial never
+                // saw but the gate permits the reuse path to ignore.
+                let grownSamples = Swift.min(
+                    fullSamples.count,
+                    Int(Double(nSamples) * (1.0 + maxGrowthFraction)))
+                let finalClip = Array(fullSamples.prefix(grownSamples))
+                let finalSec = Double(finalClip.count) / sampleRate
+                let actualGrowth = nSamples > 0
+                    ? Double(grownSamples - nSamples) / Double(nSamples)
+                    : 0.0
+
                 let clipName = "\(wav.deletingPathExtension().lastPathComponent)_\(Int(duration))s"
-                let clipWAV = workDir.appendingPathComponent("\(clipName).wav")
+                let streamWAV = workDir.appendingPathComponent("\(clipName)_stream.wav")
+                let finalWAV = workDir.appendingPathComponent("\(clipName)_final.wav")
                 do {
-                    try Divergence.writeFloat32WAV(samples: clip, sampleRate: 16_000, to: clipWAV)
+                    try Divergence.writeFloat32WAV(samples: streamClip, sampleRate: 16_000, to: streamWAV)
+                    try Divergence.writeFloat32WAV(samples: finalClip, sampleRate: 16_000, to: finalWAV)
                 } catch {
                     FileHandle.standardError.write(Data("reuse: writeWAV failed \(clipName): \(error)\n".utf8))
                     continue
                 }
 
                 FileHandle.standardError.write(Data(
-                    "reuse: \(clipName) (\(String(format: "%.2f", actualSec))s) — timing final(\(fullThreads)t) vs reuse over \(iterations) iters\n".utf8))
+                    "reuse: \(clipName) — stream \(String(format: "%.2f", actualSec))s (\(halfThreads)t, no prompt) vs final \(String(format: "%.2f", finalSec))s (+\(String(format: "%.1f", actualGrowth * 100))%, \(fullThreads)t, prompt=\(finalPrompt != nil)) over \(iterations) iters\n".utf8))
 
-                // --- One streaming-pass (half threads) and one final-pass (full threads) text. ---
+                // --- STREAMING pass: base clip, NO prompt, half threads (what the reuse path inserts). ---
                 let streamingRaw = Divergence.runWhisperCLI(
-                    whisperPath: whisperPath, modelPath: modelPath, wavPath: clipWAV.path, threads: halfThreads)
+                    whisperPath: whisperPath, modelPath: modelPath, wavPath: streamWAV.path,
+                    threads: halfThreads, prompt: nil)
+                // --- FINAL pass: GROWN clip, WITH production prompt, full threads (what reuse SKIPS). ---
                 let finalRaw = Divergence.runWhisperCLI(
-                    whisperPath: whisperPath, modelPath: modelPath, wavPath: clipWAV.path, threads: fullThreads)
+                    whisperPath: whisperPath, modelPath: modelPath, wavPath: finalWAV.path,
+                    threads: fullThreads, prompt: finalPrompt)
 
                 let finalPipelineText = runPipeline(finalRaw)
                 let reusePipelineText = runPipeline(streamingRaw)
@@ -123,13 +157,13 @@ enum Reuse {
                 // --- (1) latency: median over `iterations` of (final whisper pass) vs (reuse = TextPipeline only). ---
                 // Warm-up final pass discarded (cold model load / Metal pipeline).
                 _ = Divergence.runWhisperCLI(whisperPath: whisperPath, modelPath: modelPath,
-                                             wavPath: clipWAV.path, threads: fullThreads)
+                                             wavPath: finalWAV.path, threads: fullThreads, prompt: finalPrompt)
                 var finalMs: [Double] = []
                 var reuseMs: [Double] = []
                 for _ in 0..<iterations {
                     let f0 = DispatchTime.now()
                     _ = Divergence.runWhisperCLI(whisperPath: whisperPath, modelPath: modelPath,
-                                                 wavPath: clipWAV.path, threads: fullThreads)
+                                                 wavPath: finalWAV.path, threads: fullThreads, prompt: finalPrompt)
                     finalMs.append(elapsedMs(since: f0))
 
                     // The reuse path's ENTIRE work: route the saved partial through TextPipeline.
@@ -145,6 +179,8 @@ enum Reuse {
                 results.append(ClipResult(
                     clipName: clipName,
                     actualSeconds: actualSec,
+                    finalSeconds: finalSec,
+                    growthFraction: actualGrowth,
                     finalInferMedianMs: finalMed,
                     reuseMedianMs: reuseMed,
                     speedupX: speedup,
@@ -180,14 +216,20 @@ enum Reuse {
         modelPath: String,
         fullThreads: Int,
         halfThreads: Int,
-        machine: Fingerprint
+        machine: Fingerprint,
+        maxGrowthFraction: Double = StreamingReuse.defaultMaxSampleGrowthFraction,
+        finalPrompt: String? = nil
     ) -> String {
         var out = ""
         out += "<!-- ai:processed | session: 5b06900b-1498-4764-a786-48f408c36626 | date: 2026-06-10 -->\n"
         out += "# T2.3 — Reuse Last Streaming Partial: Latency + Accuracy\n\n"
         out += "**Task:** prove (1) reusing the last streaming partial gives near-zero final-inference\n"
-        out += "latency for short clips, and (2) the corpus accuracy delta (reused-partial vs final-pass\n"
-        out += "text, both through TextPipeline) is < 1%.\n\n"
+        out += "latency for short clips, and (2) the accuracy delta the GATE PERMITS — reused streaming\n"
+        out += "partial (base clip, no prompt, half threads) vs the final pass it replaced (clip grown up\n"
+        out += "to the gate's max growth, WITH the production prompt, full threads) — is < 1%.\n\n"
+        out += "> AR-2 R1, finding 1: this harness models BOTH the audio growth (up to "
+        out += "\(String(format: "%.0f", maxGrowthFraction * 100))%) and the initial-prompt asymmetry the\n"
+        out += "> production reuse path exhibits — not just a thread-count delta on identical audio.\n\n"
 
         out += "## Setup\n\n"
         out += "| Key | Value |\n|---|---|\n"
@@ -195,6 +237,8 @@ enum Reuse {
         out += "| whisper binary | `\(URL(fileURLWithPath: whisperPath).lastPathComponent)` |\n"
         out += "| final-pass threads | \(fullThreads) (= `activeProcessorCount`) |\n"
         out += "| streaming threads | \(halfThreads) (= `max(activeProcessorCount/2, 1)`) |\n"
+        out += "| max audio growth modeled | \(String(format: "%.0f", maxGrowthFraction * 100))% (= `StreamingReuse.defaultMaxSampleGrowthFraction`) |\n"
+        out += "| final-pass initial prompt | \(finalPrompt.map { "`\($0.prefix(60))…`" } ?? "_(none)_") |\n"
         out += "| iterations (median) | \(iterations) |\n"
         out += "| machine | \(machine.cpu) · \(machine.cores) cores · \(machine.arch) |\n"
         out += "| os | \(machine.os) |\n"
@@ -217,14 +261,15 @@ enum Reuse {
         out += "→ reuse: **\(String(format: "%.3f", aggReuse)) ms** "
         out += "(**\(String(format: "%.0f", aggFinal / Swift.max(aggReuse, 0.0001)))× faster**; the entire final pass is skipped).\n\n"
 
-        out += "## (2) Accuracy delta — reused-partial vs final-pass text (post-TextPipeline)\n\n"
-        out += "Word-level divergence between the two FINAL texts. Threshold: < 1% aggregate.\n\n"
-        out += "| clip | final-pipeline text | reuse-pipeline text | final words | edit dist | divergence % |\n"
-        out += "|---|---|---|---|---|---|\n"
+        out += "## (2) Accuracy delta — reused partial vs the grown+prompted final pass (post-TextPipeline)\n\n"
+        out += "Word-level divergence between the reused streaming text and the final pass it replaced.\n"
+        out += "`stream`/`final` columns are the durations each pass saw (final is grown). Threshold: < 1% aggregate.\n\n"
+        out += "| clip | stream | final | growth | final-pipeline text | reuse-pipeline text | final words | edit dist | divergence % |\n"
+        out += "|---|---|---|---|---|---|---|---|---|\n"
         for r in results {
-            let fp = r.finalPipelineText.isEmpty ? "_(empty)_" : String(r.finalPipelineText.prefix(48)) + (r.finalPipelineText.count > 48 ? "…" : "")
-            let rp = r.reusePipelineText.isEmpty ? "_(empty)_" : String(r.reusePipelineText.prefix(48)) + (r.reusePipelineText.count > 48 ? "…" : "")
-            out += "| `\(r.clipName)` | \(fp) | \(rp) | \(r.finalWordCount) | \(r.editDistance) | \(String(format: "%.2f", r.divergencePct))% |\n"
+            let fp = r.finalPipelineText.isEmpty ? "_(empty)_" : String(r.finalPipelineText.prefix(40)) + (r.finalPipelineText.count > 40 ? "…" : "")
+            let rp = r.reusePipelineText.isEmpty ? "_(empty)_" : String(r.reusePipelineText.prefix(40)) + (r.reusePipelineText.count > 40 ? "…" : "")
+            out += "| `\(r.clipName)` | \(String(format: "%.1f", r.actualSeconds))s | \(String(format: "%.1f", r.finalSeconds))s | +\(String(format: "%.0f", r.growthFraction * 100))% | \(fp) | \(rp) | \(r.finalWordCount) | \(r.editDistance) | \(String(format: "%.2f", r.divergencePct))% |\n"
         }
         out += "\n"
 

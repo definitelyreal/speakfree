@@ -13,6 +13,9 @@ final class FakeEngine: TranscriptionEngine {
     var supportsStreamingFlag: Bool
     var transcribeError: Error?
     var loadError: Error?
+    /// Artificial delay before `transcribe` returns. Lets the LocalAPIServer lifetime-cap regression
+    /// test (AR-2 R1 Medium) simulate a transcription that outlasts a short connection-lifetime cap.
+    var transcribeDelay: TimeInterval = 0
 
     // Recorded state / calls
     private(set) var isLoaded: Bool = false
@@ -55,6 +58,9 @@ final class FakeEngine: TranscriptionEngine {
                     prompt: String?,
                     suppressRegex: String?) async throws -> String {
         transcribeCalls.append((samples, language, prompt, suppressRegex))
+        if transcribeDelay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(transcribeDelay * 1_000_000_000))
+        }
         if let transcribeError { throw transcribeError }
         return cannedTranscript
     }

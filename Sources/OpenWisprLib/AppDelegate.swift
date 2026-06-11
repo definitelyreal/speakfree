@@ -931,12 +931,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // T2.3 — decide (on main, all state read here) whether to reuse the last streaming partial
         // instead of running a fresh final inference. The gate (flag + freshness + growth) is the
-        // pure StreamingReuse type; T2.3-PRE proved 0% word divergence under GREEDY sampling, so a
-        // reuse costs zero accuracy but skips the final whisper_full call entirely. When the gate
-        // declines, `reuseDecision` is `.runFinalInference` and the path below is byte-identical to
-        // pre-T2.3.
+        // pure StreamingReuse type.
+        //
+        // DEFAULT OFF (AR-2 finding #2): the T2.3-PRE measurement that originally authorized
+        // default-ON only varied THREAD COUNT on 2–3 s hallucination slices ("(upbeat music)",
+        // empty strings) and reported 0.000% divergence — agreement on noise, not signal. It never
+        // measured the axis production actually swaps: a `prompt:nil`, NON-VAD-trimmed streaming
+        // partial (transcribeStreaming, AppDelegate path) replacing a glossary/screen/cursor-context
+        // -primed, VAD-trimmed FINAL pass (transcribe, prompt: prompt below). Re-measured on the FULL
+        // real-speech fixtures that axis diverges ~5% (>5× the locked <1% gate). So reuse is OFF by
+        // default until a valid prompt-axis measurement clears the gate; the flag remains for
+        // opt-in/experiments. When the gate declines, `reuseDecision` is `.runFinalInference` and the
+        // path below is byte-identical to pre-T2.3.
         let reuseDecision = StreamingReuse.decide(StreamingReuse.State(
-            flagEnabled: config.reuseStreamingPartial?.value ?? true,
+            flagEnabled: config.reuseStreamingPartial?.value ?? false,
             lastRawPartial: lastStreamingRawPartial,
             lastStreamedSampleCount: lastStreamingSampleCount,
             lastStreamCompletedAt: lastStreamingCompletedAt,
@@ -983,7 +991,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 let raw: String
                 switch reuseDecision {
                 case .reusePartial(let rawPartial):
-                    raw = rawPartial
+                    // The streaming partial is RAW collectSegments output; unlike the final pass it
+                    // has NOT had its multi-segment acoustic `\n` collapsed. Apply the IDENTICAL
+                    // collapse the final path uses so an unspoken segment split can never reach
+                    // TextInserter as a line-break `.shiftReturn` (Newline Policy 2b / Option B).
+                    raw = TextPipeline.collapseSegmentNewlines(rawPartial)
                     DiagnosticLogger.shared.log("T2.3: reused last streaming partial (skipped final inference)")
                 case .runFinalInference:
                     raw = try await transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)

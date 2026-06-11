@@ -100,13 +100,23 @@ jobs:
 
   perf:
     # T2.0 perf-regression harness. Benchmarks the audio golden fixtures and gates against the
-    # tracked baseline (Tests/PerfBaseline/baseline.json). The committed baseline is fingerprinted
-    # to a dev Mac (Apple M3 Max); a CI runner's fingerprint differs, so the gate prints
-    # "no comparable baseline" and PASSES until a CI-fingerprint baseline is committed (download
-    # the uploaded perf-report.json from a green run, commit it as baseline-ci.json, and point
-    # --baseline at it to make the gate enforce on CI). Locked threshold: +15% median regression.
+    # CI-fingerprint baseline (Tests/PerfBaseline/baseline-ci.json) with --require-baseline.
+    #
+    # AR-2 finding #3 fix: the gate is NO LONGER a silent no-op. --require-baseline makes a
+    # fingerprint mismatch (or a missing baseline) a HARD FAILURE (exit 1) instead of a green pass.
+    # So either baseline-ci.json matches this runner's fingerprint and the +15% median gate
+    # ENFORCES, or the perf job is RED. A genuine regression can never pass green again.
+    #
+    # SEEDING the CI baseline: the "Self-seed CI baseline" step below auto-generates + commits
+    # Tests/PerfBaseline/baseline-ci.json on the FIRST push after a runner-fingerprint change
+    # (real measured numbers from this runner — timings are never fabricated off-runner, which
+    # would re-introduce the gameable no-op). The dev-Mac baseline.json is kept for LOCAL
+    # enforcement (run `perf-harness bench-and-gate --baseline Tests/PerfBaseline/baseline.json
+    # --require-baseline` on the dev M3 Max). Locked threshold: +15% median regression.
     runs-on: macos-15
     timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -158,22 +168,76 @@ jobs:
             '  "spokenPunctuation": "hybrid"' \
             '}' > ~/.config/speakfree/config.json
 
+      - name: Perf baseline provenance guard (PR only)
+        # AR-2 R1 finding #2 (gaming): the baseline files are plain committed JSON with no integrity
+        # binding. A regression could be landed by REGENERATING the baseline in the same PR
+        # (perf-harness run --out Tests/PerfBaseline/baseline.json) so the gate compares the
+        # regression against an already-regressed baseline → pass. Guard: a PR may NOT modify either
+        # perf baseline. Only the trusted push-time "Self-seed CI baseline" step (which commits with
+        # [skip ci] on main) may write baseline-ci.json. A PR that touches a baseline FAILS here.
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CHANGED=$(gh pr diff ${{ github.event.pull_request.number }} --name-only --repo ${{ github.repository }})
+          if echo "$CHANGED" | grep -qE '^Tests/PerfBaseline/baseline(-ci)?\.json$'; then
+            echo "::error::This PR modifies a perf baseline (Tests/PerfBaseline/baseline*.json)."
+            echo "::error::Baselines may not be hand-edited or regenerated in a PR — that games the +15% gate."
+            echo "::error::The CI baseline is seeded automatically on push to main. Revert the baseline change."
+            echo "$CHANGED" | grep -E '^Tests/PerfBaseline/baseline(-ci)?\.json$'
+            exit 1
+          fi
+          echo "OK: no perf baseline modified in this PR."
+
       - name: Build perf-harness
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
         run: xcrun swift build -c release --product perf-harness
 
+      - name: Self-seed CI baseline on first run (push only)
+        # AR-2 #3 bootstrap: the +15% gate can ONLY enforce against a baseline measured on THIS
+        # runner's fingerprint — timings can't be fabricated off-runner without re-introducing the
+        # gameable no-op. So on a push where no fingerprint-matching CI baseline exists yet, generate
+        # one HERE (real measured numbers) and commit it. Subsequent pushes find a matching baseline
+        # and the gate ENFORCES. This bootstraps once per runner-image change without ever silently
+        # passing a regression: a mismatch on a NON-bootstrap path still hard-fails (next step).
+        id: seed
+        if: github.event_name == 'push'
+        run: |
+          set -o pipefail
+          .build/release/perf-harness run --iterations 7 --engines whisper --out candidate.json
+          CAND_FP=$(python3 -c "import json;f=json.load(open('candidate.json'))['fingerprint'];print(f\"{f['cpu']}|{f['cores']}|{f['arch']}\")")
+          NEED_SEED=1
+          if [ -f Tests/PerfBaseline/baseline-ci.json ]; then
+            BASE_FP=$(python3 -c "import json;f=json.load(open('Tests/PerfBaseline/baseline-ci.json'))['fingerprint'];print(f\"{f['cpu']}|{f['cores']}|{f['arch']}\")")
+            if [ "$CAND_FP" = "$BASE_FP" ]; then NEED_SEED=0; fi
+          fi
+          if [ "$NEED_SEED" = "1" ]; then
+            echo "No fingerprint-matching CI baseline ($CAND_FP) — seeding."
+            cp candidate.json Tests/PerfBaseline/baseline-ci.json
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add Tests/PerfBaseline/baseline-ci.json
+            git commit -m "ci(perf): seed CI-fingerprint perf baseline ($CAND_FP) [skip ci]"
+            git push || echo "push failed (non-fatal: gate still runs against the local copy)"
+          else
+            echo "CI baseline fingerprint matches ($CAND_FP) — gate will enforce."
+          fi
+
       - name: Perf benchmark + regression gate
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
         # Whisper only (parakeet auto-skips when its multi-GB CoreML assets aren't on the runner).
-        # Gate enforces +15% median against a fingerprint-MATCHING baseline; a non-matching one
-        # (today: the dev-Mac baseline vs a CI runner) prints a note and passes (exit 0).
+        # --require-baseline (AR-2 #3): a fingerprint-mismatched or missing baseline FAILS the job
+        # instead of silently passing. After the self-seed step (push) a matching baseline-ci.json
+        # exists, so the +15% median gate ENFORCES. On a PR with no matching CI baseline the job
+        # fails loudly (push to main once to seed) — never a green pass on a regression.
         run: |
           .build/release/perf-harness bench-and-gate \
             --iterations 7 \
             --engines whisper \
             --out perf-report.json \
-            --baseline Tests/PerfBaseline/baseline.json \
-            --threshold 15
+            --baseline Tests/PerfBaseline/baseline-ci.json \
+            --threshold 15 \
+            --require-baseline
 
       - name: Upload perf report
         if: (github.event_name == 'push' || steps.filter.outputs.swift == 'true') && always()

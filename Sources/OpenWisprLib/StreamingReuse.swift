@@ -4,18 +4,27 @@
 //
 // When a user releases the hotkey very shortly after the live-preview ("streaming") pass last
 // completed, AND the recording has barely grown since that pass, the already-computed streaming
-// partial is (per the T2.3-PRE measurement: 0.000% word divergence on short clips under GREEDY
-// sampling) text-identical to what a fresh FINAL inference would produce. In that window we can
+// partial is OFTEN close to what a fresh FINAL inference would produce. In that window we can
 // SKIP the redundant final `whisper_full` call and route the saved partial through the SAME
 // TextPipeline post-processing the final pass uses — eliminating the final inference latency for
-// short utterances at zero accuracy cost.
+// short utterances.
 //
 // This type is the PURE decision: it owns no app state, touches no engine, and is unit-testable
 // headless. `AppDelegate.finalizeRecording` snapshots the live numbers and asks `decide(...)`.
 //
-// Kill-switch: gated by `config.reuseStreamingPartial` (FlexBool, default ON). When the flag is
-// off — or any gate condition fails — the decision is `.runFinalInference` and behavior is
-// byte-identical to pre-T2.3.
+// ACCURACY CAVEAT (AR-2 findings #1, #2): the streaming partial is computed with `prompt: nil` and
+// NO VAD trim, whereas the final pass it replaces is glossary/cursor/screen-context-PRIMED, VAD-
+// trimmed, AND transcribed over MORE audio (the gate permits up to `defaultMaxSampleGrowthFraction`
+// of post-pass growth the streamed partial never saw). The original T2.3-PRE gate measured only a
+// thread-count difference on degenerate 2–3 s slices (hallucination markers / empty strings) and
+// reported 0.000% divergence — agreement on noise, not signal. The growth+prompt-aware reuse
+// harness (`perf-harness reuse`, AR-2 R1) re-measures ALL three axes (audio growth, initial prompt,
+// thread count) and reports word divergence well above the locked <1% threshold. The plan's rule is
+// "if divergence is high, T2.3 is cancelled" — so this is DEFAULT OFF.
+//
+// Kill-switch: gated by `config.reuseStreamingPartial` (FlexBool, DEFAULT OFF — opt-in only). When
+// the flag is off — or any gate condition fails — the decision is `.runFinalInference` and behavior
+// is byte-identical to pre-T2.3.
 
 import Foundation
 
@@ -53,7 +62,7 @@ public enum StreamingReuse {
 
     /// A snapshot of the live streaming state captured at finalize time.
     public struct State: Equatable {
-        /// Kill-switch: `config.reuseStreamingPartial?.value ?? true` — default ON.
+        /// Kill-switch: `config.reuseStreamingPartial?.value ?? false` — DEFAULT OFF (AR-2 #2).
         public let flagEnabled: Bool
         /// The raw engine text the LAST completed streaming pass returned (pre-TextPipeline).
         /// Empty / whitespace-only means "no usable partial".

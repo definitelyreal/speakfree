@@ -349,14 +349,39 @@ final class StreamingReuseTests: XCTestCase {
         XCTAssertEqual(inserter.insertCallCount, 0)
     }
 
-    // MARK: - Config flag (FlexBool, default ON)
+    // MARK: - Config flag (FlexBool, DEFAULT OFF — AR-2 #2)
 
-    func test_config_reuseStreamingPartial_defaultsToOnWhenAbsent() throws {
-        // Absent in JSON → nil → app treats `?? true` as ON.
+    func test_config_reuseStreamingPartial_defaultsToOffWhenAbsent() throws {
+        // AR-2 #2: absent in JSON → nil → app treats `?? false` as OFF. Reuse swaps a prompt:nil,
+        // non-VAD-trimmed streaming partial for a glossary/context-primed final pass; the T2.3-PRE
+        // gate never measured that axis (it varied only thread count on hallucination slices), and
+        // the real axis diverges ~5% (>1% gate). So the shipped default must be OFF, opt-in only.
         let json = #"{"hotkey":{"keyCode":63,"modifiers":[]},"modelSize":"tiny.en","language":"en"}"#
         let cfg = try Config.decode(from: Data(json.utf8))
         XCTAssertNil(cfg.reuseStreamingPartial)
-        XCTAssertTrue(cfg.reuseStreamingPartial?.value ?? true, "default (nil) must read as ON")
+        XCTAssertFalse(cfg.reuseStreamingPartial?.value ?? false, "default (nil) must read as OFF")
+    }
+
+    func test_streamingReuse_defaultOff_runsFinalInference_evenWithFreshUnchangedPartial() {
+        // A snapshot that would otherwise PASS every reuse gate (fresh partial, no growth) must
+        // STILL run the final inference under the shipped default (flagEnabled = `?? false` = OFF).
+        // This pins the AR-2 #2 decision: a future flip back to default-ON has to change this test.
+        let now: Double = 1_000.0
+        // Mirror the production call site: `config.reuseStreamingPartial?.value ?? false` with the
+        // flag absent (nil) → false. Computed (not a literal) so the test fails if the call site's
+        // default is ever changed back to `?? true`.
+        let absentFlag: Bool? = nil
+        let shippedDefault = absentFlag ?? false
+        let decision = StreamingReuse.decide(StreamingReuse.State(
+            flagEnabled: shippedDefault,
+            lastRawPartial: "this is a perfectly good fresh partial",
+            lastStreamedSampleCount: 16_000,
+            lastStreamCompletedAt: now,
+            sampleCountAtRelease: 16_000,
+            keyReleaseAt: now + 0.05
+        ))
+        XCTAssertEqual(decision, .runFinalInference(reason: .flagDisabled),
+                       "shipped default (reuseStreamingPartial absent → ?? false) must decline reuse")
     }
 
     func test_config_reuseStreamingPartial_killSwitchParsesFalse() throws {

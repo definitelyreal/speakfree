@@ -70,6 +70,8 @@ enum Table {
         switch gate {
         case .pass(let note):
             return "GATE: PASS\n\(note)\n"
+        case .noComparableBaseline(let note):
+            return "GATE: FAIL\n\(note)\n"
         case .regression(let rows):
             var out = "GATE: FAIL — \(rows.count) median regression(s) > +\(String(format: "%.0f", thresholdPct))%\n"
             out += "  " + pad("engine", 9) + pad("fixture", 30) + pad("metric", 10)

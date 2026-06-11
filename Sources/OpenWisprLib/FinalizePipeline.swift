@@ -108,10 +108,21 @@ public enum FinalizePipeline {
         // T2.3 — short-utterance fast path. The reuse gate already verified (on main, before this
         // runs) that the flag is on, the partial is fresh, and the recording barely grew. We SKIP
         // the redundant final `whisper_full` call and route the saved raw partial through the SAME
-        // TextPipeline the final pass uses → identical post-processing, zero accuracy cost (per
-        // T2.3-PRE: 0.000% word divergence on short clips), final-inference latency eliminated.
+        // TextPipeline the final pass uses. NOTE: the raw streaming partial must first be passed
+        // through `collapseSegmentNewlines` (below) — the final pass applies that collapse in
+        // Transcriber.transcribeWithEngine, so without it here the two paths are NOT byte-identical
+        // for multi-segment `\n`. Accuracy: the streaming partial was transcribed over the audio
+        // available at the last streaming pass; the reuse gate caps post-pass audio growth at
+        // `defaultMaxSampleGrowthFraction`, so a tail-word difference is possible within that bound
+        // (measured by the growth-aware reuse harness). Final-inference latency is eliminated.
         if case let .reusePartial(rawPartial)? = reuseDecision {
-            let text = TextPipeline.run(makeInput(rawPartial), precomputedPrompt: .some(prompt)).finalText
+            // The reused partial is RAW streaming-engine output (collectSegments), which — unlike the
+            // final pass (Transcriber.transcribeWithEngine) — has NOT had its multi-segment acoustic
+            // `\n` collapsed. Apply the IDENTICAL collapse here so the reuse path is byte-equivalent
+            // to the final path for multi-segment newlines: an unspoken segment split can NEVER reach
+            // TextInserter as a `.shiftReturn` line break (Newline Policy 2b / Option B).
+            let normalizedPartial = TextPipeline.collapseSegmentNewlines(rawPartial)
+            let text = TextPipeline.run(makeInput(normalizedPartial), precomputedPrompt: .some(prompt)).finalText
             if text.isEmpty {
                 return .emptyTranscription
             }

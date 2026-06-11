@@ -384,7 +384,16 @@ class TextInserter {
         while i < scalars.count {
             if scalars[i].value == 0x0A || scalars[i].value == 0x0D {
                 ops.append(.shiftReturn)
-                i += 1
+                // Collapse a CRLF / LFCR pair into a SINGLE break (AR-1 Low #7): "\r\n" is one
+                // line break, not two. A genuine double break ("\n\n" from spoken "new paragraph")
+                // is two DISTINCT LF scalars and is preserved — only a CR+LF *pair* collapses.
+                if scalars[i].value == 0x0D, i + 1 < scalars.count, scalars[i + 1].value == 0x0A {
+                    i += 2
+                } else if scalars[i].value == 0x0A, i + 1 < scalars.count, scalars[i + 1].value == 0x0D {
+                    i += 2
+                } else {
+                    i += 1
+                }
                 continue
             }
 
@@ -476,20 +485,16 @@ class TextInserter {
         }
 
         let savedItems = savePasteboard(pasteboard)
-        let changeCountBeforePaste = pasteboard.changeCount
 
-        pasteboard.clearContents()
-
-        // Transient markers tell clipboard managers to skip recording this write.
-        // org.nspasteboard.TransientType = "don't persist"
-        // org.nspasteboard.ConcealedType = "don't show in history"
-        let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
-        let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
-        let item = NSPasteboardItem()
-        item.setString(text, forType: .string)
-        item.setData(Data(), forType: transientType)
-        item.setData(Data(), forType: concealedType)
-        pasteboard.writeObjects([item])
+        // Write the dictated text (transient/concealed-marked) and snapshot changeCount AFTER the
+        // write. A `clearContents()` + `writeObjects()` sequence advances `changeCount` by exactly
+        // ONE generation (clearContents bumps it; the subsequent write stays in that same
+        // generation), NOT two. The previous `+2` guard was therefore never satisfied, so the
+        // user's clipboard was NEVER restored after a paste insertion. Comparing against the
+        // post-write count (equality, the same pattern `secureInputClipboardFallback` uses) makes
+        // the restore fire when nothing else touched the clipboard, and skips it if the user or
+        // another app wrote in the meantime.
+        let writtenChangeCount = TextInserter.writeTransientString(text, to: pasteboard)
 
         simulatePaste()
 
@@ -498,10 +503,10 @@ class TextInserter {
         // so give it extra time before restoring.
         let restoreDelay: Double = isRemoteDesktopFrontmost() ? 3.0 : 1.5
         DispatchQueue.main.asyncAfter(deadline: .now() + restoreDelay) {
-            // changeCount increments on every clipboard change. We set it once (clearContents + setString).
-            // If it changed again since then, the user or another app wrote to the clipboard — don't restore.
-            let expectedChangeCount = changeCountBeforePaste + 2  // clearContents + setString
-            if pasteboard.changeCount == expectedChangeCount {
+            // Only restore if OUR write is still the live clipboard content. If changeCount moved
+            // past our write, the user or another app put something on the clipboard — leave it.
+            if TextInserter.shouldRestoreClipboard(currentChangeCount: pasteboard.changeCount,
+                                                   writtenChangeCount: writtenChangeCount) {
                 self.restorePasteboard(pasteboard, items: savedItems)
             }
         }
@@ -553,6 +558,44 @@ class TextInserter {
                 DiagnosticLogger.shared.log("TextInserter: auto-cleared concealed Secure-Input clipboard text")
             }
         }
+    }
+
+    /// Write `text` to `pasteboard` exactly as `pasteViaClipboard` does (clearContents +
+    /// transient/concealed-marked writeObjects) and return the `changeCount` AFTER the write.
+    ///
+    /// Extracted so the changeCount contract that drives clipboard restore is unit-testable on a
+    /// named (non-general) pasteboard without simulating a real Cmd+V. The key invariant the F4
+    /// regression test pins: this whole sequence advances `changeCount` by exactly ONE, so the
+    /// restore guard must compare against THIS returned value (equality), never `before + 2`.
+    @discardableResult
+    static func writeTransientString(_ text: String, to pasteboard: NSPasteboard) -> Int {
+        pasteboard.clearContents()
+        let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+        let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+        let item = NSPasteboardItem()
+        item.setString(text, forType: .string)
+        item.setData(Data(), forType: transientType)
+        item.setData(Data(), forType: concealedType)
+        pasteboard.writeObjects([item])
+        return pasteboard.changeCount
+    }
+
+    /// The restore decision: restore the prior clipboard only if OUR write is still live, i.e. the
+    /// current changeCount equals the one captured right after our write. Pure so the F4 fix is
+    /// testable without timers or a real paste.
+    static func shouldRestoreClipboard(currentChangeCount: Int, writtenChangeCount: Int) -> Bool {
+        currentChangeCount == writtenChangeCount
+    }
+
+    /// Test seam for the F4 clipboard-restore round-trip (ClipboardRestoreTests). Forwards to the
+    /// private save/restore so tests can exercise the real save→overwrite→restore cycle on a named
+    /// pasteboard without reaching `NSPasteboard.general`.
+    func savePasteboardForTest(_ pasteboard: NSPasteboard) -> [[(NSPasteboard.PasteboardType, Data)]] {
+        savePasteboard(pasteboard)
+    }
+
+    func restorePasteboardForTest(_ pasteboard: NSPasteboard, items: [[(NSPasteboard.PasteboardType, Data)]]) {
+        restorePasteboard(pasteboard, items: items)
     }
 
     private func savePasteboard(_ pasteboard: NSPasteboard) -> [[(NSPasteboard.PasteboardType, Data)]] {
