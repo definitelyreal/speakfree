@@ -34,6 +34,13 @@ func fail(_ msg: String, code: Int32 = 2) -> Never {
     exit(code)
 }
 
+/// Parse `--policy flat|adaptive` (T2.1). Defaults to flat (the legacy 300ms tax = BEFORE baseline).
+func postBufferPolicy(in args: [String]) -> Benchmark.PostBuffer {
+    let raw = (value(for: "--policy", in: args) ?? "flat").lowercased()
+    guard let p = Benchmark.PostBuffer(rawValue: raw) else { fail("unknown --policy '\(raw)' (want flat|adaptive)") }
+    return p
+}
+
 // MARK: - Engine specs
 
 /// Build the engine specs requested via --engines, skipping parakeet if its CoreML assets aren't
@@ -72,15 +79,18 @@ func parakeetModelPresent(_ model: String) -> Bool {
 
 // MARK: - run
 
-func runBenchmark(iterations: Int, engines: [Benchmark.EngineSpec]) -> PerfReport {
-    let dir = Benchmark.fixturesDir()
+func runBenchmark(iterations: Int, engines: [Benchmark.EngineSpec],
+                  postBuffer: Benchmark.PostBuffer = .flat,
+                  fixturesDir: String? = nil) -> PerfReport {
+    let dir = fixturesDir.map { URL(fileURLWithPath: $0) } ?? Benchmark.fixturesDir()
     let fixtures = Benchmark.fixtureWavs(in: dir)
     guard !fixtures.isEmpty else { fail("no fixtures found in \(dir.path)") }
 
     var engineReports: [EngineReport] = []
     for spec in engines {
-        FileHandle.standardError.write(Data("perf-harness: benchmarking \(spec.engineID)/\(spec.model) over \(fixtures.count) fixtures × \(iterations) iters…\n".utf8))
-        guard let rep = Benchmark.runEngine(spec, fixtures: fixtures, iterations: iterations) else {
+        FileHandle.standardError.write(Data("perf-harness: benchmarking \(spec.engineID)/\(spec.model) over \(fixtures.count) fixtures × \(iterations) iters (post-buffer: \(postBuffer.rawValue))…\n".utf8))
+        guard let rep = Benchmark.runEngine(spec, fixtures: fixtures, iterations: iterations,
+                                            postBuffer: postBuffer) else {
             fail("benchmark failed for engine \(spec.engineID)")
         }
         engineReports.append(rep)
@@ -116,8 +126,10 @@ switch command {
 case "run":
     let iters = max(5, Int(value(for: "--iterations", in: args) ?? "5") ?? 5)
     let engineList = value(for: "--engines", in: args, default: "whisper")!
+    let policy = postBufferPolicy(in: args)
+    let fixturesDir = value(for: "--fixtures-dir", in: args)
     let specs = resolveEngineSpecs(engineList)
-    let report = runBenchmark(iterations: iters, engines: specs)
+    let report = runBenchmark(iterations: iters, engines: specs, postBuffer: policy, fixturesDir: fixturesDir)
     print(Table.render(report))
     if let out = value(for: "--out", in: args) {
         writeReport(report, to: out)
@@ -147,8 +159,9 @@ case "bench-and-gate":
     let iters = max(5, Int(value(for: "--iterations", in: args) ?? "5") ?? 5)
     let engineList = value(for: "--engines", in: args, default: "whisper")!
     let threshold = Double(value(for: "--threshold", in: args) ?? "") ?? Compare.defaultThresholdPct
+    let policy = postBufferPolicy(in: args)
     let specs = resolveEngineSpecs(engineList)
-    let candidate = runBenchmark(iterations: iters, engines: specs)
+    let candidate = runBenchmark(iterations: iters, engines: specs, postBuffer: policy)
     print(Table.render(candidate))
     if let out = value(for: "--out", in: args) { writeReport(candidate, to: out) }
 
@@ -175,9 +188,12 @@ case "-h", "--help", "help":
     perf-harness — speakfree performance-regression harness (T2.0)
 
     USAGE:
-      perf-harness run [--iterations N] [--engines whisper,parakeet] [--out PATH]
+      perf-harness run [--iterations N] [--engines whisper,parakeet] [--policy flat|adaptive] [--out PATH]
       perf-harness compare <candidate.json> <baseline.json> [--threshold PCT]
-      perf-harness bench-and-gate [--iterations N] [--engines …] [--out PATH] --baseline PATH [--threshold PCT]
+      perf-harness bench-and-gate [--iterations N] [--engines …] [--policy flat|adaptive] [--out PATH] --baseline PATH [--threshold PCT]
+
+    --policy: flat = legacy 300ms tax on every dictation (default, = pre-T2.1 baseline);
+              adaptive = T2.1 — stop on ~150ms trailing silence, hard cap 300ms.
 
     Gate fails (exit 1) only on a >+threshold% median regression vs a FINGERPRINT-MATCHING
     baseline. A non-comparable baseline prints a note and passes (exit 0). Default threshold 15%.

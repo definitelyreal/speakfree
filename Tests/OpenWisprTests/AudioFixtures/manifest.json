@@ -23,5 +23,14 @@
       { "kind": "noCommaSpam" },
       { "kind": "spokenPeriodAtEnd", "expectedSpokenPeriodEnd": true }
     ]
+  },
+  {
+    "wav": "fixture-4-trailing-silence-period.wav",
+    "description": "T2.1 clipping canary: fixture-3 with 400ms of trailing silence appended (the realistic case where the speaker goes quiet before releasing the key). The adaptive post-buffer must NOT clip the final spoken 'period' — styled output must still end with '.'. If the adaptive buffer ever stops too early and truncates the last word, this assertion fails.",
+    "modelSHA": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+    "properties": [
+      { "kind": "noCommaSpam" },
+      { "kind": "spokenPeriodAtEnd", "expectedSpokenPeriodEnd": true }
+    ]
   }
 ]

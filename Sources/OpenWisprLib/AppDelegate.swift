@@ -51,6 +51,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // discarding stale results from previous recordings.
     private var screenCaptureGeneration: UUID = UUID()
 
+    // Adaptive post-buffer (T2.1): poll trailing audio after key release and finalize as soon as
+    // ~150ms of trailing silence is observed, hard-capped at 300ms (never worse than the old flat
+    // wait). The decision itself lives in the pure PostBufferPolicy; this timer only feeds it RMS
+    // windows from the live recorder.
+    private var postBufferTimer: Timer?
+    /// Window cadence the post-buffer poll uses (matches PostBufferPolicy's default window grain).
+    private let postBufferWindowMs: Double = 30.0
+
     // Streaming transcription: periodic inference during recording
     private var streamingTimer: Timer?
     private var streamingText: String = ""
@@ -787,16 +795,47 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Stop streaming timer and clear streaming state
         stopStreamingTimer()
 
-        // Capture key-release time NOW — finalizeRecording is called 300ms later, so
+        // Capture key-release time NOW — finalizeRecording runs up to 300ms later, so
         // measuring inside it would undercount the post-buffer delay in the latency log.
         let keyReleaseTime = CFAbsoluteTimeGetCurrent()
 
-        // Keep recording for 300ms after key release to capture trailing audio.
-        // AVAudioEngine buffers audio in chunks — releasing fn mid-word loses
-        // the tail of the last buffer. This post-buffer ensures the last word
-        // isn't cut off.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        // T2.1 — Adaptive post-buffer. We still keep recording AFTER key release so the tail of
+        // the last word (an AVAudioEngine buffer releasing mid-word loses its tail) isn't clipped.
+        // But instead of a FLAT 300ms tax on every dictation, we poll the trailing audio's RMS and
+        // finalize as soon as ~150ms of trailing silence is observed — hard-capped at 300ms so we
+        // are NEVER worse than the old flat wait. The wait DECISION is the pure PostBufferPolicy
+        // (unit-tested over RMS windows); this loop only feeds it the live trailing samples.
+        let samplesAtRelease = recorder.currentSamples().count
+        runAdaptivePostBuffer(samplesAtRelease: samplesAtRelease) { [weak self] in
             self?.finalizeRecording(keyReleaseTime: keyReleaseTime)
+        }
+    }
+
+    /// Poll the recorder's trailing audio on a short timer; once `PostBufferPolicy.decideWaitMs`
+    /// says enough contiguous trailing silence has accrued (or the 300ms cap is hit), invoke
+    /// `finalize` on the main queue. `samplesAtRelease` marks the sample count at key-release so
+    /// only audio captured AFTER the key lifted is scored as "trailing". The decision is the pure
+    /// policy; this only feeds it the live trailing samples.
+    private func runAdaptivePostBuffer(samplesAtRelease: Int, finalize: @escaping () -> Void) {
+        let windowMs = postBufferWindowMs
+        let capMs = PostBufferPolicy.defaultCapMs
+        let startTick = CFAbsoluteTimeGetCurrent()
+
+        postBufferTimer?.invalidate()
+        postBufferTimer = Timer.scheduledTimer(withTimeInterval: windowMs / 1000.0, repeats: true) { [weak self] timer in
+            guard let self = self else { timer.invalidate(); return }
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - startTick) * 1000.0
+            let all = self.recorder.currentSamples()
+            let trailing = all.count > samplesAtRelease ? Array(all[samplesAtRelease...]) : []
+            // Ask the pure policy how long it wants given the trailing audio seen so far.
+            let decided = PostBufferPolicy.decideWaitMs(trailingSamples: trailing, windowMs: windowMs)
+
+            // Stop once we've waited at least the policy's decision, or we hit the hard cap.
+            if elapsedMs >= decided || elapsedMs >= capMs {
+                timer.invalidate()
+                self.postBufferTimer = nil
+                finalize()
+            }
         }
     }
 
