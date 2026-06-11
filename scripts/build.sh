@@ -131,7 +131,21 @@ echo "Stapling..."
 xcrun stapler staple "$DMG"
 
 echo "Updating Sparkle appcast..."
-SPARKLE_BIN="/opt/homebrew/Caskroom/sparkle/2.9.0/bin"
+# Discover the installed Sparkle cask version dynamically so the path does not
+# need to be bumped every time the cask is updated.
+SPARKLE_CASKROOM="/opt/homebrew/Caskroom/sparkle"
+SPARKLE_VERSION=$(ls "$SPARKLE_CASKROOM" 2>/dev/null | sort -V | tail -1)
+if [ -z "$SPARKLE_VERSION" ]; then
+    echo "FATAL: Sparkle cask not installed. Run: brew install --cask sparkle" >&2
+    exit 1
+fi
+SPARKLE_BIN="$SPARKLE_CASKROOM/$SPARKLE_VERSION/bin"
+if [ ! -x "$SPARKLE_BIN/sign_update" ]; then
+    echo "FATAL: sign_update not found at $SPARKLE_BIN/sign_update" >&2
+    echo "  Installed Sparkle version: $SPARKLE_VERSION" >&2
+    echo "  Re-install with: brew install --cask sparkle" >&2
+    exit 1
+fi
 APPCAST="docs/appcast.xml"
 DOWNLOAD_URL="https://github.com/definitelyreal/speakfree/releases/download/v${VERSION}/${DMG}"
 DMG_SIZE=$(stat -f%z "$DMG")

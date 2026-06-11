@@ -236,3 +236,42 @@ jobs:
 
       - name: Transcription integration test
         run: bash scripts/test-transcription.sh
+
+  unsigned-artifact:
+    # Produces an ad-hoc-signed (not Developer-ID-signed) .app bundle on every
+    # push to main. No secrets required — uses bundle-app.sh which runs
+    # 'codesign --sign -' (ad-hoc, not a release identity).
+    # This job is intentionally separate from the signed local flow in build.sh
+    # (which uses 'codesign --sign "Developer ID Application: ..."' and
+    # notarytool). It lets contributors verify the build compiles and bundles
+    # correctly without needing Apple credentials.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install whisper-cpp
+        run: brew install whisper-cpp
+
+      - name: Build release binary
+        run: xcrun swift build -c release
+
+      - name: Bundle unsigned .app
+        # bundle-app.sh uses 'codesign --sign -' (ad-hoc) — no Developer ID
+        # certificate or notarization required.
+        run: |
+          VERSION=$(grep 'let version' Sources/OpenWisprLib/Version.swift \
+            | sed 's/.*"\(.*\)".*/\1/')
+          bash scripts/bundle-app.sh \
+            .build/release/speakfree \
+            speakfree-unsigned.app \
+            "$VERSION"
+
+      - name: Upload unsigned .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: speakfree-unsigned-app
+          path: speakfree-unsigned.app
+          if-no-files-found: error
+          retention-days: 7
