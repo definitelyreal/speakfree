@@ -54,6 +54,11 @@ public enum FinalizePipeline {
     ///     in production, a FakeEngine-backed closure in tests.
     ///   - inserter: the insertion seam (`TextInserter` in production, MockInserter in tests).
     ///   - element: the captured focused element to refocus before inserting (nil in headless tests).
+    ///   - precomputedPrependSpace: if non-nil, used directly instead of calling
+    ///     `inserter.shouldPrependSpace(before:element)`. Production passes the value derived
+    ///     from the cursor-context string captured at record-start (T2.2: off-main precompute).
+    ///     When nil (legacy / test path without a precomputed value), `shouldPrependSpace` is
+    ///     called on the inserter as before.
     ///   - onFocusLost: forwarded to `inserter.insert`.
     /// - Returns: the `Outcome` describing which branch ran.
     @discardableResult
@@ -64,6 +69,7 @@ public enum FinalizePipeline {
         transcribe: (URL, [Float], String?) async throws -> String,
         inserter: TextInserting,
         element: AXUIElement?,
+        precomputedPrependSpace: Bool? = nil,
         onFocusLost: (() -> Void)? = nil
     ) async -> Outcome {
         // Too-short guard (accidental tap).
@@ -88,7 +94,12 @@ public enum FinalizePipeline {
                 return .emptyTranscription
             }
 
-            let insertText = inserter.shouldPrependSpace(before: element) ? " " + text : text
+            // T2.2: use the precomputed answer when available (derived from cursor context
+            // captured at record-start, off the main thread — no AX query, no semaphore).
+            // Fall back to the AX-backed shouldPrependSpace only when no precomputed value
+            // is available (e.g. legacy callers or tests that omit the parameter).
+            let wantSpace = precomputedPrependSpace ?? inserter.shouldPrependSpace(before: element)
+            let insertText = wantSpace ? " " + text : text
             let pasted = inserter.insert(text: insertText, refocusing: element, onFocusLost: onFocusLost)
             return .inserted(insertedText: insertText, pasted: pasted)
         } catch {

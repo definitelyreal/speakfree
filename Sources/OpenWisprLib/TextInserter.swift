@@ -30,9 +30,39 @@ class TextInserter {
     /// types its own fixture text into the foreground app (see SecureInputTests).
     var performInsertion: ((String) -> Void)?
 
+    /// Pure check: should a space be prepended given the text ALREADY captured before
+    /// the cursor at record-start?
+    ///
+    /// This is the zero-latency path: `AppDelegate` captures cursor context off the main
+    /// thread at record-start (inside `captureFocusedElement`) and stores it in
+    /// `recordingContextText`. By the time `finalizeRecording` runs, the answer is already
+    /// available — no AX query, no semaphore, no main-thread stall.
+    ///
+    /// Returns true when the last non-empty character of `contextBefore` is a non-whitespace,
+    /// non-newline character — i.e. the cursor immediately follows printable text.
+    ///
+    /// Tradeoff: the value reflects the focused element AT RECORD-START, which is also the
+    /// element we refocus before inserting. If the user switches focus mid-dictation the
+    /// answer may be stale, but we are refocusing the original element anyway — so the
+    /// element and the precomputed context agree.
+    static func shouldPrependSpace(contextBefore text: String?) -> Bool {
+        guard let text = text, !text.isEmpty else { return false }
+        let lastChar = text.last!
+        return !lastChar.isWhitespace && !lastChar.isNewline
+    }
+
     /// Check if a space should be prepended before inserting text.
     /// Returns true if the character before the cursor is a non-whitespace character.
-    /// Runs AX queries with a 300ms timeout to avoid blocking on slow apps (Electron).
+    ///
+    /// NOTE: This method blocks the calling thread on an AX semaphore (up to 300 ms).
+    /// It is kept for legacy/fallback purposes. In the normal insert path,
+    /// `shouldPrependSpace(contextBefore:)` is used instead — computed at record-start
+    /// off the main thread, so the main thread never waits here.
+    ///
+    /// Seam: `axWaitWillBlock` is called immediately before `semaphore.wait` so tests can
+    /// record WHICH thread reaches the wait. Production leaves it nil.
+    var axWaitWillBlock: (() -> Void)?
+
     func shouldPrependSpace(before element: AXUIElement?) -> Bool {
         let semaphore = DispatchSemaphore(value: 0)
         var result = false
@@ -63,6 +93,7 @@ class TextInserter {
             semaphore.signal()
         }
 
+        axWaitWillBlock?()
         let timeout = semaphore.wait(timeout: .now() + 0.3)
         if timeout == .timedOut {
             DiagnosticLogger.shared.log("shouldPrependSpace: AX query timed out")
