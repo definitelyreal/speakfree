@@ -34,6 +34,11 @@ public enum FinalizePipeline {
         /// Happy path: text reached the inserter. `insertedText` is the exact string handed to
         /// the inserter (including any prepended space); `pasted` mirrors `insert(...)`'s return.
         case inserted(insertedText: String, pasted: Bool)
+        /// T2.3 — short-utterance fast path: the FINAL inference was SKIPPED and the already-computed
+        /// streaming partial was routed through the SAME TextPipeline and inserted. Same observable
+        /// effect as `.inserted`, but a distinct case so callers/tests can prove the final pass
+        /// never ran. `insertedText`/`pasted` mirror `.inserted`.
+        case reusedPartial(insertedText: String, pasted: Bool)
     }
 
     /// Pure RMS used by the silence guard. Matches `finalizeRecording`'s inline computation.
@@ -60,6 +65,11 @@ public enum FinalizePipeline {
     ///     When nil (legacy / test path without a precomputed value), `shouldPrependSpace` is
     ///     called on the inserter as before.
     ///   - onFocusLost: forwarded to `inserter.insert`.
+    ///   - reuseDecision: T2.3 streaming-partial reuse gate. When `.reusePartial(raw)`, the FINAL
+    ///     inference (the `transcribe` closure) is SKIPPED entirely and `raw` — the saved last
+    ///     streaming partial — is routed through the SAME `makeInput`→`TextPipeline.run` the final
+    ///     pass uses, then inserted identically. The result is `.reusedPartial`. When `nil` or
+    ///     `.runFinalInference`, behavior is byte-identical to pre-T2.3 (run the final pass).
     /// - Returns: the `Outcome` describing which branch ran.
     @discardableResult
     public static func run(
@@ -70,7 +80,8 @@ public enum FinalizePipeline {
         inserter: TextInserting,
         element: AXUIElement?,
         precomputedPrependSpace: Bool? = nil,
-        onFocusLost: (() -> Void)? = nil
+        onFocusLost: (() -> Void)? = nil,
+        reuseDecision: StreamingReuse.Decision? = nil
     ) async -> Outcome {
         // Too-short guard (accidental tap).
         if samples.count < minSamples {
@@ -81,6 +92,22 @@ public enum FinalizePipeline {
         let level = rms(of: samples)
         if level < silenceRMSThreshold {
             return .silent(rms: level)
+        }
+
+        // T2.3 — short-utterance fast path. The reuse gate already verified (on main, before this
+        // runs) that the flag is on, the partial is fresh, and the recording barely grew. We SKIP
+        // the redundant final `whisper_full` call and route the saved raw partial through the SAME
+        // TextPipeline the final pass uses → identical post-processing, zero accuracy cost (per
+        // T2.3-PRE: 0.000% word divergence on short clips), final-inference latency eliminated.
+        if case let .reusePartial(rawPartial)? = reuseDecision {
+            let text = TextPipeline.run(makeInput(rawPartial)).finalText
+            if text.isEmpty {
+                return .emptyTranscription
+            }
+            let (insertText, pasted) = insertFinalText(
+                text, inserter: inserter, element: element,
+                precomputedPrependSpace: precomputedPrependSpace, onFocusLost: onFocusLost)
+            return .reusedPartial(insertedText: insertText, pasted: pasted)
         }
 
         do {
@@ -94,13 +121,9 @@ public enum FinalizePipeline {
                 return .emptyTranscription
             }
 
-            // T2.2: use the precomputed answer when available (derived from cursor context
-            // captured at record-start, off the main thread — no AX query, no semaphore).
-            // Fall back to the AX-backed shouldPrependSpace only when no precomputed value
-            // is available (e.g. legacy callers or tests that omit the parameter).
-            let wantSpace = precomputedPrependSpace ?? inserter.shouldPrependSpace(before: element)
-            let insertText = wantSpace ? " " + text : text
-            let pasted = inserter.insert(text: insertText, refocusing: element, onFocusLost: onFocusLost)
+            let (insertText, pasted) = insertFinalText(
+                text, inserter: inserter, element: element,
+                precomputedPrependSpace: precomputedPrependSpace, onFocusLost: onFocusLost)
             return .inserted(insertedText: insertText, pasted: pasted)
         } catch {
             let modelMissing: Bool
@@ -111,5 +134,24 @@ public enum FinalizePipeline {
             }
             return .failed(modelMissing: modelMissing)
         }
+    }
+
+    /// Shared insertion tail used by BOTH the final-pass and the T2.3 reuse paths so they prepend
+    /// space and insert identically. Returns the exact string handed to the inserter and the
+    /// inserter's pasted/focus-lost result.
+    private static func insertFinalText(
+        _ text: String,
+        inserter: TextInserting,
+        element: AXUIElement?,
+        precomputedPrependSpace: Bool?,
+        onFocusLost: (() -> Void)?
+    ) -> (insertText: String, pasted: Bool) {
+        // T2.2: use the precomputed answer when available (derived from cursor context captured at
+        // record-start, off the main thread — no AX query, no semaphore). Fall back to the
+        // AX-backed shouldPrependSpace only when no precomputed value is available.
+        let wantSpace = precomputedPrependSpace ?? inserter.shouldPrependSpace(before: element)
+        let insertText = wantSpace ? " " + text : text
+        let pasted = inserter.insert(text: insertText, refocusing: element, onFocusLost: onFocusLost)
+        return (insertText, pasted)
     }
 }

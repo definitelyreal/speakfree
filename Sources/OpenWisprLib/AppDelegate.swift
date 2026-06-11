@@ -72,6 +72,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// callbacks that arrive on main after recording ended compare against this and are dropped.
     private var streamingGeneration: UInt = 0
 
+    // T2.3 — Reuse last streaming partial. These three capture the LAST completed streaming pass so
+    // `finalizeRecording` can (when StreamingReuse.decide approves) skip the redundant final
+    // inference and route this saved raw partial through TextPipeline instead. Reset on every
+    // streaming start/stop. Written on the main queue only.
+    /// Raw engine text the last completed streaming pass returned (pre-TextPipeline). "" = none.
+    private var lastStreamingRawPartial: String = ""
+    /// Recorder sample count the last streaming pass ran over.
+    private var lastStreamingSampleCount: Int = 0
+    /// `CFAbsoluteTime` the last streaming pass completed (0 = none yet).
+    private var lastStreamingCompletedAt: Double = 0
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar = StatusBarController()
         recorder = AudioRecorder()
@@ -918,6 +929,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // T2.3 — decide (on main, all state read here) whether to reuse the last streaming partial
+        // instead of running a fresh final inference. The gate (flag + freshness + growth) is the
+        // pure StreamingReuse type; T2.3-PRE proved 0% word divergence under GREEDY sampling, so a
+        // reuse costs zero accuracy but skips the final whisper_full call entirely. When the gate
+        // declines, `reuseDecision` is `.runFinalInference` and the path below is byte-identical to
+        // pre-T2.3.
+        let reuseDecision = StreamingReuse.decide(StreamingReuse.State(
+            flagEnabled: config.reuseStreamingPartial?.value ?? true,
+            lastRawPartial: lastStreamingRawPartial,
+            lastStreamedSampleCount: lastStreamingSampleCount,
+            lastStreamCompletedAt: lastStreamingCompletedAt,
+            sampleCountAtRelease: samples.count,
+            keyReleaseAt: keyReleaseTime
+        ))
+
         // Bridge into async: the transcribe pipeline is now async/await (FluidAudio is
         // async-only; WhisperEngine exposes async shims). The engines serialize access to
         // their own context internally, so we no longer need whisperSerialQueue to gate the
@@ -943,7 +969,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                 }
                 let prompt = TextPipeline.assemblePromptHints(input: makeInput(""))
-                let raw = try await transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
+                // T2.3 — reuse the saved streaming partial when the gate approved, else run the
+                // final inference. Either way the raw text flows through the SAME TextPipeline
+                // post-processing below, so the only difference is whether whisper_full ran again.
+                let raw: String
+                switch reuseDecision {
+                case .reusePartial(let rawPartial):
+                    raw = rawPartial
+                    DiagnosticLogger.shared.log("T2.3: reused last streaming partial (skipped final inference)")
+                case .runFinalInference:
+                    raw = try await transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
+                }
                 RecordingStore.saveRaw(text: raw, for: audioURL)
                 let text = TextPipeline.run(makeInput(raw)).finalText
                 RecordingStore.saveTranscription(text: text, for: audioURL)
@@ -1052,6 +1088,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         streamingText = ""
         streamingAssembler.reset()
         isStreamingInFlight = false
+        resetStreamingReuseState()  // T2.3: no partial to reuse until the first pass completes
         streamingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.processStreamingChunk()
         }
@@ -1065,6 +1102,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         streamingAssembler.reset()
         isStreamingInFlight = false
         streamingGeneration &+= 1  // invalidate any in-flight partial-result callbacks
+        // NOTE: lastStreamingRawPartial/SampleCount/CompletedAt are intentionally NOT cleared here.
+        // handleRecordingStop() calls stopStreamingTimer() BEFORE finalizeRecording reads the reuse
+        // state, so clearing here would always defeat the reuse path. They are reset in
+        // startStreamingTimer() (next recording) instead.
         recordingOverlay.clearStreamingText()
     }
 
@@ -1076,6 +1117,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         guard currentSamples.count > 16000 else { return }
 
         isStreamingInFlight = true
+
+        // T2.3 — remember the sample count this streaming pass runs over so finalizeRecording can
+        // measure how much the recording grew since (the reuse growth-gate).
+        let streamedSampleCount = currentSamples.count
 
         let language = config.language
 
@@ -1123,6 +1168,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     self.recordingOverlay.updateStreamingText(displayText)
                     self.isStreamingInFlight = false
+                    // T2.3 — record THIS completed pass (raw partial + samples it saw + when it
+                    // finished) so a fast key-release can reuse it instead of a fresh final pass.
+                    // Guard on generation: a stop that already bumped the generation must not have
+                    // its (now-stale) partial revived by a late-arriving completion.
+                    if self.streamingGeneration == generation {
+                        self.lastStreamingRawPartial = partial
+                        self.lastStreamingSampleCount = streamedSampleCount
+                        self.lastStreamingCompletedAt = CFAbsoluteTimeGetCurrent()
+                    }
                 }
             } catch {
                 DiagnosticLogger.shared.log("Streaming: chunk failed — \(error.localizedDescription)")
@@ -1137,6 +1191,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Each sentence starts on a new line so existing lines don't reflow.
     private func buildStableDisplayText(from rawText: String) -> String {
         return streamingAssembler.append(rawText)
+    }
+
+    /// T2.3 — clear the saved last-streaming-pass state (called at streaming START so a new
+    /// recording can't reuse the previous recording's partial).
+    private func resetStreamingReuseState() {
+        lastStreamingRawPartial = ""
+        lastStreamingSampleCount = 0
+        lastStreamingCompletedAt = 0
     }
 
     public func reprocess(audioURL: URL) {

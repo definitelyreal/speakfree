@@ -18,6 +18,10 @@ public struct Config: Codable {
     public var keepModelLoaded: String?  // "auto", "always", "off" — nil = "auto"
     public var diagnosticLogging: FlexBool?  // nil = default (off for production, on for beta)
     public var streamingEnabled: FlexBool?  // nil = default (true) — show live preview while recording
+    // T2.3 — kill-switch for reusing the last streaming partial on short utterances (skip the
+    // redundant final inference when release lands <300ms after the last streaming pass and the
+    // recording barely grew). nil = default (true). Set false to always run the final pass.
+    public var reuseStreamingPartial: FlexBool?
     public var languageModels: [String: String]?  // e.g. ["en": "small.en", "auto": "small"]
     public var engine: String?  // "whisper" | "parakeet" — nil = "whisper"
     public var parakeetModel: String?  // e.g. "parakeet-tdt-0.6b-v3" — nil = "parakeet-tdt-0.6b-v3"
