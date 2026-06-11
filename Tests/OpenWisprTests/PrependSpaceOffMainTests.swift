@@ -151,8 +151,7 @@ final class PrependSpaceOffMainPipelineTests: XCTestCase {
             samples: loudSamples(),
             audioURL: audioURL,
             makeInput: { raw in
-                TextPipeline.Input(raw: raw, cursorContextText: nil, screenContextText: nil,
-                                   punctuationMode: .off, styleMode: .none, glossaryWords: nil)
+                TextPipeline.Input(raw: raw, punctuationMode: .off)
             },
             transcribe: { _, _, _ in try await FakeTranscribeHelper.transcribe(engine) },
             inserter: inserter,
@@ -185,8 +184,7 @@ final class PrependSpaceOffMainPipelineTests: XCTestCase {
             samples: loudSamples(),
             audioURL: audioURL,
             makeInput: { raw in
-                TextPipeline.Input(raw: raw, cursorContextText: nil, screenContextText: nil,
-                                   punctuationMode: .off, styleMode: .none, glossaryWords: nil)
+                TextPipeline.Input(raw: raw, punctuationMode: .off)
             },
             transcribe: { _, _, _ in try await FakeTranscribeHelper.transcribe(engine) },
             inserter: capturingInserter,
@@ -218,8 +216,7 @@ final class PrependSpaceOffMainPipelineTests: XCTestCase {
             samples: loudSamples(),
             audioURL: audioURL,
             makeInput: { raw in
-                TextPipeline.Input(raw: raw, cursorContextText: nil, screenContextText: nil,
-                                   punctuationMode: .off, styleMode: .none, glossaryWords: nil)
+                TextPipeline.Input(raw: raw, punctuationMode: .off)
             },
             transcribe: { _, _, _ in try await FakeTranscribeHelper.transcribe(engine) },
             inserter: capturingInserter,
@@ -242,8 +239,7 @@ final class PrependSpaceOffMainPipelineTests: XCTestCase {
             samples: loudSamples(),
             audioURL: audioURL,
             makeInput: { raw in
-                TextPipeline.Input(raw: raw, cursorContextText: nil, screenContextText: nil,
-                                   punctuationMode: .off, styleMode: .none, glossaryWords: nil)
+                TextPipeline.Input(raw: raw, punctuationMode: .off)
             },
             transcribe: { _, _, _ in try await FakeTranscribeHelper.transcribe(engine) },
             inserter: inserter,

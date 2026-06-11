@@ -52,9 +52,12 @@ public enum FinalizePipeline {
     /// - Parameters:
     ///   - samples: captured audio (16kHz mono Float32), as `finalizeRecording` sees it.
     ///   - audioURL: passed through to `transcribe`.
+    ///   - promptContext: context-only Input used to assemble the Whisper prompt (no raw text needed).
+    ///     Production passes the `pipelineContext` captured at record-start. When `nil` (backward-
+    ///     compatible test path), context is derived from `makeInput` with an empty raw string.
     ///   - makeInput: builds the TextPipeline.Input for a given raw string — identical closure
-    ///     shape to the one in `finalizeRecording`, so prompt-hints + post-processing run the
-    ///     same way the app runs them.
+    ///     shape to the one in `finalizeRecording`, so post-processing runs the same way as in
+    ///     the app. Receives the actual transcript string; do NOT pass an empty placeholder.
     ///   - transcribe: the transcription seam — `Transcriber.transcribe(audioURL:samples:prompt:)`
     ///     in production, a FakeEngine-backed closure in tests.
     ///   - inserter: the insertion seam (`TextInserter` in production, MockInserter in tests).
@@ -75,6 +78,7 @@ public enum FinalizePipeline {
     public static func run(
         samples: [Float],
         audioURL: URL,
+        promptContext: TextPipeline.Input? = nil,
         makeInput: (String) -> TextPipeline.Input,
         transcribe: (URL, [Float], String?) async throws -> String,
         inserter: TextInserting,
@@ -94,13 +98,20 @@ public enum FinalizePipeline {
             return .silent(rms: level)
         }
 
+        // Assemble prompt hints ONCE from the context-only Input (no raw text needed).
+        // Both the T2.3 reuse path and the normal final-inference path pass this
+        // precomputed prompt into TextPipeline.run via `.some(prompt)` so assemblePromptHints
+        // is never called a second time inside run().
+        let contextInput = promptContext ?? makeInput("")
+        let prompt = TextPipeline.assemblePromptHints(input: contextInput)
+
         // T2.3 — short-utterance fast path. The reuse gate already verified (on main, before this
         // runs) that the flag is on, the partial is fresh, and the recording barely grew. We SKIP
         // the redundant final `whisper_full` call and route the saved raw partial through the SAME
         // TextPipeline the final pass uses → identical post-processing, zero accuracy cost (per
         // T2.3-PRE: 0.000% word divergence on short clips), final-inference latency eliminated.
         if case let .reusePartial(rawPartial)? = reuseDecision {
-            let text = TextPipeline.run(makeInput(rawPartial)).finalText
+            let text = TextPipeline.run(makeInput(rawPartial), precomputedPrompt: .some(prompt)).finalText
             if text.isEmpty {
                 return .emptyTranscription
             }
@@ -111,11 +122,8 @@ public enum FinalizePipeline {
         }
 
         do {
-            // Prompt hints are assembled from an empty raw first (matches finalizeRecording),
-            // then the real transcription is re-run through TextPipeline.
-            let prompt = TextPipeline.assemblePromptHints(input: makeInput(""))
             let raw = try await transcribe(audioURL, samples, prompt)
-            let text = TextPipeline.run(makeInput(raw)).finalText
+            let text = TextPipeline.run(makeInput(raw), precomputedPrompt: .some(prompt)).finalText
 
             if text.isEmpty {
                 return .emptyTranscription

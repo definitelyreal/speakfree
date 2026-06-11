@@ -115,9 +115,9 @@ final class PipelineIntegrationTests: XCTestCase {
         return { raw in
             TextPipeline.Input(
                 raw: raw,
+                punctuationMode: punctuation,
                 cursorContextText: cursorContext,
                 screenContextText: screenContext,
-                punctuationMode: punctuation,
                 styleMode: style,
                 glossaryWords: glossary
             )

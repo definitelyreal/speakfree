@@ -78,14 +78,7 @@ public enum ProcessCommand {
             throw Error.transcriptionFailed(error)
         }
         let punctuationMode = config.spokenPunctuation ?? .hybrid
-        let input = TextPipeline.Input(
-            raw: raw,
-            cursorContextText: nil,
-            screenContextText: nil,
-            punctuationMode: punctuationMode,
-            styleMode: .none,
-            glossaryWords: nil
-        )
+        let input = TextPipeline.Input(raw: raw, punctuationMode: punctuationMode)
         let result = TextPipeline.run(input)
         return ProcessResult(raw: raw, processed: result.processedText, styled: result.finalText)
     }
