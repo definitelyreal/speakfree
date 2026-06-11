@@ -194,7 +194,8 @@ public enum TextPipeline {
     }
 
     /// Remove Whisper non-speech bracket markers embedded in otherwise-real transcriptions.
-    /// Standalone "..." or "…" are also stripped. Preserves ellipsis mid-sentence.
+    /// All pause ellipses ("..." / "…") are stripped via `stripPauseEllipses` — the user's
+    /// directive (2026-06-11) is that dictation output must never contain pause markers.
     public static func stripWhisperBracketMarkers(_ text: String) -> String {
         var result = text
         // Known Whisper hallucination markers
@@ -205,11 +206,57 @@ public enum TextPipeline {
         for marker in markers {
             result = result.replacingOccurrences(of: marker, with: "", options: .caseInsensitive)
         }
-        // Standalone "..." or "…" at start, end, or surrounded by whitespace
-        result = result.replacingOccurrences(
-            of: #"(?:^|\s)\.\.\.(?:\s|$)"#, with: " ", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"(?:^|\s)…(?:\s|$)"#, with: " ", options: .regularExpression)
+        result = stripPauseEllipses(result)
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Strip Whisper's pause ellipses. Whisper renders hesitation pauses as "..." (or "…")
+    /// attached to the preceding word — "make it, and... If you think" — and capitalizes the
+    /// word that follows. The old standalone-only rule (`(?:^|\s)\.\.\.(?:\s|$)`) required
+    /// whitespace BEFORE the dots, so it never fired on real output.
+    ///
+    /// Transform order matters:
+    /// 1. "…" → "..." so one set of rules covers both.
+    /// 2. Dots after real punctuation are redundant: "right?..." → "right?".
+    /// 3. A word restarted across the pause is deduped: "there are... Are other" → "there are other".
+    /// 4. Mid-text pause joins with a space, lowercasing the capitalized restart (pronoun "I"
+    ///    and deliberate-caps words like "AirPods"/"OK" keep their case). A pause that truly
+    ///    ended a sentence joins as a run-on — accepted tradeoff: Whisper emits "." for
+    ///    confident sentence ends, "..." only for trail-offs.
+    /// 5. A trailing pause ends the utterance: "a lot of..." → "a lot of."
+    public static func stripPauseEllipses(_ text: String) -> String {
+        var result = text.replacingOccurrences(of: "\u{2026}", with: "...")
+        guard result.contains("...") else { return result }
+        result = result.replacingOccurrences(
+            of: #"([.!?,;:])\s*\.{3,}"#, with: "$1", options: .regularExpression)
+        // Restarted words across the pause — two-word restarts first, then single-word.
+        result = result.replacingOccurrences(
+            of: #"(?i)\b(\w+\s\w+)\.{3,}\s+\1\b"#, with: "$1", options: .regularExpression)
+        result = result.replacingOccurrences(
+            of: #"(?i)\b(\w+)\.{3,}\s+\1\b"#, with: "$1", options: .regularExpression)
+        // Mid-text pause → single space + lowercased continuation.
+        if let regex = try? NSRegularExpression(pattern: #"\.{3,}\s*(\S+)"#) {
+            let ns = result as NSString
+            for m in regex.matches(in: result, range: NSRange(location: 0, length: ns.length)).reversed() {
+                let word = (result as NSString).substring(with: m.range(at: 1))
+                let joined = " " + lowercaseFirstUnlessDeliberate(word)
+                result = (result as NSString).replacingCharacters(in: m.range, with: joined)
+            }
+        }
+        result = result.replacingOccurrences(
+            of: #"\.{3,}\s*$"#, with: ".", options: .regularExpression)
+        result = result.replacingOccurrences(
+            of: #"^\s*\.{3,}\s*"#, with: "", options: .regularExpression)
+        return result
+    }
+
+    /// Lowercase a word's first letter unless the capitalization is deliberate:
+    /// the pronoun "I" (and contractions), all-caps ("OK"), or internal caps ("AirPods").
+    private static func lowercaseFirstUnlessDeliberate(_ word: String) -> String {
+        guard let first = word.first, first.isUppercase else { return word }
+        if word == "I" || word.hasPrefix("I'") || word.hasPrefix("I\u{2019}") { return word }
+        let rest = word.dropFirst()
+        guard !rest.contains(where: { $0.isUppercase }) else { return word }
+        return first.lowercased() + rest
     }
 }

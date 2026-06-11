@@ -32,14 +32,19 @@ final class CorpusTests: XCTestCase {
 
         var failures: [String] = []
         for c in cases {
+            // Mirror the app's pipeline composition (TextPipeline.run): sanitize →
+            // stripWhisperBracketMarkers → TextPostProcessor. Testing process() alone
+            // skips the marker/ellipsis strip the app always applies — the same
+            // harness-vs-app drift that shipped the v1.2.11 comma loop.
+            let stripped = TextPipeline.stripWhisperBracketMarkers(TextPipeline.sanitize(c.input))
             let actual: String
             switch c.mode {
             case "off":
-                actual = c.input
+                actual = stripped
             case "spoken":
-                actual = TextPostProcessor.process(c.input, hybrid: false)
+                actual = TextPostProcessor.process(stripped, hybrid: false)
             case "hybrid":
-                actual = TextPostProcessor.process(c.input, hybrid: true)
+                actual = TextPostProcessor.process(stripped, hybrid: true)
             default:
                 failures.append("\(c.name): unknown mode '\(c.mode)'")
                 continue

@@ -97,6 +97,35 @@ class AudioRecorder {
 
     // MARK: - Audio device change monitoring
 
+    /// Name of the current default input device (e.g. "MacBook Pro Microphone",
+    /// "Michael's AirPods Pro"). Logged at recording start so transcription-quality
+    /// regressions can be correlated with the capture device (AirPods in Bluetooth
+    /// hands-free mode record narrowband audio that degrades ASR).
+    static func defaultInputDeviceName() -> String? {
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID
+        ) == noErr, deviceID != 0 else { return nil }
+
+        var name: CFString = "" as CFString
+        var nameSize = UInt32(MemoryLayout<CFString>.size)
+        var nameAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceNameCFString,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &nameSize, &name) == noErr else {
+            return nil
+        }
+        return name as String
+    }
+
     private var deviceChangeObserver: NSObjectProtocol?
 
     /// Reinstall the audio tap when the input device changes (e.g. AirPods connect/disconnect).
@@ -352,7 +381,8 @@ class AudioRecorder {
         stateLock.unlock()
 
         print("AudioRecorder: recording started, pre-roll: \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms)")
-        DiagnosticLogger.shared.log("AudioRecorder: recording started, pre-roll \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms)")
+        let device = Self.defaultInputDeviceName() ?? "unknown"
+        DiagnosticLogger.shared.log("AudioRecorder: recording started, pre-roll \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms), input device: \(device)")
 
         // Write pre-roll to WAV file (async, flag is already set so tap writes new audio too)
         if !preroll.isEmpty {
