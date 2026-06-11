@@ -166,14 +166,7 @@ enum Benchmark {
 
                 // --- post-processing (TextPipeline, the app's pre-insertion path) ---
                 let p0 = DispatchTime.now()
-                let input = TextPipeline.Input(
-                    raw: raw,
-                    cursorContextText: nil,
-                    screenContextText: nil,
-                    punctuationMode: .hybrid,
-                    styleMode: .none,
-                    glossaryWords: nil
-                )
+                let input = TextPipeline.Input(raw: raw, punctuationMode: .hybrid)
                 _ = TextPipeline.run(input).finalText
                 let postProcMs = elapsedMs(since: p0)
 

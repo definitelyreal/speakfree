@@ -956,19 +956,27 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 // what lets unit tests cover the same code path the app uses,
                 // preventing the kind of drift that shipped the v1.2.11 comma loop.
 
-                // Build pipeline inputs with placeholder raw; we need promptHints
-                // before whisper runs, then re-run with the real raw text.
+                // Build prompt context once before whisper runs; pass the precomputed
+                // prompt into TextPipeline.run so assemblePromptHints is called only once
+                // per recording. The makeInput closure captures context for the run call.
+                let pipelineContext = TextPipeline.Input(
+                    punctuationMode: mode,
+                    cursorContextText: capturedInputText,
+                    screenContextText: capturedScreenText,
+                    styleMode: capturedStyleMode,
+                    glossaryWords: glossary
+                )
+                let prompt = TextPipeline.assemblePromptHints(input: pipelineContext)
                 let makeInput: (String) -> TextPipeline.Input = { raw in
                     TextPipeline.Input(
                         raw: raw,
+                        punctuationMode: mode,
                         cursorContextText: capturedInputText,
                         screenContextText: capturedScreenText,
-                        punctuationMode: mode,
                         styleMode: capturedStyleMode,
                         glossaryWords: glossary
                     )
                 }
-                let prompt = TextPipeline.assemblePromptHints(input: makeInput(""))
                 // T2.3 — reuse the saved streaming partial when the gate approved, else run the
                 // final inference. Either way the raw text flows through the SAME TextPipeline
                 // post-processing below, so the only difference is whether whisper_full ran again.
@@ -981,7 +989,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     raw = try await transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
                 }
                 RecordingStore.saveRaw(text: raw, for: audioURL)
-                let text = TextPipeline.run(makeInput(raw)).finalText
+                let text = TextPipeline.run(makeInput(raw), precomputedPrompt: .some(prompt)).finalText
                 RecordingStore.saveTranscription(text: text, for: audioURL)
 
                 RecordingStore.clearSentinel()

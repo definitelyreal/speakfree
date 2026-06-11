@@ -122,9 +122,10 @@ final class StreamingReuseTests: XCTestCase {
     ) async -> FinalizeOutcome {
         let transcriber = Transcriber(engine: engine, modelID: "tiny.en", language: "en")
         let makeInput: (String) -> TextPipeline.Input = { raw in
-            TextPipeline.Input(raw: raw, cursorContextText: nil, screenContextText: nil,
-                               punctuationMode: punctuation, styleMode: .none, glossaryWords: nil)
+            TextPipeline.Input(raw: raw, punctuationMode: punctuation)
         }
+        // Compute prompt context once — no makeInput("") placeholder needed.
+        let prompt = TextPipeline.assemblePromptHints(input: TextPipeline.Input(punctuationMode: punctuation))
         let audioURL = URL(fileURLWithPath: "/tmp/speakfree-reuse-test.wav")
         let samples: [Float] = (0..<32_000).map { _ in 0.2 }
 
@@ -136,15 +137,14 @@ final class StreamingReuseTests: XCTestCase {
             raw = rawPartial
         case .runFinalInference:
             do {
-                raw = try await transcriber.transcribe(audioURL: audioURL, samples: samples,
-                                                       prompt: TextPipeline.assemblePromptHints(input: makeInput("")))
+                raw = try await transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
             } catch {
                 return FinalizeOutcome(inserted: nil, engineCalls: engine.transcribeCallCount, inferenceMs: 0)
             }
         }
         let inferenceMs = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000.0
 
-        let text = TextPipeline.run(makeInput(raw)).finalText
+        let text = TextPipeline.run(makeInput(raw), precomputedPrompt: prompt).finalText
         guard !text.isEmpty else {
             return FinalizeOutcome(inserted: nil, engineCalls: engine.transcribeCallCount, inferenceMs: inferenceMs)
         }
@@ -225,10 +225,7 @@ final class StreamingReuseTests: XCTestCase {
     private func makeInput(
         _ punctuation: PunctuationMode = .off
     ) -> (String) -> TextPipeline.Input {
-        return { raw in
-            TextPipeline.Input(raw: raw, cursorContextText: nil, screenContextText: nil,
-                               punctuationMode: punctuation, styleMode: .none, glossaryWords: nil)
-        }
+        return { raw in TextPipeline.Input(raw: raw, punctuationMode: punctuation) }
     }
 
     /// Drive the real FinalizePipeline.run with a transcribe seam that counts engine calls.

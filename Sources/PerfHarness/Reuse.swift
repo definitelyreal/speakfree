@@ -63,9 +63,7 @@ enum Reuse {
         // Pipeline input shape identical to AppDelegate.finalizeRecording (hybrid punctuation,
         // no glossary/context) so the post-processing matches production for both texts.
         func runPipeline(_ raw: String) -> String {
-            let input = TextPipeline.Input(
-                raw: raw, cursorContextText: nil, screenContextText: nil,
-                punctuationMode: .hybrid, styleMode: .none, glossaryWords: nil)
+            let input = TextPipeline.Input(raw: raw, punctuationMode: .hybrid)
             return TextPipeline.run(input).finalText
         }
 

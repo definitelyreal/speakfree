@@ -6,14 +6,7 @@ final class TextPipelineTests: XCTestCase {
     // MARK: - run(): end-to-end
 
     func test_passthrough_with_no_context_or_glossary() {
-        let input = TextPipeline.Input(
-            raw: "Hello world.",
-            cursorContextText: nil,
-            screenContextText: nil,
-            punctuationMode: .hybrid,
-            styleMode: .none,
-            glossaryWords: nil
-        )
+        let input = TextPipeline.Input(raw: "Hello world.", punctuationMode: .hybrid)
         let result = TextPipeline.run(input)
         XCTAssertEqual(result.finalText, "Hello world.")
         // Hybrid mode produces the instruction line; without context/glossary the
@@ -25,14 +18,7 @@ final class TextPipelineTests: XCTestCase {
     func test_run_punctuationOff_skipsProcessAndReturnsRaw() {
         // .off mode: TextPostProcessor.process is skipped entirely; raw passes through
         // to styleMode application (which is a no-op for .none).
-        let input = TextPipeline.Input(
-            raw: "hello comma world",
-            cursorContextText: nil,
-            screenContextText: nil,
-            punctuationMode: .off,
-            styleMode: .none,
-            glossaryWords: nil
-        )
+        let input = TextPipeline.Input(raw: "hello comma world", punctuationMode: .off)
         let result = TextPipeline.run(input)
         XCTAssertEqual(result.processedText, "hello comma world")
         XCTAssertEqual(result.finalText, "hello comma world")
@@ -42,14 +28,7 @@ final class TextPipelineTests: XCTestCase {
 
     func test_run_appliesStyle_textingStripsTrailingPeriod() {
         // texting style strips trailing single period — verify the styleMode hook fires.
-        let input = TextPipeline.Input(
-            raw: "ok cool.",
-            cursorContextText: nil,
-            screenContextText: nil,
-            punctuationMode: .hybrid,
-            styleMode: .texting,
-            glossaryWords: nil
-        )
+        let input = TextPipeline.Input(raw: "ok cool.", punctuationMode: .hybrid, styleMode: .texting)
         let result = TextPipeline.run(input)
         XCTAssertFalse(result.finalText.hasSuffix("."),
                        "Texting style should strip a single trailing period, got: \(result.finalText)")
@@ -63,11 +42,8 @@ final class TextPipelineTests: XCTestCase {
         let rawCursor = "I said, well, you know, whatever, exactly,"
         let input = TextPipeline.Input(
             raw: "anything",
-            cursorContextText: rawCursor,
-            screenContextText: nil,
             punctuationMode: .off,        // suppress instruction line for clarity
-            styleMode: .none,
-            glossaryWords: nil
+            cursorContextText: rawCursor
         )
         let prompt = TextPipeline.assemblePromptHints(input: input) ?? ""
         XCTAssertFalse(prompt.contains(rawCursor),
@@ -89,11 +65,8 @@ final class TextPipelineTests: XCTestCase {
         let commaHeavyCursor = "yeah , well , so , thanks , anyway , indeed , alright , fine"
         let input = TextPipeline.Input(
             raw: "hello",
-            cursorContextText: commaHeavyCursor,
-            screenContextText: nil,
             punctuationMode: .off,  // suppress instruction line so any comma == cursor-derived
-            styleMode: .none,
-            glossaryWords: nil
+            cursorContextText: commaHeavyCursor
         )
         let prompt = TextPipeline.assemblePromptHints(input: input) ?? ""
         XCTAssertFalse(prompt.isEmpty)
@@ -108,10 +81,7 @@ final class TextPipelineTests: XCTestCase {
     func test_promptHints_glossaryLineAppearsWhenWordsProvided() {
         let input = TextPipeline.Input(
             raw: "hello",
-            cursorContextText: nil,
-            screenContextText: nil,
             punctuationMode: .off,
-            styleMode: .none,
             glossaryWords: "OpenWispr, Whisper, EdDSA"
         )
         let prompt = TextPipeline.assemblePromptHints(input: input) ?? ""
@@ -121,29 +91,14 @@ final class TextPipelineTests: XCTestCase {
 
     func test_promptHints_instructionLineAppearsWhenPunctuationNotOff() {
         for mode in [PunctuationMode.spoken, .hybrid] {
-            let input = TextPipeline.Input(
-                raw: "hello",
-                cursorContextText: nil,
-                screenContextText: nil,
-                punctuationMode: mode,
-                styleMode: .none,
-                glossaryWords: nil
-            )
+            let input = TextPipeline.Input(raw: "hello", punctuationMode: mode)
             let prompt = TextPipeline.assemblePromptHints(input: input) ?? ""
             XCTAssertTrue(prompt.contains("Spoken punctuation:"),
                           "Instruction line should appear for mode \(mode). Got: \(prompt)")
         }
 
         // ...and absent for .off
-        let off = TextPipeline.Input(
-            raw: "hello",
-            cursorContextText: nil,
-            screenContextText: nil,
-            punctuationMode: .off,
-            styleMode: .none,
-            glossaryWords: nil
-        )
-        XCTAssertNil(TextPipeline.assemblePromptHints(input: off),
+        XCTAssertNil(TextPipeline.assemblePromptHints(input: TextPipeline.Input(punctuationMode: .off)),
                      "No instruction, no context, no glossary -> nil prompt")
     }
 
@@ -155,11 +110,8 @@ final class TextPipelineTests: XCTestCase {
         let pollutedContext = "First, comma, then, comma, then, more, commas, everywhere"
         let input = TextPipeline.Input(
             raw: "Plain sentence with one comma, like this.",
-            cursorContextText: pollutedContext,
-            screenContextText: nil,
             punctuationMode: .hybrid,
-            styleMode: .none,
-            glossaryWords: nil
+            cursorContextText: pollutedContext
         )
         let result = TextPipeline.run(input)
         let hints = result.promptHints ?? ""
@@ -168,21 +120,173 @@ final class TextPipelineTests: XCTestCase {
         XCTAssertFalse(hints.contains("comma, comma"), "prompt must not parrot comma-spam phrasing")
     }
 
-    func test_promptHints_screenContextWordsAreCommaJoined() {
-        // Sanity: the screen-context line uses comma-joined words (per existing code),
-        // while cursor-context uses space-joined. Distinguishes the two code paths.
+    func test_promptHints_screenContextWordsAreSpaceJoined() {
+        // Screen-context words are space-joined (same guard as cursor context) so the
+        // "Context words:" line carries no commas — applying the v1.2.11 comma-loop fix
+        // to both context paths equally.
         let input = TextPipeline.Input(
             raw: "hello",
-            cursorContextText: nil,
-            screenContextText: "alpha beta gamma delta",
             punctuationMode: .off,
-            styleMode: .none,
-            glossaryWords: nil
+            screenContextText: "alpha beta gamma delta"
         )
         let prompt = TextPipeline.assemblePromptHints(input: input) ?? ""
         XCTAssertTrue(prompt.hasPrefix("Context words: "),
                       "Screen-context line should be the only line and start with the label. Got: \(prompt)")
-        // Screen-context joiner is ", "; with 4 long words there must be at least one comma.
-        XCTAssertTrue(prompt.contains(","), "Screen-context line should be comma-joined. Got: \(prompt)")
+        // Space-joined: no commas in the hint line.
+        XCTAssertFalse(prompt.contains(","), "Screen-context hint line must be space-joined (no commas). Got: \(prompt)")
+        // The four words should all appear (Set order is non-deterministic but each word appears exactly once).
+        for word in ["alpha", "beta", "gamma", "delta"] {
+            XCTAssertTrue(prompt.contains(word), "Screen-context word '\(word)' should appear in prompt. Got: \(prompt)")
+        }
+    }
+
+    // MARK: - T2.6: Input.init defaults
+
+    func test_input_init_defaults_omitOptionals() {
+        // Verify only raw + punctuationMode are required; all optional fields default correctly.
+        let minimal = TextPipeline.Input(raw: "test", punctuationMode: .off)
+        XCTAssertEqual(minimal.raw, "test")
+        XCTAssertEqual(minimal.punctuationMode, .off)
+        XCTAssertNil(minimal.cursorContextText, "cursorContextText defaults to nil")
+        XCTAssertNil(minimal.screenContextText, "screenContextText defaults to nil")
+        XCTAssertEqual(minimal.styleMode, .none, "styleMode defaults to .none")
+        XCTAssertNil(minimal.glossaryWords, "glossaryWords defaults to nil")
+
+        // raw defaults to "" when omitted (context-only Input for prompt assembly).
+        let contextOnly = TextPipeline.Input(punctuationMode: .hybrid)
+        XCTAssertEqual(contextOnly.raw, "", "raw defaults to \"\" when omitted")
+    }
+
+    func test_input_init_contextOnly_omitRaw_givesSamepromptAsEmptyRaw() {
+        // TextPipeline.Input(punctuationMode:) and TextPipeline.Input(raw:"", punctuationMode:)
+        // must produce identical prompt hints — raw is irrelevant to assemblePromptHints.
+        let withEmpty = TextPipeline.Input(
+            raw: "",
+            punctuationMode: .hybrid,
+            glossaryWords: "OpenWispr Parakeet"
+        )
+        let withDefault = TextPipeline.Input(
+            punctuationMode: .hybrid,
+            glossaryWords: "OpenWispr Parakeet"
+        )
+        XCTAssertEqual(
+            TextPipeline.assemblePromptHints(input: withEmpty),
+            TextPipeline.assemblePromptHints(input: withDefault),
+            "Context-only Input (raw omitted) must produce the same prompt as explicit raw: \"\""
+        )
+    }
+
+    // MARK: - T2.6: precomputedPrompt eliminates double assemblePromptHints
+
+    func test_run_precomputedPrompt_usedVerbatim() {
+        // When precomputedPrompt is supplied, run() places it in Result.promptHints without
+        // calling assemblePromptHints again — the returned hints equal the supplied value.
+        let input = TextPipeline.Input(raw: "hello world", punctuationMode: .hybrid)
+        let sentinelPrompt: String? = "SENTINEL-PRECOMPUTED-PROMPT"
+        let result = TextPipeline.run(input, precomputedPrompt: sentinelPrompt)
+        XCTAssertEqual(result.promptHints, sentinelPrompt,
+                       "precomputedPrompt must be stored verbatim in Result.promptHints")
+        // Post-processing should still run on the raw text.
+        XCTAssertEqual(result.finalText, "hello world")
+    }
+
+    func test_run_precomputedPrompt_nilPreserved() {
+        // .some(nil) means "caller computed nil (no hints)"; run() must store nil, not recompute.
+        // This tests the String?? wrapping: .some(nil) differs from .none (not provided).
+        let input = TextPipeline.Input(
+            raw: "hello",
+            punctuationMode: .hybrid,
+            glossaryWords: "something"  // would produce a non-nil prompt if computed
+        )
+        let result = TextPipeline.run(input, precomputedPrompt: .some(nil))
+        XCTAssertNil(result.promptHints,
+                     ".some(nil) precomputedPrompt must store nil (caller decided no hints)")
+    }
+
+    func test_run_noPrecomputedPrompt_computesFromInput() {
+        // Default (no precomputedPrompt) must still compute hints from the input.
+        let input = TextPipeline.Input(
+            raw: "hello",
+            punctuationMode: .hybrid,
+            glossaryWords: "OpenWispr"
+        )
+        let result = TextPipeline.run(input) // no precomputedPrompt
+        XCTAssertTrue(result.promptHints?.contains("Glossary: OpenWispr") ?? false,
+                      "Without precomputedPrompt, assemblePromptHints must run and include glossary")
+    }
+
+    // MARK: - T2.6: prompt budget enforcement
+
+    func test_promptBudget_longPromptTruncatedToAtMost800Chars() {
+        // Build a prompt guaranteed to exceed the budget: a spoken instruction line
+        // + a very long glossary + screen context.
+        let longGlossary = (0..<100).map { "GlossaryWord\($0)" }.joined(separator: " ")
+        let input = TextPipeline.Input(
+            punctuationMode: .hybrid,  // adds instruction line
+            glossaryWords: longGlossary
+        )
+        let prompt = TextPipeline.assemblePromptHints(input: input) ?? ""
+        XCTAssertLessThanOrEqual(prompt.count, TextPipeline.promptBudget,
+                                  "Assembled prompt must not exceed promptBudget (\(TextPipeline.promptBudget)) chars. Got \(prompt.count)")
+    }
+
+    func test_promptBudget_shortPromptNotTruncated() {
+        // A typical short prompt must pass through unchanged (no silent truncation of real content).
+        let input = TextPipeline.Input(
+            raw: "hello",
+            punctuationMode: .hybrid,
+            glossaryWords: "OpenWispr"
+        )
+        let prompt = TextPipeline.assemblePromptHints(input: input) ?? ""
+        XCTAssertTrue(prompt.count < TextPipeline.promptBudget,
+                      "Short prompt must be under budget; got \(prompt.count) chars: \(prompt)")
+        // Content must be preserved intact (instruction line and glossary both present).
+        XCTAssertTrue(prompt.contains("Spoken punctuation:"), "Instruction line must survive in short prompt")
+        XCTAssertTrue(prompt.contains("OpenWispr"), "Glossary must survive in short prompt")
+    }
+
+    // MARK: - T2.6: both contexts populated
+
+    func test_promptHints_bothContextsPopulated() {
+        // Verify both screen-context and cursor-context hint lines appear when both are provided.
+        let input = TextPipeline.Input(
+            raw: "hello",
+            punctuationMode: .off,  // suppress instruction line
+            cursorContextText: "apple banana cherry dragon",
+            screenContextText: "elephant funnel gravel hammer"
+        )
+        let prompt = TextPipeline.assemblePromptHints(input: input) ?? ""
+        // Both "Context words:" sections must be present.
+        let contextCount = prompt.components(separatedBy: "Context words:").count - 1
+        XCTAssertEqual(contextCount, 2,
+                       "Both screen-context and cursor-context must produce a 'Context words:' line. Got: \(prompt)")
+        // No commas in either section (both space-joined).
+        XCTAssertFalse(prompt.contains(","), "Both context sections must be space-joined (no commas). Got: \(prompt)")
+    }
+
+    // MARK: - T2.6: processedText differs from raw for spoken/hybrid modes
+
+    func test_run_spoken_processedTextDiffersFromRaw() {
+        // "period" spoken-command → "."; processedText must differ from raw.
+        let raw = "hello period"
+        let input = TextPipeline.Input(raw: raw, punctuationMode: .spoken)
+        let result = TextPipeline.run(input)
+        XCTAssertNotEqual(result.processedText, raw,
+                          ".spoken mode: TextPostProcessor must transform 'period' word, processedText should differ from raw")
+        // The raw "period" word should be removed and replaced by ".".
+        XCTAssertFalse(result.processedText.contains("period"),
+                       ".spoken mode: 'period' spoken command must be consumed by TextPostProcessor. Got: \(result.processedText)")
+        XCTAssertTrue(result.processedText.hasSuffix("."),
+                      ".spoken mode: processedText should end with '.' after spoken 'period'. Got: \(result.processedText)")
+    }
+
+    func test_run_hybrid_processedTextDiffersFromRaw() {
+        // .hybrid mode also applies spoken-command substitution.
+        let input = TextPipeline.Input(raw: "is that right question mark", punctuationMode: .hybrid)
+        let result = TextPipeline.run(input)
+        XCTAssertFalse(result.processedText.contains("question mark"),
+                       ".hybrid mode: 'question mark' must be consumed by TextPostProcessor. Got: \(result.processedText)")
+        XCTAssertTrue(result.processedText.hasSuffix("?"),
+                      ".hybrid mode: processedText should end with '?' after spoken 'question mark'. Got: \(result.processedText)")
     }
 }
