@@ -333,6 +333,97 @@ final class LocalAPIServerLiveTests: XCTestCase {
                        "Server should still serve normal requests after a negative-CL probe")
     }
 
+    // MARK: - M2: Absolute connection-lifetime cap
+
+    /// M2 (connection-slot exhaustion): a connection that trickles bytes indefinitely must be cut
+    /// by the absolute lifetime timer, not just by the idle timer. Trickle keeps the idle timer
+    /// alive but the lifetime timer fires unconditionally.
+    ///
+    /// We shorten the lifetime to 2 s via the instance seam so the test finishes fast.
+    /// The idle timer is kept long (60 s) so it does NOT fire first — the lifetime timer must win.
+    func testLiveLifetimeCapCutsSlowDrippingConnection() throws {
+        try skipIfDisabled()
+
+        // Build a server with a very short lifetime (2 s) but a long idle timeout (60 s).
+        // The trickle (1 byte/s) keeps the idle timer alive; the lifetime timer must still cut it.
+        let t = makeTranscriber()
+        let s = LocalAPIServer(port: Self.livePort)
+        s.connectionLifetimeOverride = 2.0
+        s.start(transcriber: t)
+        self.server = s
+
+        // Wait for the listener to bind.
+        let bindDeadline = Date().addingTimeInterval(3)
+        while Date() < bindDeadline {
+            let (out, _) = shell("/usr/sbin/lsof", ["-iTCP:\(Self.livePort)", "-sTCP:LISTEN", "-P", "-n"])
+            if out.contains("\(Self.livePort)") { break }
+            usleep(50_000)
+        }
+
+        // Python script: opens a connection, then trickles 1 byte per second forever.
+        // We run it for 5 s total. If the lifetime cap works, the server closes the socket
+        // around t=2 s; the script will get a ConnectionResetError or empty recv and exit.
+        // We consider the test passing if the script finishes within 10 s (server closed it)
+        // rather than hanging the full 5 s send loop.
+        let script = """
+        import socket, sys, time, struct
+        port = \(Self.livePort)
+        s = socket.create_connection(("127.0.0.1", port), timeout=10)
+        s.settimeout(8)
+        # Send the start of an HTTP request header but never complete it,
+        # trickling one byte per second to keep the idle timer alive.
+        partial_header = b"POST /v1/audio/transcriptions HTTP/1.1\\r\\n"
+        sent = 0
+        start = time.time()
+        closed_by_server = False
+        while time.time() - start < 5:
+            try:
+                if sent < len(partial_header):
+                    s.sendall(partial_header[sent:sent+1])
+                    sent += 1
+                else:
+                    s.sendall(b"X")
+            except (BrokenPipeError, ConnectionResetError):
+                closed_by_server = True
+                break
+            # Also check if the server sent back any data (it closes without a response
+            # for a mid-header lifetime cut).
+            try:
+                s.settimeout(0)
+                data = s.recv(1)
+                if data == b"":
+                    closed_by_server = True
+                    break
+            except BlockingIOError:
+                pass
+            except Exception:
+                closed_by_server = True
+                break
+            s.settimeout(8)
+            time.sleep(1)
+        elapsed = time.time() - start
+        sys.stdout.write(f"closed_by_server={closed_by_server} elapsed={elapsed:.1f}\\n")
+        try:
+            s.close()
+        except Exception:
+            pass
+        """
+        let (out, code) = shell("/usr/bin/python3", ["-c", script], timeout: 15)
+        print("PROOF[M2 lifetime-cap] byte-trickling connection: exit=\(code) output: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+
+        // The server must have closed the connection within ~3 s of the 2 s lifetime limit.
+        XCTAssertTrue(
+            out.contains("closed_by_server=True"),
+            "Lifetime cap must cut a byte-trickling connection within the lifetime window. Output: \(out)"
+        )
+
+        // Verify the elapsed time was < 5 s (the full drip loop), confirming the cap fired.
+        if let elapsedStr = out.components(separatedBy: "elapsed=").last?.prefix(3),
+           let elapsed = Double(elapsedStr) {
+            XCTAssertLessThan(elapsed, 4.5, "Lifetime cap should have fired around t=2 s, not at the end of the 5 s drip loop")
+        }
+    }
+
     // (d) With a token set, an unauthenticated 127.0.0.1 request -> 401.
     func testLiveTokenUnauthenticatedRequestGets401() throws {
         try skipIfDisabled()

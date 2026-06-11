@@ -37,12 +37,15 @@ final class TextPostProcessorTests: XCTestCase {
         }
     }
 
+    // M2 fix: spaces adjacent to spoken newlines are trimmed so the break is clean.
+    // Previously "hello new line world" → "hello \n world" (artifact spaces from the
+    // non-consuming lookbehind/lookahead). Now → "hello\nworld".
     func testNewLine() {
-        XCTAssertEqual(TextPostProcessor.process("hello new line world"), "hello \n world")
+        XCTAssertEqual(TextPostProcessor.process("hello new line world"), "hello\nworld")
     }
 
     func testNewParagraph() {
-        XCTAssertEqual(TextPostProcessor.process("hello new paragraph world"), "hello \n\n world")
+        XCTAssertEqual(TextPostProcessor.process("hello new paragraph world"), "hello\n\nworld")
     }
 
     func testOpenCloseQuotes() {
@@ -89,8 +92,73 @@ final class TextPostProcessorTests: XCTestCase {
         XCTAssertEqual(TextPostProcessor.process("first semi colon second"), "first; second")
     }
 
+    // M2 fix: same as testNewLine — "newline" (one word) also trims adjacent spaces.
     func testNewlineSingleWord() {
-        XCTAssertEqual(TextPostProcessor.process("hello newline world"), "hello \n world")
+        XCTAssertEqual(TextPostProcessor.process("hello newline world"), "hello\nworld")
+    }
+
+    // =========================================================================
+    // MARK: - M2 newline-spacing fix (TextPostProcessor/pipeline tests)
+    // =========================================================================
+
+    /// "new line" spoken between two words → clean break, no artifact spaces.
+    func testM2_newLine_noArtifactSpaces() {
+        XCTAssertEqual(TextPostProcessor.process("hello new line world"), "hello\nworld")
+    }
+
+    /// "newline" (single word) variant → same clean result.
+    func testM2_newlineWord_noArtifactSpaces() {
+        XCTAssertEqual(TextPostProcessor.process("hello newline world"), "hello\nworld")
+    }
+
+    /// "new paragraph" → double break, no artifact spaces.
+    func testM2_newParagraph_noArtifactSpaces() {
+        XCTAssertEqual(TextPostProcessor.process("hello new paragraph world"), "hello\n\nworld")
+    }
+
+    /// Multiple spoken breaks in one utterance — all trimmed.
+    func testM2_multipleNewLines_allTrimmed() {
+        XCTAssertEqual(
+            TextPostProcessor.process("first new line second new line third"),
+            "first\nsecond\nthird"
+        )
+    }
+
+    /// A leading spoken newline (break at the start of text).
+    func testM2_leadingNewLine_trimmed() {
+        // "new line world" → "\nworld"
+        let result = TextPostProcessor.process("new line world")
+        XCTAssertTrue(result.hasPrefix("\n"),
+                      "leading new-line break must start the string with \\n, not a space; got: \(result.debugDescription)")
+        XCTAssertFalse(result.hasPrefix(" "),
+                       "no leading space before the \\n; got: \(result.debugDescription)")
+    }
+
+    /// A trailing spoken newline (break at the end of text).
+    func testM2_trailingNewLine_trimmed() {
+        let result = TextPostProcessor.process("hello new line")
+        XCTAssertTrue(result.hasSuffix("\n"),
+                      "trailing new-line break must end the string with \\n, not a space; got: \(result.debugDescription)")
+        XCTAssertFalse(result.hasSuffix(" "),
+                       "no trailing space after the \\n; got: \(result.debugDescription)")
+    }
+
+    /// The `trimSpacesAroundNewlines` helper: direct unit coverage of the M2 utility.
+    func testM2_trimSpacesAroundNewlines_directCoverage() {
+        // Space before \n
+        XCTAssertEqual(TextPostProcessor.trimSpacesAroundNewlines("hello \nworld"), "hello\nworld")
+        // Space after \n
+        XCTAssertEqual(TextPostProcessor.trimSpacesAroundNewlines("hello\n world"), "hello\nworld")
+        // Space both sides
+        XCTAssertEqual(TextPostProcessor.trimSpacesAroundNewlines("hello \n world"), "hello\nworld")
+        // Double newline (paragraph break)
+        XCTAssertEqual(TextPostProcessor.trimSpacesAroundNewlines("hello \n\n world"), "hello\n\nworld")
+        // Multiple spaces
+        XCTAssertEqual(TextPostProcessor.trimSpacesAroundNewlines("hello   \n   world"), "hello\nworld")
+        // No newline — untouched
+        XCTAssertEqual(TextPostProcessor.trimSpacesAroundNewlines("hello world"), "hello world")
+        // Empty string — untouched
+        XCTAssertEqual(TextPostProcessor.trimSpacesAroundNewlines(""), "")
     }
 
     func testEnsureSpaceAfterPunctuation() {

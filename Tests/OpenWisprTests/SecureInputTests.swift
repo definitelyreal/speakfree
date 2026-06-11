@@ -224,6 +224,37 @@ final class SecureInputTests: XCTestCase {
         pb.clearContents()
     }
 
+    // MARK: - M2: onSecureInputFallback fires only on the secure-input path
+
+    /// `onSecureInputFallback` fires when `insert()` hits the secure-input guard, so the UI can
+    /// show a distinct "auto-clears" notification (audit M2).
+    func test_secureInput_onSecureInputFallbackFires() {
+        let inserter = makeInserter(secureInput: true)
+        var fallbackFired = false
+        inserter.onSecureInputFallback = { fallbackFired = true }
+        inserter.insert(text: "password-dictation")
+        XCTAssertTrue(fallbackFired, "onSecureInputFallback must fire when Secure Input is active")
+    }
+
+    /// `onSecureInputFallback` must NOT fire when Secure Input is inactive (regular insertion path).
+    func test_noSecureInput_onSecureInputFallbackDoesNotFire() {
+        let inserter = makeInserter(secureInput: false)
+        var fallbackFired = false
+        inserter.onSecureInputFallback = { fallbackFired = true }
+        inserter.insert(text: "normal-text")
+        XCTAssertFalse(fallbackFired, "onSecureInputFallback must not fire on the normal insertion path")
+    }
+
+    // MARK: - M2: auto-clear delay default is 15 s
+
+    /// The default auto-clear delay must be 15 s (shortened from 30 s in M2 to reduce the
+    /// window in which the plaintext sits on the general pasteboard).
+    func test_secureInputClearDelay_defaultIs15Seconds() {
+        let inserter = TextInserter()
+        XCTAssertEqual(inserter.secureInputClipboardClearDelay, 15, accuracy: 0.001,
+                       "Default auto-clear delay must be 15 s (audit M2)")
+    }
+
     // MARK: - seam default produces a real Bool (smoke test)
 
     /// The default seam compiles and returns a Bool without crashing.

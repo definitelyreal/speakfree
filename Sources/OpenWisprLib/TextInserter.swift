@@ -84,6 +84,7 @@ class TextInserter {
         if isSecureInputActive() {
             DiagnosticLogger.shared.log("TextInserter: Secure Input is active — concealed clipboard fallback instead of inserting")
             secureInputClipboardFallback(text)
+            onSecureInputFallback?()
             onFocusLost?()
             return false
         }
@@ -103,6 +104,7 @@ class TextInserter {
                         if self.isSecureInputActive() {
                             DiagnosticLogger.shared.log("TextInserter: Secure Input became active during focus-settle — concealed clipboard fallback")
                             self.secureInputClipboardFallback(text)
+                            self.onSecureInputFallback?()
                             onFocusLost?()
                             return
                         }
@@ -480,9 +482,16 @@ class TextInserter {
     }
 
     /// How long dictated text may sit on the clipboard after a Secure-Input fallback before it
-    /// is auto-cleared. Seam so tests can shrink it. Production default: 30 s — long enough to
-    /// paste manually, short enough not to linger.
-    var secureInputClipboardClearDelay: TimeInterval = 30
+    /// is auto-cleared. Seam so tests can shrink it. Production default: 15 s — short enough
+    /// that the plaintext does not linger, yet long enough for most users to paste.
+    var secureInputClipboardClearDelay: TimeInterval = 15
+
+    /// Called when `insert()` falls back to the concealed Secure-Input clipboard path instead of
+    /// inserting text directly. Unlike `onFocusLost` (which fires for any focus failure), this
+    /// fires ONLY for the secure-input case so the UI can show an auto-clear notification.
+    /// Set by the caller (AppDelegate) before each insertion. Reset to nil after each use so it
+    /// does not accidentally fire on a later non-secure fallback.
+    var onSecureInputFallback: (() -> Void)?
 
     /// Secure-Input clipboard fallback (audit AR-1). Dictating into a password field is the
     /// worst case, so unlike `copyToClipboard` this:
