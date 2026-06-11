@@ -41,7 +41,9 @@ public enum TextPipeline {
     /// chars per token, so 224 × 3.5 ≈ 784 chars. We cap at 800 to match the whisper.cpp
     /// source comment, erring slightly above rather than cutting real content mid-sentence.
     /// Priority order (most important last, closest to end of prompt): cursor context >
-    /// screen context > glossary > instruction line. Truncation drops earlier sections first.
+    /// glossary > screen context > instruction line. Truncation drops earlier sections first.
+    /// Glossary outranks screen context because user-curated vocabulary terms are high-value
+    /// and unbounded; ambient screen context is capped at 20 words and is lower signal.
     public static let promptBudget = 800
 
     /// Build the Whisper prompt-hints string from input context.
@@ -56,9 +58,10 @@ public enum TextPipeline {
     /// comma/apostrophe feedback loop shipped in pre-v1.2.11 builds.
     ///
     /// The assembled prompt is truncated to `promptBudget` chars when it exceeds the
-    /// Whisper initial_prompt token limit. Truncation removes from the start (the
-    /// instruction line is lowest-priority) while preserving complete sections where
-    /// possible.
+    /// Whisper initial_prompt token limit. Truncation removes from the start (lowest-
+    /// priority sections first: instruction line, then screen context, then glossary)
+    /// while preserving complete sections where possible. Cursor context is highest-
+    /// priority and closest to the end of the prompt.
     public static func assemblePromptHints(input: Input) -> String? {
         var parts: [String] = []
         // Instructions first (furthest from end = least style influence)
@@ -67,15 +70,14 @@ public enum TextPipeline {
             // and comma-heavy prompts cause comma spam in output.
             parts.append("Spoken punctuation: say the word \"period\" or \"comma\" or \"question mark\" to insert punctuation.")
         }
-        if let vocab = input.glossaryWords, !vocab.isEmpty {
-            parts.append("Glossary: \(vocab).")
-        }
         // Screen context: extract only unique words as vocabulary hints.
         // Don't pass raw text — whisper parrots it instead of transcribing.
         // Strip terminal punctuation from tokens so embedded commas (e.g. "hello,")
         // don't survive into the prompt and amplify comma output.
         // Space-join (not comma-join) so the hint line itself carries no commas —
         // the same guard applied to cursor context to prevent the v1.2.11 feedback loop.
+        // Screen context is placed BEFORE glossary so it is dropped first on budget overflow —
+        // user-curated glossary terms are higher-value than ambient screen context words.
         if let screen = input.screenContextText {
             let words = Set(screen.components(separatedBy: .whitespacesAndNewlines)
                 .map { $0.trimmingCharacters(in: .punctuationCharacters) }
@@ -85,6 +87,12 @@ public enum TextPipeline {
             if !words.isEmpty {
                 parts.append("Context words: \(words).")
             }
+        }
+        // Glossary: placed after screen context so it survives truncation longer.
+        // User-curated vocabulary terms are high-value and unbounded — heavy-vocab users
+        // must not silently lose their custom terms while ambient screen words survive.
+        if let vocab = input.glossaryWords, !vocab.isEmpty {
+            parts.append("Glossary: \(vocab).")
         }
         // Cursor context: extract words-only as vocab hints — do NOT pass raw
         // text. Whisper mimics the punctuation style of whatever ENDS the prompt,

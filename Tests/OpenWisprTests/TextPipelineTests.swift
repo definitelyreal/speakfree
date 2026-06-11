@@ -245,6 +245,67 @@ final class TextPipelineTests: XCTestCase {
         XCTAssertTrue(prompt.contains("OpenWispr"), "Glossary must survive in short prompt")
     }
 
+    /// AR-2 Medium finding — priority inversion fix.
+    ///
+    /// When the assembled prompt exceeds the budget, `suffix(promptBudget)` keeps the LAST N chars,
+    /// meaning sections near the END of the assembled string survive truncation. The correct order
+    /// (highest-priority last / closest to end) is: instruction → screen context → glossary →
+    /// cursor context. This test pins that glossary terms survive an overflow while screen-context
+    /// words are truncated away — confirming user-curated vocabulary outranks ambient screen words.
+    func test_promptBudget_glossaryOutranksScreenContextOnOverflow() {
+        // Build a screen-context block large enough to overflow the budget on its own when combined
+        // with glossary and cursor context. Use 30-char marker words so 20 of them produce ~655
+        // chars for screen context alone; adding glossary (~160) and cursor (~95) gives ~910 chars
+        // total → overflows the 800-char budget by ~110, cutting the first screen words.
+        //
+        // Each section uses a unique marker prefix so we can count survivors by section.
+        // All words are >3 chars (pass the length filter) and unique (no Set-dedup loss).
+
+        // 20 screen-context words, ~30 chars each; assembled to ~655-char context line.
+        let screenWords = (0..<20).map { String(format: "SCREENCONTEXTWORDXXLONGSUFFIX%02d", $0) }.joined(separator: " ")
+
+        // 10 glossary terms — user-curated, must survive truncation.
+        let glossary = (0..<10).map { "GLOSSTERM\($0)ABCD" }.joined(separator: " ")
+
+        // 5 cursor-context words — highest priority, must always survive.
+        let cursorWords = (0..<5).map { "CURSORWORD\($0)PQRS" }.joined(separator: " ")
+
+        let input = TextPipeline.Input(
+            punctuationMode: .off,           // suppress instruction line to isolate screen vs glossary
+            cursorContextText: cursorWords,
+            screenContextText: screenWords,
+            glossaryWords: glossary
+        )
+
+        let prompt = TextPipeline.assemblePromptHints(input: input) ?? ""
+
+        // Sanity: the full assembly must exceed the budget so truncation actually fired.
+        XCTAssertEqual(prompt.count, TextPipeline.promptBudget,
+                       "Prompt must be exactly at the budget after truncation (full assembly exceeds 800). " +
+                       "Got \(prompt.count) — if < 800, increase screen word length so the assembly overflows.")
+
+        // GLOSSARY MUST SURVIVE: user-curated terms are placed after screen context in the
+        // assembled string, so they survive truncation longer. All 10 glossary terms must be present.
+        let glossaryTermsSurviving = (0..<10).filter { prompt.contains("GLOSSTERM\($0)ABCD") }.count
+        XCTAssertEqual(glossaryTermsSurviving, 10,
+            "All 10 glossary terms must survive budget truncation — glossary outranks screen context. " +
+            "Only \(glossaryTermsSurviving)/10 survived. Prompt tail: \(prompt.suffix(300))")
+
+        // SCREEN CONTEXT MUST BE (PARTIALLY) DROPPED: screen words are placed BEFORE glossary,
+        // so they are the first to be cut when the budget overflows. Not all 20 can survive.
+        let screenWordsSurviving = (0..<20).filter { prompt.contains(String(format: "SCREENCONTEXTWORDXXLONGSUFFIX%02d", $0)) }.count
+        XCTAssertLessThan(screenWordsSurviving, 20,
+            "Some screen-context words must be truncated when budget overflows — screen context is " +
+            "lower priority than glossary. All 20 survived, indicating the priority order is wrong.")
+
+        // CURSOR CONTEXT MUST SURVIVE: it is placed last (closest to the end of the prompt) and is
+        // the highest-priority section. All cursor words must be present.
+        let cursorWordsSurviving = (0..<5).filter { prompt.contains("CURSORWORD\($0)PQRS") }.count
+        XCTAssertEqual(cursorWordsSurviving, 5,
+            "All 5 cursor-context words must survive truncation (highest priority, closest to prompt end). " +
+            "Only \(cursorWordsSurviving)/5 survived. Prompt tail: \(prompt.suffix(200))")
+    }
+
     // MARK: - T2.6: both contexts populated
 
     func test_promptHints_bothContextsPopulated() {
