@@ -19,12 +19,9 @@ class WordMemory {
         try? data.write(to: wordsFile)
     }
 
-    static func remember(wrong: String, right: String) {
-        var words = load()
-        words[wrong.lowercased()] = right
-        save(words)
-        addToVocabulary(right)
-    }
+    // The auto-learning path (remember(wrong:right:), fed by CorrectionMonitor) was
+    // removed 2026-06-11 — it filled the glossary with truncations and quote noise.
+    // dictionary.json is now written only by VocabularyMigration cleanup / forget().
 
     static func forget(_ wrong: String) {
         var words = load()
@@ -76,28 +73,6 @@ class WordMemory {
     }
 
     // MARK: - Vocabulary sync
-
-    private static func addToVocabulary(_ word: String) {
-        let url = Config.vocabularyFile
-        try? FileManager.default.createDirectory(at: Config.configDir, withIntermediateDirectories: true)
-
-        var lines: [String] = []
-        if let content = try? String(contentsOf: url, encoding: .utf8) {
-            lines = content.components(separatedBy: .newlines)
-        }
-
-        // Don't add if already present (with or without # auto suffix)
-        let trimmed = word.trimmingCharacters(in: .whitespaces)
-        let alreadyExists = lines.contains { line in
-            let l = line.trimmingCharacters(in: .whitespaces)
-            return l == trimmed || l == "\(trimmed) # auto"
-        }
-        if alreadyExists { return }
-
-        lines.append("\(trimmed) # auto")
-        let content = lines.joined(separator: "\n")
-        try? content.write(to: url, atomically: true, encoding: .utf8)
-    }
 
     private static func removeFromVocabulary(_ word: String) {
         let url = Config.vocabularyFile

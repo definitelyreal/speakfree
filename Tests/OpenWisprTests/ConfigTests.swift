@@ -5,19 +5,18 @@ final class ConfigTests: XCTestCase {
 
     // MARK: - effectiveMaxRecordings
 
-    func testEffectiveMaxRecordingsNilDefaultsToDefaultMaxRecordings() {
-        // Shipped default: nil maxRecordings falls back to Config.defaultMaxRecordings (30),
-        // so production builds always prune. (Was 0 = keep-forever, which grew disk unbounded.)
-        XCTAssertEqual(Config.effectiveMaxRecordings(nil), Config.defaultMaxRecordings)
-        XCTAssertEqual(Config.effectiveMaxRecordings(nil), 30)
+    func testEffectiveMaxRecordingsNilMeansKeepEverything() {
+        // Default since 2026-06-11: recordings are kept forever (they are the
+        // dictation corpus). Pruning requires an explicit user-set cap.
+        XCTAssertEqual(Config.effectiveMaxRecordings(nil), 0)
     }
 
     func testEffectiveMaxRecordingsZero() {
         XCTAssertEqual(Config.effectiveMaxRecordings(0), 0)
     }
 
-    func testEffectiveMaxRecordingsNegativeClampsToOne() {
-        XCTAssertEqual(Config.effectiveMaxRecordings(-5), 1)
+    func testEffectiveMaxRecordingsNegativeMeansKeepEverything() {
+        XCTAssertEqual(Config.effectiveMaxRecordings(-5), 0)
     }
 
     func testEffectiveMaxRecordingsWithinRange() {
@@ -88,8 +87,8 @@ final class ConfigTests: XCTestCase {
         """.data(using: .utf8)!
         let config = try Config.decode(from: json)
         XCTAssertNil(config.maxRecordings)
-        // A config that omits maxRecordings resolves to the shipped default (30), not 0.
-        XCTAssertEqual(Config.effectiveMaxRecordings(config.maxRecordings), Config.defaultMaxRecordings)
+        // A config that omits maxRecordings keeps everything (0 = no pruning).
+        XCTAssertEqual(Config.effectiveMaxRecordings(config.maxRecordings), 0)
     }
 
     // MARK: - toggleMode decoding

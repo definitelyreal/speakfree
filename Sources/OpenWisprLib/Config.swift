@@ -9,10 +9,13 @@ public struct Config: Codable {
     public var maxRecordings: Int?
     public var toggleMode: FlexBool?
     public var screenContext: FlexBool?
+    // Deprecated 2026-06-11: the correction learner was removed (it polluted the
+    // glossary with truncations and quote-style noise). Key is kept so old configs
+    // decode and the value round-trips, but nothing reads it.
     public var rememberWords: FlexBool?
-    // Hidden dev/power-user escape hatch — NOT exposed in Settings UI. When true, recordings
-    // are never pruned (for corpus collection). Only settable by editing config.json directly.
-    // Shipped default is OFF so production builds always prune to defaultMaxRecordings.
+    // Mostly redundant since 2026-06-11: keep-everything is now the DEFAULT (nil/0
+    // maxRecordings). Still honored for old configs that set it alongside an explicit
+    // maxRecordings cap.
     public var preserveAllRecordings: FlexBool?
     public var preBuffer: FlexBool?  // nil = default (on)
     public var keepModelLoaded: String?  // "auto", "always", "off" — nil = "auto"
@@ -31,14 +34,13 @@ public struct Config: Codable {
     public var localAPIAllowBrowser: FlexBool?  // nil = false — gate any CORS (Access-Control-*) headers
     public var localAPIToken: String?           // nil = no auth — when set, require "Authorization: Bearer <token>"
 
-    // Sane shipped default — production builds always cap retained recordings.
-    // (Was 0 = keep-everything-forever, which caused unbounded disk growth.)
-    public static let defaultMaxRecordings = 30
-
+    // Recordings are kept forever by DEFAULT — they are the dictation corpus that
+    // makes accuracy regressions diagnosable (and ~1 MB per 30 s of speech is cheap).
+    // Pruning happens ONLY when the user explicitly picks a cap in Settings.
+    // 0 = keep everything.
     public static func effectiveMaxRecordings(_ value: Int?) -> Int {
-        let raw = value ?? Config.defaultMaxRecordings
-        if raw == 0 { return 0 }
-        return min(max(1, raw), 100)
+        guard let raw = value, raw > 0 else { return 0 }
+        return min(raw, 100)
     }
 
     public static let defaultConfig = Config(
@@ -47,13 +49,21 @@ public struct Config: Codable {
         modelSize: "large-v3-turbo",
         language: "en",
         spokenPunctuation: .hybrid,
-        maxRecordings: 30,
+        maxRecordings: nil,
         toggleMode: FlexBool(false),
         engine: nil,
         parakeetModel: nil
     )
 
+    /// Test seam: when set, all config/vocabulary/recordings paths resolve under this
+    /// directory instead of the real ~/.config/speakfree. Tests that write config MUST
+    /// set this in setUp — a test once overwrote the developer's live config.json with
+    /// a fixture (base.en), which knocked the configured model off disk-reality and
+    /// silently degraded dictation to tiny.en for days (2026-06-11 collapse).
+    public static var configDirOverride: URL?
+
     public static var configDir: URL {
+        if let override = configDirOverride { return override }
         let home = FileManager.default.homeDirectoryForCurrentUser
         // Use bundle identifier to isolate beta from production
         let dirName: String
