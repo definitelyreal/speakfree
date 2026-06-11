@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +36,7 @@ jobs:
 
   unit-tests:
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -88,7 +90,13 @@ jobs:
 
       - name: Unit tests
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
-        run: xcrun swift test
+        # --no-parallel + line-buffered tee so per-test "Test Case '…' started/passed" lines
+        # stream live to the log. If the suite hangs, the LAST "started" line with no matching
+        # "passed/failed" identifies the culprit test (the job-level timeout-minutes then kills
+        # it instead of burning a runner for an hour). Diagnosis only — do NOT fix a hang here.
+        run: |
+          set -o pipefail
+          xcrun swift test --no-parallel 2>&1 | tee swift-test.log
 
   perf:
     # T2.0 perf-regression harness. Benchmarks the audio golden fixtures and gates against the
@@ -98,6 +106,7 @@ jobs:
     # the uploaded perf-report.json from a green run, commit it as baseline-ci.json, and point
     # --baseline at it to make the gate enforce on CI). Locked threshold: +15% median regression.
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -176,6 +185,7 @@ jobs:
 
   swiftlint:
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -190,6 +200,7 @@ jobs:
 
   version-check:
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -198,6 +209,7 @@ jobs:
 
   install-test:
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -212,6 +224,7 @@ jobs:
 
   transcription-test:
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
