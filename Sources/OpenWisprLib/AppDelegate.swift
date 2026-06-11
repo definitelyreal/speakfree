@@ -888,6 +888,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         recordingSourceElement = nil
         recordingContextText = nil
 
+        // T2.2 — Precompute shouldPrependSpace NOW, on main, from the cursor-context string
+        // that was already captured at record-start (off main, inside captureFocusedElement).
+        // The last character of capturedInputText IS the character immediately before the cursor,
+        // so no further AX query is needed. This eliminates the 300ms semaphore.wait that
+        // previously blocked the main thread at insert time.
+        //
+        // Tradeoff: the value reflects the focused element at RECORD-START. If focus changes
+        // mid-dictation the answer may be stale — but we refocus that same element anyway, so
+        // the element and the precomputed context always agree.
+        let capturedPrependSpace = TextInserter.shouldPrependSpace(contextBefore: capturedInputText)
+
         // Snapshot ALL config-derived state on main before crossing into the async Task.
         // Accessing self.config.* from a background queue is a torn-read race — Config is a
         // struct so reads and writes are not atomic across threads.
@@ -945,8 +956,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     self.recordingOverlay.hide()
                     if !text.isEmpty {
-                        // Prepend space if cursor follows a non-whitespace character
-                        let insertText = self.inserter.shouldPrependSpace(before: capturedElement) ? " " + text : text
+                        // T2.2: use the prepend-space decision precomputed at record-start (off
+                        // main). No AX query, no semaphore.wait — zero main-thread stall here.
+                        let insertText = capturedPrependSpace ? " " + text : text
                         self.lastTranscription = text
                         // Record usage stats
                         let audioSeconds = Double(samples.count) / 16000.0
