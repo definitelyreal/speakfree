@@ -295,9 +295,6 @@ private class InlineDownloadManager: NSObject, ObservableObject {
     private var coordinator: ModelDownloadCoordinator?
     private var modelSize: String = ""
 
-    /// The StatusBarController to update with download progress (set by the view).
-    weak var statusBarController: StatusBarController?
-
     func startDownload(modelSize: String, onComplete: @escaping () -> Void) {
         self.modelSize = modelSize
         self.errorMessage = nil
@@ -352,11 +349,10 @@ private class InlineDownloadManager: NSObject, ObservableObject {
     }
 
     private func updateStatusBar(_ text: String?) {
-        DispatchQueue.main.async { [weak self] in
+        DispatchQueue.main.async {
             if let delegate = NSApplication.shared.delegate as? AppDelegate {
                 delegate.statusBar?.updateDownloadProgress(text)
             }
-            _ = self  // prevent unused warning
         }
     }
 }
