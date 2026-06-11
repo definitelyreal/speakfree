@@ -21,6 +21,13 @@
 //
 // Threshold: T2.3 proceeds only if aggregate word-level divergence < 1%.
 // Word-level divergence = (insertions + deletions + substitutions) / max(final_word_count, 1).
+//
+// CAVEAT (AR-2 round-2): the short clips this slices from the existing fixtures (2s/3s) are partly
+// degenerate — agreement on near-silence/noise inflates the apparent "PROCEED" verdict. Do NOT
+// read a low divergence here as license to ship reuse: T2.3's REAL gate is the production-faithful
+// `reuse` measurement (audio growth + initial-prompt asymmetry, AR-2 round-1 F1), which exceeded
+// the <1% bar and correctly CANCELLED T2.3 (the reuse flag ships DEFAULT OFF). This subcommand is
+// a coarse pre-screen, not the decision.
 
 import Foundation
 import AVFoundation

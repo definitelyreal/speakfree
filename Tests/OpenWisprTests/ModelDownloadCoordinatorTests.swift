@@ -11,6 +11,7 @@
 //   • network error → onFailure
 //   • already-exists short-circuit → onSuccess with no network
 //   • cancel → no callback
+//   • AR-2 round-2: URLSession→delegate retain-cycle is broken at every terminal event
 //
 // CRITICAL property proven here: the coordinator verifies SHA256 on the URLSession
 // path. Before T2.4 all three GUI sites installed unverified bytes.
@@ -109,8 +110,23 @@ final class ModelDownloadCoordinatorTests: XCTestCase {
         return coord
     }
 
+    /// Where a pre-existing REAL tiny.en model is parked while these tests scribble over the
+    /// install path. testSize == "tiny.en" so cleanFiles() would otherwise DELETE the developer's
+    /// (and CI's cached) actual model — which silently breaks AudioGoldenTests + the AR-2 adaptive
+    /// transcription tests that run in the same suite. We move it aside in setUp and restore it in
+    /// tearDown so this suite never destroys a real installed model.
+    private var preservedModelBackup: URL?
+
     override func setUp() {
         super.setUp()
+        let dest = destURL(testSize)
+        if FileManager.default.fileExists(atPath: dest.path) {
+            let backup = dest.appendingPathExtension("ar2backup")
+            try? FileManager.default.removeItem(at: backup)
+            if (try? FileManager.default.moveItem(at: dest, to: backup)) != nil {
+                preservedModelBackup = backup
+            }
+        }
         cleanFiles()
     }
     override func tearDown() {
@@ -127,6 +143,12 @@ final class ModelDownloadCoordinatorTests: XCTestCase {
             return hasher.finalize().map { String(format: "%02x", $0) }.joined()
         }
         cleanFiles()
+        // Restore the developer's / CI's real model if we moved it aside.
+        if let backup = preservedModelBackup {
+            try? FileManager.default.removeItem(at: destURL(testSize))
+            try? FileManager.default.moveItem(at: backup, to: destURL(testSize))
+            preservedModelBackup = nil
+        }
         super.tearDown()
     }
     private func cleanFiles() {
@@ -243,4 +265,50 @@ final class ModelDownloadCoordinatorTests: XCTestCase {
         coord.cancel()
         wait(for: [inverted], timeout: 1.5)
     }
+
+    // MARK: - AR-2 round-2: URLSession→delegate retain-cycle leak
+
+    /// REGRESSION (AR-2 round-2, Medium): `URLSession(delegate:)` retains its delegate STRONGLY
+    /// until the session is invalidated. Because the coordinator IS its own delegate AND holds the
+    /// session, every completed download used to leak a coordinator + session forever (cycle:
+    /// session → delegate(self) → session, surviving all external refs). The fix invalidates the
+    /// session at every terminal event. `didBecomeInvalid` is the documented point where URLSession
+    /// RELEASES its strong delegate ref — the deterministic proof the cycle is broken. Before the
+    /// fix the session was never invalidated, so this NEVER fired (test would time out).
+    func test_success_breaksRetainCycle_sessionInvalidated() {
+        let expected = ModelDownloader.knownSHA256[Self.testSize]!
+        ModelDownloader.computeSHA256 = { _ in expected }
+
+        let coord = makeCoordinator(serving: bigBody())
+        let invalidated = expectation(description: "session invalidated → delegate released")
+        coord.onDidBecomeInvalidForTests = { invalidated.fulfill() }
+        let succeeded = expectation(description: "onSuccess")
+        coord.onSuccess = { _ in succeeded.fulfill() }
+        coord.onFailure = { err in XCTFail("unexpected failure: \(err)") }
+        coord.start(modelSize: testSize)
+        wait(for: [succeeded], timeout: 10)
+        XCTAssertTrue(coord.sessionTornDownForTests,
+            "internal session reference must be dropped at the terminal event")
+        wait(for: [invalidated], timeout: 10)
+    }
+
+    /// The cancel path (invalidateAndCancel) must ALSO release the delegate (break the cycle).
+    func test_cancel_breaksRetainCycle_sessionInvalidated() {
+        ModelDownloader.computeSHA256 = { _ in ModelDownloader.knownSHA256[Self.testSize]! }
+        let coord = makeCoordinator(serving: bigBody())
+        let invalidated = expectation(description: "session invalidated on cancel")
+        coord.onDidBecomeInvalidForTests = { invalidated.fulfill() }
+        coord.start(modelSize: testSize)
+        coord.cancel()
+        XCTAssertTrue(coord.sessionTornDownForTests, "session reference must be dropped on cancel")
+        wait(for: [invalidated], timeout: 10)
+    }
+
+    // NOTE: a `weak`-reference dealloc assertion was evaluated and intentionally NOT shipped: even
+    // after URLSession delivers `didBecomeInvalid` (releasing its strong delegate ref), the final
+    // dealloc is gated on URLSession's INTERNAL operation queue / autorelease timing that a
+    // main-thread RunLoop pump can't deterministically advance (observed: the coordinator DOES
+    // deinit, but only after a long, machine-dependent delay → a flaky 20s test). The deterministic
+    // proof of the broken cycle is `didBecomeInvalid` firing (the documented delegate-release point)
+    // + `sessionTornDownForTests`, both asserted above.
 }

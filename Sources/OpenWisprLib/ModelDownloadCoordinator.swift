@@ -65,7 +65,35 @@ public final class ModelDownloadCoordinator: NSObject, URLSessionDownloadDelegat
     /// True between `start` and a terminal callback. Used by callers for UI state if they want.
     public private(set) var isDownloading = false
 
+    /// Test-only: true once the URLSession has been invalidated and our reference dropped.
+    /// AR-2 round-2 leak regression: lets the test assert the session→delegate retain cycle was
+    /// broken at a terminal event (before the fix, `session` was never nil-ed/invalidated).
+    var sessionTornDownForTests: Bool { session == nil }
+
     // MARK: - Public API
+
+    /// Tear down the URLSession after a terminal event.
+    ///
+    /// AUDIT (AR-2 round-2, Medium leak): `URLSession(configuration:delegate:delegateQueue:)`
+    /// retains its delegate STRONGLY until the session is invalidated, and this coordinator IS
+    /// that delegate while it also holds `self.session`. That is a self-sustaining retain cycle
+    /// (session → delegate(self) → session) that outlives every external reference — so without
+    /// an explicit invalidation each completed/cancelled download leaked one coordinator + one
+    /// URLSession forever. `finishTasksAndInvalidate()` releases the session's strong hold on the
+    /// delegate (after the last delegate callback drains), breaking the cycle. We also drop our
+    /// own `session`/`downloadTask` references so nothing keeps the (now invalidating) session
+    /// alive. Called from EVERY terminal path: success, failure, already-installed, cancel.
+    private func teardownSession(cancel: Bool = false) {
+        if cancel {
+            // Cancel path: stop in-flight tasks AND release the delegate immediately.
+            session?.invalidateAndCancel()
+        } else {
+            // Normal completion: let queued delegate callbacks finish, then release the delegate.
+            session?.finishTasksAndInvalidate()
+        }
+        session = nil
+        downloadTask = nil
+    }
 
     /// Begin downloading `modelSize` (e.g. "tiny.en"). If the model already exists on disk,
     /// `onSuccess` fires immediately with no network activity.
@@ -109,9 +137,10 @@ public final class ModelDownloadCoordinator: NSObject, URLSessionDownloadDelegat
     /// Cancel the in-flight download. No callback is delivered (matches prior cancel semantics
     /// across all three sites: cancel is user-initiated and silent).
     public func cancel() {
-        downloadTask?.cancel()
-        downloadTask = nil
         isDownloading = false
+        // invalidateAndCancel() cancels the in-flight task AND releases the session's strong
+        // reference to this delegate, breaking the retain cycle (see teardownSession).
+        teardownSession(cancel: true)
     }
 
     /// Suspend the in-flight download (Welcome's Pause). Resumable via `resume()`.
@@ -144,6 +173,11 @@ public final class ModelDownloadCoordinator: NSObject, URLSessionDownloadDelegat
         // method returns — so we must move it out synchronously, on this delegate queue,
         // BEFORE hopping to main. Validation + verification + install all happen here.
         let result = installVerified(from: location)
+        // Terminal: release the session's strong hold on this delegate (breaks the retain
+        // cycle). Safe to invalidate from within a delegate callback — queued callbacks drain
+        // first. Done on the delegate queue before hopping to main so no further delegate
+        // method can fire against a torn-down coordinator.
+        teardownSession()
         switch result {
         case .success(let dest):
             DispatchQueue.main.async { [weak self] in
@@ -162,6 +196,16 @@ public final class ModelDownloadCoordinator: NSObject, URLSessionDownloadDelegat
                            didCompleteWithError error: Error?) {
         guard let error = error, (error as NSError).code != NSURLErrorCancelled else { return }
         deliverFailure(error)
+    }
+
+    /// Test-only hook fired when URLSession delivers `didBecomeInvalidWithError`. This is the
+    /// documented point at which URLSession RELEASES its strong reference to the delegate — i.e.
+    /// the deterministic signal that the retain cycle is broken (the actual dealloc then follows
+    /// asynchronously). AR-2 round-2 leak regression asserts this fires after every terminal event.
+    var onDidBecomeInvalidForTests: (() -> Void)?
+
+    public func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+        onDidBecomeInvalidForTests?()
     }
 
     // MARK: - Install + verify (runs on the delegate queue, synchronously)
@@ -201,6 +245,9 @@ public final class ModelDownloadCoordinator: NSObject, URLSessionDownloadDelegat
     // MARK: - Delivery helpers (hop to main)
 
     private func deliverSuccess(_ dest: URL) {
+        // Terminal — break any retain cycle (no-op when no session was created, e.g. the
+        // already-installed fast path).
+        teardownSession()
         DispatchQueue.main.async { [weak self] in
             self?.isDownloading = false
             self?.onSuccess?(dest)
@@ -208,6 +255,8 @@ public final class ModelDownloadCoordinator: NSObject, URLSessionDownloadDelegat
     }
 
     private func deliverFailure(_ error: Error) {
+        // Terminal — break the retain cycle (didCompleteWithError network failures, bad URL).
+        teardownSession()
         DispatchQueue.main.async { [weak self] in
             self?.isDownloading = false
             self?.onFailure?(error)

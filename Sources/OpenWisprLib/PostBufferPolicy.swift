@@ -16,6 +16,14 @@
 //
 // Reuses the SAME RMS notion the audio tap already computes (AudioRecorder.handleAudioBuffer:
 // sqrtf(Σx² / n)) so "silence" here means the same thing the visualizer + dead-audio check mean.
+//
+// SCOPE OF THE WIN (AR-2 round-2, measured): this only shaves latency when the user goes silent
+// BEFORE releasing the key (trailing audio at/below the 0.01 RMS floor). On recordings whose tail
+// is still spoken word, the policy correctly pays the full cap — no clipping, no win. On the
+// golden corpus exactly one fixture (the manufactured trailing-silence canary) early-stops, so the
+// corpus-aggregate median benefit is ~0%; the real-world benefit is the fraction of dictations
+// that end in a quiet tail. It is hard-capped at the legacy flat wait, so it is never worse.
+// See AdaptiveBufferCorpusTests for the tests that pin this reality.
 
 import Foundation
 

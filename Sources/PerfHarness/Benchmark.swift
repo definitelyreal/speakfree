@@ -25,6 +25,16 @@ enum Benchmark {
     /// The post-key-release CAP (worst case). PLAN T2.1: the FLAT policy always pays this; the
     /// ADAPTIVE policy stops on ~150ms trailing silence and only pays up to this cap. The harness
     /// records the per-fixture wait so the adaptive win shows up in endToEnd medians.
+    ///
+    /// TRUTHFULNESS NOTE (AR-2 round-2, verified on this corpus): the adaptive win materialises
+    /// ONLY on fixtures whose trailing audio is at/below the 0.01 RMS silence floor. Of the four
+    /// golden fixtures, exactly ONE -- fixture-4-trailing-silence-period.wav (= fixture-3 + 400ms of
+    /// appended DIGITAL silence) -- early-stops (postBuf 150ms, e2e -150ms). The three real
+    /// recordings (incl. fixture-3, whose spoken-'period' tail sits ABOVE 0.01) pay the full cap,
+    /// so the CORPUS-AGGREGATE median post-buffer benefit is ~0%. The "~17% faster" headline is a
+    /// fixture-4-only number; in live use the win accrues whenever the speaker actually goes silent
+    /// before releasing the key (real trailing silence the fixtures' recorded tails can't model).
+    /// The mechanism is hard-capped at the old flat value so it is NEVER worse and NEVER clips.
     static let postBufferMs: Double = PostBufferPolicy.defaultCapMs
 
     /// Post-key-release buffer policy under test.
