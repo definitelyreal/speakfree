@@ -161,7 +161,18 @@ final class ConfigTests: XCTestCase {
 
     // MARK: - Default model
 
-    func testDefaultModelIsLargeV3Turbo() {
+    func testDefaultEngineIsParakeetEnglish() {
+        // Product default (Michael, 2026-06-11): new users get Parakeet ENGLISH.
+        // v2 = English-only; v3 = multilingual (selected when language != en).
+        let config = Config.defaultConfig
+        XCTAssertEqual(config.engine, "parakeet")
+        XCTAssertEqual(config.parakeetModel, "parakeet-tdt-0.6b-v2")
+        XCTAssertEqual(Config.defaultEngine, "parakeet")
+        XCTAssertEqual(Config.defaultParakeetModel, "parakeet-tdt-0.6b-v2")
+    }
+
+    func testDefaultWhisperModelIsLargeV3Turbo() {
+        // Whisper default applies when the user switches engine to whisper.
         let config = Config.defaultConfig
         XCTAssertEqual(config.modelSize, "large-v3-turbo")
     }

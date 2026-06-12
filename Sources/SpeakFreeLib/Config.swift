@@ -43,16 +43,34 @@ public struct Config: Codable {
         return min(raw, 100)
     }
 
+    // MARK: - Product defaults (Michael, 2026-06-11)
+    //
+    // The default engine for NEW users is Parakeet ENGLISH: parakeet-tdt-0.6b-v2.
+    // v2 is the English-only variant (faster, more accurate for English); v3 is
+    // the multilingual variant — the welcome flow and Settings switch to v3 when
+    // a non-English language is selected.
+    //
+    // Back-compat split — DELIBERATE, do not "clean up":
+    //   • defaultConfig writes `engine` and `parakeetModel` EXPLICITLY, so every
+    //     config created from it carries both keys on disk.
+    //   • The `?? "whisper"` / `?? "parakeet-tdt-0.6b-v3"` nil-coalescing at use
+    //     sites serves LEGACY configs written before these keys existed. Changing
+    //     those fallbacks to the new defaults would silently switch existing
+    //     whisper-era users' engine on upgrade.
+    public static let defaultEngine = "parakeet"
+    public static let defaultParakeetModel = "parakeet-tdt-0.6b-v2"  // English-only
+
     public static let defaultConfig = Config(
         hotkey: HotkeyConfig(keyCode: 63, modifiers: []),
         modelPath: nil,
+        // Whisper default for when the user switches engine to whisper.
         modelSize: "large-v3-turbo",
         language: "en",
         spokenPunctuation: .hybrid,
         maxRecordings: nil,
         toggleMode: FlexBool(false),
-        engine: nil,
-        parakeetModel: nil
+        engine: Config.defaultEngine,
+        parakeetModel: Config.defaultParakeetModel
     )
 
     /// Test seam: when set, all config/vocabulary/recordings paths resolve under this
