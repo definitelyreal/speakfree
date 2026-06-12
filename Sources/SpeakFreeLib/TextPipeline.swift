@@ -134,7 +134,12 @@ public enum TextPipeline {
     ///     The outer `.none` default means "compute from input as usual".
     ///     Using `String??` (not `String?`) avoids the nil-sentinel collision: `.some(nil)` means
     ///     "caller computed nil hints", `.none` means "not provided; compute now".
-    public static func run(_ input: Input, precomputedPrompt: String?? = .none) -> Result {
+    /// - Parameter isRealWord: passed through to `GlossaryCorrector` — returns true
+    ///   for a token that must NOT be treated as a misspelled name (defaults to the
+    ///   system spell checker; tests inject a fixture for determinism).
+    public static func run(_ input: Input,
+                           precomputedPrompt: String?? = .none,
+                           isRealWord: (String) -> Bool = GlossaryCorrector.systemIsRealWord) -> Result {
         let prompt: String?
         switch precomputedPrompt {
         case .none:
@@ -149,15 +154,30 @@ public enum TextPipeline {
             ? stripped
             : TextPostProcessor.process(stripped, hybrid: hybrid)
         let styled = TextPostProcessor.applyStyle(processed, mode: input.styleMode)
+        // Glossary correction: fix near-miss misspellings of curated proper nouns
+        // (makes custom names work on Parakeet, which ignores the glossary prompt).
+        // Runs before case-adjust so corrected names feed the keep-capitalized logic.
+        let corrected = GlossaryCorrector.correct(styled,
+                                                  glossary: glossaryTerms(input.glossaryWords),
+                                                  isRealWord: isRealWord)
         // Mid-sentence insertion must not start with a capital (Michael 2026-06-11:
         // "I really want it to be lowercase if I'm in the middle of the sentence").
         // Whisper sentence-cases every utterance; when the cursor context shows we're
         // continuing a sentence, undo that leading capital — glossary names, "I",
         // all-caps, and internal-caps words keep their case.
-        let final = adjustCaseForInsertion(styled,
+        let final = adjustCaseForInsertion(corrected,
                                            contextBefore: input.cursorContextText,
                                            glossaryWords: input.glossaryWords)
         return Result(promptHints: prompt, processedText: processed, finalText: final)
+    }
+
+    /// Split the comma-joined glossary string (as `Config.loadVocabulary()` produces
+    /// it) back into individual terms for the corrector.
+    static func glossaryTerms(_ glossaryWords: String?) -> [String] {
+        guard let g = glossaryWords, !g.isEmpty else { return [] }
+        return g.components(separatedBy: ", ")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 
     /// True when the text immediately before the cursor leaves us mid-sentence —

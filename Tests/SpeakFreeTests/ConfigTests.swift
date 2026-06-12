@@ -176,6 +176,40 @@ final class ConfigTests: XCTestCase {
         let config = Config.defaultConfig
         XCTAssertEqual(config.modelSize, "large-v3-turbo")
     }
+
+    // MARK: - Vocabulary provenance-comment parsing
+
+    func testStripInlineComment() {
+        XCTAssertEqual(Config.stripInlineComment("Gaubert # brain"), "Gaubert")
+        XCTAssertEqual(Config.stripInlineComment("Sari # auto"), "Sari")
+        XCTAssertEqual(Config.stripInlineComment("Maryna # contacts"), "Maryna")
+        XCTAssertEqual(Config.stripInlineComment("Rohrlich"), "Rohrlich")
+        XCTAssertEqual(Config.stripInlineComment("  Bexx  "), "Bexx")
+        // Full-line comment returned as-is (caller drops it via hasPrefix("#")).
+        XCTAssertEqual(Config.stripInlineComment("# a heading"), "# a heading")
+        // Hashes inside a term are not comment markers (no leading space-hash).
+        XCTAssertEqual(Config.stripInlineComment("C#"), "C#")
+    }
+
+    func testLoadVocabularyStripsProvenanceTags() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speakfree-vocab-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        Config.configDirOverride = dir
+        defer { Config.configDirOverride = nil; try? FileManager.default.removeItem(at: dir) }
+
+        try """
+        # heading comment
+        Rohrlich
+        Gaubert # brain
+        Maryna # contacts
+        Sari # auto
+
+        """.write(to: Config.vocabularyFile, atomically: true, encoding: .utf8)
+
+        let vocab = Config.loadVocabulary()
+        XCTAssertEqual(vocab, "Rohrlich, Gaubert, Maryna, Sari")
+    }
 }
 
 private struct FlexBoolWrapper: Codable {

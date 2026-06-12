@@ -102,21 +102,31 @@ public struct Config: Codable {
     }
 
     /// Load custom vocabulary words from ~/.config/speakfree/vocabulary.txt
-    /// One word or phrase per line. Prepended to whisper's prompt to prime recognition.
+    /// One word or phrase per line. Used to prime Whisper's prompt AND to drive
+    /// GlossaryCorrector on every engine (incl. Parakeet, which ignores the prompt).
+    ///
+    /// Lines may carry an inline provenance comment — ` # manual` / ` # contacts` /
+    /// ` # brain` / ` # auto` — which is stripped here. Full-line comments (starting
+    /// with `#`) are dropped.
     public static func loadVocabulary() -> String? {
         guard let content = try? String(contentsOf: vocabularyFile, encoding: .utf8) else { return nil }
         let words = content.components(separatedBy: .newlines)
-            .map { line -> String in
-                var l = line.trimmingCharacters(in: .whitespaces)
-                // Strip "# auto" suffix from auto-learned entries
-                if let range = l.range(of: " # auto", options: .backwards) {
-                    l = String(l[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
-                }
-                return l
-            }
+            .map { stripInlineComment($0).trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.hasPrefix("#") }
         guard !words.isEmpty else { return nil }
         return words.joined(separator: ", ")
+    }
+
+    /// Strip an inline ` # <provenance>` comment from a vocabulary line, leaving the
+    /// term. A line that is entirely a comment (`# ...`) is returned unchanged so the
+    /// caller's `hasPrefix("#")` filter drops it.
+    static func stripInlineComment(_ line: String) -> String {
+        let l = line.trimmingCharacters(in: .whitespaces)
+        guard !l.hasPrefix("#") else { return l }
+        if let range = l.range(of: " #") {
+            return String(l[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
+        return l
     }
 
     public static func load() -> Config {
