@@ -15,6 +15,29 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # at model load. See scripts/vendor/dylibs/README.md.
 VENDOR_DIR="$(dirname "$0")/vendor/dylibs"
 
+# Stamp EVERY mechanical version surface in the Pages site from VERSION, up front,
+# BEFORE the consistency check validates them. Historically build.sh rewrote only
+# the download URL, so the visible "vX.Y.Z" label and the changelog drifted (the
+# site showed v1.3.0 while serving the v1.6.0 DMG). These are regenerated on every
+# release so they can never go stale again; the changelog body is the one human
+# step, enforced by check-version.sh (newest <h3> must equal VERSION).
+INDEX="docs/index.html"
+MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1-2)
+if [ -f "$INDEX" ]; then
+    echo "Stamping Pages site version surfaces to v${VERSION}..."
+    # Download button URL
+    sed -i '' -E "s#releases/latest/download/speakfree-[0-9][0-9.]*\.dmg#releases/latest/download/speakfree-${VERSION}.dmg#g" "$INDEX"
+    # Visible version label under the download button
+    sed -i '' -E "s#(class=\"btn-sub\">v)[0-9][0-9.]*#\1${VERSION}#g" "$INDEX"
+    # "What's new in vX.Y" disclosure heading
+    sed -i '' -E "s#(What's new in v)[0-9]+\.[0-9]+#\1${MAJOR_MINOR}#g" "$INDEX"
+    # Fail fast if any mechanical surface didn't land — these are guarded again in
+    # check-version.sh below, but failing here pinpoints which sed missed.
+    grep -q "speakfree-${VERSION}.dmg" "$INDEX"        || { echo "FATAL: download URL not updated to v${VERSION} in $INDEX." >&2; exit 1; }
+    grep -q "class=\"btn-sub\">v${VERSION} " "$INDEX"  || { echo "FATAL: version label not updated to v${VERSION} in $INDEX." >&2; exit 1; }
+    grep -q "What's new in v${MAJOR_MINOR}" "$INDEX"   || { echo "FATAL: changelog heading not updated to v${MAJOR_MINOR} in $INDEX." >&2; exit 1; }
+fi
+
 echo "Checking version consistency..."
 bash "$REPO_DIR/scripts/check-version.sh"
 
@@ -187,18 +210,9 @@ cat > "$APPCAST" << APPCAST_EOF
 </rss>
 APPCAST_EOF
 
-# Keep the GitHub Pages download link in lockstep with the released binary.
-# build.sh updates appcast.xml but historically NOT index.html, so the public
-# "Download" button drifted to an old version. Rewrite it to this release's DMG.
-echo "Updating GitHub Pages download link to ${DMG}..."
-INDEX="docs/index.html"
-if [ -f "$INDEX" ]; then
-    sed -i '' -E "s#releases/latest/download/speakfree-[0-9][0-9.]*\.dmg#releases/latest/download/speakfree-${VERSION}.dmg#g" "$INDEX"
-    if ! grep -q "speakfree-${VERSION}.dmg" "$INDEX"; then
-        echo "FATAL: failed to update download link in $INDEX to v${VERSION}." >&2
-        exit 1
-    fi
-fi
+# NOTE: the GitHub Pages site (docs/index.html) — download URL, version label, and
+# "What's new" heading — was already stamped to v${VERSION} at the top of this
+# script and validated by check-version.sh. Nothing to do here.
 
 echo "Force-quitting any running instance and deleting old app before install..."
 osascript -e 'quit app "speakfree"' 2>/dev/null || true
