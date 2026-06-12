@@ -44,6 +44,36 @@ func overlayScreen(
     return mainScreen
 }
 
+/// Full screen-selection fallback chain used by the overlay, as pure geometry.
+///
+/// The focused-window AX query (`focusedWindowFrame`) returns nil for a LOT of real
+/// apps — Electron with a lazy AX tree, full-screen apps, AX-permission timing — and
+/// the old code then fell straight back to the MAIN screen, so on a multi-monitor
+/// setup the overlay appeared on the wrong display (or, if main was momentarily nil,
+/// not at all). The mouse-cursor screen is a reliable proxy for "where the user is
+/// working" and fills that gap.
+///
+/// Order: (1) screen with most overlap with the focused window → (2) screen under the
+/// mouse cursor → (3) main screen → (4) first screen. Returns nil only when there are
+/// no screens at all.
+func overlayScreenIndex(
+    windowFrame: NSRect?,
+    mouseLocation: NSPoint,
+    screenFrames: [NSRect],
+    mainIndex: Int?
+) -> Int? {
+    if let idx = bestScreenIndex(windowFrame: windowFrame, screenFrames: screenFrames) {
+        return idx
+    }
+    for (i, frame) in screenFrames.enumerated() where frame.contains(mouseLocation) {
+        return i
+    }
+    if let mainIndex = mainIndex, screenFrames.indices.contains(mainIndex) {
+        return mainIndex
+    }
+    return screenFrames.isEmpty ? nil : 0
+}
+
 // MARK: - AX focused-window frame helper
 
 /// Returns the screen-coordinate frame of the frontmost application's focused window
@@ -105,6 +135,8 @@ class RecordingOverlay {
 
     // Seam for unit tests: override to inject a known window frame without real AX.
     var windowFrameProvider: (() -> NSRect?)? = nil
+    // Seam for unit tests: override to inject a known cursor location.
+    var mouseLocationProvider: () -> NSPoint = { NSEvent.mouseLocation }
 
     private func activeWindowFrame() -> NSRect? {
         if let provider = windowFrameProvider { return provider() }
@@ -112,11 +144,16 @@ class RecordingOverlay {
     }
 
     private func targetScreen() -> NSScreen? {
-        overlayScreen(
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return nil }
+        let mainIndex = NSScreen.main.flatMap { main in screens.firstIndex(where: { $0 === main }) }
+        let idx = overlayScreenIndex(
             windowFrame: activeWindowFrame(),
-            screens: NSScreen.screens,
-            mainScreen: NSScreen.main
+            mouseLocation: mouseLocationProvider(),
+            screenFrames: screens.map { $0.frame },
+            mainIndex: mainIndex
         )
+        return idx.map { screens[$0] }
     }
 
     func show(state: OverlayState, recorder: AudioRecorder? = nil) {

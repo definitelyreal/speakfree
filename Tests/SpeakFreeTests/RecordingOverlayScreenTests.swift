@@ -114,4 +114,44 @@ final class RecordingOverlayScreenTests: XCTestCase {
         let result = bestScreenIndex(windowFrame: windowFrame, screenFrames: [bottomScreen, topScreen])
         XCTAssertEqual(result, 1, "Window at y=1600 is fully on the top screen (index 1)")
     }
+
+    // MARK: - overlayScreenIndex fallback chain (the "overlay on wrong screen" fix)
+
+    private let mouseOnSecondary = NSPoint(x: 2500, y: 500)
+    private let mouseOnPrimary   = NSPoint(x: 500, y: 500)
+
+    func test_focusedWindowWins_overMouse() {
+        // Focused window known and on secondary → used even if mouse is on primary.
+        let win = NSRect(x: 2000, y: 100, width: 800, height: 600)
+        let idx = overlayScreenIndex(windowFrame: win, mouseLocation: mouseOnPrimary,
+                                     screenFrames: [primaryFrame, secondaryFrame], mainIndex: 0)
+        XCTAssertEqual(idx, 1, "focused window on secondary should win")
+    }
+
+    func test_nilWindow_fallsBackToMouseScreen_notMain() {
+        // AX focused-window unavailable (the common Electron/fullscreen case): the
+        // overlay must follow the MOUSE (secondary), NOT collapse to main (index 0).
+        let idx = overlayScreenIndex(windowFrame: nil, mouseLocation: mouseOnSecondary,
+                                     screenFrames: [primaryFrame, secondaryFrame], mainIndex: 0)
+        XCTAssertEqual(idx, 1, "nil window + mouse on secondary → secondary, not main")
+    }
+
+    func test_nilWindow_mouseOffAllScreens_fallsBackToMain() {
+        let off = NSPoint(x: -5000, y: -5000)
+        let idx = overlayScreenIndex(windowFrame: nil, mouseLocation: off,
+                                     screenFrames: [primaryFrame, secondaryFrame], mainIndex: 1)
+        XCTAssertEqual(idx, 1, "no window, mouse off-screen → main index")
+    }
+
+    func test_nilEverything_fallsBackToFirstScreen_neverNilWithScreens() {
+        let idx = overlayScreenIndex(windowFrame: nil, mouseLocation: NSPoint(x: -1, y: -1),
+                                     screenFrames: [primaryFrame, secondaryFrame], mainIndex: nil)
+        XCTAssertEqual(idx, 0, "with screens present, never nil — falls back to first")
+    }
+
+    func test_overlayScreenIndex_noScreens_returnsNil() {
+        let idx = overlayScreenIndex(windowFrame: nil, mouseLocation: .zero,
+                                     screenFrames: [], mainIndex: nil)
+        XCTAssertNil(idx)
+    }
 }
