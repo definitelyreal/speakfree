@@ -23,7 +23,7 @@
 2. Drag **speakfree.app** to your Applications folder
 3. Open it — **right-click → Open** on the first launch (macOS security step, required once)
 4. Grant **Microphone** and **Accessibility** permissions when prompted
-5. On first launch, a window appears to choose and download a Whisper model (~142 MB for the default)
+5. On first launch, a window appears to download the speech model — **NVIDIA Parakeet (English)** by default, ~600 MB one-time
 
 The speakfree icon appears in your menu bar when it's running.
 
@@ -42,10 +42,10 @@ Click the menu bar icon → **Settings** to change everything in-app:
 | Setting | Options |
 |---|---|
 | **Hotkey** | Globe 🌐, Left/Right Command ⌘, Left/Right Option ⌥, Left Control ⌃ |
-| **Model** | tiny.en → large (see table below) |
+| **Engine & model** | Parakeet English (default), or any Whisper size (see below) |
 | **Punctuation** | Hybrid (default), Off, Spoken words |
 | **Key Mode** | Hold (default), Toggle |
-| **Max Recordings** | Off (default), 10–100 |
+| **Past Recordings** | Keep everything (default), or cap at the last 10–100 |
 
 Click **Help** in the menu for plain-English explanations of every setting.
 
@@ -53,31 +53,32 @@ Click **Help** in the menu for plain-English explanations of every setting.
 
 speakfree can transcribe with one of two local engines. Both run entirely on your Mac — no audio or text ever leaves your computer.
 
-| Engine | Whisper (default) | Parakeet |
+| Engine | Parakeet (default) | Whisper |
 |---|---|---|
-| Maker | OpenAI (via whisper.cpp) | NVIDIA |
-| Runs on | CPU / Metal GPU | Apple Neural Engine |
-| Speed & accuracy | Good | Higher |
-| Live preview | Yes — words appear as you speak | No — text appears when you release |
-| Download | 75 MB – 3 GB (see Models) | ~600 MB, one-time |
+| Maker | NVIDIA | OpenAI (via whisper.cpp) |
+| Runs on | Apple Neural Engine | CPU / Metal GPU |
+| Speed & accuracy | Higher | Good |
+| Live preview | No — text appears when you release | Yes — words appear as you speak |
+| Download | ~600 MB, one-time | 75 MB – 3 GB (see Models) |
 | Requires | macOS 14+ | macOS 14+ |
 
-**Whisper** is the default and works for most people. It shows a live preview of your words as you speak, and offers a range of model sizes (see [Models](#models)).
+**Parakeet** is the default: NVIDIA's speech model running on the Apple Neural Engine — faster and more accurate than Whisper for English. The default model is the English-only variant (`parakeet-tdt-0.6b-v2`); choosing a non-English language switches to the multilingual variant (v3). Parakeet does **not** show a live preview — your text appears all at once when you release the key.
 
-**Parakeet** is NVIDIA's speech model, running on the Apple Neural Engine. It's faster and more accurate than Whisper, at the cost of a one-time ~600 MB download. It does **not** show a live preview — your text appears all at once when you release the key.
+**Whisper** is the alternative if you want a live preview of your words as you speak, or a smaller download — it offers a range of model sizes (see [Models](#models)).
 
-Switch engines in **Settings**. The Parakeet model downloads automatically the first time you select it.
+Switch engines in **Settings**. Models download automatically the first time you select them.
 
 ## Models
 
-These are the **Whisper** model sizes. Larger models are more accurate but take longer to transcribe. (Parakeet uses a single ~600 MB model — see [Transcription engines](#transcription-engines).)
+These are the **Whisper** model sizes, for when you switch off the default Parakeet engine. Larger models are more accurate but take longer to transcribe. (Parakeet uses a single ~600 MB model — see [Transcription engines](#transcription-engines).)
 
 | Model | Size | Speed | Best for |
 |---|---|---|---|
 | tiny.en | 75 MB | Fastest | Quick notes, short phrases |
-| **base.en** | **142 MB** | **Fast** | **Most people (default)** |
+| base.en | 142 MB | Fast | Small download, decent accuracy |
 | small.en | 466 MB | Moderate | Technical terms, longer dictation |
 | medium.en | 1.5 GB | Slower | High accuracy |
+| **large-v3-turbo** | **1.5 GB** | **Fast** | **Whisper default — best accuracy/speed balance** |
 | large | 3 GB | Slowest | Best accuracy (M1 Pro+ recommended) |
 
 Switching models downloads automatically if needed.
@@ -88,8 +89,8 @@ speakfree runs entirely on your Mac.
 
 - No audio or text ever leaves your computer
 - No servers, no accounts, no subscriptions
-- Internet is only needed once — to download a model on first launch (a Whisper model, or Parakeet if you switch engines)
-- Audio is transcribed locally and deleted immediately
+- Internet is only needed once — to download a model on first launch (Parakeet by default, or a Whisper model if you switch engines)
+- Audio is transcribed locally. Recordings are kept on your Mac (`~/.config/speakfree/recordings`) so you can review past dictations — cap or delete them anytime in Settings
 
 ## Build from source
 

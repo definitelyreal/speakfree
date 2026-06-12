@@ -96,9 +96,19 @@ final class ParakeetEngineTests: XCTestCase {
         XCTAssertNil(versionString(for: "large-v3-turbo"))  // a whisper model id
     }
 
-    func testDefaultParakeetModelIsV3() {
-        // PLAN §0.7 + Config accessor convention: nil parakeetModel → "parakeet-tdt-0.6b-v3".
-        let resolved = Config.defaultConfig.parakeetModel ?? defaultModel
+    func testDefaultParakeetModelIsEnglishV2() {
+        // Product default (Michael, 2026-06-11): new users get Parakeet ENGLISH (v2),
+        // written EXPLICITLY into defaultConfig.
+        XCTAssertEqual(Config.defaultConfig.parakeetModel, "parakeet-tdt-0.6b-v2")
+        XCTAssertEqual(versionString(for: Config.defaultConfig.parakeetModel!), "v2")
+    }
+
+    func testLegacyNilParakeetModelCoalescesToV3() {
+        // LEGACY configs that predate the parakeetModel key still resolve to v3 at
+        // use sites (`?? "parakeet-tdt-0.6b-v3"`) — deliberate back-compat so
+        // v3-era users don't silently switch variants on upgrade.
+        let legacyValue: String? = nil
+        let resolved = legacyValue ?? defaultModel
         XCTAssertEqual(resolved, defaultModel)
         XCTAssertEqual(versionString(for: resolved), "v3")
     }
