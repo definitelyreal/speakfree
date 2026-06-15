@@ -28,7 +28,9 @@ public final class ParakeetEngine: TranscriptionEngine {
         /// FluidAudio audio constraints (mirror `ASRConstants`): 1 s of trailing silence (16k
         /// samples) is appended to capture final-word punctuation, but only when staying under the
         /// 15 s single-chunk encoder cap (240k samples).
-        private static let trailingSilenceSamples = 16_000
+        // 3 s of trailing silence. The old 1 s was too short for the TDT decoder to flush
+        // its final tokens, causing silent tail-clause truncation (see transcribe()).
+        private static let trailingSilenceSamples = 48_000
         private static let maxSingleChunkSamples = 240_000
 
         /// FluidAudio's loaded ASR manager (actor). `nil` until `load` succeeds.
@@ -158,11 +160,19 @@ public final class ParakeetEngine: TranscriptionEngine {
             active += 1
             defer { active -= 1 }
 
-            // Trailing-silence pad so the final word's punctuation lands, but only under the
-            // single-chunk encoder cap (FluidAudio auto-chunks anything longer internally).
+            // Trailing-silence pad. Parakeet's TDT decoder needs trailing audio to "flush"
+            // its final tokens — with too little, it stops early and SILENTLY DROPS the last
+            // clause (verified 2026-06-12: a 7.8s clip lost "and happy to send a screener"
+            // with the old 1s pad; ~3s recovers it). The pad is near-free: it's silence and
+            // the ANE encoder cost is ~flat regardless of length (measured ~110ms at both
+            // 7.8s and 10.8s). Pad up to `trailingSilenceSamples`, but never past the
+            // single-chunk cap so longer clips keep as much pad as fits (FluidAudio
+            // auto-chunks anything beyond the cap).
             var audio = samples
-            if audio.count + Core.trailingSilenceSamples <= Core.maxSingleChunkSamples {
-                audio += [Float](repeating: 0, count: Core.trailingSilenceSamples)
+            let availablePad = max(0, Core.maxSingleChunkSamples - audio.count)
+            let pad = min(Core.trailingSilenceSamples, availablePad)
+            if pad > 0 {
+                audio += [Float](repeating: 0, count: pad)
             }
 
             // Language hint: v3 forwards an explicit Language for concrete codes (including "en");
