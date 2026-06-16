@@ -190,6 +190,22 @@ class AudioRecorder {
     private var needsTapReinstall = false
     private var isRebuilding = false
 
+    /// Audio engines retired by a device-change teardown, kept alive briefly before release.
+    ///
+    /// AVFoundation installs its own property listener on the input audio unit
+    /// (`AVAudioIOUnit::IOUnitPropertyListener`) and fires it on a private dispatch queue
+    /// when the hardware reconfigures. During an AirPods device-change storm, that callback
+    /// can fire SECONDS after we've torn the engine down — and if the `AVAudioEngine` has
+    /// already deallocated, it messages a freed audio unit → `objc_msgSend` on freed memory
+    /// → `EXC_BAD_ACCESS` (the 2026-06-15 crash). Holding a strong reference past teardown
+    /// keeps the audio unit alive until the OS finishes reconfiguring; we release it after a
+    /// delay that comfortably exceeds the observed ~5 s callback latency. A stopped,
+    /// tap-removed engine costs only its memory, and the `isRebuilding` guard serializes
+    /// teardowns so at most a handful are ever retained at once.
+    private var retiredEngines: [AVAudioEngine] = []
+    private let retiredEnginesLock = NSLock()
+    private static let retiredEngineLingerSeconds: TimeInterval = 8.0
+
     /// Rebuild the audio engine from scratch after a device change.
     /// Tears down the old engine on a background thread to avoid deadlocking
     /// with CoreAudio's internal locks during reconfiguration.
@@ -206,6 +222,22 @@ class AudioRecorder {
         audioEngine = nil
         audioConverter = nil
 
+        // Keep the retired engine alive past teardown (see `retiredEngines`) so a late
+        // AVFoundation IO-unit property-listener callback during the device change can never
+        // message a freed audio unit. Released after the OS settles. reinstallTap() always
+        // runs on main; the lock guards against any future off-main caller regardless.
+        if let oldEngine = oldEngine {
+            retiredEnginesLock.lock()
+            retiredEngines.append(oldEngine)
+            retiredEnginesLock.unlock()
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.retiredEngineLingerSeconds) { [weak self] in
+                guard let self = self else { return }
+                self.retiredEnginesLock.lock()
+                self.retiredEngines.removeAll { $0 === oldEngine }
+                self.retiredEnginesLock.unlock()
+            }
+        }
+
         // Clear stale pre-roll
         stateLock.lock()
         prerollBuffer = []
@@ -218,7 +250,7 @@ class AudioRecorder {
                 DiagnosticLogger.shared.log("AudioRecorder: removeTap starting (background thread)")
                 engine.inputNode.removeTap(onBus: 0)
                 engine.stop()
-                DiagnosticLogger.shared.log("AudioRecorder: old engine stopped")
+                DiagnosticLogger.shared.log("AudioRecorder: old engine stopped (retained \(Int(Self.retiredEngineLingerSeconds))s to outlive late device-change callbacks)")
             }
 
             // Rebuild on main after CoreAudio settles
