@@ -154,4 +154,33 @@ final class RecordingOverlayScreenTests: XCTestCase {
                                      screenFrames: [], mainIndex: nil)
         XCTAssertNil(idx)
     }
+
+    // MARK: - AX→Cocoa coordinate flip (the multi-monitor "wrong screen" bug)
+
+    func test_axToCocoaFrame_primaryFlip() {
+        // AX top-left (0,0), 800x600, primary 1440 tall → Cocoa bottom-left y = 1440-0-600.
+        let r = axToCocoaFrame(axPosition: CGPoint(x: 0, y: 0), axSize: CGSize(width: 800, height: 600), primaryHeight: 1440)
+        XCTAssertEqual(r, NSRect(x: 0, y: 840, width: 800, height: 600))
+    }
+
+    func test_axToCocoaFrame_secondaryAbovePrimary_landsOnRightScreen() {
+        // Primary 2560x1440 at Cocoa (0,0); a second 2560x1440 display stacked ABOVE it
+        // at Cocoa y 1440..2880. A window on the upper display sits at NEGATIVE AX y.
+        let primary   = NSRect(x: 0, y: 0,    width: 2560, height: 1440)
+        let secondary = NSRect(x: 0, y: 1440, width: 2560, height: 1440)
+        let primaryHeight: CGFloat = 1440
+
+        // Window on the upper (secondary) display: AX y is above the primary's top.
+        let cocoa = axToCocoaFrame(axPosition: CGPoint(x: 100, y: -1000),
+                                   axSize: CGSize(width: 800, height: 600),
+                                   primaryHeight: primaryHeight)
+        // Correct flip puts it on the secondary, so bestScreenIndex picks index 1.
+        XCTAssertEqual(bestScreenIndex(windowFrame: cocoa, screenFrames: [primary, secondary]), 1)
+
+        // Document the old bug: pivoting on max(maxY)=2880 instead of primaryHeight pushes
+        // the frame off ALL screens (no overlap) → the overlay misses the active screen.
+        let buggyY = 2880 - (-1000) - 600  // = 3280, above both displays
+        let buggy = NSRect(x: 100, y: CGFloat(buggyY), width: 800, height: 600)
+        XCTAssertNil(bestScreenIndex(windowFrame: buggy, screenFrames: [primary, secondary]))
+    }
 }

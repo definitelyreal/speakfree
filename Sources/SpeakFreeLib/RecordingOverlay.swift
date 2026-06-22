@@ -118,11 +118,24 @@ func focusedWindowFrame() -> NSRect? {
     } else {
         return nil
     }
-    // AX coordinates are Cocoa-flipped (top-left origin); NSScreen uses bottom-left.
-    // Convert: screenY = totalHeight - axY - windowHeight.
-    let totalHeight = NSScreen.screens.reduce(CGFloat(0)) { max($0, $1.frame.maxY) }
-    let screenY = totalHeight - position.y - size.height
-    return NSRect(origin: CGPoint(x: position.x, y: screenY), size: size)
+    // AX reports the window in global display coordinates whose origin is the
+    // TOP-LEFT of the PRIMARY display (Y increases downward); NSScreen uses a
+    // bottom-left origin (Y increases upward). The vertical flip pivots on the
+    // PRIMARY screen's height — NOT the union/max edge across all screens. Using
+    // `max(maxY)` put the window on the wrong display whenever a secondary monitor
+    // was taller or positioned higher than the primary, which is why the overlay
+    // appeared on the wrong screen in multi-monitor setups (2026-06-22).
+    let primaryHeight = NSScreen.screens.first?.frame.height ?? size.height
+    return axToCocoaFrame(axPosition: position, axSize: size, primaryHeight: primaryHeight)
+}
+
+/// Convert an Accessibility window rect (top-left origin, primary-display relative)
+/// to a Cocoa screen rect (bottom-left origin). Pure + testable: the vertical flip
+/// pivots on `primaryHeight` (the menu-bar screen's height), so it stays correct
+/// across multi-monitor arrangements regardless of where secondary displays sit.
+func axToCocoaFrame(axPosition: CGPoint, axSize: CGSize, primaryHeight: CGFloat) -> NSRect {
+    let cocoaY = primaryHeight - axPosition.y - axSize.height
+    return NSRect(origin: CGPoint(x: axPosition.x, y: cocoaY), size: axSize)
 }
 
 // MARK: - RecordingOverlay
