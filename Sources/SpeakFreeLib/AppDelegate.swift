@@ -916,6 +916,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         let mode = config.spokenPunctuation ?? .off
         let glossary = Config.loadVocabulary()
+        let overrides = Config.loadOverrides()
         let capturedStyleMode = recordingStyleMode
         // Provenance snapshot for the .meta.json sidecar — engine/model from the ACTIVE
         // transcriber (not config, which can disagree after a model fallback).
@@ -986,7 +987,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         cursorContextText: capturedInputText,
                         screenContextText: capturedScreenText,
                         styleMode: capturedStyleMode,
-                        glossaryWords: glossary
+                        glossaryWords: glossary,
+                        overrides: overrides
                     )
                 }
                 // T2.3 — reuse the saved streaming partial when the gate approved, else run the

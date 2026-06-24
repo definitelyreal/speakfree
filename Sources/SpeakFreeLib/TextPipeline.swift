@@ -11,6 +11,8 @@ public enum TextPipeline {
         public let punctuationMode: PunctuationMode
         public let styleMode: TextPostProcessor.StyleMode
         public let glossaryWords: String?
+        /// Curated exact garble→correct overrides (lowercased key → replacement).
+        public let overrides: [String: String]
 
         /// `raw` defaults to `""` so callers can construct a context-only Input for prompt
         /// assembly without needing a dummy empty-string placeholder.
@@ -19,13 +21,15 @@ public enum TextPipeline {
                     cursorContextText: String? = nil,
                     screenContextText: String? = nil,
                     styleMode: TextPostProcessor.StyleMode = .none,
-                    glossaryWords: String? = nil) {
+                    glossaryWords: String? = nil,
+                    overrides: [String: String] = [:]) {
             self.raw = raw
             self.cursorContextText = cursorContextText
             self.screenContextText = screenContextText
             self.punctuationMode = punctuationMode
             self.styleMode = styleMode
             self.glossaryWords = glossaryWords
+            self.overrides = overrides
         }
     }
 
@@ -159,6 +163,7 @@ public enum TextPipeline {
         // Runs before case-adjust so corrected names feed the keep-capitalized logic.
         let corrected = GlossaryCorrector.correct(styled,
                                                   glossary: glossaryTerms(input.glossaryWords),
+                                                  overrides: input.overrides,
                                                   isRealWord: isRealWord)
         // Mid-sentence insertion must not start with a capital (Michael 2026-06-11:
         // "I really want it to be lowercase if I'm in the middle of the sentence").

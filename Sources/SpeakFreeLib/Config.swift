@@ -101,6 +101,23 @@ public struct Config: Codable {
         configDir.appendingPathComponent("vocabulary.txt")
     }
 
+    public static var overridesFile: URL {
+        configDir.appendingPathComponent("overrides.json")
+    }
+
+    /// Load curated exact garble→correct overrides from ~/.config/speakfree/overrides.json
+    /// (a flat JSON object, lowercased keys). For recurring mistranscriptions the fuzzy
+    /// GlossaryCorrector can't safely fix — real-word-colliding garbles ("kama"→"Karma")
+    /// or short tokens ("crf"→"CRM"). Curated only; nothing auto-learns into it.
+    public static func loadOverrides() -> [String: String] {
+        guard let data = try? Data(contentsOf: overridesFile),
+              let raw = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        // Normalize keys to lowercase (the corrector matches on lowercased tokens).
+        var out: [String: String] = [:]
+        for (k, v) in raw { out[k.lowercased()] = v }
+        return out
+    }
+
     /// Load custom vocabulary words from ~/.config/speakfree/vocabulary.txt
     /// One word or phrase per line. Used to prime Whisper's prompt AND to drive
     /// GlossaryCorrector on every engine (incl. Parakeet, which ignores the prompt).

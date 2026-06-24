@@ -82,6 +82,43 @@ final class GlossaryCorrectorTests: XCTestCase {
                        "San Pesa")
     }
 
+    // MARK: - Curated exact overrides (the cases fuzzy can't safely fix)
+
+    func test_override_appliesToRealWordGarble() {
+        // "Kama" reads as a real word, so the fuzzy real-word guard would skip it.
+        // A curated override forces it (the user confirmed Kama→Karma).
+        let out = GlossaryCorrector.correct("Hey Kama, are you around?",
+                                            glossary: glossary,
+                                            overrides: ["kama": "Karma"],
+                                            isRealWord: { _ in true })  // everything "real" → guard would block all fuzzy
+        XCTAssertEqual(out, "Hey Karma, are you around?")
+    }
+
+    func test_override_appliesToShortToken() {
+        // "CRF" is 3 chars — below the fuzzy length gate — so only an override fixes it.
+        let out = GlossaryCorrector.correct("update the CRF please",
+                                            glossary: [],
+                                            overrides: ["crf": "CRM"],
+                                            isRealWord: { _ in true })
+        XCTAssertEqual(out, "update the CRM please")
+    }
+
+    func test_override_caseInsensitiveKey_runsWithEmptyGlossary() {
+        let out = GlossaryCorrector.correct("Rohrli and ROHRLI",
+                                            glossary: [],
+                                            overrides: ["rohrli": "Rohrlich"],
+                                            isRealWord: { _ in true })
+        XCTAssertEqual(out, "Rohrlich and Rohrlich")
+    }
+
+    func test_override_doesNotTouchUnlistedWords() {
+        let out = GlossaryCorrector.correct("the marina was nice",
+                                            glossary: glossary,
+                                            overrides: ["kama": "Karma"],
+                                            isRealWord: isRealWord)
+        XCTAssertEqual(out, "the marina was nice")
+    }
+
     func test_glossaryTermsSplitFromCommaJoined() {
         // TextPipeline splits Config.loadVocabulary()'s ", "-joined string back to terms.
         XCTAssertEqual(TextPipeline.glossaryTerms("Claude, Zander, Bexx"),
