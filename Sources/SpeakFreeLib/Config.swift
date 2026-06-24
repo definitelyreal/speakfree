@@ -83,9 +83,14 @@ public struct Config: Codable {
     public static var configDir: URL {
         if let override = configDirOverride { return override }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        // Use bundle identifier to isolate beta from production
+        // Isolate variants by bundle-id suffix so an experimental build never shares the
+        // production app's config/recordings: ".streaming" → speakfree-streaming,
+        // ".beta" → speakfree-beta, production → speakfree.
+        let bundleId = Bundle.main.bundleIdentifier ?? ""
         let dirName: String
-        if let bundleId = Bundle.main.bundleIdentifier, bundleId.hasSuffix(".beta") {
+        if bundleId.hasSuffix(".streaming") {
+            dirName = "speakfree-streaming"
+        } else if bundleId.hasSuffix(".beta") {
             dirName = "speakfree-beta"
         } else {
             dirName = "speakfree"
