@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <strong>🌐 Website &amp; downloads: <a href="https://definitelyreal.github.io/speakfree/">definitelyreal.github.io/speakfree</a></strong>
+</p>
+
+<p align="center">
   <a href="https://github.com/definitelyreal/speakfree/releases/latest"><img src="https://img.shields.io/github/v/release/definitelyreal/speakfree?label=download&style=flat-square" alt="Download"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-blue?style=flat-square" alt="macOS 14+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT">
@@ -19,7 +23,7 @@
 
 ## Install
 
-1. Download **[speakfree.zip](https://github.com/definitelyreal/speakfree/releases/latest)** and unzip it
+1. Download **[speakfree.dmg](https://github.com/definitelyreal/speakfree/releases/latest)** and open it
 2. Drag **speakfree.app** to your Applications folder
 3. Open it — **right-click → Open** on the first launch (macOS security step, required once)
 4. Grant **Microphone** and **Accessibility** permissions when prompted

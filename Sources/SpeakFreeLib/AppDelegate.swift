@@ -230,12 +230,32 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             var selectedModel = modelID
             var selectedLanguage = config.language
             var didProceed = false
-            DispatchQueue.main.sync {
+            // Present the onboarding modal via the main RUN LOOP, NOT DispatchQueue.main.sync.
+            // WelcomeController.show() runs NSApp.runModal; its nested run loop must keep draining the
+            // main dispatch queue so the Parakeet download's progress callbacks AND its post-download
+            // MainActor hops (finalize, compileAndCache, markDownloaded) can run. Launching the modal
+            // from a main-queue dispatch block makes libdispatch treat the main queue as mid-drain and
+            // starves every other main-queue block for the modal's whole lifetime: the ~600 MB model
+            // downloads to disk, but the UI freezes at 0% and the install never finishes (the Task
+            // hangs at the first `await MainActor.run`). CFRunLoopPerformBlock runs as a run-loop
+            // activity, not a dispatch item, so the nested modal loop drains the main queue normally.
+            let presentWelcome = {
                 let result = WelcomeController.show(suggestedEngine: engineID, suggestedModel: modelID)
                 selectedEngine = result.engine
                 selectedModel = result.modelID
                 selectedLanguage = result.language
                 didProceed = result.shouldContinue
+            }
+            if Thread.isMainThread {
+                presentWelcome()
+            } else {
+                let welcomeDone = DispatchSemaphore(value: 0)
+                CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+                    presentWelcome()
+                    welcomeDone.signal()
+                }
+                CFRunLoopWakeUp(CFRunLoopGetMain())
+                welcomeDone.wait()
             }
             guard didProceed else {
                 DispatchQueue.main.async {
