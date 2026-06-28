@@ -160,8 +160,108 @@ public final class ParakeetModelManager {
     /// `downloadOnly`, and `loadDownloadedModels` (which throw `modelAssetsMissing` for unknown ids).
     public func isModelDownloaded(_ modelName: String) -> Bool {
         guard isKnownModelID(modelName) else { return false }
-        let v = version(for: modelName)
-        return AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v)
+        return cacheIsComplete(version: version(for: modelName))
+    }
+
+    // MARK: - Cache integrity
+
+    /// Whether the cache for `v` is not just present-by-name but actually loadable.
+    ///
+    /// `AsrModels.modelsExist` is existence-only: an interrupted prior download can leave every
+    /// required file present *by name* while a `.mlmodelc` bundle is missing its compiled
+    /// `coremldata.bin`. That passes the naive check, so onboarding/launch is skipped, yet
+    /// `loadFromCache` later throws `modelAssetsMissing`, and because `enforceOffline` is held true
+    /// outside `ensureDownloaded`, FluidAudio can't self-heal, leaving the user stuck with no progress
+    /// UI. This adds the same `coremldata.bin` integrity check FluidAudio's own loader performs, so a
+    /// partial cache is treated as "not downloaded" (re-triggering the visible download, which purges
+    /// and refetches it).
+    private func cacheIsComplete(version v: AsrModelVersion) -> Bool {
+        let dir = AsrModels.defaultCacheDirectory(for: v)
+        // Names must all be present first (also covers a wholly missing model dir).
+        guard AsrModels.modelsExist(at: dir, version: v) else { return false }
+        let fm = FileManager.default
+        guard
+            let enumerator = fm.enumerator(
+                at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+        else { return false }
+        var foundModel = false
+        for case let url as URL in enumerator where url.pathExtension == "mlmodelc" {
+            enumerator.skipDescendants()  // don't walk the (large) compiled-weights tree
+            foundModel = true
+            let marker = url.appendingPathComponent("coremldata.bin")
+            let size = (try? fm.attributesOfItem(atPath: marker.path))?[.size] as? NSNumber
+            if (size?.intValue ?? 0) <= 0 { return false }  // present but empty/missing → corrupt
+        }
+        return foundModel
+    }
+
+    /// Removes any `.mlmodelc` bundle in the cache whose compiled `coremldata.bin` is missing or
+    /// empty (the corruption `cacheIsComplete` detects). FluidAudio's downloader skips files that
+    /// already exist on disk, so a corrupt-but-present bundle is never refetched unless removed.
+    /// Deleting *only the bad bundles* (not the whole model dir) lets FluidAudio refetch exactly
+    /// those while resuming/keeping every valid or merely-missing file, so it heals a corrupt or
+    /// mixed cache in a single download cycle without re-pulling the full ~600 MB.
+    ///
+    /// Throws on a failed removal rather than swallowing it: a silent failure would let FluidAudio
+    /// re-skip the corrupt bundle and leave the user stuck, exactly the bug this closes. Only ever
+    /// deletes `.mlmodelc` subdirectories of the per-model cache dir
+    /// (`…/FluidAudio/Models/parakeet-tdt-0.6b-vN`), never the model dir, a sibling, or the Models root.
+    @discardableResult
+    private func purgeCorruptBundles(version v: AsrModelVersion) throws -> Int {
+        let dir = AsrModels.defaultCacheDirectory(for: v)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: dir.path),
+            let enumerator = fm.enumerator(
+                at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+        else { return 0 }
+        var corrupt: [URL] = []
+        for case let url as URL in enumerator where url.pathExtension == "mlmodelc" {
+            enumerator.skipDescendants()  // don't walk into the (large) compiled-weights tree
+            let marker = url.appendingPathComponent("coremldata.bin")
+            let size = (try? fm.attributesOfItem(atPath: marker.path))?[.size] as? NSNumber
+            if (size?.intValue ?? 0) <= 0 { corrupt.append(url) }  // missing/empty → corrupt
+        }
+        for url in corrupt {  // remove after enumerating so we never mutate the tree mid-walk
+            try fm.removeItem(at: url)
+            DiagnosticLogger.shared.log(
+                "ParakeetModelManager: purged corrupt bundle \(url.lastPathComponent)")
+        }
+        return corrupt.count
+    }
+
+    // MARK: - Direct pre-fetch (smooth byte-accurate progress)
+
+    /// Whether `modelName` has a direct-download plan (so the UI can show a true byte-progress bar
+    /// before handing off to FluidAudio). Currently only the default English v2 model.
+    public func hasDirectDownloadPlan(_ modelName: String) -> Bool {
+        ParakeetDirectDownloader.plan(forModelID: modelName) != nil
+    }
+
+    /// Best-effort: pre-fetches the large model bundles directly from HuggingFace with real
+    /// `(downloadedBytes, totalBytes)` progress, into FluidAudio's cache, BEFORE FluidAudio's own
+    /// download. FluidAudio then skips the placed files and fetches only the small remainder +
+    /// compiles. No-op for models without a plan. Errors are swallowed: FluidAudio's subsequent
+    /// download fills in anything missing, so a failed pre-fetch only loses the smooth bar.
+    public func prefetchLargeFiles(
+        _ modelName: String,
+        progress: @escaping (_ downloaded: Int64, _ total: Int64) -> Void
+    ) async throws {
+        guard isKnownModelID(modelName) else { return }
+        let cacheDir = cacheDirectory(for: modelName)
+        do {
+            try await ParakeetDirectDownloader.prefetch(
+                modelID: modelName, into: cacheDir, progress: progress)
+        } catch is CancellationError {
+            throw CancellationError()  // user paused/stopped — propagate so the flow stops
+        } catch let e as URLError where e.code == .cancelled {
+            throw CancellationError()  // same: a cancelled URLSession download is a user pause/stop
+        } catch {
+            // Network/list failure is non-fatal: swallow it so FluidAudio's own download (called next)
+            // fetches everything normally. We only lose the smooth progress bar, never the install.
+            DiagnosticLogger.shared.log(
+                "ParakeetModelManager: direct pre-fetch failed (FluidAudio will download normally): "
+                    + "\(error.localizedDescription)")
+        }
     }
 
     // MARK: - Download
@@ -188,30 +288,37 @@ public final class ParakeetModelManager {
 
         let v = version(for: modelName)
 
-        // Existence is a pure on-disk check independent of `enforceOffline`, so it stays outside the
-        // gate to avoid holding the global slot for a no-op.
-        if AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v) {
+        // Completeness (not just existence) is a pure on-disk check independent of `enforceOffline`,
+        // so it stays outside the gate to avoid holding the global slot for a no-op.
+        if cacheIsComplete(version: v) {
             progress(1.0)
             return
         }
 
         // Serialize behind the single global gate so the `enforceOffline = false` window below can
-        // never overlap a concurrent cache load or another download. Re-check existence inside the
-        // gate: a download that completed while we were queued makes ours a no-op.
+        // never overlap a concurrent cache load or another download. Re-check inside the gate: a
+        // download that completed while we were queued makes ours a no-op.
         try await downloadGate.run {
-            if AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v) {
+            if cacheIsComplete(version: v) {
                 progress(1.0)
                 return
             }
+
+            // Remove any present-but-corrupt bundle (bad coremldata.bin) that FluidAudio's
+            // existence-only check would otherwise skip; valid and merely-missing files are left for
+            // FluidAudio to keep/resume. (We only get here with cacheIsComplete == false.)
+            try purgeCorruptBundles(version: v)
 
             DiagnosticLogger.shared.log(
                 "ParakeetModelManager: downloading \(modelName) (version \(v))")
             let start = Date()
 
-            // FluidAudio's progress handler is `@Sendable (DownloadProgress) -> Void`. Map its
-            // `.fractionCompleted` (already a 0..1 Double) onto our `(Double) -> Void`.
+            // FluidAudio's `@Sendable (DownloadProgress) -> Void` re-emits a per-spec 0→1 sweep for
+            // every model component (download() + load() each loop the specs), so `.fractionCompleted`
+            // sawtooths. Funnel it through `ProgressNormalizer` so callers get one monotonic [0, 1) ramp.
+            let normalizer = ProgressNormalizer()
             let handler: DownloadUtils.ProgressHandler = { p in
-                progress(p.fractionCompleted)
+                progress(normalizer.map(p))
             }
 
             // This is the ONLY sanctioned network fetch. Flip `enforceOffline` off for the duration
@@ -235,10 +342,13 @@ public final class ParakeetModelManager {
         progress(1.0)
     }
 
-    /// Downloads model files using `AsrModels.download()`, which fires byte-level progress callbacks
-    /// in [0, 0.5] (FluidAudio reserves the upper half for the load phase internally).
-    /// Does NOT compile or load — call `compileAndCache()` afterward.
-    /// Callers that want a 0–1 display range should multiply the received fraction by 2.
+    /// Acquires the model's files via `AsrModels.download()`, reporting a **monotonic** [0, 1)
+    /// display fraction (the caller pegs 1.0 only on success). `AsrModels.download()` loops over
+    /// the model's component specs and re-runs a full download→compile pass per spec, re-emitting
+    /// its own 0→0.5(bytes)→1.0(CoreML compile) sweep each time; forwarding that verbatim makes a
+    /// progress bar jump backward. `ProgressNormalizer` collapses that sawtooth into one
+    /// never-decreasing ramp. Note `AsrModels.download()` already compiles each spec internally;
+    /// `compileAndCache()` is still called afterward to load + validate from the warm cache.
     public func downloadOnly(
         _ modelName: String,
         progress: @escaping (Double) -> Void
@@ -251,18 +361,22 @@ public final class ParakeetModelManager {
         Self.pinRegistryHostIfNeeded()
         let v = version(for: modelName)
 
-        if AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v) {
-            return  // already downloaded
+        if cacheIsComplete(version: v) {
+            return  // already downloaded and loadable
         }
 
         try await downloadGate.run {
-            if AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: v), version: v) {
+            if cacheIsComplete(version: v) {
                 return
             }
+            // Remove any present-but-corrupt bundle (bad coremldata.bin) that FluidAudio would skip;
+            // valid and merely-missing files are left for FluidAudio to keep/resume.
+            try purgeCorruptBundles(version: v)
             DiagnosticLogger.shared.log(
                 "ParakeetModelManager: downloading \(modelName) via download-only API")
             let start = Date()
-            let handler: DownloadUtils.ProgressHandler = { p in progress(p.fractionCompleted) }
+            let normalizer = ProgressNormalizer()
+            let handler: DownloadUtils.ProgressHandler = { p in progress(normalizer.map(p)) }
             DownloadUtils.enforceOffline = false
             defer { DownloadUtils.enforceOffline = true }
             _ = try await AsrModels.download(version: v, progressHandler: handler)
@@ -344,5 +458,49 @@ public final class ParakeetModelManager {
     /// `ensureDownloaded(_:progress:)`.
     public func loadedModels(_ modelName: String) async throws -> AsrModels {
         try await loadDownloadedModels(modelName)
+    }
+}
+
+/// Collapses FluidAudio's chunky, non-monotonic `DownloadProgress` stream into a single
+/// never-decreasing display fraction in [0, 1).
+///
+/// FluidAudio acquires a Parakeet model by looping over its component specs (preprocessor,
+/// encoder, decoder, joint) and re-running a full download→compile pass per spec, re-emitting its
+/// own 0→0.5 (byte download) → 0.5→1.0 (CoreML compile) sweep each time. Forwarded verbatim, that
+/// fraction sawtooths (e.g. 1.0→0.5→1.0…), so the progress bar jumps backward and reads as broken,
+/// the original "download progress isn't showing" bug. This maps the real byte download into the
+/// bulk of the bar and lets the (path-dependent, count-unknown) compile passes creep the tail
+/// toward (but never reaching) 1.0; the caller pegs 1.0 only when the operation actually succeeds.
+///
+/// `@unchecked Sendable`: FluidAudio invokes the progress handler from an arbitrary queue, so the
+/// mutable `displayed` cursor is guarded by a lock.
+final class ProgressNormalizer: @unchecked Sendable {
+    /// Byte download fills [0, downloadCeiling]; compile passes creep within (downloadCeiling, tailCeiling].
+    private static let downloadCeiling = 0.85
+    private static let tailCeiling = 0.99
+    /// Each compile callback closes this fraction of the remaining gap to `tailCeiling`.
+    private static let compileStep = 0.25
+
+    private let lock = NSLock()
+    private var displayed = 0.0
+
+    /// Maps one FluidAudio progress snapshot to a monotonic [0, 1) display fraction.
+    func map(_ p: DownloadUtils.DownloadProgress) -> Double {
+        lock.lock()
+        defer { lock.unlock() }
+        switch p.phase {
+        case .listing, .downloading:
+            // FluidAudio's byte-weighted download fraction lives in [0, 0.5]; rescale it across the
+            // download band. `max` keeps it monotonic against the per-spec "already on disk" 0.5 spikes.
+            let raw = p.fractionCompleted.isFinite ? min(max(p.fractionCompleted, 0), 0.5) : 0
+            let mapped = (raw / 0.5) * Self.downloadCeiling
+            displayed = max(displayed, mapped)
+        case .compiling:
+            // Number of compile passes is path-dependent (download vs download+load), so advance
+            // by a fixed fraction of the remaining gap on each callback, always forward, never 1.0.
+            displayed = max(displayed, Self.downloadCeiling)
+            displayed += (Self.tailCeiling - displayed) * Self.compileStep
+        }
+        return displayed
     }
 }

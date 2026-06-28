@@ -19,7 +19,7 @@ func printUsage() {
         speakfree set-model <size>   Set the Whisper model
         speakfree download-model [size]  Download a Whisper model
         speakfree set-engine <name>  Set the transcription engine (whisper | parakeet)
-        speakfree download-parakeet [id]  Download a Parakeet model (default parakeet-tdt-0.6b-v3)
+        speakfree download-parakeet [id]  Download a Parakeet model (default parakeet-tdt-0.6b-v2)
         speakfree status             Show configuration and status
         speakfree --help             Show this help message
 
@@ -142,14 +142,21 @@ func cmdSetEngine(_ name: String) {
 }
 
 func cmdDownloadParakeet(_ modelID: String) {
+    DiagnosticLogger.shared.setEnabled(true)  // surface ParakeetDirectDownloader diagnostics on the CLI
     print("Downloading Parakeet model '\(modelID)' (~600 MB, one time)…")
     let sem = DispatchSemaphore(value: 0)
     var failure: Error?
     Task {
         do {
-            try await ParakeetModelManager.shared.ensureDownloaded(modelID) { fraction in
-                fputs("\r  \(Int(fraction * 100))%   ", stderr)
+            // Phase 1: byte-accurate pre-fetch of the large bundles (smooth real progress).
+            try await ParakeetModelManager.shared.prefetchLargeFiles(modelID) { written, total in
+                guard total > 0 else { return }
+                let pct = Int(Double(written) / Double(total) * 100)
+                fputs("\r  downloading \(pct)%  (\(written / 1_000_000) of \(total / 1_000_000) MB)   ", stderr)
             }
+            fputs("\n  finishing + compiling…\n", stderr)
+            // Phase 2: FluidAudio fetches the small remainder and compiles (skips pre-fetched files).
+            try await ParakeetModelManager.shared.ensureDownloaded(modelID) { _ in }
         } catch {
             failure = error
         }
@@ -236,7 +243,9 @@ case "set-engine":
     }
     cmdSetEngine(args[2])
 case "download-parakeet":
-    let id = args.count > 2 ? args[2] : "parakeet-tdt-0.6b-v3"
+    // Default to the app's default model (English v2) so the bare command matches what a fresh
+    // install expects. Important for the manual-install fallback instructions on the website.
+    let id = args.count > 2 ? args[2] : Config.defaultParakeetModel
     cmdDownloadParakeet(id)
 case "status":
     cmdStatus()

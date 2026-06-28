@@ -1,7 +1,7 @@
 import Foundation
 
-class DiagnosticLogger {
-    static let shared = DiagnosticLogger()
+public class DiagnosticLogger {
+    public static let shared = DiagnosticLogger()
 
     private var logFile: URL?
     private let queue = DispatchQueue(label: "com.speakfree.logger")
@@ -22,7 +22,7 @@ class DiagnosticLogger {
     }
 
     /// Enable or disable logging at runtime (from settings toggle)
-    func setEnabled(_ enabled: Bool) {
+    public func setEnabled(_ enabled: Bool) {
         isEnabled = enabled
         if enabled && logFile == nil {
             startLogging()
