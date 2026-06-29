@@ -5,6 +5,10 @@ class HelpController: NSWindowController {
 
     static func show() {
         if shared == nil { shared = HelpController() }
+        // Accessory (menu-bar) apps can't bring a window to the front without first switching to a
+        // regular activation policy — the Settings window does this; Help was missing it, so clicking
+        // Help appeared to do nothing.
+        NSApp.showDockIconIfNeeded()
         shared?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         shared?.window?.makeKeyAndOrderFront(nil)
