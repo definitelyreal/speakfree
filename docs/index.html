@@ -522,48 +522,6 @@
 
   <div class="page-glow"></div>
 
-  <div class="notice" id="model-download-notice">
-    <span class="notice-title">⚠️ Known issue: first-launch model download</span>
-    The one-time Parakeet speech-model download on first launch is still being fixed
-    (should be sorted within the week). If your download stalls, never finishes, or the app
-    says the model is missing, you can install it manually in about a minute. The steps below
-    are written so you can also just <strong>paste this page to an AI assistant</strong>
-    (Claude, ChatGPT) and have it download speakfree and install the model for you.
-
-    <details>
-      <summary>Manual install (or hand these steps to your AI assistant)</summary>
-
-      <ol>
-        <li>
-          <strong>Install speakfree.</strong> Download the <code>.dmg</code> using the
-          Download button below, open it, and drag <code>speakfree</code> into your
-          <code>Applications</code> folder. Launch it once and grant the permissions it asks for.
-        </li>
-        <li>
-          <strong>Install the Parakeet model.</strong> Open <code>Terminal</code> (Applications →
-          Utilities → Terminal) and paste this, then press Return. It downloads the model
-          (~600&nbsp;MB) straight into the right place and prints progress:
-          <pre><code>/Applications/speakfree.app/Contents/MacOS/speakfree download-parakeet parakeet-tdt-0.6b-v2</code></pre>
-          <span class="muted">For multilingual dictation, use
-          <code>parakeet-tdt-0.6b-v3</code> instead of <code>...-v2</code>.</span>
-        </li>
-        <li>
-          <strong>Quit and reopen speakfree.</strong> It will pick up the model automatically.
-          That's it.
-        </li>
-      </ol>
-
-      <p class="muted">
-        Reference (for the curious or for an AI assistant): the model is the public
-        <a href="https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml">FluidInference/parakeet-tdt-0.6b-v2-coreml</a>
-        repo on Hugging Face, and it gets cached at
-        <code>~/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v2/</code>.
-        The Terminal command above is the clean, supported way to install it. No need to place
-        files by hand.
-      </p>
-    </details>
-  </div>
-
   <section class="hero">
     <img class="logo" src="logo.png" alt="speakfree" />
     <h1 class="wordmark">speakfree</h1>
