@@ -4,18 +4,34 @@ class HelpController: NSWindowController {
     private static var shared: HelpController?
 
     static func show() {
-        if shared == nil { shared = HelpController() }
+        if shared == nil {
+            shared = HelpController()
+            // Hide the dock icon again when the Help window closes (matches Settings).
+            if let window = shared?.window {
+                NotificationCenter.default.addObserver(
+                    forName: NSWindow.willCloseNotification,
+                    object: window,
+                    queue: .main
+                ) { _ in NSApp.hideDockIconIfNoWindows() }
+            }
+        }
         // Accessory (menu-bar) apps can't bring a window to the front without first switching to a
         // regular activation policy — the Settings window does this; Help was missing it, so clicking
         // Help appeared to do nothing.
         NSApp.showDockIconIfNeeded()
-        shared?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+        shared?.showWindow(nil)
         shared?.window?.makeKeyAndOrderFront(nil)
     }
 
-    override func loadWindow() {
-        let panel = NSPanel(
+    // Build the window in the designated initializer (like SettingsWindowController) instead of a
+    // lazy loadWindow() override. The lazy path left the window unbuilt, so clicking Help did
+    // nothing even though the menu action fired.
+    convenience init() {
+        // Use a plain NSWindow, not NSPanel: NSPanel defaults hidesOnDeactivate=true, so in an
+        // accessory (menu-bar) app it hides itself the moment activation wobbles — which is why
+        // clicking Help did nothing. SettingsWindowController uses NSWindow and works.
+        let panel = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 560),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
@@ -23,8 +39,10 @@ class HelpController: NSWindowController {
         )
         panel.title = "speakfree Help"
         panel.minSize = NSSize(width: 380, height: 400)
+        // A reused shared controller must NOT release its window on close, or the next show()
+        // would reference a freed window and silently fail.
+        panel.isReleasedWhenClosed = false
         panel.center()
-        self.window = panel
 
         let scrollView = NSScrollView(frame: panel.contentView!.bounds)
         scrollView.autoresizingMask = [.width, .height]
@@ -36,7 +54,7 @@ class HelpController: NSWindowController {
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 20, height: 20)
-        textView.textStorage?.setAttributedString(helpContent())
+        textView.textStorage?.setAttributedString(HelpController.helpContent())
         textView.sizeToFit()
 
         let contentHeight = max(textView.frame.height + 40, 560)
@@ -44,9 +62,11 @@ class HelpController: NSWindowController {
 
         scrollView.documentView = textView
         panel.contentView!.addSubview(scrollView)
+
+        self.init(window: panel)
     }
 
-    private func helpContent() -> NSAttributedString {
+    private static func helpContent() -> NSAttributedString {
         let result = NSMutableAttributedString()
 
         func h(_ text: String) {
