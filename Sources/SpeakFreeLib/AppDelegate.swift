@@ -742,6 +742,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleRecordingStart() {
         guard !isPressed else { return }
+
+        // Microphone gate: never silently record silence. If access is missing, this prompts
+        // (notDetermined) or shows an actionable alert (denied) and aborts this attempt.
+        guard Permissions.ensureMicrophoneForRecording() else { return }
+
         isPressed = true
 
         // Verify all subsystems before every recording
