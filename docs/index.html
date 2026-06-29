@@ -16,7 +16,7 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg: #080809;
+      --bg: #121212;
       --surface: #111114;
       --border: rgba(255,255,255,0.07);
       --text: #eeeef2;
@@ -529,9 +529,9 @@
 
     <div class="cta-wrap">
       <div class="cta-row">
-        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.6.0.dmg">
+        <a class="btn btn-primary" href="https://github.com/definitelyreal/speakfree/releases/latest/download/speakfree-1.7.0.dmg">
           ↓&nbsp; Download for Mac
-          <span class="btn-sub">v1.6.0 &nbsp;•&nbsp; Apple Silicon</span>
+          <span class="btn-sub">v1.7.0 &nbsp;•&nbsp; Apple Silicon</span>
         </a>
         <a class="btn btn-secondary" href="https://github.com/definitelyreal/speakfree">
           View on GitHub ↗
@@ -757,9 +757,16 @@
   <section class="changes">
     <div class="changes-inner">
       <button class="changes-toggle" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
-        <span class="arrow">▶</span> What's new in v1.6
+        <span class="arrow">▶</span> What's new in v1.7
       </button>
       <div class="changes-body">
+        <h3>v1.7.0</h3>
+        <ul>
+          <li>The first-launch model download now shows a real, smooth progress bar and reliably finishes. A timing bug in the setup window could leave it stuck at 0% even after the model had fully downloaded.</li>
+          <li>A partial or corrupted model cache now repairs itself automatically instead of silently failing.</li>
+          <li>Stop reliably cancels a download. Removed a "pause" that could only restart the large download from scratch.</li>
+          <li>Closing the setup window after the model is installed no longer asks you to download one.</li>
+        </ul>
         <h3>v1.6.0</h3>
         <ul>
           <li>Parakeet (English) is now the default engine — NVIDIA's speech model running on the Apple Neural Engine, faster and more accurate than Whisper for English</li>
