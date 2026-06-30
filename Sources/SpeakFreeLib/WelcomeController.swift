@@ -34,6 +34,10 @@ class WelcomeController: NSObject, NSWindowDelegate {
     private var isModelReady = false
     private var whisperCoordinator: ModelDownloadCoordinator?
     private var parakeetTask: Task<Void, Never>?
+    /// Identifies the live Parakeet download. Bumped whenever a download starts, is cancelled, or is
+    /// paused/stopped; every UI callback captures its generation and no-ops if it no longer matches,
+    /// so a late callback from an abandoned task can't write stale progress over a reset panel.
+    private var parakeetDownloadGeneration = 0
     private var completion: ((String, String, String, Bool) -> Void)?
 
     private static let modelSizes: [String: String] = [
@@ -200,7 +204,11 @@ class WelcomeController: NSObject, NSWindowDelegate {
         errorLabel = NSTextField(wrappingLabelWithString: "")
         errorLabel.font = NSFont.systemFont(ofSize: 11)
         errorLabel.textColor = .systemRed
-        errorLabel.frame = NSRect(x: 88, y: h - 398, width: 352, height: 16)
+        // Spans the full footer width/height: the Parakeet failure message is multi-line and
+        // includes a long, copy-pasteable Terminal command. showError() hides the login checkbox
+        // and Start/Configure buttons while this is visible so nothing overlaps (see showError).
+        errorLabel.frame = NSRect(x: 20, y: h - 470, width: w - 40, height: 112)
+        errorLabel.isSelectable = true  // let users copy the manual-install command from the fallback
         errorLabel.isHidden = true
         c.addSubview(errorLabel)
 
@@ -328,6 +336,7 @@ class WelcomeController: NSObject, NSWindowDelegate {
         percentLabel.isHidden = true; percentLabel.stringValue = ""
         bytesLabel.isHidden = true; bytesLabel.stringValue = ""
         statusLabel.stringValue = ""; errorLabel.isHidden = true; errorLabel.stringValue = ""
+        loginCheckbox.isHidden = false; configureButton.isHidden = false; startButton.isHidden = false
         startButton.isEnabled = false; configureButton.isEnabled = false
         enginePicker.isEnabled = true; modelPicker.isEnabled = true
         if languagePicker != nil { languagePicker.isEnabled = true }
@@ -339,6 +348,8 @@ class WelcomeController: NSObject, NSWindowDelegate {
         pauseButton.isHidden = true; stopButton.isHidden = true
         progressBar.stopAnimation(nil); progressBar.isHidden = true
         percentLabel.isHidden = true; bytesLabel.isHidden = true
+        errorLabel.isHidden = true; errorLabel.stringValue = ""
+        loginCheckbox.isHidden = false; configureButton.isHidden = false; startButton.isHidden = false
         statusLabel.stringValue = "Model ready."
         startButton.isEnabled = true; configureButton.isEnabled = true
         enginePicker.isEnabled = true; modelPicker.isEnabled = true
@@ -352,6 +363,10 @@ class WelcomeController: NSObject, NSWindowDelegate {
         downloadButton.title = "Retry"; downloadButton.isEnabled = true; downloadButton.isHidden = false
         pauseButton.isHidden = true; stopButton.isHidden = true
         statusLabel.stringValue = ""
+        // The fallback message is multi-line (includes a Terminal command), so the error label
+        // expands into the footer zone, so hide the login checkbox and Start/Configure buttons while
+        // it shows so nothing overlaps. They are restored when leaving the error state.
+        loginCheckbox.isHidden = true; configureButton.isHidden = true; startButton.isHidden = true
         errorLabel.stringValue = message; errorLabel.isHidden = false
         enginePicker.isEnabled = true; modelPicker.isEnabled = true
         if languagePicker != nil { languagePicker.isEnabled = true }
@@ -359,6 +374,8 @@ class WelcomeController: NSObject, NSWindowDelegate {
 
     private func showDownloadingUI(label: String, indeterminate: Bool) {
         isDownloading = true; isPaused = false
+        // Restore footer controls in case a prior error hid them (see showError).
+        loginCheckbox.isHidden = false; configureButton.isHidden = false; startButton.isHidden = false
         downloadButton.isHidden = true
         pauseButton.isHidden = false; pauseButton.title = "⏸︎ Pause"
         stopButton.isHidden = false; stopButton.title = indeterminate ? "Cancel" : "Stop"
@@ -405,6 +422,15 @@ class WelcomeController: NSObject, NSWindowDelegate {
     }
 
     @objc private func languageChanged() {
+        // If a download error is showing, changing language clears it and restores the footer
+        // controls that showError hid, so the user can't get stranded with a hidden Start button.
+        if !isDownloading && !errorLabel.isHidden {
+            resetDownloadUI()
+            if selectedEngine == "parakeet",
+                ParakeetModelManager.shared.isModelDownloaded(selectedParakeetModel) {
+                markDownloaded()
+            }
+        }
         if let code = languagePicker.selectedItem?.representedObject as? String {
             selectedLanguage = code
             if selectedEngine == "whisper" {
@@ -446,6 +472,7 @@ class WelcomeController: NSObject, NSWindowDelegate {
         } else {
             isPaused = true; pauseButton.title = "▶︎ Resume"
             if selectedEngine == "parakeet" {
+                parakeetDownloadGeneration += 1  // invalidate in-flight callbacks from the paused task
                 parakeetTask?.cancel(); parakeetTask = nil
             } else {
                 whisperCoordinator?.pause()
@@ -475,6 +502,13 @@ class WelcomeController: NSObject, NSWindowDelegate {
     // MARK: - NSWindowDelegate
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // If a model is already downloaded, closing the window just means "done" — proceed into the
+        // app like the Start button, no nag.
+        if isModelReady {
+            applyLoginCheckbox()
+            dismiss(shouldContinue: true)
+            return false
+        }
         let alert = NSAlert()
         alert.messageText = "You must download a model to use SpeakFree."
         alert.informativeText = "Download one in Settings at any time."
@@ -500,6 +534,7 @@ class WelcomeController: NSObject, NSWindowDelegate {
 
     private func cancelCurrentDownload() {
         whisperCoordinator?.cancel(); whisperCoordinator = nil
+        parakeetDownloadGeneration += 1  // invalidate in-flight callbacks from the cancelled task
         parakeetTask?.cancel(); parakeetTask = nil
         isDownloading = false; isPaused = false
     }
@@ -516,45 +551,94 @@ class WelcomeController: NSObject, NSWindowDelegate {
     // MARK: - Parakeet download (two-phase: download → compile)
 
     private func beginParakeetDownload(modelName: String) {
-        let sizeStr = EngineCatalog.parakeetModels.first(where: { $0.id == modelName })?.sizeDescription ?? "~600 MB"
-        showDownloadingUI(label: "Downloading \(modelName)…", indeterminate: false)
+        // v2 has a direct-download plan, so we show a true byte-progress bar. Other models (v3) have
+        // no usable progress from FluidAudio, so start an animated indeterminate bar immediately so it
+        // never shows a frozen number.
+        let smoothProgress = ParakeetModelManager.shared.hasDirectDownloadPlan(modelName)
+        showDownloadingUI(
+            label: smoothProgress ? "Downloading Parakeet model…" : "Downloading Parakeet model (~600 MB)…",
+            indeterminate: !smoothProgress)
+        // A Parakeet download is essentially one large file fetched without resume data, so "pause"
+        // would just restart it from zero (and orphan the partial download). Offer only Stop.
+        pauseButton.isHidden = true
+
+        // Capture this download's generation; every UI callback below no-ops if a later
+        // pause/stop/new-download has superseded it (guards against stale late callbacks).
+        parakeetDownloadGeneration += 1
+        let generation = parakeetDownloadGeneration
 
         parakeetTask = Task {
             do {
-                // Phase 1: real byte-level download progress via AsrModels.download()
-                // FluidAudio maps download to [0, 0.5]; multiply by 2 for 0–100% display.
-                try await ParakeetModelManager.shared.downloadOnly(modelName) { [weak self] fraction in
-                    guard fraction.isFinite, fraction >= 0 else { return }
+                // Phase 1: byte-accurate direct pre-fetch of the large bundles (~99% of the bytes),
+                // so the bar moves smoothly instead of freezing on FluidAudio's progress-less fetch.
+                try await ParakeetModelManager.shared.prefetchLargeFiles(modelName) { [weak self] written, total in
+                    guard total > 0 else { return }
                     DispatchQueue.main.async {
-                        guard let self = self, !self.isPaused else { return }
-                        let display = min(fraction * 2.0, 1.0)
+                        guard let self = self, self.parakeetDownloadGeneration == generation,
+                            !self.isPaused else { return }
+                        let display = min(Double(written) / Double(total), 1.0) * 0.92  // download fills 0–92%
+                        self.progressBar.isIndeterminate = false
                         self.progressBar.doubleValue = display
                         self.percentLabel.stringValue = "\(Int(display * 100))%"
-                        let downloaded = WelcomeController.formatBytes(Int64(fraction * 2.0 * 650_000_000))
-                        self.bytesLabel.stringValue = "\(downloaded) of \(sizeStr)"
+                        self.percentLabel.isHidden = false
+                        self.bytesLabel.stringValue =
+                            "\(WelcomeController.formatBytes(written)) of \(WelcomeController.formatBytes(total))"
                         self.bytesLabel.isHidden = false
-                        self.progressBar.display(); self.percentLabel.display(); self.bytesLabel.display()
+                        self.statusLabel.stringValue = "Downloading Parakeet model…"
+                        self.progressBar.display(); self.percentLabel.display()
+                        self.bytesLabel.display(); self.statusLabel.display()
                     }
                 }
 
-                // Phase 2: compilation (indeterminate — no granular signal available)
+                // Phase 2: FluidAudio fetches the small remainder (skipping the pre-fetched bundles)
+                // and compiles each model on the Neural Engine. FluidAudio reports no usable progress
+                // here, so show an animated bar with an honest label rather than a frozen number.
                 await MainActor.run { [weak self] in
-                    guard let self = self else { return }
-                    self.progressBar.isIndeterminate = true
-                    self.progressBar.startAnimation(nil)
+                    guard let self = self, self.parakeetDownloadGeneration == generation else { return }
                     self.percentLabel.isHidden = true
                     self.bytesLabel.isHidden = true
-                    self.statusLabel.stringValue = "Compiling model for your device…"
+                    self.progressBar.isIndeterminate = true
+                    self.progressBar.startAnimation(nil)
+                    // For v2 the download is essentially done (pre-fetched), so this is genuinely the
+                    // compile step; for v3 the whole download happens here, so label it accordingly.
+                    self.statusLabel.stringValue =
+                        smoothProgress ? "Preparing model for your Mac…" : "Downloading Parakeet model (~600 MB)…"
                     self.progressBar.display(); self.statusLabel.display()
                 }
 
+                try await ParakeetModelManager.shared.downloadOnly(modelName) { _ in }
                 try await ParakeetModelManager.shared.compileAndCache(modelName)
-                await MainActor.run { [weak self] in self?.markDownloaded() }
+                await MainActor.run { [weak self] in
+                    guard let self = self, self.parakeetDownloadGeneration == generation else { return }
+                    self.markDownloaded()
+                }
 
             } catch {
-                await MainActor.run { [weak self] in self?.showError(error.localizedDescription) }
+                // Pause/Stop cancels the task, surfacing as CancellationError / URLError.cancelled.
+                // Treat any cancellation as user-initiated and stay silent; the pause/stop handlers
+                // already set the correct UI.
+                if Task.isCancelled || error is CancellationError
+                    || (error as? URLError)?.code == .cancelled { return }
+                await MainActor.run { [weak self] in
+                    guard let self = self, self.parakeetDownloadGeneration == generation,
+                        !self.isPaused else { return }
+                    self.showError(WelcomeController.parakeetErrorMessage(error, modelName: modelName))
+                }
             }
         }
+    }
+
+    /// Download-failure copy for Parakeet, with a manual-install fallback the user (or their AI
+    /// assistant) can run when the in-app download won't complete.
+    private static func parakeetErrorMessage(_ error: Error, modelName: String) -> String {
+        // Action first (command + help) so the copy-pasteable line is never pushed off-screen by a
+        // long error string; the raw detail is truncated and shown last.
+        let detail = error.localizedDescription
+        let shortDetail = detail.count > 140 ? String(detail.prefix(140)) + "…" : detail
+        return "Download didn't finish. Tap Retry, or install it manually in Terminal:\n"
+            + "/Applications/speakfree.app/Contents/MacOS/speakfree download-parakeet \(modelName)\n"
+            + "More help: definitelyreal.github.io/speakfree\n"
+            + "(\(shortDetail))"
     }
 
     // MARK: - Whisper download (T2.4: via ModelDownloadCoordinator)

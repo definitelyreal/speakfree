@@ -48,10 +48,17 @@ public enum GlossaryCorrector {
     ///     ignored for now — a future enhancement).
     ///   - isRealWord: returns true if a token is a legitimate word that must NOT be
     ///     corrected. Defaults to the system spell checker; tests inject a fixture.
+    ///   - overrides: curated exact garble→correct map (lowercased key → replacement).
+    ///     Applied BEFORE the fuzzy logic and the real-word guard, for known recurring
+    ///     mistranscriptions the fuzzy path can't safely fix — either because the garble
+    ///     is itself a real word (e.g. "kama"→"Karma": the guard would block it) or it's
+    ///     a short token below the fuzzy threshold (e.g. "crf"→"CRM"). Curated only;
+    ///     nothing auto-learns into this.
     public static func correct(_ text: String,
                                glossary: [String],
+                               overrides: [String: String] = [:],
                                isRealWord: (String) -> Bool = GlossaryCorrector.systemIsRealWord) -> String {
-        guard !text.isEmpty, !glossary.isEmpty else { return text }
+        guard !text.isEmpty, (!glossary.isEmpty || !overrides.isEmpty) else { return text }
 
         // Build lowercased-term → canonical-spelling map (single-word terms only).
         var canonical: [String: String] = [:]
@@ -60,7 +67,6 @@ public enum GlossaryCorrector {
             guard !t.isEmpty, !t.contains(" ") else { continue }
             canonical[t.lowercased()] = t
         }
-        guard !canonical.isEmpty else { return text }
         let terms = Array(canonical.keys)
 
         // Walk word tokens, emitting all non-word characters (spaces, punctuation,
@@ -69,7 +75,8 @@ public enum GlossaryCorrector {
         var word = ""
         func flush() {
             if !word.isEmpty {
-                result += correctedToken(word, canonical: canonical, terms: terms, isRealWord: isRealWord)
+                result += correctedToken(word, canonical: canonical, terms: terms,
+                                         overrides: overrides, isRealWord: isRealWord)
                 word = ""
             }
         }
@@ -88,8 +95,14 @@ public enum GlossaryCorrector {
     private static func correctedToken(_ token: String,
                                        canonical: [String: String],
                                        terms: [String],
+                                       overrides: [String: String],
                                        isRealWord: (String) -> Bool) -> String {
         let lower = token.lowercased()
+
+        // Curated exact override wins over everything — bypasses the real-word guard
+        // and the length/edit-distance gates, because these are explicitly-listed,
+        // user-confirmed corrections (e.g. "kama"→"Karma", "crf"→"CRM").
+        if let forced = overrides[lower] { return forced }
 
         // Exact glossary term (any case) → normalize to the curated spelling
         // (e.g. mid-sentence "bexx" → "Bexx"; names keep their case).
