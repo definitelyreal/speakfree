@@ -21,6 +21,51 @@ struct Permissions {
         }
     }
 
+    /// Gate a recording attempt on microphone authorization. Returns true only when recording
+    /// can actually capture audio. On anything else it surfaces a user-visible prompt instead of
+    /// letting dictation silently record silence:
+    ///   - notDetermined: triggers the system permission prompt (user grants, then presses again)
+    ///   - denied/restricted: shows an actionable alert with a link to System Settings
+    ///
+    /// Returns synchronously and never blocks — safe to call from inside the hotkey event-tap
+    /// callback (a blocking modal there would make macOS disable the tap).
+    static func ensureMicrophoneForRecording() -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            // Shows the standard macOS microphone prompt. The current key press is abandoned;
+            // once granted, the next press records normally.
+            AVCaptureDevice.requestAccess(for: .audio) { _ in }
+            return false
+        default:
+            // Defer the modal to the next main-loop tick so the event-tap callback returns now.
+            DispatchQueue.main.async { showMicrophoneDeniedAlert() }
+            return false
+        }
+    }
+
+    /// Visible, actionable indication that the mic is off — the thing the app failed to show
+    /// before, leaving dictation to fail silently.
+    static func showMicrophoneDeniedAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "speakfree can’t access the microphone"
+        alert.informativeText = "Microphone access is turned off, so dictation records nothing. Turn it on in System Settings → Privacy & Security → Microphone, then try dictating again."
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            openMicrophoneSettings()
+        }
+    }
+
+    static func openMicrophoneSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     static func promptAccessibility() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)
