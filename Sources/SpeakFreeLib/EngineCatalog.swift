@@ -41,22 +41,24 @@ public enum EngineCatalog {
         EngineInfo(id: "parakeet", displayName: "Parakeet (NVIDIA, Neural Engine)")
     ]
 
-    /// v3 default first (multilingual), then v2 (English-only). Sizes are approximate and
-    /// vendor-reported. Language lists are a short representative set, not exhaustive.
+    /// v2 (English-only, the product DEFAULT) listed FIRST so it's the top of the model
+    /// dropdown, then v3 (multilingual). Selection is by id everywhere, so order is purely
+    /// presentational. Sizes are approximate/vendor-reported; language lists are a short
+    /// representative set, not exhaustive.
     public static let parakeetModels: [ParakeetModelInfo] = [
-        ParakeetModelInfo(
-            id: "parakeet-tdt-0.6b-v3",
-            displayName: "Parakeet v3 (multilingual)",
-            version: "v3",
-            sizeDescription: "~600 MB",
-            supportedLanguages: ["en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "uk"]
-        ),
         ParakeetModelInfo(
             id: "parakeet-tdt-0.6b-v2",
             displayName: "Parakeet v2 (English)",
             version: "v2",
             sizeDescription: "~600 MB",
             supportedLanguages: ["en"]
+        ),
+        ParakeetModelInfo(
+            id: "parakeet-tdt-0.6b-v3",
+            displayName: "Parakeet v3 (multilingual)",
+            version: "v3",
+            sizeDescription: "~600 MB",
+            supportedLanguages: ["en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "uk"]
         )
     ]
 
