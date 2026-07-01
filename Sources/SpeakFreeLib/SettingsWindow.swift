@@ -407,6 +407,13 @@ struct SettingsView: View {
         return "\(info.displayName) supports a fixed set of languages; unsupported selections are ignored."
     }
 
+    /// True when the selected Parakeet model is English-only (v2). A language picker is
+    /// pointless then — Parakeet uses language only as a hint and this model ignores it —
+    /// so we hide the Language row and let the footnote explain it instead.
+    private var isParakeetEnglishOnly: Bool {
+        viewModel.engine == "parakeet" && selectedParakeetModelInfo?.supportedLanguages == ["en"]
+    }
+
     /// Whether current hotkey matches one of the standard options
     private var isCustomHotkey: Bool {
         !standardHotkeyOptions.contains(where: { $0.keyCode == viewModel.hotkeyKeyCode })
@@ -508,6 +515,9 @@ struct SettingsView: View {
                         modelStatusBanner
 
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                            // Language row is hidden for English-only Parakeet (v2) — a
+                            // one-item "English" picker is pointless; the footnote covers it.
+                            if !isParakeetEnglishOnly {
                             GridRow {
                                 Text("Language").frame(width: labelWidth, alignment: .leading).gridColumnAlignment(.leading)
                                 Picker("", selection: $viewModel.language) {
@@ -547,6 +557,7 @@ struct SettingsView: View {
                                     }
                                 }
                             }
+                            }  // end if !isParakeetEnglishOnly
 
                             // Whisper-specific ggml model picker. Parakeet's downloadable
                             // model variants (v2/v3) are chosen in EnginePickerView above, so
