@@ -92,10 +92,26 @@ jobs:
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
         # --no-parallel + line-buffered tee so per-test "Test Case '…' started/passed" lines
         # stream live to the log. If the suite hangs, the LAST "started" line with no matching
-        # "passed/failed" identifies the culprit test (the job-level timeout-minutes then kills
-        # it instead of burning a runner for an hour). Diagnosis only — do NOT fix a hang here.
+        # "passed/failed" identifies the culprit test.
+        # Stall watchdog (audit 2026-07-01): a hung test used to burn the full 20-min
+        # timeout-minutes on every push (red-is-normal). Now: if the log stops growing for
+        # 300s (build steps can be quiet; tests never are), kill xctest so the job fails in
+        # minutes with the culprit named instead of timing out with no verdict.
         run: |
           set -o pipefail
+          touch swift-test.log
+          (
+            while true; do
+              sleep 60
+              if [ -z "$(find swift-test.log -newermt '-300 seconds' 2>/dev/null)" ]; then
+                echo "::error::swift test produced no output for 300s — treating as hung. Last started tests:"
+                grep "' started" swift-test.log | tail -3 || true
+                pkill -9 -x xctest 2>/dev/null || true
+              fi
+            done
+          ) &
+          WATCHDOG=$!
+          trap 'kill $WATCHDOG 2>/dev/null || true' EXIT
           xcrun swift test --no-parallel 2>&1 | tee swift-test.log
 
   perf:
@@ -309,6 +325,21 @@ jobs:
 
       - name: Build
         run: swift build -c release
+
+      - name: Write speakfree config for CI (whisper engine)
+        # test-transcription.sh asserts the whisper path (`speakfree status` must print
+        # "whisper-cpp: yes"). Without a config, Config.load() falls back to the
+        # Parakeet-first defaults (engine=parakeet) and cmdStatus never prints that
+        # line — the job has failed deterministically on every push since the default
+        # flipped (audit 2026-07-01). Pin the engine this job actually tests.
+        run: |
+          mkdir -p ~/.config/speakfree
+          printf '%s\n' \
+            '{' \
+            '  "modelSize": "tiny.en",' \
+            '  "engine": "whisper",' \
+            '  "language": "en"' \
+            '}' > ~/.config/speakfree/config.json
 
       - name: Transcription integration test
         run: bash scripts/test-transcription.sh

@@ -37,7 +37,13 @@ public struct TextPostProcessor {
         // Require punctuation immediately before (after optional whitespace):
         // "hello, comma how" → replace ("," before "comma" = whisper saw a break)
         // "comma separating" → skip (no punctuation before = regular word)
-        ("(?<=[.,!?;:])\\s*(?:[ck]omma|kana|kanna)(?:[.,!?;:]|(?=\\s|$))", ","),
+        // "kama" joined the garble list 2026-07-01: Parakeet writes spoken "comma"
+        // as "kama", and without this alias the glossary override ("kama"→"Karma",
+        // the contact) hijacked punctuation intent — "Alright. kama what" became
+        // "Alright. Karma, what". Position disambiguates: punctuation-before means
+        // command (handled here, BEFORE GlossaryCorrector runs); plain prose means
+        // the name, which the override downstream still fixes.
+        ("(?<=[.,!?;:])\\s*(?:[ck]omma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[.,!?;:])\\s*period(?:[.,!?;:]|(?=\\s|$))", "."),
         ("(?<=[.,!?;:])\\s*colon(?:[.,!?;:]|(?=\\s|$))", ":"),
         ("(?<=[.,!?;:])\\s*dash(?:[.,!?;:]|(?=\\s|$))", " —"),
@@ -50,7 +56,7 @@ public struct TextPostProcessor {
     // Fallback replacements for spoken mode (no whisper auto-punct, so no context to read).
     // These use the same boundaries as alwaysReplace — replace regardless of surrounding punct.
     private static var spokenFallback: [(pattern: String, replacement: String)] {[
-        ("\(ws)(?:[ck]omma|kana|kanna)\(we)", ","),
+        ("\(ws)(?:[ck]omma|kana|kanna|kama)\(we)", ","),
         ("\(ws)period\(we)", "."),
         ("\(ws)colon\(we)", ":"),
         ("\(ws)dash\(we)", " —"),

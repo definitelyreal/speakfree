@@ -124,9 +124,11 @@ class WelcomeController: NSObject, NSWindowDelegate {
         c.addSubview(engineLabel)
 
         enginePicker = NSPopUpButton(frame: NSRect(x: 88, y: h - 196, width: 372, height: 26))
+        // Parakeet (the default) at the top; Whisper below. engineChanged() reads
+        // index 0 == parakeet — keep the two in sync if this order ever changes.
+        enginePicker.addItem(withTitle: "Parakeet (Apple Neural Engine) — Recommended")
         enginePicker.addItem(withTitle: "Whisper (CPU/GPU)")
-        enginePicker.addItem(withTitle: "Parakeet (Apple Neural Engine) (Faster)")
-        enginePicker.selectItem(at: 1)
+        enginePicker.selectItem(at: 0)
         enginePicker.target = self
         enginePicker.action = #selector(engineChanged)
         c.addSubview(enginePicker)
@@ -215,7 +217,9 @@ class WelcomeController: NSObject, NSWindowDelegate {
         // ── Bottom ───────────────────────────────────────────────
         loginCheckbox = NSButton(checkboxWithTitle: "Launch SpeakFree at login", target: nil, action: nil)
         loginCheckbox.font = NSFont.systemFont(ofSize: 12)
-        loginCheckbox.state = LaunchAtLogin.isEnabled ? .on : .off
+        // Default ON for new users (onboarding). applyLoginCheckbox() registers it only when
+        // they proceed, so unchecking here still opts out. Reflect an already-enabled state too.
+        loginCheckbox.state = .on
         loginCheckbox.frame = NSRect(x: 20, y: 52, width: w - 40, height: 20)
         c.addSubview(loginCheckbox)
 
@@ -397,7 +401,8 @@ class WelcomeController: NSObject, NSWindowDelegate {
 
     @objc private func engineChanged() {
         cancelCurrentDownload()
-        selectedEngine = enginePicker.indexOfSelectedItem == 1 ? "parakeet" : "whisper"
+        // Index 0 == Parakeet (see the enginePicker item order above).
+        selectedEngine = enginePicker.indexOfSelectedItem == 0 ? "parakeet" : "whisper"
         refreshModelPicker()
     }
 

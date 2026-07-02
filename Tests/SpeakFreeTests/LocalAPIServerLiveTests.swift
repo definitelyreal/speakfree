@@ -16,7 +16,12 @@ final class LocalAPIServerLiveTests: XCTestCase {
     private var server: LocalAPIServer?
     private var transcriber: Transcriber?
 
-    private static let livePort: UInt16 = 57650
+    /// Ephemeral per-run port (audit 2026-07-01 M0.5). The old fixed 57650 flaked:
+    /// a not-yet-released socket from a prior or concurrent run blocked the bind and
+    /// `startServer`'s lsof wait spun until the suite failed (seen in the M1 report).
+    /// A random high port per process makes collisions vanishingly unlikely; the
+    /// lsof probe in `startServer` still verifies the listener actually came up.
+    private static let livePort: UInt16 = .random(in: 49500...64000)
 
     override func setUp() {
         super.setUp()
