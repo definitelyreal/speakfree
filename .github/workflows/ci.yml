@@ -330,15 +330,21 @@ jobs:
         # test-transcription.sh asserts the whisper path (`speakfree status` must print
         # "whisper-cpp: yes"). Without a config, Config.load() falls back to the
         # Parakeet-first defaults (engine=parakeet) and cmdStatus never prints that
-        # line — the job has failed deterministically on every push since the default
-        # flipped (audit 2026-07-01). Pin the engine this job actually tests.
+        # line — the job failed deterministically on every push since the default
+        # flipped (audit 2026-07-01). NOTE: the JSON must include every non-optional
+        # Config field (hotkey, modelSize, language) — a partial config fails decode
+        # and SILENTLY falls back to defaultConfig, re-breaking this job. Keep it in
+        # sync with the unit-tests job's config step.
         run: |
           mkdir -p ~/.config/speakfree
           printf '%s\n' \
             '{' \
+            '  "hotkey": {"keyCode": 63, "modifiers": []},' \
             '  "modelSize": "tiny.en",' \
             '  "engine": "whisper",' \
-            '  "language": "en"' \
+            '  "language": "en",' \
+            '  "maxRecordings": 30,' \
+            '  "spokenPunctuation": "hybrid"' \
             '}' > ~/.config/speakfree/config.json
 
       - name: Transcription integration test
