@@ -155,6 +155,17 @@ public struct TextPostProcessor {
         // 6. Collapse adjacent different-type punctuation conflicts
         result = collapseAdjacentPunctuation(result)
 
+        // 6.5. Re-collapse two-dot duplicates that only became ADJACENT after fixSpacing
+        // removed the separating space (". ." → ".."). Step 3 ran BEFORE spacing, so it
+        // missed the space-separated form — the case Parakeet produces when its own
+        // sentence period collides with a spoken/stray one ("looking for. ." → "for.."
+        // → "for."). Preserves 3+ dot ellipses via the same lookarounds.
+        if let dotsRegex = try? NSRegularExpression(pattern: "(?<!\\.)\\.\\.(?!\\.)", options: []) {
+            result = dotsRegex.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "."
+            )
+        }
+
         // 7. Ensure space after punctuation before next word
         result = ensureSpaceAfterPunctuation(result)
 
