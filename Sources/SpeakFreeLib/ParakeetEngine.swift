@@ -194,13 +194,30 @@ public final class ParakeetEngine: TranscriptionEngine {
                     DownloadUtils.enforceOffline = priorOffline
                     throw error
                 }
+                // CRITICAL: tokenize each term for the CTC keyword spotter. The spotter matches on
+                // `term.ctcTokenIds` (CtcKeywordSpotter: `ctcTokenIds ?? tokenIds`); `.load()` leaves
+                // both nil, so nothing is ever spotted and Replacements is always 0 (dogfood
+                // 2026-07-02: the boost silently did nothing). Encode `text` with the CTC tokenizer,
+                // matching FluidAudio's own `loadWithCtcTokens`.
+                let tokenizer = try await CtcTokenizer.load(from: CtcModels.defaultCacheDirectory(for: .ctc110m))
+                let tokenizedTerms = vocab.terms.compactMap { term -> CustomVocabularyTerm? in
+                    let ids = tokenizer.encode(term.text)
+                    guard !ids.isEmpty else { return nil }
+                    return CustomVocabularyTerm(text: term.text, weight: term.weight,
+                                                aliases: term.aliases, tokenIds: nil, ctcTokenIds: ids)
+                }
+                let tokenizedVocab = CustomVocabularyContext(
+                    terms: tokenizedTerms, alpha: vocab.alpha, minCtcScore: vocab.minCtcScore,
+                    minSimilarity: vocab.minSimilarity, minCombinedConfidence: vocab.minCombinedConfidence,
+                    minTermLength: vocab.minTermLength)
+
                 // Commit only if this model is still the loaded one (a reload may have raced).
                 guard loadedModelID == forModelID, manager != nil else { return }
                 vocabModels = models
                 vocabCtc = ctc
-                vocabContext = vocab
-                vocabTermCount = vocab.terms.count
-                DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting ready (\(vocab.terms.count) terms)")
+                vocabContext = tokenizedVocab
+                vocabTermCount = tokenizedVocab.terms.count
+                DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting ready (\(tokenizedVocab.terms.count) CTC-tokenized terms)")
             } catch {
                 DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting unavailable — \(error.localizedDescription); using batch path")
                 vocabModels = nil; vocabCtc = nil; vocabContext = nil; vocabTermCount = 0
@@ -219,6 +236,13 @@ public final class ParakeetEngine: TranscriptionEngine {
             // every window on a >15s clip errors out and the transcript comes back empty (dogfood
             // 2026-07-02). The 11-2-2 window is 13s, within the cap, and FluidAudio's own docs call
             // 10-11s the right chunk size.
+            // Trim trailing near-silence before feeding the sliding window. Its per-window decoder
+            // hallucinates plausible words for long silent tails (dogfood 2026-07-02: "Yeah, it
+            // would be nice if" + a long pause → "…you're not sure if you're gonna"). The batch path
+            // tolerates silence/the flush pad; the sliding path treats it as "transcribe this". Keep
+            // a short margin so real trailing speech isn't clipped.
+            let fedAudio = ParakeetEngine.trimTrailingSilence(audio)
+
             let sw = SlidingWindowAsrManager(config: .streaming)
             try await sw.loadModels(models)
             try await sw.configureVocabularyBoosting(vocabulary: vocab, ctcModels: ctc)
@@ -261,9 +285,9 @@ public final class ParakeetEngine: TranscriptionEngine {
             // 24s clip produced nothing). ~1s chunks let the window loop process incrementally.
             let chunk = 16_000   // 1s at 16kHz
             var i = 0
-            while i < audio.count {
-                let end = min(i + chunk, audio.count)
-                if let buf = ParakeetEngine.makeBuffer(from: Array(audio[i..<end])) {
+            while i < fedAudio.count {
+                let end = min(i + chunk, fedAudio.count)
+                if let buf = ParakeetEngine.makeBuffer(from: Array(fedAudio[i..<end])) {
                     await sw.streamAudio(buf)
                 }
                 i = end
@@ -479,6 +503,27 @@ public final class ParakeetEngine: TranscriptionEngine {
         guard !code.isEmpty, code != "auto" else { return nil }
         let primary = stripRegionSubtag(code)
         return Language(rawValue: primary)
+    }
+
+    /// Trim trailing near-silence: scan 100ms frames from the end, drop everything after the last
+    /// frame whose RMS exceeds a small threshold, keeping a ~200ms margin so real trailing speech
+    /// (and the TDT flush tail) survives. Used only for the sliding-window path, which hallucinates
+    /// words for long silent tails; the batch path keeps its full padded audio.
+    fileprivate static func trimTrailingSilence(_ s: [Float]) -> [Float] {
+        let frame = 1600            // 100ms @ 16kHz
+        let margin = 3200           // keep 200ms after the last voiced frame
+        let threshold: Float = 0.006
+        guard s.count > frame else { return s }
+        var i = s.count - frame
+        while i >= 0 {
+            var sum: Float = 0
+            for j in i..<(i + frame) { sum += s[j] * s[j] }
+            if (sum / Float(frame)).squareRoot() > threshold {
+                return Array(s.prefix(min(s.count, i + frame + margin)))
+            }
+            i -= frame
+        }
+        return s   // all silence — leave as-is, the plausibility/backstop handles it
     }
 
     /// Wrap 16kHz mono Float32 samples in an `AVAudioPCMBuffer` for the sliding-window manager's
