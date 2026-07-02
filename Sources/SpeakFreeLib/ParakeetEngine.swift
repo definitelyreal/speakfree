@@ -233,14 +233,24 @@ public final class ParakeetEngine: TranscriptionEngine {
             let updates = await sw.transcriptionUpdates
             let collector = Task { () -> String in
                 var confirmed: [String] = []
-                var lastVolatile = ""
+                var bestVolatile = ""
+                var bestVolatileConfidence: Float = -1
                 for await u in updates {
                     let t = u.text.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !t.isEmpty else { continue }
-                    if u.isConfirmed { confirmed.append(t) } else { lastVolatile = t }
+                    if u.isConfirmed {
+                        confirmed.append(t)
+                    } else if u.confidence > bestVolatileConfidence {
+                        // Keep the HIGHEST-confidence volatile, not the last. When a clip ends
+                        // mid-window the final flush emits a spurious low-confidence fragment
+                        // ("s." @0.37, or "" ) that must not overwrite the real transcript from
+                        // the preceding high-confidence window ("I know you're super…" @0.99).
+                        bestVolatileConfidence = u.confidence
+                        bestVolatile = t
+                    }
                 }
                 var parts = confirmed
-                if !lastVolatile.isEmpty { parts.append(lastVolatile) }
+                if !bestVolatile.isEmpty { parts.append(bestVolatile) }
                 return parts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             }
 
@@ -260,10 +270,13 @@ public final class ParakeetEngine: TranscriptionEngine {
             }
             let finishText = (try await sw.finish()).trimmingCharacters(in: .whitespacesAndNewlines)
             await sw.cancel()   // stop the recognizer task; NOT cleanup() (that frees the shared models)
-            // finish() is authoritative when it returns text (multi-window clips work); the collected
-            // stream text only rescues the wiped-volatile case above.
+            // Use the richer of the two reconstructions. finish()'s internal volatile can be
+            // clobbered by a spurious low-confidence flush chunk (returning "s." or ""), while the
+            // confidence-filtered collector keeps the real high-confidence window. For multi-window
+            // clips finish() is complete and wins; for the single-window-clobber case the collector
+            // wins. Taking the longer is correct in both.
             let collected = await collector.value
-            return finishText.isEmpty ? collected : finishText
+            return collected.count > finishText.count ? collected : finishText
         }
 
         // MARK: Transcribe
@@ -298,12 +311,25 @@ public final class ParakeetEngine: TranscriptionEngine {
             let hint = ParakeetEngine.languageHint(for: language, isV3: isV3)
 
             // Custom-vocabulary path first, once its background setup has populated the ingredients.
-            // On ANY failure, fall through to the batch path so dictation never breaks.
+            // The vocab/sliding path is an ENHANCEMENT over the reliable batch path, and the
+            // sliding-window manager (a real-time API driven in batch here) is fragile at edges:
+            // dogfood surfaced hangs, blanks, and fragments ("s." for a 10s clip). So we only
+            // TRUST its output when it's plausibly complete for the audio length; otherwise, and
+            // on any error, we fall through to the batch path. This guarantees vocab boosting can
+            // never make a dictation worse than production — worst case it's the plain batch result.
             if let m = vocabModels, let ctc = vocabCtc, let ctx = vocabContext {
                 do {
-                    return try await transcribeSliding(models: m, ctc: ctc, vocab: ctx, audio: audio)
+                    let vocabText = try await transcribeSliding(models: m, ctc: ctc, vocab: ctx, audio: audio)
+                    let seconds = Double(samples.count) / 16000.0
+                    // ~1.5 chars/s is a very low bar (normal speech is ~12+), so this only rejects
+                    // clear failures, not terse-but-valid utterances — and if it ever rejects a
+                    // sparse real clip, the batch fallback transcribes it just as well.
+                    if !vocabText.isEmpty, Double(vocabText.count) >= max(3.0, seconds * 1.5) {
+                        return vocabText
+                    }
+                    DiagnosticLogger.shared.log("ParakeetEngine: vocab result implausibly short (\(vocabText.count) chars / \(String(format: "%.1f", seconds))s) — using batch")
                 } catch {
-                    DiagnosticLogger.shared.log("ParakeetEngine: vocab-boosted transcribe failed (\(error.localizedDescription)); falling back to batch")
+                    DiagnosticLogger.shared.log("ParakeetEngine: vocab-boosted transcribe failed (\(error.localizedDescription)) — using batch")
                 }
             }
 
