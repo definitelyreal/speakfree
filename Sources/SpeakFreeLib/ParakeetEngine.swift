@@ -37,13 +37,15 @@ public final class ParakeetEngine: TranscriptionEngine {
         /// FluidAudio's loaded ASR manager (actor). `nil` until `load` succeeds.
         private var manager: AsrManager?
 
-        /// Optional sliding-window manager used ONLY for custom-vocabulary decode-time biasing
-        /// (the batch `AsrManager` has no vocab hook — boosting lives on the sliding-window path).
-        /// Set up in `performLoad` when a `custom-vocabulary.json` is present in the config dir and
-        /// the CTC keyword-spotter model is available; nil otherwise. When nil, `transcribe` uses the
-        /// plain batch path. Any failure setting it up (or transcribing with it) falls back to batch,
-        /// so dictation can never break because of vocab boosting.
-        private var slidingManager: SlidingWindowAsrManager?
+        /// Ingredients for the custom-vocabulary sliding-window path. Populated in the background by
+        /// `setupVocabBoosting` when a `custom-vocabulary.json` is present and the CTC keyword-spotter
+        /// loads; all nil otherwise (→ `transcribe` uses the plain batch path). A FRESH
+        /// `SlidingWindowAsrManager` is built per utterance from these — the manager's input stream is
+        /// single-use (finish() terminates it permanently), so it cannot be reused across dictations.
+        /// The heavy models here ARE reused, so per-utterance setup is cheap.
+        private var vocabModels: AsrModels?
+        private var vocabCtc: CtcModels?
+        private var vocabContext: CustomVocabularyContext?
         private var vocabTermCount = 0
 
         /// The model identifier currently loaded, e.g. "parakeet-tdt-0.6b-v3". `nil` when unloaded.
@@ -147,6 +149,7 @@ public final class ParakeetEngine: TranscriptionEngine {
                 while active > 0 { await Task.yield() }
                 manager = nil
                 loadedModelID = nil
+                vocabModels = nil; vocabCtc = nil; vocabContext = nil; vocabTermCount = 0
                 await old.cleanup()
                 tearingDown = false
             }
@@ -154,12 +157,15 @@ public final class ParakeetEngine: TranscriptionEngine {
             manager = mgr
             loadedModelID = modelID
 
-            // Optional: stand up the custom-vocabulary sliding-window path. Never fatal.
-            await setupVocabBoosting(models: models)
-
             let loadTime = CFAbsoluteTimeGetCurrent() - loadStart
             DiagnosticLogger.shared.log("ParakeetEngine: model loaded in \(String(format: "%.2f", loadTime))s")
             onLoadedChange(true)
+
+            // Custom-vocabulary setup runs in the BACKGROUND so it never delays model-ready (loading
+            // the CTC keyword-spotter takes ~15s). Dictation works immediately via the batch path and
+            // upgrades to vocab-boosted automatically once ready. Never fatal.
+            let modelForVocab = modelID
+            Task { await self.setupVocabBoosting(models: models, forModelID: modelForVocab) }
         }
 
         /// Try to configure decode-time custom-vocabulary biasing. Gated on a
@@ -167,10 +173,8 @@ public final class ParakeetEngine: TranscriptionEngine {
         /// active config dir — so the streaming build opts in and production stays batch-only.
         /// Downloads the ~110MB CTC keyword-spotter model on first use. Any failure logs and leaves
         /// `slidingManager` nil, so `transcribe` silently uses the batch path.
-        private func setupVocabBoosting(models: AsrModels) async {
-            await slidingManager?.cleanup()
-            slidingManager = nil
-            vocabTermCount = 0
+        private func setupVocabBoosting(models: AsrModels, forModelID: String) async {
+            vocabModels = nil; vocabCtc = nil; vocabContext = nil; vocabTermCount = 0
 
             let dictURL = Config.configDir.appendingPathComponent("custom-vocabulary.json")
             guard FileManager.default.fileExists(atPath: dictURL.path) else { return }
@@ -179,8 +183,7 @@ public final class ParakeetEngine: TranscriptionEngine {
                 DiagnosticLogger.shared.log("ParakeetEngine: loading CTC keyword-spotter for vocab boosting")
                 // FluidAudio is pinned offline (speakfree owns all downloads). Lift it JUST around
                 // this one deliberate CTC fetch, then restore — same pattern ParakeetModelManager
-                // uses for the Parakeet weights. Runs after the model is already loaded, so there is
-                // no concurrent Parakeet fetch to race. Cached after first fetch (~110MB, one-time).
+                // uses for the Parakeet weights. Cached after first fetch (~110MB, one-time).
                 let priorOffline = DownloadUtils.enforceOffline
                 DownloadUtils.enforceOffline = false
                 let ctc: CtcModels
@@ -191,30 +194,35 @@ public final class ParakeetEngine: TranscriptionEngine {
                     DownloadUtils.enforceOffline = priorOffline
                     throw error
                 }
-                let sw = SlidingWindowAsrManager(config: .default)
-                try await sw.loadModels(models)
-                try await sw.configureVocabularyBoosting(vocabulary: vocab, ctcModels: ctc)
-                slidingManager = sw
+                // Commit only if this model is still the loaded one (a reload may have raced).
+                guard loadedModelID == forModelID, manager != nil else { return }
+                vocabModels = models
+                vocabCtc = ctc
+                vocabContext = vocab
                 vocabTermCount = vocab.terms.count
-                DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting active (\(vocab.terms.count) terms)")
+                DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting ready (\(vocab.terms.count) terms)")
             } catch {
                 DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting unavailable — \(error.localizedDescription); using batch path")
-                await slidingManager?.cleanup()
-                slidingManager = nil
-                vocabTermCount = 0
+                vocabModels = nil; vocabCtc = nil; vocabContext = nil; vocabTermCount = 0
             }
         }
 
-        /// Feed already-recorded 16kHz mono samples through the sliding-window manager to get a
-        /// vocab-boosted transcript. `streamAudio` yields explicit buffers (it does not tap the mic),
-        /// so batch-driving it is just: reset → startStreaming → streamAudio(buffer) → finish.
-        private func transcribeSliding(_ sw: SlidingWindowAsrManager, audio: [Float]) async throws -> String {
-            try await sw.reset()
+        /// Feed already-recorded 16kHz mono samples through a FRESH sliding-window manager to get a
+        /// vocab-boosted transcript. A new manager per call is required: its input stream is
+        /// single-use (finish() terminates it), so a reused manager hangs every dictation after the
+        /// first. The heavy models are passed in (already loaded), so this only builds the light
+        /// wrapper + rescorer. `streamAudio` takes explicit buffers (it does not tap the mic).
+        private func transcribeSliding(models: AsrModels, ctc: CtcModels,
+                                       vocab: CustomVocabularyContext, audio: [Float]) async throws -> String {
+            let sw = SlidingWindowAsrManager(config: .default)
+            try await sw.loadModels(models)
+            try await sw.configureVocabularyBoosting(vocabulary: vocab, ctcModels: ctc)
             try await sw.startStreaming(source: .microphone)
             if let buf = ParakeetEngine.makeBuffer(from: audio) {
                 await sw.streamAudio(buf)
             }
             let text = try await sw.finish()
+            await sw.cancel()   // stop the recognizer task; NOT cleanup() (that frees the shared models)
             return text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
@@ -249,11 +257,11 @@ public final class ParakeetEngine: TranscriptionEngine {
             let isV3 = EngineCatalog.versionString(forParakeetModelID: modelID) != "v2"
             let hint = ParakeetEngine.languageHint(for: language, isV3: isV3)
 
-            // Custom-vocabulary path first, if configured. On ANY failure, fall through to the
-            // batch path below so dictation never breaks because of vocab boosting.
-            if let sw = slidingManager {
+            // Custom-vocabulary path first, once its background setup has populated the ingredients.
+            // On ANY failure, fall through to the batch path so dictation never breaks.
+            if let m = vocabModels, let ctc = vocabCtc, let ctx = vocabContext {
                 do {
-                    return try await transcribeSliding(sw, audio: audio)
+                    return try await transcribeSliding(models: m, ctc: ctc, vocab: ctx, audio: audio)
                 } catch {
                     DiagnosticLogger.shared.log("ParakeetEngine: vocab-boosted transcribe failed (\(error.localizedDescription)); falling back to batch")
                 }
@@ -287,11 +295,8 @@ public final class ParakeetEngine: TranscriptionEngine {
             let m = manager
             manager = nil
             loadedModelID = nil
-            let sw = slidingManager
-            slidingManager = nil
-            vocabTermCount = 0
+            vocabModels = nil; vocabCtc = nil; vocabContext = nil; vocabTermCount = 0
             await m?.cleanup()
-            await sw?.cleanup()
             tearingDown = false
             DiagnosticLogger.shared.log("ParakeetEngine: model unloaded")
         }
