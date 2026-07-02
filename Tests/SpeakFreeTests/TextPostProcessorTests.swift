@@ -249,6 +249,26 @@ final class TextPostProcessorTests: XCTestCase {
                        "Alright. What are you talking about?")
     }
 
+    // 8d. "Kamala" / "karma" variants — more of the /kVmV/ comma-homophone family Parakeet
+    // produces (dogfood 2026-07-02: "Hey comma where do you want to meet" → "Hey. Kamala,…").
+    // Gated on preceding punctuation (the garble signature).
+    func testHybrid08d_kamalaVariant() {
+        // Hybrid mode (Michael's): the mis-heard command word, preceded by a punctuation break,
+        // is converted to punctuation, never left as the name/word (trailing punct/casing handled
+        // by later steps, so assert the garble is simply gone).
+        let a = TextPostProcessor.process("Hey. Kamala, where do you want to meet?", hybrid: true)
+        XCTAssertFalse(a.contains("Kamala"), "Kamala after a break is a spoken comma. Got: \(a)")
+        let b = TextPostProcessor.process("first. Karma, second", hybrid: true)
+        XCTAssertFalse(b.contains("Karma"), "Karma after a break is a spoken comma. Got: \(b)")
+    }
+
+    // 8e. NEGATIVE: a real "Kamala"/"karma" in plain prose (no preceding punctuation break)
+    // must NOT be turned into a comma — in hybrid mode (the position gate protects it).
+    func testHybrid08e_realNameNotConverted() {
+        XCTAssertEqual(TextPostProcessor.process("I met Kamala today", hybrid: true), "I met Kamala today")
+        XCTAssertEqual(TextPostProcessor.process("that is good karma", hybrid: true), "that is good karma")
+    }
+
     // 9. Exclamation point variant
     // CURRENT: PASS — "great exclamation point" → "great !" → "great!"
     func testHybrid09_exclamationPoint() {
