@@ -152,7 +152,7 @@ public enum TextPipeline {
             prompt = provided
         }
         let sanitized = sanitize(input.raw)
-        let stripped = stripWhisperBracketMarkers(sanitized)
+        let stripped = collapseBoundaryDuplicateWord(stripWhisperBracketMarkers(sanitized))
         let hybrid = input.punctuationMode == .hybrid
         let processed = (input.punctuationMode == .off)
             ? stripped
@@ -269,6 +269,53 @@ public enum TextPipeline {
     /// Remove Whisper non-speech bracket markers embedded in otherwise-real transcriptions.
     /// All pause ellipses ("..." / "…") are stripped via `stripPauseEllipses` — the user's
     /// directive (2026-06-11) is that dictation output must never contain pause markers.
+    /// Collapse a chunk-boundary duplicated word: two adjacent copies of the same word,
+    /// equal case-insensitively but NOT identical (they differ only in casing), separated
+    /// only by whitespace. Keeps the first copy, drops the second.
+    ///
+    /// Root cause (Parakeet / FluidAudio 0.15.1): dictations longer than ~14.92s are split
+    /// into windows with 2.0s overlap, decoded independently. A word on the seam is emitted
+    /// by both windows; window 2 is SOS-primed, so it re-emits the word capitalized
+    /// ("should" → "Should"). FluidAudio's overlap deduper matches token IDs, so the case
+    /// difference defeats it and both survive: "...parameters should Should be allowed".
+    ///
+    /// The case-difference is the seam signature. Genuine same-case reduplication ("that that",
+    /// "had had") is IDENTICAL, so the "not identical" guard leaves it alone. Only alphabetic
+    /// word tokens separated by whitespace-only are considered — never across punctuation.
+    ///
+    /// Accepted tradeoff: a proper noun landing exactly on the seam ("Steve Steve") is
+    /// same-case and intentionally left alone, to avoid touching legitimate reduplication.
+    public static func collapseBoundaryDuplicateWord(_ text: String) -> String {
+        let ns = text as NSString
+        guard let wordRe = try? NSRegularExpression(pattern: "[A-Za-z][A-Za-z'’]*") else { return text }
+        let words = wordRe.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        guard words.count >= 2 else { return text }
+        // Scan CONSECUTIVE word tokens (non-overlapping regex-pair matching would skip the
+        // seam pair). Drop the second of any adjacent pair that is equal case-insensitively
+        // but not identical, separated by whitespace only (space/tab, never a newline or
+        // punctuation — that would be a real sentence boundary).
+        var dropRanges: [NSRange] = []
+        var i = 0
+        while i < words.count - 1 {
+            let a = words[i].range, b = words[i + 1].range
+            let sepStart = a.location + a.length
+            let sepLen = b.location - sepStart
+            let sep = ns.substring(with: NSRange(location: sepStart, length: sepLen))
+            let wa = ns.substring(with: a), wb = ns.substring(with: b)
+            if sepLen > 0, sep.allSatisfy({ $0 == " " || $0 == "\t" }),
+               wa.lowercased() == wb.lowercased(), wa != wb {
+                dropRanges.append(NSRange(location: sepStart, length: sepLen + b.length))
+                i += 2   // consume the dropped copy so chains don't cascade
+            } else {
+                i += 1
+            }
+        }
+        guard !dropRanges.isEmpty else { return text }
+        let m = NSMutableString(string: text)
+        for r in dropRanges.reversed() { m.deleteCharacters(in: r) }
+        return m as String
+    }
+
     public static func stripWhisperBracketMarkers(_ text: String) -> String {
         var result = text
         // Known Whisper hallucination markers
