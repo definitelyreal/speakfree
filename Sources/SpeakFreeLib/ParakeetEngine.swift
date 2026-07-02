@@ -214,12 +214,27 @@ public final class ParakeetEngine: TranscriptionEngine {
         /// wrapper + rescorer. `streamAudio` takes explicit buffers (it does not tap the mic).
         private func transcribeSliding(models: AsrModels, ctc: CtcModels,
                                        vocab: CustomVocabularyContext, audio: [Float]) async throws -> String {
-            let sw = SlidingWindowAsrManager(config: .default)
+            // `.streaming` (11-2-2), NOT `.default` (15-10-2): the default assembles 17s windows
+            // (chunk 15s + right 2s) that exceed the TDT model's 240000-sample (15s) input cap, so
+            // every window on a >15s clip errors out and the transcript comes back empty (dogfood
+            // 2026-07-02). The 11-2-2 window is 13s, within the cap, and FluidAudio's own docs call
+            // 10-11s the right chunk size.
+            let sw = SlidingWindowAsrManager(config: .streaming)
             try await sw.loadModels(models)
             try await sw.configureVocabularyBoosting(vocabulary: vocab, ctcModels: ctc)
             try await sw.startStreaming(source: .microphone)
-            if let buf = ParakeetEngine.makeBuffer(from: audio) {
-                await sw.streamAudio(buf)
+            // Feed the recording in small chunks the way live audio arrives, NOT as one giant
+            // buffer. The sliding window advances per fed chunk; a single multi-window buffer
+            // (>~15s) never got processed past the first window and hung (dogfood 2026-07-02:
+            // 24s clip produced nothing). ~1s chunks let the window loop process incrementally.
+            let chunk = 16_000   // 1s at 16kHz
+            var i = 0
+            while i < audio.count {
+                let end = min(i + chunk, audio.count)
+                if let buf = ParakeetEngine.makeBuffer(from: Array(audio[i..<end])) {
+                    await sw.streamAudio(buf)
+                }
+                i = end
             }
             let text = try await sw.finish()
             await sw.cancel()   // stop the recognizer task; NOT cleanup() (that frees the shared models)
