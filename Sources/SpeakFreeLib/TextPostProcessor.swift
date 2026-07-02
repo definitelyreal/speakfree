@@ -37,13 +37,14 @@ public struct TextPostProcessor {
         // Require punctuation immediately before (after optional whitespace):
         // "hello, comma how" → replace ("," before "comma" = whisper saw a break)
         // "comma separating" → skip (no punctuation before = regular word)
-        // "kama" joined the garble list 2026-07-01: Parakeet writes spoken "comma"
-        // as "kama", and without this alias the glossary override ("kama"→"Karma",
-        // the contact) hijacked punctuation intent — "Alright. kama what" became
-        // "Alright. Karma, what". Position disambiguates: punctuation-before means
-        // command (handled here, BEFORE GlossaryCorrector runs); plain prose means
-        // the name, which the override downstream still fixes.
-        ("(?<=[.,!?;:])\\s*(?:[ck]omma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
+        // Comma-homophone family: Parakeet mishears the spoken word "comma" as a small,
+        // bounded set of /kVmV/ non-words. Mined from Michael's corpus 2026-07-02:
+        // kama(29), kana(4), karma(3), kamala(1). All are handled here, gated on a
+        // preceding punctuation break — that break is the garble signature (Parakeet
+        // emits its own period/comma, then the mis-heard command). The gate is what keeps
+        // a real "Kamala" or "good karma" in plain prose from being turned into a comma;
+        // only the punctuation-preceded position converts. Runs BEFORE GlossaryCorrector.
+        ("(?<=[.,!?;:])\\s*(?:kamala|[ck]omma|kana|kanna|kama|karma)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[.,!?;:])\\s*period(?:[.,!?;:]|(?=\\s|$))", "."),
         ("(?<=[.,!?;:])\\s*colon(?:[.,!?;:]|(?=\\s|$))", ":"),
         ("(?<=[.,!?;:])\\s*dash(?:[.,!?;:]|(?=\\s|$))", " —"),
@@ -56,6 +57,10 @@ public struct TextPostProcessor {
     // Fallback replacements for spoken mode (no whisper auto-punct, so no context to read).
     // These use the same boundaries as alwaysReplace — replace regardless of surrounding punct.
     private static var spokenFallback: [(pattern: String, replacement: String)] {[
+        // NOTE: kamala/karma are deliberately NOT here. This is the SPOKEN-mode always-replace
+        // fallback; kamala/karma are real words, so they only convert in the position-gated hybrid
+        // rule above (preceded by a punctuation break = the garble signature). kama/kana/kanna are
+        // non-words, safe to always-replace.
         ("\(ws)(?:[ck]omma|kana|kanna|kama)\(we)", ","),
         ("\(ws)period\(we)", "."),
         ("\(ws)colon\(we)", ":"),
