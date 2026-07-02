@@ -261,6 +261,24 @@ final class TextPostProcessorTests: XCTestCase {
         XCTAssertEqual(TextPostProcessor.process("the end full stop"), "the end.")
     }
 
+    // 10b. Double period from Parakeet's native period colliding with a spoken/stray one
+    // (dogfood 2026-07-02: "looking for. ." → "looking for.."). The space-separated dots
+    // only become adjacent after spacing is fixed, so they must be re-collapsed.
+    func testHybrid10b_spaceSeparatedDoublePeriod() {
+        XCTAssertEqual(TextPostProcessor.process("we are still looking for. ."),
+                       "we are still looking for.")
+    }
+
+    func testHybrid10c_adjacentDoublePeriod() {
+        XCTAssertEqual(TextPostProcessor.process("talk about the hack.."),
+                       "talk about the hack.")
+    }
+
+    func testHybrid10d_ellipsisPreserved() {
+        // A genuine 3-dot ellipsis must survive the double-dot collapse.
+        XCTAssertEqual(TextPostProcessor.process("So... you see"), "So... you see")
+    }
+
     // -------------------------------------------------------------------------
     // MARK: Category 2 — Hybrid conflicts (whisper auto-punctuates + spoken word)
     // -------------------------------------------------------------------------
@@ -272,9 +290,8 @@ final class TextPostProcessorTests: XCTestCase {
     // CURRENT: FAIL — produces "Hello.." instead of "Hello."
     // BUG: collapseAdjacentPunctuation doesn't handle ".." (two consecutive periods)
     func testHybrid11_whisperPeriodPlusSpokenPeriod() {
-        XCTExpectFailure("aspirational — Cascade Tier 1; see wave-1-deferred") {
-            XCTAssertEqual(TextPostProcessor.process("Hello. Period."), "Hello.")
-        }
+        // Resolved 2026-07-02 by the post-fixSpacing double-dot collapse.
+        XCTAssertEqual(TextPostProcessor.process("Hello. Period."), "Hello.")
     }
 
     // 12. Whisper adds comma before spoken exclamation mark
@@ -349,9 +366,8 @@ final class TextPostProcessorTests: XCTestCase {
     // collapse: ".." not handled → "Hello.. Next sentence."
     // CURRENT: FAIL — produces "Hello.. Next sentence." instead of "Hello. Next sentence."
     func testHybrid18_whisperCapitalizedPeriodWord() {
-        XCTExpectFailure("aspirational — Cascade Tier 1; see wave-1-deferred") {
-            XCTAssertEqual(TextPostProcessor.process("Hello. Period. Next sentence."), "Hello. Next sentence.")
-        }
+        // Resolved 2026-07-02 by the post-fixSpacing double-dot collapse.
+        XCTAssertEqual(TextPostProcessor.process("Hello. Period. Next sentence."), "Hello. Next sentence.")
     }
 
     // 19. Whisper adds comma, user says "comma" — double comma
@@ -786,12 +802,11 @@ final class TextPostProcessorTests: XCTestCase {
     // Result: "Hello... How are you??. Great!."
     // CURRENT: FAIL — produces "Hello... How are you??. Great!." instead of "Hello. How are you? Great!"
     func testHybrid59_multiSentenceHybridConflicts() {
-        XCTExpectFailure("aspirational — Cascade Tier 1; see wave-1-deferred") {
-            XCTAssertEqual(
-                TextPostProcessor.process("Hello. Period. How are you? Question mark. Great, exclamation mark."),
-                "Hello. How are you? Great!"
-            )
-        }
+        // Resolved 2026-07-02 by the post-fixSpacing double-dot collapse.
+        XCTAssertEqual(
+            TextPostProcessor.process("Hello. Period. How are you? Question mark. Great, exclamation mark."),
+            "Hello. How are you? Great!"
+        )
     }
 
     // 60. Spoken "open quote" and "close quote" with whisper punctuation
