@@ -232,6 +232,23 @@ final class TextPostProcessorTests: XCTestCase {
         XCTAssertEqual(TextPostProcessor.process("one komma two"), "one, two")
     }
 
+    // 8b. "Kama" variant — Parakeet's garble of spoken "comma" (audit 2026-07-01;
+    // reported live: "Alright. Karma, what are you talking about?" — the glossary
+    // override "kama"→"Karma" was hijacking punctuation intent).
+    func testHybrid08b_kamaVariant() {
+        XCTAssertEqual(TextPostProcessor.process("one kama two"), "one, two")
+    }
+
+    // 8c. Kama after Parakeet auto-punct (the exact reported shape): the break
+    // before "kama" marks it as a command; the spoken comma merges into the
+    // existing auto-period break (consistent with how ", comma," resolves —
+    // the earlier break wins and the sentence stays readable). The essential
+    // fence: the word never survives to become "Karma".
+    func testHybrid08c_kamaAfterAutoPunct() {
+        XCTAssertEqual(TextPostProcessor.process("Alright. Kama, what are you talking about?"),
+                       "Alright. What are you talking about?")
+    }
+
     // 9. Exclamation point variant
     // CURRENT: PASS — "great exclamation point" → "great !" → "great!"
     func testHybrid09_exclamationPoint() {

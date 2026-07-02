@@ -108,29 +108,28 @@ final class SetupFailureRoutingTests: XCTestCase {
             throw FakeSetupError(message: errorMessage)
         }
 
-        // Call setup() synchronously — the implementation dispatches the
-        // state change to main and then calls DispatchQueue.main.sync for the
-        // alert, so we need to drain the main queue.
-        let exp = expectation(description: "setup-failure side-effects reach main queue")
+        // setup()'s catch runs on the background thread and calls
+        // DispatchQueue.main.sync for the alert, so the main thread must actively
+        // drain its queue while we wait. Do NOT use XCTWaiter/wait(for:) here:
+        // under Xcode 26.2 it no longer services the GCD main queue while waiting,
+        // so the background thread parks in main.sync forever and XCTest aborts the
+        // whole suite with a stalled-wait SIGABRT (found in the 2026-07-01 audit).
+        // Instead, spin the main run loop ourselves until setup() returns.
+        let done = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
-            // We're calling the internal `setup()` indirectly via the executor seam.
-            // AppDelegate.setup() is private, so we trigger it the same way the app
-            // does — but we can't call it from a test directly.  Instead we invoke it
-            // through the public seam contract by running a method that calls setup().
-            // Since we can't call `setup()` (it is private), we exercise the SAME code
-            // path by directly simulating what setup() does when the executor throws:
-            // that is, we replicate the catch block via the seams.
-            //
-            // Actually: setup() IS accessible in test targets because AppDelegate is
-            // @testable-imported.  We use perform(selector:) as a workaround.
-            // Better: use the internal bridge below.
             delegate.runSetupForTesting()
-            exp.fulfill()
+            done.signal()
         }
-        wait(for: [exp], timeout: 5.0)
+        var completed = false
+        let deadline = Date(timeIntervalSinceNow: 5.0)
+        while Date() < deadline {
+            // Services both the main.async state hop and the main.sync alert call.
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+            if done.wait(timeout: .now()) == .success { completed = true; break }
+        }
+        XCTAssertTrue(completed, "setup() must return within 5s — main.sync alert hop deadlocked")
 
-        // Drain the main queue so the DispatchQueue.main.async state update fires.
-        // Use a short runloop spin — just enough for the async to execute.
+        // One more spin so any trailing main.async work lands before asserting.
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
 
         // 1. Alert presenter was called with the error message.
@@ -153,12 +152,21 @@ final class SetupFailureRoutingTests: XCTestCase {
         delegate._alertPresenter = { _ in alertCalled = true }
         delegate._setupExecutor = { /* success — no throw */ }
 
-        let exp = expectation(description: "non-throwing setup completes")
+        // Same drain-loop pattern as the throwing test (see comment there) — the
+        // success path has no main.sync hop today, but keep the tests symmetric so
+        // a future main-thread hop in setup() can't reintroduce the stalled-wait abort.
+        let done = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
             delegate.runSetupForTesting()
-            exp.fulfill()
+            done.signal()
         }
-        wait(for: [exp], timeout: 5.0)
+        var completed = false
+        let deadline = Date(timeIntervalSinceNow: 5.0)
+        while Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+            if done.wait(timeout: .now()) == .success { completed = true; break }
+        }
+        XCTAssertTrue(completed, "setup() must return within 5s")
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
 
         XCTAssertFalse(alertCalled, "alert must not be called when setup succeeds")

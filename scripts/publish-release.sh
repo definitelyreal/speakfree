@@ -41,9 +41,18 @@ if [ "$APPCAST_VERSION" != "$VERSION" ]; then
     exit 1
 fi
 
-# 3. Promote draft to public
-echo "Promoting draft to public release..."
-gh release edit "$TAG" --repo "$REPO" --draft=false
+# 3. Replace the draft-placeholder notes with real release notes, then promote to public.
+# build.sh creates the draft with a "*Draft — not yet published*" placeholder body; without
+# this step it went PUBLIC with that placeholder still showing (the v1.7.0 bug). Require a
+# real notes file so the placeholder can never reach users.
+NOTES_FILE="$REPO_DIR/docs/release-notes/v${VERSION}.md"
+if [ ! -f "$NOTES_FILE" ]; then
+    echo "FATAL: no release notes at docs/release-notes/v${VERSION}.md." >&2
+    echo "  Write the user-facing notes there before publishing (prevents the draft placeholder going public)." >&2
+    exit 1
+fi
+echo "Setting real release notes + promoting draft to public..."
+gh release edit "$TAG" --repo "$REPO" --notes-file "$NOTES_FILE" --draft=false
 
 # 4. Commit and push the appcast + Pages download link together — this is the moment
 # existing users see the Sparkle update AND the public Download button points at the new

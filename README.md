@@ -31,7 +31,7 @@
 
 The speakfree icon appears in your menu bar when it's running.
 
-> **Requires macOS 14 or later.** Older releases ran on macOS 13, but this version moves the minimum up to 14. If you're on macOS 13, the last release that supports you is the previous one — you won't receive updates past it.
+> **Requires macOS 14 or later on Apple Silicon (M1 or newer).** Intel Macs are not supported — the default Parakeet engine runs on the Neural Engine, and the build links Apple-Silicon Homebrew paths. Older releases ran on macOS 13, but this version moves the minimum up to 14. If you're on macOS 13, the last release that supports you is the previous one — you won't receive updates past it.
 
 ## Usage
 
@@ -97,6 +97,8 @@ speakfree runs entirely on your Mac.
 - Audio is transcribed locally. Recordings are kept on your Mac (`~/.config/speakfree/recordings`) so you can review past dictations — cap or delete them anytime in Settings
 
 ## Build from source
+
+Apple Silicon only — `Package.swift` links whisper-cpp from the Apple-Silicon Homebrew prefix (`/opt/homebrew`), so Intel Macs cannot build this project.
 
 ```bash
 git clone https://github.com/definitelyreal/speakfree.git

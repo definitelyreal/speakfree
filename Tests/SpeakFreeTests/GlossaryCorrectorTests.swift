@@ -49,6 +49,46 @@ final class GlossaryCorrectorTests: XCTestCase {
         XCTAssertEqual(correct("Viktor"), "Viktor")                   // already correct
     }
 
+    // MARK: - Exact-path real-word guard (audit 2026-07-01)
+    // Vocabulary comes from Contacts/Brain, so names that are also common words
+    // are routine. The exact-match path must never recapitalize a real word:
+    // with "Will" in the glossary, "i will send it" was becoming "I Will send it"
+    // in every dictation.
+
+    func test_exactTerm_realWordNeverRecapitalized() {
+        let g = ["Will", "Mark", "Grace"]
+        let real: (String) -> Bool = { ["will", "mark", "grace", "i", "send", "it", "done"].contains($0.lowercased()) }
+        XCTAssertEqual(GlossaryCorrector.correct("i will send it", glossary: g, isRealWord: real),
+                       "i will send it")
+        XCTAssertEqual(GlossaryCorrector.correct("mark it done", glossary: g, isRealWord: real),
+                       "mark it done")
+    }
+
+    func test_exactTerm_nonWordNameStillNormalized() {
+        // The guard must not break the intended behavior for distinctive names.
+        let g = ["Bexx", "Will"]
+        let real: (String) -> Bool = { ["will", "tell", "that", "called"].contains($0.lowercased()) }
+        XCTAssertEqual(GlossaryCorrector.correct("tell bexx that will called", glossary: g, isRealWord: real),
+                       "tell Bexx that will called")
+    }
+
+    func test_exactTerm_alreadyCanonicalUntouchedEvenIfRealWord() {
+        // Dictating the actual name capitalized keeps working ("ask Will tomorrow").
+        let g = ["Will"]
+        let real: (String) -> Bool = { _ in true }
+        XCTAssertEqual(GlossaryCorrector.correct("ask Will tomorrow", glossary: g, isRealWord: real),
+                       "ask Will tomorrow")
+    }
+
+    func test_override_stillBeatsRealWordGuard() {
+        // Curated overrides remain the explicit escape hatch for real-word garbles.
+        let g = ["Karma"]
+        let real: (String) -> Bool = { _ in true }
+        XCTAssertEqual(GlossaryCorrector.correct("kama is here", glossary: g,
+                                                 overrides: ["kama": "Karma"], isRealWord: real),
+                       "Karma is here")
+    }
+
     // MARK: - Skips
 
     func test_skipsShortTokens() {
