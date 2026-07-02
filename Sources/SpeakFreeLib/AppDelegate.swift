@@ -35,8 +35,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         localAPIServer?.stop()
     }
 
-    // Sparkle auto-updater — checks for updates on launch and periodically
-    let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    // Sparkle auto-updater — checks for updates on launch and periodically.
+    // Constructed lazily and STARTED only from setupInner (the production launch
+    // path), never at AppDelegate construction: with `startingUpdater: true` the
+    // updater came alive inside xctest whenever a test built an AppDelegate, and
+    // Sparkle's scheduled update-check prompts/errors are real modal NSAlerts on
+    // the main queue — any test that then spins the run loop deadlocks forever.
+    // That was the whole-suite stall found by the 2026-07-01 audit (and it is
+    // time/defaults-dependent, which is why the suite was green on 06-10 and hung
+    // on 07-01 with no code change). Tests route setup through _setupExecutor and
+    // never reach setupInner, so the updater now stays dormant under test.
+    private(set) lazy var updaterController = SPUStandardUpdaterController(
+        startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
 
     // The AXUIElement focused when recording started — used to refocus before pasting
     private var recordingSourceElement: AXUIElement?
@@ -163,10 +173,79 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         setup()
     }
 
+    // MARK: Legacy Parakeet model resolution (audit 2026-07-01, Michael's call)
+
+    /// Test seam for the legacy model prompt — receives whether v3 is already on
+    /// disk, returns the chosen model id. nil = show the real NSAlert.
+    var _legacyModelPrompter: ((_ v3Downloaded: Bool) -> String)?
+
+    /// Configs written before Parakeet-first onboarding can have engine=parakeet
+    /// with no `parakeetModel` key. The old `?? v3` fallback silently steered
+    /// those users to the multilingual model while the product default moved to
+    /// v2 (faster English). Instead of silently picking either, ask ONCE at
+    /// launch and persist the answer, so the config always carries an explicit
+    /// choice afterwards.
+    func resolveLegacyParakeetModel() -> String {  // internal for tests (seam: _legacyModelPrompter)
+        if let explicit = config.parakeetModel { return explicit }
+        let v3Downloaded = ParakeetModelManager.shared.isModelDownloaded("parakeet-tdt-0.6b-v3")
+        let chosen = _legacyModelPrompter?(v3Downloaded)
+            ?? Self.promptLegacyParakeetChoice(v3Downloaded: v3Downloaded)
+        config.parakeetModel = chosen
+        try? config.save()
+        DiagnosticLogger.shared.log(
+            "Legacy Parakeet config had no model choice — user chose \(chosen) (v3 on disk: \(v3Downloaded))")
+        return chosen
+    }
+
+    /// Blocking one-time choice dialog. Runs on main (setup calls this off-main);
+    /// the default button favors not surprising the user: keep multilingual if
+    /// it's already installed and in use, recommend English v2 otherwise.
+    private static func promptLegacyParakeetChoice(v3Downloaded: Bool) -> String {
+        var choice = Config.defaultParakeetModel
+        let present = {
+            let alert = NSAlert()
+            alert.messageText = "Choose your dictation model"
+            alert.alertStyle = .informational
+            if v3Downloaded {
+                alert.informativeText = """
+                speakfree now uses a faster English-only model by default. \
+                You currently have the multilingual model installed.
+
+                Keep multilingual, or switch to the faster English model? \
+                Switching downloads about 600 MB. You can change this anytime in Settings.
+                """
+                alert.addButton(withTitle: "Keep Multilingual")
+                alert.addButton(withTitle: "Switch to English (Faster)")
+                choice = alert.runModal() == .alertFirstButtonReturn
+                    ? "parakeet-tdt-0.6b-v3" : "parakeet-tdt-0.6b-v2"
+            } else {
+                alert.informativeText = """
+                speakfree now uses a faster English-only model by default.
+
+                Use English (recommended), or the multilingual model if you \
+                dictate in other languages? You can change this anytime in Settings.
+                """
+                alert.addButton(withTitle: "English (Recommended)")
+                alert.addButton(withTitle: "Multilingual")
+                choice = alert.runModal() == .alertFirstButtonReturn
+                    ? "parakeet-tdt-0.6b-v2" : "parakeet-tdt-0.6b-v3"
+            }
+        }
+        if Thread.isMainThread { present() } else { DispatchQueue.main.sync(execute: present) }
+        return choice
+    }
+
     private func setupInner() throws {
         DiagnosticLogger.shared.setup()
         DiagnosticLogger.shared.log("Setup started")
         config = Config.load()
+
+        // Start Sparkle from the real launch path only (see updaterController's
+        // comment — starting it at construction deadlocked the test suite).
+        // setupInner runs off-main; the updater expects a main-thread start.
+        DispatchQueue.main.async { [weak self] in
+            self?.updaterController.startUpdater()
+        }
 
         // Check for crash recovery before touching recordings
         if let orphanedURL = RecordingStore.checkCrashRecovery() {
@@ -196,7 +275,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         var needsDownload = false
 
         if engineID == "parakeet" {
-            modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
+            modelID = resolveLegacyParakeetModel()
             needsDownload = !ParakeetModelManager.shared.isModelDownloaded(modelID)
         } else {
             // Determine effective model (multilingual if needed)
@@ -484,6 +563,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 ?? freshConfig.engine ?? "whisper"
             let modelAvailable: Bool
             if engineID == "parakeet" {
+                // nil model here = legacy config that hasn't been through the launch
+                // prompt yet (resolveLegacyParakeetModel). Keep the historical v3
+                // fallback for this transient window — silently flipping a legacy
+                // v3 user to v2 mid-session would be a surprise model change.
                 let modelID = freshConfig.parakeetModel ?? "parakeet-tdt-0.6b-v3"
                 modelAvailable = ParakeetModelManager.shared.isModelDownloaded(modelID)
             } else {
@@ -501,6 +584,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Parakeet: no ggml-on-disk gate (FluidAudio downloads/validates its own cache).
         // Always rebuild the transcriber so an engine switch takes effect.
         if effectiveEngineID == "parakeet" {
+            // Same transient-window fallback as above — see resolveLegacyParakeetModel.
             let modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
             finishReloadConfig(modelID: modelID)
             return
