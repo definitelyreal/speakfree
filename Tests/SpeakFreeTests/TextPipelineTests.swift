@@ -448,4 +448,57 @@ final class TextPipelineTests: XCTestCase {
         XCTAssertEqual(prose.finalText, "tell Karma about the plan",
                        "prose-position 'kama' is the name — override must still fix it")
     }
+
+    // MARK: - Parakeet chunk-boundary word duplication (2026-07-02)
+    // Dictations >14.92s split into overlapping windows; the seam word is emitted by
+    // both, and window 2 (SOS-primed) re-emits it capitalized. FluidAudio's token-ID
+    // deduper misses the case difference, so "should Should" survives. Fix collapses
+    // case-differing adjacent duplicates; identical reduplication is left alone.
+
+    func test_collapseBoundaryDup_realRepro() {
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("parameters should Should be allowed"),
+            "parameters should be allowed")
+    }
+
+    func test_collapseBoundaryDup_caseDifferingMidText() {
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("searching by entity Entity text"),
+            "searching by entity text")
+    }
+
+    func test_collapseBoundaryDup_endToEndThroughRun() {
+        // Proves the collapse is wired into run() ahead of punctuation processing.
+        let r = TextPipeline.run(TextPipeline.Input(
+            raw: "parameters should Should be allowed", punctuationMode: .hybrid))
+        XCTAssertFalse(r.finalText.contains("Should"),
+                       "seam dup must be gone end-to-end. Got: \(r.finalText)")
+    }
+
+    func test_collapseBoundaryDup_identicalReduplicationUntouched() {
+        // Legitimate same-case reduplication is NOT a seam artifact — leave it.
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("I think that that is fine"),
+            "I think that that is fine")
+    }
+
+    func test_collapseBoundaryDup_sentenceBoundaryUntouched() {
+        // Punctuation between the copies = genuine sentence boundary, never adjacent.
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("He said stop. Stop now."),
+            "He said stop. Stop now.")
+    }
+
+    func test_collapseBoundaryDup_identicalCapitalTradeoff() {
+        // Spec's accepted tradeoff: an identical-case pair (proper noun on the seam,
+        // "Steve Steve", or a sentence-start "Should Should") is indistinguishable from
+        // legitimate reduplication and is intentionally left alone. Documents that the
+        // rule is case-DIFFERENCE-gated, per the primary spec, not sentence-position.
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("Call Steve Steve about it"),
+            "Call Steve Steve about it")
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("It is allowed. Should Should be"),
+            "It is allowed. Should Should be")
+    }
 }
