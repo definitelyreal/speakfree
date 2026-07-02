@@ -222,6 +222,28 @@ public final class ParakeetEngine: TranscriptionEngine {
             let sw = SlidingWindowAsrManager(config: .streaming)
             try await sw.loadModels(models)
             try await sw.configureVocabularyBoosting(vocabulary: vocab, ctcModels: ctc)
+
+            // Capture the transcript from the update stream as a safety net. finish() returns the
+            // manager's internal confirmed+volatile, but a single-window clip (~11-13s) keeps its
+            // text in VOLATILE (never promoted, since there's no following window) and a trailing
+            // empty flush chunk overwrites it — so finish() comes back empty even though the clip
+            // transcribed fine (dogfood 2026-07-02: 11.1s "Hey Kama…" recognized, then wiped).
+            // Tracking the richest non-empty text seen survives that. The stream is finished by
+            // finish()/cancel(), so this collector task always terminates — no hang.
+            let updates = await sw.transcriptionUpdates
+            let collector = Task { () -> String in
+                var confirmed: [String] = []
+                var lastVolatile = ""
+                for await u in updates {
+                    let t = u.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !t.isEmpty else { continue }
+                    if u.isConfirmed { confirmed.append(t) } else { lastVolatile = t }
+                }
+                var parts = confirmed
+                if !lastVolatile.isEmpty { parts.append(lastVolatile) }
+                return parts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
             try await sw.startStreaming(source: .microphone)
             // Feed the recording in small chunks the way live audio arrives, NOT as one giant
             // buffer. The sliding window advances per fed chunk; a single multi-window buffer
@@ -236,9 +258,12 @@ public final class ParakeetEngine: TranscriptionEngine {
                 }
                 i = end
             }
-            let text = try await sw.finish()
+            let finishText = (try await sw.finish()).trimmingCharacters(in: .whitespacesAndNewlines)
             await sw.cancel()   // stop the recognizer task; NOT cleanup() (that frees the shared models)
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // finish() is authoritative when it returns text (multi-window clips work); the collected
+            // stream text only rescues the wiped-volatile case above.
+            let collected = await collector.value
+            return finishText.isEmpty ? collected : finishText
         }
 
         // MARK: Transcribe
