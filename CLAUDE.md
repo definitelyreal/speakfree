@@ -18,6 +18,17 @@ Correct sequence when installing a fresh build to `/Applications` (or `~/Applica
 - The dev bundle is ad-hoc signed (version "dev"): first launch needs **right-click → Open**, and TCC permissions (Mic/Accessibility) may need re-granting after each rebuild.
 - To run the CLI build directly: `export DYLD_FALLBACK_LIBRARY_PATH=$PWD/scripts/vendor/dylibs` then `./.build/debug/speakfree <cmd>`.
 
+## Menu-bar title must reflect build/mode (MANDATORY)
+
+**The menu-bar dropdown title must always tell Michael which build he's running, so an experimental/test build is never mistaken for the dogfood release.** (2026-07-02: production relaunched via launch-at-login and fought the streaming build for the fn hotkey; it wasn't obvious which was which, and one silently wasn't recording.)
+
+Implemented in `SpeakFree.menuTitle` ([Version.swift](Sources/SpeakFreeLib/Version.swift)), rendered as the disabled title item in `StatusBarController.buildMenuItems`:
+- **Streaming variant** (bundle id `…​.streaming`) → `SpeakFree Streaming X.Y.Z Testing`
+- **Beta variant** (`…​.beta`) → `SpeakFree Beta X.Y.Z Testing`
+- **Production** → `speakfree X.Y.Z Testing` for local dev builds; clean `speakfree X.Y.Z` ONLY for the released DMG, which `scripts/build.sh` stamps with Info.plist `SFBuildChannel = release`.
+
+Rule of thumb: dogfooding the real release = clean title; anything you built to test = "Testing". Keep this behavior when touching the menu or the release flow.
+
 ## Parakeet model download
 
 - Default new-user engine is Parakeet English (`parakeet-tdt-0.6b-v2`); models cache at `~/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v{2,3}/`.
