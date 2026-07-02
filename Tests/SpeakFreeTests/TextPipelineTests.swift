@@ -423,4 +423,29 @@ final class TextPipelineTests: XCTestCase {
         XCTAssertTrue(result.finalText.hasPrefix("If"),
                       "no context = no case adjustment. Got: \(result.finalText)")
     }
+
+    // Audit 2026-07-01, reported live during the streaming dogfood: spoken "comma"
+    // garbled by Parakeet to "kama" was hijacked by the curated override
+    // "kama"→"Karma" (the contact), inserting the name instead of punctuation.
+    // Position disambiguates the two intents: a break before the word means
+    // punctuation (TextPostProcessor consumes it BEFORE overrides run); plain
+    // prose means the name (the override downstream still fixes it).
+    func test_run_kamaPunctuationIntent_beatsKarmaOverride() {
+        let overrides = ["kama": "Karma"]
+        let punct = TextPipeline.run(
+            TextPipeline.Input(raw: "Alright. Kama, what are you talking about?",
+                               punctuationMode: .hybrid,
+                               overrides: overrides),
+            isRealWord: { _ in true })
+        XCTAssertFalse(punct.finalText.contains("Karma"),
+                       "break-before 'kama' is a spoken comma, not the name. Got: \(punct.finalText)")
+
+        let prose = TextPipeline.run(
+            TextPipeline.Input(raw: "tell kama about the plan",
+                               punctuationMode: .hybrid,
+                               overrides: overrides),
+            isRealWord: { _ in true })
+        XCTAssertEqual(prose.finalText, "tell Karma about the plan",
+                       "prose-position 'kama' is the name — override must still fix it")
+    }
 }
