@@ -106,7 +106,19 @@ public enum GlossaryCorrector {
 
         // Exact glossary term (any case) → normalize to the curated spelling
         // (e.g. mid-sentence "bexx" → "Bexx"; names keep their case).
-        if let canon = canonical[lower] { return canon }
+        //
+        // Real-word guard applies HERE too (audit 2026-07-01). On this path the
+        // token already has the same letters as the term, so the only possible
+        // "correction" is capitalization — and vocabulary comes from Contacts/
+        // Brain, where names that are also common words are routine ("Will",
+        // "Mark", "Grace", "Rose"). Without the guard, "i will send it" became
+        // "I Will send it" in every dictation. A token that is itself a
+        // legitimate word is left alone; put it in overrides to force it.
+        if let canon = canonical[lower] {
+            if token == canon { return token }
+            if isRealWord(token) { return token }
+            return canon
+        }
 
         // Guards: long enough, and not a legitimate word.
         guard token.count >= 4 else { return token }
