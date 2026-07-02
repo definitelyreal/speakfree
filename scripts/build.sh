@@ -52,6 +52,10 @@ echo "Copying canonical Info.plist and setting version to ${VERSION}..."
 cp "Resources/Info.plist" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "$APP/Contents/Info.plist"
+# Mark this as the RELEASE channel so the menu-bar title is clean ("speakfree X.Y.Z").
+# Any build without this key defaults to "Testing" (dev/experimental) — see SpeakFree.menuTitle.
+/usr/libexec/PlistBuddy -c "Set :SFBuildChannel release" "$APP/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :SFBuildChannel string release" "$APP/Contents/Info.plist"
 
 echo "Copying main binary..."
 cp .build/release/speakfree "$APP/Contents/MacOS/speakfree"

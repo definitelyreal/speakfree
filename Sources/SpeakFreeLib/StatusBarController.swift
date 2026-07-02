@@ -123,7 +123,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     private func buildMenuItems(into menu: NSMenu) {
 
-        let titleItem = NSMenuItem(title: "speakfree v\(SpeakFree.version)", action: nil, keyEquivalent: "")
+        let titleItem = NSMenuItem(title: SpeakFree.menuTitle, action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
         menu.addItem(titleItem)
 
