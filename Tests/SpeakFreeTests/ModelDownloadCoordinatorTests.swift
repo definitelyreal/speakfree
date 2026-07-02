@@ -83,10 +83,12 @@ final class MockURLProtocol: URLProtocol {
 
 final class ModelDownloadCoordinatorTests: XCTestCase {
 
-    /// A throwaway models dir per test, so we never touch the user's real ~/.config/speakfree.
-    /// We redirect Config.configDir by setting HOME? No — Config derives from homeDirectory.
-    /// Instead each test uses a real but isolated temp HOME via the `tinyEn` size and cleans up
-    /// the destination it would write. We DELETE any installed/temp file in setUp/tearDown.
+    /// A throwaway config dir per suite via the Config.configDirOverride seam (the same
+    /// pattern as ConfigTests/SettingsViewModelTests), so these tests NEVER resolve paths
+    /// under the user's real ~/.config/speakfree. Before the 2026-07-01 audit this suite
+    /// parked the developer's real tiny.en aside and restored it in tearDown — a SIGKILL
+    /// mid-suite would have deleted the installed model (the 06-11 collapse failure class).
+    private var scratchConfigDir: URL!
     private var modelsDir: URL { Config.configDir.appendingPathComponent("models") }
     private func destURL(_ size: String) -> URL { modelsDir.appendingPathComponent("ggml-\(size).bin") }
     private func tmpURL(_ size: String) -> URL { destURL(size).appendingPathExtension("downloading") }
@@ -110,23 +112,16 @@ final class ModelDownloadCoordinatorTests: XCTestCase {
         return coord
     }
 
-    /// Where a pre-existing REAL tiny.en model is parked while these tests scribble over the
-    /// install path. testSize == "tiny.en" so cleanFiles() would otherwise DELETE the developer's
-    /// (and CI's cached) actual model — which silently breaks AudioGoldenTests + the AR-2 adaptive
-    /// transcription tests that run in the same suite. We move it aside in setUp and restore it in
-    /// tearDown so this suite never destroys a real installed model.
-    private var preservedModelBackup: URL?
-
     override func setUp() {
         super.setUp()
-        let dest = destURL(testSize)
-        if FileManager.default.fileExists(atPath: dest.path) {
-            let backup = dest.appendingPathExtension("ar2backup")
-            try? FileManager.default.removeItem(at: backup)
-            if (try? FileManager.default.moveItem(at: dest, to: backup)) != nil {
-                preservedModelBackup = backup
-            }
-        }
+        // Isolate the whole suite in a scratch config dir. destURL/tmpURL and the
+        // coordinator itself both resolve through Config.configDir, so pointing the
+        // override at a temp dir keeps every write (and every cleanFiles delete)
+        // out of the real install path. No park/restore of the real model needed.
+        scratchConfigDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakfree-mdc-tests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: scratchConfigDir, withIntermediateDirectories: true)
+        Config.configDirOverride = scratchConfigDir
         cleanFiles()
     }
     override func tearDown() {
@@ -143,11 +138,11 @@ final class ModelDownloadCoordinatorTests: XCTestCase {
             return hasher.finalize().map { String(format: "%02x", $0) }.joined()
         }
         cleanFiles()
-        // Restore the developer's / CI's real model if we moved it aside.
-        if let backup = preservedModelBackup {
-            try? FileManager.default.removeItem(at: destURL(testSize))
-            try? FileManager.default.moveItem(at: backup, to: destURL(testSize))
-            preservedModelBackup = nil
+        // Drop the scratch config dir and restore the real Config.configDir.
+        if let dir = scratchConfigDir {
+            Config.configDirOverride = nil
+            try? FileManager.default.removeItem(at: dir)
+            scratchConfigDir = nil
         }
         super.tearDown()
     }
