@@ -70,7 +70,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Streaming transcription: periodic inference during recording
     private var streamingTimer: Timer?
-    private var streamingText: String = ""
     private var isStreamingInFlight = false  // prevents overlapping inference runs
     /// Streaming-overlay text assembler. Owns the "committed" display text (sentences that
     /// have ended and won't reflow) and the stable-append logic, extracted to
@@ -972,9 +971,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let audioURL = recording.url
         let samples = recording.samples
 
-        // Skip transcription for very short recordings (<300ms) — likely an accidental tap
-        let minSamples = 4800  // 300ms at 16kHz
-        if samples.count < minSamples {
+        // Skip transcription for very short recordings (<300ms) — likely an accidental tap.
+        // Threshold + RMS live in FinalizePipeline so the test harness gates on the SAME values.
+        if samples.count < FinalizePipeline.minSamples {
             print("Recording too short (\(samples.count) samples / \(Int(Double(samples.count) / 16000.0 * 1000))ms) — skipping")
             RecordingStore.clearSentinel()
             recordingSourceElement = nil
@@ -985,8 +984,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Check for dead audio (all silence) — engine may have died mid-recording
-        let rms = sqrtf(samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count))
-        if rms < 0.0001 {
+        let rms = FinalizePipeline.rms(of: samples)
+        if rms < FinalizePipeline.silenceRMSThreshold {
             DiagnosticLogger.shared.log("Recording was silent (RMS \(rms)) — audio engine may be dead, rebuilding")
             recorder.ensureAudioHealthy()
             RecordingStore.clearSentinel()
@@ -1101,19 +1100,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                 }
                 // T2.3 — reuse the saved streaming partial when the gate approved, else run the
-                // final inference. Either way the raw text flows through the SAME TextPipeline
-                // post-processing below, so the only difference is whether whisper_full ran again.
-                let raw: String
-                switch reuseDecision {
-                case .reusePartial(let rawPartial):
-                    // The streaming partial is RAW collectSegments output; unlike the final pass it
-                    // has NOT had its multi-segment acoustic `\n` collapsed. Apply the IDENTICAL
-                    // collapse the final path uses so an unspoken segment split can never reach
-                    // TextInserter as a line-break `.shiftReturn` (Newline Policy 2b / Option B).
-                    raw = TextPipeline.collapseSegmentNewlines(rawPartial)
+                // final inference, via the SHARED FinalizePipeline.resolveRaw (same branch the
+                // test harness exercises, incl. the segment-newline collapse on the reuse path).
+                // Either way the raw text flows through the SAME TextPipeline below.
+                let (raw, reusedPartial) = try await FinalizePipeline.resolveRaw(reuseDecision: reuseDecision) {
+                    try await transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
+                }
+                if reusedPartial {
                     DiagnosticLogger.shared.log("T2.3: reused last streaming partial (skipped final inference)")
-                case .runFinalInference:
-                    raw = try await transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
                 }
                 RecordingStore.saveRaw(text: raw, for: audioURL)
                 let text = TextPipeline.run(makeInput(raw), precomputedPrompt: .some(prompt)).finalText
@@ -1138,7 +1132,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     if !text.isEmpty {
                         // T2.2: use the prepend-space decision precomputed at record-start (off
                         // main). No AX query, no semaphore.wait — zero main-thread stall here.
-                        let insertText = capturedPrependSpace ? " " + text : text
+                        let insertText = FinalizePipeline.composeInsertText(text, prependSpace: capturedPrependSpace)
                         self.lastTranscription = text
                         // Record usage stats
                         let audioSeconds = Double(samples.count) / 16000.0
@@ -1223,7 +1217,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Gate on the transcriber's engine-agnostic passthroughs. Engines that don't support
         // live preview (parakeet v1) report supportsStreaming == false and are skipped here.
         guard transcriber.supportsStreaming, transcriber.isLoaded else { return }
-        streamingText = ""
         streamingAssembler.reset()
         isStreamingInFlight = false
         resetStreamingReuseState()  // T2.3: no partial to reuse until the first pass completes
@@ -1236,7 +1229,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopStreamingTimer() {
         streamingTimer?.invalidate()
         streamingTimer = nil
-        streamingText = ""
         streamingAssembler.reset()
         isStreamingInFlight = false
         streamingGeneration &+= 1  // invalidate any in-flight partial-result callbacks
@@ -1298,12 +1290,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         self.recordingOverlay.updateStreamingText(displayText)
                     }
                 )
-                self.streamingText = partial
-
-                // Commit completed sentences so they won't change on next inference
-                let displayText = self.buildStableDisplayText(from: partial)
-
                 DispatchQueue.main.async {
+                    // Commit completed sentences so they won't change on next inference.
+                    // Must run on main: streamingAssembler is main-queue-only state (it is
+                    // also mutated by onPartialResult and reset by stopStreamingTimer).
+                    let displayText = self.buildStableDisplayText(from: partial)
                     self.recordingOverlay.updateStreamingText(displayText)
                     self.isStreamingInFlight = false
                     // T2.3 — record THIS completed pass (raw partial + samples it saw + when it
