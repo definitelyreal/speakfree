@@ -47,6 +47,8 @@ public final class ParakeetEngine: TranscriptionEngine {
         private var vocabCtc: CtcModels?
         private var vocabContext: CustomVocabularyContext?
         private var vocabTermCount = 0
+        /// Handle on the background vocab setup, for the SPEAKFREE_WAIT_VOCAB test seam only.
+        private var vocabSetupTask: Task<Void, Never>?
 
         /// The model identifier currently loaded, e.g. "parakeet-tdt-0.6b-v3". `nil` when unloaded.
         private var loadedModelID: String?
@@ -165,7 +167,7 @@ public final class ParakeetEngine: TranscriptionEngine {
             // the CTC keyword-spotter takes ~15s). Dictation works immediately via the batch path and
             // upgrades to vocab-boosted automatically once ready. Never fatal.
             let modelForVocab = modelID
-            Task { await self.setupVocabBoosting(models: models, forModelID: modelForVocab) }
+            vocabSetupTask = Task { await self.setupVocabBoosting(models: models, forModelID: modelForVocab) }
         }
 
         /// Try to configure decode-time custom-vocabulary biasing. Gated on a
@@ -333,6 +335,15 @@ public final class ParakeetEngine: TranscriptionEngine {
             // nil only for auto/empty codes or v2 (English-only, ignores the hint).
             let isV3 = EngineCatalog.versionString(forParakeetModelID: modelID) != "v2"
             let hint = ParakeetEngine.languageHint(for: language, isV3: isV3)
+
+            // Test seam (A/B benchmarking, 2026-07-03): a short-lived CLI `process` run normally
+            // races the background vocab setup and silently benchmarks the batch path instead.
+            // SPEAKFREE_WAIT_VOCAB=1 awaits setup and reports the engaged path on stderr so every
+            // benchmark run self-verifies which decode path produced its output. No-op in the app.
+            if ProcessInfo.processInfo.environment["SPEAKFREE_WAIT_VOCAB"] == "1" {
+                await vocabSetupTask?.value
+                FileHandle.standardError.write(Data("SPEAKFREE_WAIT_VOCAB: vocab terms ready = \(vocabTermCount)\n".utf8))
+            }
 
             // Custom-vocabulary path first, once its background setup has populated the ingredients.
             // The vocab/sliding path is an ENHANCEMENT over the reliable batch path, and the
