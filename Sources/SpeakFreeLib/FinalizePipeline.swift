@@ -6,9 +6,12 @@ import Foundation
 /// decision logic, lifted out of AppDelegate so it can be driven by a FakeEngine + a
 /// MockInserter under XCTest without AppKit, a real audio engine, or a live cursor.
 ///
-/// AppDelegate's `finalizeRecording` keeps every UI / RecordingStore / status-bar side
-/// effect; it delegates ONLY the pure pipeline decisions to this type so the observable
-/// app behavior is byte-identical to the inline version.
+/// Sharing contract (audit 2026-07-03): `finalizeRecording` CALLS the pure pieces of this
+/// type directly — `minSamples`/`silenceRMSThreshold`/`rms` for the gates, `resolveRaw`
+/// for the T2.3 reuse-vs-final branch, `composeInsertText` for prepend-space assembly —
+/// and keeps only UI / RecordingStore / status-bar side effects inline. `run(...)` below
+/// composes those SAME pieces for tests, so a change to any decision is exercised by both
+/// paths and they cannot silently diverge.
 public enum FinalizePipeline {
 
     /// 300ms at 16kHz — the minimum sample count below which a recording is treated as an
@@ -45,6 +48,28 @@ public enum FinalizePipeline {
     public static func rms(of samples: [Float]) -> Float {
         guard !samples.isEmpty else { return 0 }
         return sqrtf(samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count))
+    }
+
+    /// T2.3 reuse-vs-final branch, shared verbatim by `finalizeRecording` and `run(...)`.
+    ///
+    /// When the gate approved reuse, the saved raw streaming partial is returned after
+    /// `collapseSegmentNewlines` — the final pass applies that collapse inside
+    /// `Transcriber.transcribeWithEngine`, so applying it here keeps the two paths
+    /// byte-identical for multi-segment `\n` (an unspoken segment split can never reach
+    /// TextInserter as a `.shiftReturn`). Otherwise the `transcribe` closure runs.
+    public static func resolveRaw(
+        reuseDecision: StreamingReuse.Decision?,
+        transcribe: () async throws -> String
+    ) async rethrows -> (raw: String, reusedPartial: Bool) {
+        if case let .reusePartial(rawPartial)? = reuseDecision {
+            return (TextPipeline.collapseSegmentNewlines(rawPartial), true)
+        }
+        return (try await transcribe(), false)
+    }
+
+    /// Prepend-space assembly, shared verbatim by `finalizeRecording` and `insertFinalText`.
+    public static func composeInsertText(_ text: String, prependSpace: Bool) -> String {
+        prependSpace ? " " + text : text
     }
 
     /// Run the finalize core.
@@ -105,35 +130,16 @@ public enum FinalizePipeline {
         let contextInput = promptContext ?? makeInput("")
         let prompt = TextPipeline.assemblePromptHints(input: contextInput)
 
-        // T2.3 — short-utterance fast path. The reuse gate already verified (on main, before this
-        // runs) that the flag is on, the partial is fresh, and the recording barely grew. We SKIP
-        // the redundant final `whisper_full` call and route the saved raw partial through the SAME
-        // TextPipeline the final pass uses. NOTE: the raw streaming partial must first be passed
-        // through `collapseSegmentNewlines` (below) — the final pass applies that collapse in
-        // Transcriber.transcribeWithEngine, so without it here the two paths are NOT byte-identical
-        // for multi-segment `\n`. Accuracy: the streaming partial was transcribed over the audio
-        // available at the last streaming pass; the reuse gate caps post-pass audio growth at
-        // `defaultMaxSampleGrowthFraction`, so a tail-word difference is possible within that bound
-        // (measured by the growth-aware reuse harness). Final-inference latency is eliminated.
-        if case let .reusePartial(rawPartial)? = reuseDecision {
-            // The reused partial is RAW streaming-engine output (collectSegments), which — unlike the
-            // final pass (Transcriber.transcribeWithEngine) — has NOT had its multi-segment acoustic
-            // `\n` collapsed. Apply the IDENTICAL collapse here so the reuse path is byte-equivalent
-            // to the final path for multi-segment newlines: an unspoken segment split can NEVER reach
-            // TextInserter as a `.shiftReturn` line break (Newline Policy 2b / Option B).
-            let normalizedPartial = TextPipeline.collapseSegmentNewlines(rawPartial)
-            let text = TextPipeline.run(makeInput(normalizedPartial), precomputedPrompt: .some(prompt)).finalText
-            if text.isEmpty {
-                return .emptyTranscription
-            }
-            let (insertText, pasted) = insertFinalText(
-                text, inserter: inserter, element: element,
-                precomputedPrependSpace: precomputedPrependSpace, onFocusLost: onFocusLost)
-            return .reusedPartial(insertedText: insertText, pasted: pasted)
-        }
-
+        // T2.3 — short-utterance fast path vs final inference, via the SHARED resolveRaw
+        // (the same call `finalizeRecording` makes). When reuse was approved the final
+        // `whisper_full` call is skipped and the saved partial (segment-newline-collapsed)
+        // is routed through the SAME TextPipeline the final pass uses. Accuracy: the reuse
+        // gate caps post-pass audio growth at `defaultMaxSampleGrowthFraction`, so a
+        // tail-word difference is possible within that bound.
         do {
-            let raw = try await transcribe(audioURL, samples, prompt)
+            let (raw, reusedPartial) = try await resolveRaw(reuseDecision: reuseDecision) {
+                try await transcribe(audioURL, samples, prompt)
+            }
             let text = TextPipeline.run(makeInput(raw), precomputedPrompt: .some(prompt)).finalText
 
             if text.isEmpty {
@@ -143,7 +149,9 @@ public enum FinalizePipeline {
             let (insertText, pasted) = insertFinalText(
                 text, inserter: inserter, element: element,
                 precomputedPrependSpace: precomputedPrependSpace, onFocusLost: onFocusLost)
-            return .inserted(insertedText: insertText, pasted: pasted)
+            return reusedPartial
+                ? .reusedPartial(insertedText: insertText, pasted: pasted)
+                : .inserted(insertedText: insertText, pasted: pasted)
         } catch {
             let modelMissing: Bool
             if case TranscriptionEngineError.modelAssetsMissing = error {
@@ -169,7 +177,7 @@ public enum FinalizePipeline {
         // record-start, off the main thread — no AX query, no semaphore). Fall back to the
         // AX-backed shouldPrependSpace only when no precomputed value is available.
         let wantSpace = precomputedPrependSpace ?? inserter.shouldPrependSpace(before: element)
-        let insertText = wantSpace ? " " + text : text
+        let insertText = composeInsertText(text, prependSpace: wantSpace)
         let pasted = inserter.insert(text: insertText, refocusing: element, onFocusLost: onFocusLost)
         return (insertText, pasted)
     }

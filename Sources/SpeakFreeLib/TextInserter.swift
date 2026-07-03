@@ -259,9 +259,22 @@ class TextInserter {
         var error: NSDictionary?
         script?.executeAndReturnError(&error)
         if let error = error {
+            Self.logAppleEventsDenialHint(error)
             DiagnosticLogger.shared.log("TextInserter: AppleScript keystroke failed: \(error) — falling back to clipboard")
             pasteViaClipboard(text)
         }
+    }
+
+    /// -1743 = the app has no Automation (Apple Events → System Events) grant. Both remote-
+    /// desktop insertion tiers depend on it, so surface the ACTIONABLE cause: without an
+    /// NSAppleEventsUsageDescription in Info.plist macOS auto-denies and never prompts
+    /// (2026-07-03: Splashtop insertion silently dead on builds whose plist lacked the key).
+    static func logAppleEventsDenialHint(_ error: NSDictionary) {
+        guard (error["NSAppleScriptErrorNumber"] as? Int) == -1743 else { return }
+        DiagnosticLogger.shared.log(
+            "TextInserter: Apple Events DENIED (-1743) — remote-desktop insertion cannot work. "
+            + "Fix: System Settings → Privacy & Security → Automation → enable System Events for this app. "
+            + "If the app never appears there, its Info.plist is missing NSAppleEventsUsageDescription (rebuild).")
     }
 
     /// Insert text directly via the Accessibility API. Returns true on success.
@@ -665,6 +678,7 @@ class TextInserter {
                 var error: NSDictionary?
                 script?.executeAndReturnError(&error)
                 if let error = error {
+                    Self.logAppleEventsDenialHint(error)
                     DiagnosticLogger.shared.log("TextInserter: AppleScript paste failed: \(error)")
                 }
             }
