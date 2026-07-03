@@ -105,6 +105,7 @@ git clone https://github.com/definitelyreal/speakfree.git
 cd speakfree
 brew install whisper-cpp
 swift build -c release
+bash scripts/bundle-app.sh .build/release/speakfree speakfree.app dev
 open speakfree.app
 ```
 
