@@ -114,7 +114,10 @@ public class Transcriber {
             } catch {
                 // CLI fallback is whisper-only; other engines rethrow.
                 if engine.engineID == "whisper" {
-                    print("WhisperEngine failed: \(error.localizedDescription) — falling back to CLI")
+                    // Log to the diagnostic log, not just stdout: the CLI path uses different
+                    // inference params, so a persistently failing in-process engine silently
+                    // degrading every dictation must be visible in the log health checks read.
+                    DiagnosticLogger.shared.log("Transcriber: in-process engine failed (\(error.localizedDescription)) — falling back to whisper CLI")
                     result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
                 } else {
                     throw error
@@ -383,15 +386,18 @@ public class Transcriber {
                     isCancelled: isCancelled
                 )
             } else {
-                // Parakeet and other engines: progress by chunk count only
-                progressHandler(idx, totalChunks, 0)
+                // Parakeet and other engines: progress by chunk count only.
+                // Hop to main explicitly — whisper's transcribeWithProgress does this
+                // internally, but this branch runs in the caller's Task context, and
+                // FileTranscriptionController mutates AppKit views in the handler.
+                DispatchQueue.main.async { progressHandler(idx, totalChunks, 0) }
                 raw = try await engine.transcribe(
                     samples: samples,
                     language: language,
                     prompt: parts.last.map { String($0.suffix(200)) },
                     suppressRegex: suppressRegex
                 )
-                progressHandler(idx + 1, totalChunks, 100)
+                DispatchQueue.main.async { progressHandler(idx + 1, totalChunks, 100) }
             }
 
             // Preserve multi-segment whisper breaks as newlines HERE. Unlike live dictation
