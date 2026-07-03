@@ -97,6 +97,14 @@ This value is committed to the repo and is not secret.
 
 Everything from source to a live Sparkle update in one ordered list.
 
+> **After any FluidAudio (or engine) version bump, run the replay canaries first:**
+> `python3 scripts/replay-regression.py --canaries` (optionally `--corpus 40` for a
+> broader sweep). The 3s trailing-silence pad compensates for a truncation quirk in
+> the FluidAudio/CoreML decode path — it does not reproduce on other runtimes and its
+> pad response is non-monotonic (2.0s ok / 2.5s truncated / 3.0s ok, measured
+> 2026-06-12) — so an engine upgrade can silently re-break tail clauses. The canaries
+> replay the original failing clip and assert the clause survives.
+
 ```
 1.  Bump version in all three sources (see §4)
 2.  Commit + push the version bump to main
