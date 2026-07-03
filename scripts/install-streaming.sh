@@ -47,6 +47,15 @@ $PB -c "Set :CFBundleDisplayName SpeakFree Streaming" "$PLIST" 2>/dev/null || $P
 $PB -c "Delete :SUFeedURL" "$PLIST" 2>/dev/null || true
 $PB -c "Delete :SUEnableAutomaticChecks" "$PLIST" 2>/dev/null || true
 
+# Ensure the TCC usage descriptions exist regardless of the production template's age.
+# Without NSAppleEventsUsageDescription macOS AUTO-DENIES Apple Events (-1743, never
+# prompts) and remote-desktop insertion (Splashtop etc.) silently drops the text —
+# found live 2026-07-03. Older installed templates predate the Resources/Info.plist fix.
+$PB -c "Add :NSAppleEventsUsageDescription string 'speakfree uses Apple Events to type/paste text into remote desktop apps like Splashtop.'" "$PLIST" 2>/dev/null \
+  || $PB -c "Set :NSAppleEventsUsageDescription 'speakfree uses Apple Events to type/paste text into remote desktop apps like Splashtop.'" "$PLIST"
+$PB -c "Add :NSScreenCaptureUsageDescription string 'speakfree uses screen capture for local OCR to improve transcription accuracy (opt-in).'" "$PLIST" 2>/dev/null \
+  || $PB -c "Set :NSScreenCaptureUsageDescription 'speakfree uses screen capture for local OCR to improve transcription accuracy (opt-in).'" "$PLIST"
+
 echo "Setting up isolated config dir ($STREAM_CONFIG)..."
 mkdir -p "$STREAM_CONFIG"
 # Reuse production models (large, effectively read-only) via symlink — no re-download.
