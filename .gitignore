@@ -1,5 +1,9 @@
 .build/
 .swiftpm/
+# Session working dirs — never commit (may contain personal audio/transcripts).
+# A few pre-existing build/ files (test fixtures, early reports) remain tracked.
+build/
+*.log
 *.xcodeproj
 *.app
 .DS_Store
