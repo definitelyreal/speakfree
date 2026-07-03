@@ -47,6 +47,10 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>speakfree needs microphone access to record your voice.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>speakfree uses Apple Events to type/paste text into remote desktop apps like Splashtop.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>speakfree uses screen capture for local OCR to improve transcription accuracy (opt-in).</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>
