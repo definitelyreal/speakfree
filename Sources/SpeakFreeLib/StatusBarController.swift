@@ -33,6 +33,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
         case recording
         case transcribing
         case downloading
+        /// Model just finished downloading and the app is set up, but the user hasn't dictated yet.
+        /// Drawn as a green logo — an at-a-glance "you're all set, try it now" cue. Cleared to `.idle`
+        /// the moment the first dictation starts (see AppDelegate.handleKeyDown → `.recording`).
+        case ready
         case waitingForPermission
         case copiedToClipboard
         /// Secure-Input fallback: dictated text was copied with concealment markers and will
@@ -149,11 +153,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        // Status line — only show when not idle (remove "Ready" noise)
-        if state != .idle {
+        // Status line — only show when not idle/ready (remove "Ready" noise; the green icon already
+        // signals the ready state).
+        if state != .idle && state != .ready {
             let stateText: String
             switch state {
-            case .idle: stateText = ""  // unreachable
+            case .idle, .ready: stateText = ""  // unreachable — excluded above
             case .recording: stateText = "Recording..."
             case .transcribing: stateText = "Transcribing..."
             case .downloading: stateText = "Downloading model..."
@@ -301,6 +306,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
         switch state {
         case .idle:
             setIcon(StatusBarController.drawLogo(active: false))
+        case .ready:
+            setIcon(StatusBarController.drawGreenLogo())
         case .recording:
             startRecordingAnimation()
         case .transcribing:
@@ -422,17 +429,60 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    // MARK: - Downloading animation: arrow moves down
+    // MARK: - Downloading animation: rolling wave (each bar dips to a dot, sweeping left→right)
+
+    private static let downloadFrameCount = 40
+
+    private static func prerenderDownloadWaveFrames() -> [NSImage] {
+        let count = downloadFrameCount
+        let baseHeights: [CGFloat] = [4, 8, 12, 8, 4]
+        let barWidth: CGFloat = 2.0
+        let gap: CGFloat = 2.5
+        let radius: CGFloat = 1.0
+        let dotHeight: CGFloat = barWidth  // a fully-shrunk bar reads as a round dot
+
+        return (0..<count).map { frame in
+            let t = Double(frame) / Double(count)
+            let size = NSSize(width: 18, height: 18)
+            let image = NSImage(size: size, flipped: false) { rect in
+                NSColor.black.setFill()
+
+                let centerX = rect.midX
+                let centerY = rect.midY
+                let totalWidth = CGFloat(baseHeights.count) * barWidth + CGFloat(baseHeights.count - 1) * gap
+                let startX = centerX - totalWidth / 2
+
+                for (i, base) in baseHeights.enumerated() {
+                    // Each bar lags the one to its left, so the trough (dot) sweeps left→right.
+                    let phase = 2.0 * .pi * (t - Double(i) / Double(baseHeights.count))
+                    let s = CGFloat((sin(phase) + 1.0) / 2.0)  // 0 = dot, 1 = full height
+                    let height = dotHeight + (base - dotHeight) * s
+                    let x = startX + CGFloat(i) * (barWidth + gap)
+                    let y = centerY - height / 2
+                    NSBezierPath(roundedRect: NSRect(x: x, y: y, width: barWidth, height: height),
+                                 xRadius: radius, yRadius: radius).fill()
+                }
+                return true
+            }
+            image.isTemplate = true
+            return image
+        }
+    }
 
     private func startDownloadingAnimation() {
         animationFrame = 0
-        setIcon(StatusBarController.drawDownloadingFrame(0))
+        animationFrames = StatusBarController.prerenderDownloadWaveFrames()
+        setIcon(animationFrames[0])
 
-        animationTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        // Use a common-mode timer so the wave keeps animating even while the onboarding modal
+        // panel is up (a default-mode timer is starved during NSApp.runModal).
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            self.animationFrame = (self.animationFrame + 1) % 3
-            self.setIcon(StatusBarController.drawDownloadingFrame(self.animationFrame))
+            self.animationFrame = (self.animationFrame + 1) % StatusBarController.downloadFrameCount
+            self.setIcon(self.animationFrames[self.animationFrame])
         }
+        RunLoop.main.add(timer, forMode: .common)
+        animationTimer = timer
     }
 
     private func stopAnimation() {
@@ -479,41 +529,32 @@ class StatusBarController: NSObject, NSMenuDelegate {
         return image
     }
 
-    static func drawDownloadingFrame(_ frame: Int) -> NSImage {
+    /// Green-filled logo for the `.ready` state (post-download, pre-first-dictation). Not a template
+    /// image — the green must render as an actual color, not be recolored to the menu-bar tint.
+    static func drawGreenLogo() -> NSImage {
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size, flipped: false) { rect in
-            NSColor.black.setStroke()
-            NSColor.black.setFill()
+            NSColor.systemGreen.setFill()
 
+            let barWidth: CGFloat = 2.0
+            let gap: CGFloat = 2.5
+            let radius: CGFloat = 1.5
             let centerX = rect.midX
+            let centerY = rect.midY
 
-            let basePath = NSBezierPath()
-            basePath.move(to: NSPoint(x: centerX - 5, y: 3))
-            basePath.line(to: NSPoint(x: centerX + 5, y: 3))
-            basePath.lineWidth = 1.5
-            basePath.lineCapStyle = .round
-            basePath.stroke()
+            let heights: [CGFloat] = [4, 8, 12, 8, 4]
+            let totalWidth = CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * gap
+            let startX = centerX - totalWidth / 2
 
-            let arrowY: CGFloat = 14 - CGFloat(frame) * 2
-            let arrowPath = NSBezierPath()
-            arrowPath.move(to: NSPoint(x: centerX, y: arrowY))
-            arrowPath.line(to: NSPoint(x: centerX, y: 6))
-            arrowPath.lineWidth = 1.5
-            arrowPath.lineCapStyle = .round
-            arrowPath.stroke()
-
-            let headPath = NSBezierPath()
-            headPath.move(to: NSPoint(x: centerX - 3, y: 9))
-            headPath.line(to: NSPoint(x: centerX, y: 5))
-            headPath.line(to: NSPoint(x: centerX + 3, y: 9))
-            headPath.lineWidth = 1.5
-            headPath.lineCapStyle = .round
-            headPath.lineJoinStyle = .round
-            headPath.stroke()
-
+            for (i, height) in heights.enumerated() {
+                let x = startX + CGFloat(i) * (barWidth + gap)
+                let y = centerY - height / 2
+                let barRect = NSRect(x: x, y: y, width: barWidth, height: height)
+                NSBezierPath(roundedRect: barRect, xRadius: radius, yRadius: radius).fill()
+            }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = false  // keep the green; don't let the menu bar tint it
         return image
     }
 
