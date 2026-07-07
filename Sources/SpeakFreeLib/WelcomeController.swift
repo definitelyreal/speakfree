@@ -346,7 +346,12 @@ class WelcomeController: NSObject, NSWindowDelegate {
         if languagePicker != nil { languagePicker.isEnabled = true }
     }
 
-    private func markDownloaded() {
+    /// - Parameter autoAdvance: pass `true` only when a download just *completed* (not when a model
+    ///   was already present on selection). Shows the ready state briefly, then closes the panel and
+    ///   proceeds into the app — the same as pressing Start — so a walked-away install finishes itself
+    ///   (and the default-on "Launch at login" checkbox actually registers). Never auto-advances when
+    ///   a model was merely found already-downloaded, so switching engines/models stays interactive.
+    private func markDownloaded(autoAdvance: Bool = false) {
         isDownloading = false; isPaused = false; isModelReady = true
         downloadButton.title = "✓ Downloaded"; downloadButton.isEnabled = false; downloadButton.isHidden = false
         pauseButton.isHidden = true; stopButton.isHidden = true
@@ -354,14 +359,26 @@ class WelcomeController: NSObject, NSWindowDelegate {
         percentLabel.isHidden = true; bytesLabel.isHidden = true
         errorLabel.isHidden = true; errorLabel.stringValue = ""
         loginCheckbox.isHidden = false; configureButton.isHidden = false; startButton.isHidden = false
-        statusLabel.stringValue = "Model ready."
+        statusLabel.stringValue = autoAdvance ? "Model ready — starting…" : "Model ready."
         startButton.isEnabled = true; configureButton.isEnabled = true
         enginePicker.isEnabled = true; modelPicker.isEnabled = true
         if languagePicker != nil { languagePicker.isEnabled = true }
+
+        if autoAdvance {
+            // Brief pause so the "ready" state (purple logo + label) is visible as confirmation, then
+            // proceed like Start. Guards: bail if the user switched to a not-yet-downloaded model in
+            // the meantime (isModelReady flips false), or already closed the panel some other way.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                guard let self = self, self.isModelReady, self.panel.isVisible else { return }
+                self.applyLoginCheckbox()
+                self.dismiss(shouldContinue: true)
+            }
+        }
     }
 
     private func showError(_ message: String) {
         isDownloading = false; isPaused = false
+        setMenuBarState(.idle)  // stop the menu-bar download wave on failure
         progressBar.stopAnimation(nil); progressBar.isHidden = true
         percentLabel.isHidden = true; bytesLabel.isHidden = true
         downloadButton.title = "Retry"; downloadButton.isEnabled = true; downloadButton.isHidden = false
@@ -378,6 +395,10 @@ class WelcomeController: NSObject, NSWindowDelegate {
 
     private func showDownloadingUI(label: String, indeterminate: Bool) {
         isDownloading = true; isPaused = false
+        // Reflect the download in the menu-bar icon too (rolling-wave animation), so it's visible even
+        // with the panel focused. Cleared back to idle on stop/cancel/error; on success the panel
+        // closes and setup takes over, switching the icon to the green "ready" state.
+        setMenuBarState(.downloading)
         // Restore footer controls in case a prior error hid them (see showError).
         loginCheckbox.isHidden = false; configureButton.isHidden = false; startButton.isHidden = false
         downloadButton.isHidden = true
@@ -488,6 +509,7 @@ class WelcomeController: NSObject, NSWindowDelegate {
 
     @objc private func stopTapped() {
         cancelCurrentDownload(); resetDownloadUI(); updateLanguagePicker()
+        setMenuBarState(.idle)  // stop the menu-bar download wave
     }
 
     @objc private func startTapped() {
@@ -542,6 +564,11 @@ class WelcomeController: NSObject, NSWindowDelegate {
         parakeetDownloadGeneration += 1  // invalidate in-flight callbacks from the cancelled task
         parakeetTask?.cancel(); parakeetTask = nil
         isDownloading = false; isPaused = false
+    }
+
+    /// Drive the shared menu-bar icon from the onboarding panel (download → wave, etc.).
+    private func setMenuBarState(_ state: StatusBarController.State) {
+        (NSApplication.shared.delegate as? AppDelegate)?.statusBar.state = state
     }
 
     private func applyLoginCheckbox() {
@@ -615,7 +642,7 @@ class WelcomeController: NSObject, NSWindowDelegate {
                 try await ParakeetModelManager.shared.compileAndCache(modelName)
                 await MainActor.run { [weak self] in
                     guard let self = self, self.parakeetDownloadGeneration == generation else { return }
-                    self.markDownloaded()
+                    self.markDownloaded(autoAdvance: true)
                 }
 
             } catch {
@@ -666,7 +693,7 @@ class WelcomeController: NSObject, NSWindowDelegate {
             }
             self.progressBar.display(); self.percentLabel.display(); self.bytesLabel.display()
         }
-        coordinator.onSuccess = { [weak self] _ in self?.markDownloaded() }
+        coordinator.onSuccess = { [weak self] _ in self?.markDownloaded(autoAdvance: true) }
         coordinator.onFailure = { [weak self] error in
             self?.showError(WelcomeController.whisperErrorMessage(error))
         }

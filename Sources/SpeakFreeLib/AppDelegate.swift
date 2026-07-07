@@ -342,6 +342,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return
             }
+            // Proceeding out of the needsDownload path means a model was just downloaded — flag it so
+            // the re-run of setup() ends on the green `.ready` icon (see startListening()).
+            justDownloadedModel = true
             config.engine = selectedEngine
             config.language = selectedLanguage
             if selectedEngine == "parakeet" {
@@ -463,7 +466,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         isReady = true
-        statusBar.state = .idle
+        // After a fresh model download, show the green "ready" icon as a "you're all set" cue until
+        // the first dictation clears it (handleKeyDown → .recording). Normal launches stay idle.
+        if justDownloadedModel {
+            justDownloadedModel = false
+            statusBar.state = .ready
+        } else {
+            statusBar.state = .idle
+        }
         statusBar.buildMenu()
 
         let hotkeyDesc = KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)
@@ -542,6 +552,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Set by WelcomeController's Configure button — opens Settings once setup finishes.
     public var openSettingsAfterSetup = false
+
+    /// True when onboarding just downloaded a model this launch. Consumed by startListening() to show
+    /// the green `.ready` icon until the first dictation; reset once shown.
+    private var justDownloadedModel = false
 
     private var tutorialPopover: NSPopover?
 
