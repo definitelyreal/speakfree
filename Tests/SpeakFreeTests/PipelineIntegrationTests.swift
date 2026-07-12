@@ -292,6 +292,79 @@ final class PipelineIntegrationTests: XCTestCase {
         XCTAssertEqual(inserter.insertCallCount, 0)
     }
 
+    // MARK: wav-arbiter gate (2026-06-29 AirPods incident: good wav dropped as "silent")
+
+    func test_gateArbiter_memoryPasses_wavNeverRead() {
+        var wavRead = false
+        let good = Array(repeating: Float(0.2), count: FinalizePipeline.minSamples + 16_000)
+        let gate = FinalizePipeline.resolveGateSamples(memorySamples: good,
+                                                       readWav: { wavRead = true; return nil })
+        XCTAssertNil(gate.failure)
+        XCTAssertFalse(gate.usedWavFallback)
+        XCTAssertFalse(wavRead, "the wav is only the arbiter on gate failure — no read on the happy path")
+        XCTAssertEqual(gate.samples.count, good.count)
+    }
+
+    func test_gateArbiter_memorySilentButWavGood_usesWavSamples() {
+        let zeros = Array(repeating: Float(0), count: FinalizePipeline.minSamples + 16_000)
+        let fromWav = Array(repeating: Float(0.3), count: FinalizePipeline.minSamples + 32_000)
+        let gate = FinalizePipeline.resolveGateSamples(memorySamples: zeros, readWav: { fromWav })
+        XCTAssertNil(gate.failure, "a good wav must rescue the dictation")
+        XCTAssertTrue(gate.usedWavFallback)
+        XCTAssertEqual(gate.samples.count, fromWav.count)
+    }
+
+    func test_gateArbiter_memoryTooShortButWavGood_usesWavSamples() {
+        let short = Array(repeating: Float(0.2), count: FinalizePipeline.minSamples - 1)
+        let fromWav = Array(repeating: Float(0.3), count: FinalizePipeline.minSamples + 32_000)
+        let gate = FinalizePipeline.resolveGateSamples(memorySamples: short, readWav: { fromWav })
+        XCTAssertNil(gate.failure)
+        XCTAssertTrue(gate.usedWavFallback)
+    }
+
+    func test_gateArbiter_bothSilent_stillSilent() {
+        let zeros = Array(repeating: Float(0), count: FinalizePipeline.minSamples + 16_000)
+        let gate = FinalizePipeline.resolveGateSamples(memorySamples: zeros, readWav: { zeros })
+        guard case .silent = gate.failure else {
+            return XCTFail("expected .silent when memory AND wav are silent, got \(String(describing: gate.failure))")
+        }
+        XCTAssertFalse(gate.usedWavFallback)
+    }
+
+    func test_gateArbiter_wavUnreadable_failsOnMemoryVerdict() {
+        let short = Array(repeating: Float(0.2), count: 10)
+        let gate = FinalizePipeline.resolveGateSamples(memorySamples: short, readWav: { nil })
+        XCTAssertEqual(gate.failure, .tooShort(sampleCount: 10))
+    }
+
+    func test_gateArbiter_runTranscribesWavSamplesWhenMemorySilent() async {
+        // Full run(): all-zero in-memory samples + a good "wav" → the engine must run,
+        // and must receive the wav's samples, not the dead in-memory copy.
+        let engine = FakeScriptedEngine(scriptedFinal: "rescued from the wav")
+        let inserter = MockInserter()
+        let zeros = Array(repeating: Float(0), count: FinalizePipeline.minSamples + 16_000)
+        let fromWav = Array(repeating: Float(0.3), count: FinalizePipeline.minSamples + 32_000)
+
+        let outcome = await FinalizePipeline.run(
+            samples: zeros,
+            audioURL: URL(fileURLWithPath: "/nonexistent.wav"),
+            makeInput: makeInputClosure(punctuation: .off),
+            transcribe: { _, samples, prompt in
+                try await engine.transcribe(samples: samples, language: "en",
+                                            prompt: prompt, suppressRegex: nil)
+            },
+            inserter: inserter,
+            element: nil,
+            readWav: { fromWav }
+        )
+
+        guard case .inserted = outcome else { return XCTFail("expected .inserted, got \(outcome)") }
+        XCTAssertEqual(engine.transcribeCallCount, 1)
+        XCTAssertEqual(engine.lastSamples.count, fromWav.count,
+                       "engine must see the wav samples, not the silent in-memory copy")
+        XCTAssertEqual(inserter.insertedTexts.first, "rescued from the wav")
+    }
+
     func test_emptyTranscription_nothingInserted() async {
         // Engine returns text the hallucination filter empties → empty finalText → no insert.
         let engine = FakeScriptedEngine(scriptedFinal: "[BLANK_AUDIO]")

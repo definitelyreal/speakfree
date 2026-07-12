@@ -50,6 +50,34 @@ public enum FinalizePipeline {
         return sqrtf(samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count))
     }
 
+    /// True when samples pass both pre-transcription gates (length and non-silence).
+    public static func passesGates(_ samples: [Float]) -> Bool {
+        samples.count >= minSamples && rms(of: samples) >= silenceRMSThreshold
+    }
+
+    /// Resolve the samples to transcribe, with the wav on disk as ARBITER when the in-memory
+    /// copy fails a gate. The wav is what gets kept and what replays fine offline — the
+    /// 2026-06-29 AirPods incident was a good 6.7s wav whose dictation was dropped with
+    /// "Recording was silent", and any memory-vs-file divergence must cost a file read, not
+    /// a dictation. Returns the samples to use, the failure outcome (nil = proceed), and
+    /// whether the wav override was taken (callers should log it — divergence is a bug
+    /// somewhere upstream and must leave a trace).
+    public static func resolveGateSamples(
+        memorySamples: [Float],
+        readWav: () -> [Float]?
+    ) -> (samples: [Float], failure: Outcome?, usedWavFallback: Bool) {
+        if passesGates(memorySamples) {
+            return (memorySamples, nil, false)
+        }
+        if let fileSamples = readWav(), passesGates(fileSamples) {
+            return (fileSamples, nil, true)
+        }
+        if memorySamples.count < minSamples {
+            return (memorySamples, .tooShort(sampleCount: memorySamples.count), false)
+        }
+        return (memorySamples, .silent(rms: rms(of: memorySamples)), false)
+    }
+
     /// T2.3 reuse-vs-final branch, shared verbatim by `finalizeRecording` and `run(...)`.
     ///
     /// When the gate approved reuse, the saved raw streaming partial is returned after
@@ -98,6 +126,9 @@ public enum FinalizePipeline {
     ///     streaming partial — is routed through the SAME `makeInput`→`TextPipeline.run` the final
     ///     pass uses, then inserted identically. The result is `.reusedPartial`. When `nil` or
     ///     `.runFinalInference`, behavior is byte-identical to pre-T2.3 (run the final pass).
+    ///   - readWav: gate-arbiter seam — returns the wav's samples when the in-memory copy fails
+    ///     a gate (production: `ProcessCommand.loadSamples`). Default `nil` keeps the legacy
+    ///     memory-only gating for tests that don't care.
     /// - Returns: the `Outcome` describing which branch ran.
     @discardableResult
     public static func run(
@@ -110,18 +141,16 @@ public enum FinalizePipeline {
         element: AXUIElement?,
         precomputedPrependSpace: Bool? = nil,
         onFocusLost: (() -> Void)? = nil,
-        reuseDecision: StreamingReuse.Decision? = nil
+        reuseDecision: StreamingReuse.Decision? = nil,
+        readWav: (() -> [Float]?)? = nil
     ) async -> Outcome {
-        // Too-short guard (accidental tap).
-        if samples.count < minSamples {
-            return .tooShort(sampleCount: samples.count)
+        // Too-short / dead-audio gates with the wav as arbiter — the same
+        // `resolveGateSamples` call `finalizeRecording` makes.
+        let gate = resolveGateSamples(memorySamples: samples, readWav: readWav ?? { nil })
+        if let failure = gate.failure {
+            return failure
         }
-
-        // Dead-audio / silence guard.
-        let level = rms(of: samples)
-        if level < silenceRMSThreshold {
-            return .silent(rms: level)
-        }
+        let samples = gate.samples
 
         // Assemble prompt hints ONCE from the context-only Input (no raw text needed).
         // Both the T2.3 reuse path and the normal final-inference path pass this
