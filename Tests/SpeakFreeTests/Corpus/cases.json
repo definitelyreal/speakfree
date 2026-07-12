@@ -245,5 +245,26 @@
   "mode": "hybrid",
   "input": "first item new line second item",
   "expected": "first item\nsecond item"
+ },
+ {
+  "name": "determiner-period-before-sentence-break-not-converted",
+  "note": "Verifier catch 2026-07-11: an auto-punct or digit after the command word must not count as utterance-final, or the determiner guard is bypassed and the noun is eaten.",
+  "mode": "hybrid",
+  "input": "talk about your period. It hurts",
+  "expected": "talk about your period. It hurts"
+ },
+ {
+  "name": "utterance-opening-colon-before-digit-not-converted",
+  "note": "Verifier catch 2026-07-11: a digit after the garbled opener defeated the utterance-opening guard.",
+  "mode": "hybrid",
+  "input": "Colon 50 things to do",
+  "expected": "Colon 50 things to do"
+ },
+ {
+  "name": "negated-not-new-line-not-converted",
+  "note": "Verifier catch 2026-07-11: 'did not new line' was outside the contraction-only negation list.",
+  "mode": "hybrid",
+  "input": "I did not new line that it was happening",
+  "expected": "I did not new line that it was happening"
  }
 ]

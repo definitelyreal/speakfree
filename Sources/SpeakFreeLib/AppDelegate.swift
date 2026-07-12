@@ -59,6 +59,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // captures the UUID at dispatch time and writes back only if the token still matches,
     // discarding stale results from previous recordings.
     private var screenCaptureGeneration: UUID = UUID()
+    // Last time the transcription-failure alert was shown; a persistently broken engine
+    // fails every attempt, and the modal is throttled to one per 5 minutes (main-only).
+    private var lastTranscriptionFailureAlert: Date?
 
     // Adaptive post-buffer (T2.1): poll trailing audio after key release and finalize as soon as
     // ~150ms of trailing silence is observed, hard-capped at 300ms (never worse than the old flat
@@ -1004,8 +1007,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 DiagnosticLogger.shared.log(
                     "Recording too short (\(count) samples / \(Int(Double(count) / 16000.0 * 1000))ms) — skipping")
             default:
+                // NOTE: the wav either agreed or could not be read — resolveGateSamples does
+                // not distinguish; do not claim agreement in the log.
                 DiagnosticLogger.shared.log(
-                    "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples)), wav agrees) — audio engine may be dead, rebuilding")
+                    "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples))) and the wav did not rescue it — audio engine may be dead, rebuilding")
                 recorder.ensureAudioHealthy()
             }
             RecordingStore.clearSentinel()
@@ -1235,14 +1240,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         let message = "Transcription failed: \(error)"
                         print("Error: \(message)")
                         DiagnosticLogger.shared.log(message)
-                        NSApp.activate(ignoringOtherApps: true)
-                        let alert = NSAlert()
-                        alert.messageText = "Transcription Failed"
-                        alert.informativeText = "The engine reported an error. Your recording was kept"
-                            + " and can be transcribed from the recordings folder.\n\n\(error.localizedDescription)"
-                        alert.alertStyle = .warning
-                        alert.addButton(withTitle: "OK")
-                        alert.runModal()
+                        // Throttle the modal: a persistently broken engine fails EVERY
+                        // dictation, and one focus-stealing alert per attempt is hostile.
+                        // The log line above fires every time regardless.
+                        let now = Date()
+                        if self.lastTranscriptionFailureAlert.map({ now.timeIntervalSince($0) > 300 }) ?? true {
+                            self.lastTranscriptionFailureAlert = now
+                            NSApp.activate(ignoringOtherApps: true)
+                            let alert = NSAlert()
+                            alert.messageText = "Transcription Failed"
+                            alert.informativeText = "The engine reported an error. Your recording was kept"
+                                + " and can be transcribed from the recordings folder.\n\n\(error.localizedDescription)"
+                            alert.alertStyle = .warning
+                            alert.addButton(withTitle: "OK")
+                            alert.runModal()
+                        }
                     }
                     self.statusBar.state = .idle
                     self.statusBar.buildMenu()
