@@ -19,19 +19,27 @@ import FluidAudio
 /// mirror for the synchronous protocol getter.
 public final class ParakeetEngine: TranscriptionEngine {
 
+    // MARK: - Audio constraints
+
+    /// FluidAudio audio constraints (mirror `ASRConstants`). 3 s of trailing silence is appended
+    /// so the TDT decoder can flush its final tokens — the old 1 s pad silently truncated the
+    /// tail clause (see transcribe()). 240k samples = the 15 s single-chunk encoder cap.
+    /// Internal, not private, so tests assert against these exact production values instead of
+    /// mirroring them (the mirrors drifted once already).
+    static let trailingSilenceSamples = 48_000
+    static let maxSingleChunkSamples = 240_000
+
+    /// Target length after the trailing-silence pad: pad up to `trailingSilenceSamples`, but
+    /// never past the single-chunk cap — longer clips keep as much pad as fits.
+    static func paddedSampleCount(_ count: Int) -> Int {
+        count + min(trailingSilenceSamples, max(0, maxSingleChunkSamples - count))
+    }
+
     // MARK: - Core (owns all mutable model state)
 
     /// Serializes all model lifecycle and transcription against a single owner. Every mutable
     /// field lives here; nothing outside the actor touches the manager.
     private actor Core {
-
-        /// FluidAudio audio constraints (mirror `ASRConstants`): 1 s of trailing silence (16k
-        /// samples) is appended to capture final-word punctuation, but only when staying under the
-        /// 15 s single-chunk encoder cap (240k samples).
-        // 3 s of trailing silence. The old 1 s was too short for the TDT decoder to flush
-        // its final tokens, causing silent tail-clause truncation (see transcribe()).
-        private static let trailingSilenceSamples = 48_000
-        private static let maxSingleChunkSamples = 240_000
 
         /// FluidAudio's loaded ASR manager (actor). `nil` until `load` succeeds.
         private var manager: AsrManager?
@@ -169,8 +177,7 @@ public final class ParakeetEngine: TranscriptionEngine {
             // single-chunk cap so longer clips keep as much pad as fits (FluidAudio
             // auto-chunks anything beyond the cap).
             var audio = samples
-            let availablePad = max(0, Core.maxSingleChunkSamples - audio.count)
-            let pad = min(Core.trailingSilenceSamples, availablePad)
+            let pad = ParakeetEngine.paddedSampleCount(audio.count) - audio.count
             if pad > 0 {
                 audio += [Float](repeating: 0, count: pad)
             }
@@ -319,7 +326,8 @@ public final class ParakeetEngine: TranscriptionEngine {
     /// Compute the FluidAudio `Language?` hint. For v3, returns an explicit `Language(rawValue:)` on
     /// the region-stripped code for any concrete code (including "en"); returns nil only for
     /// auto/empty codes. Always nil for v2 (English-only, ignores it).
-    private static func languageHint(for language: String, isV3: Bool) -> Language? {
+    /// Internal so tests exercise the real rule instead of a mirror.
+    static func languageHint(for language: String, isV3: Bool) -> Language? {
         guard isV3 else { return nil }
         let code = language.trimmingCharacters(in: .whitespaces).lowercased()
         guard !code.isEmpty, code != "auto" else { return nil }
@@ -328,7 +336,7 @@ public final class ParakeetEngine: TranscriptionEngine {
     }
 
     /// Strip an IETF region subtag: "en-US"/"en_US" → "en".
-    private static func stripRegionSubtag(_ code: String) -> String {
+    static func stripRegionSubtag(_ code: String) -> String {
         if let primary = code.split(whereSeparator: { $0 == "-" || $0 == "_" }).first {
             return String(primary)
         }

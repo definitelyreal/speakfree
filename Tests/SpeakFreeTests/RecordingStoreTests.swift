@@ -2,20 +2,23 @@ import XCTest
 @testable import SpeakFreeLib
 
 final class RecordingStoreTests: XCTestCase {
+    private var scratchDir: URL!
     private var testDir: URL!
-    private var savedDir: URL!
 
     override func setUp() {
         super.setUp()
-        savedDir = RecordingStore.recordingsDir
-        testDir = FileManager.default.temporaryDirectory.appendingPathComponent("speakfree-test-\(UUID().uuidString)")
+        // Standard isolation seam: RecordingStore.recordingsDir is computed from
+        // Config.configDir on every access, so the override redirects everything.
+        scratchDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakfree-test-\(UUID().uuidString)")
+        Config.configDirOverride = scratchDir
+        testDir = RecordingStore.recordingsDir
         try? FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
-        RecordingStore.recordingsDir = testDir
     }
 
     override func tearDown() {
-        try? FileManager.default.removeItem(at: testDir)
-        RecordingStore.recordingsDir = savedDir
+        Config.configDirOverride = nil
+        try? FileManager.default.removeItem(at: scratchDir)
         super.tearDown()
     }
 

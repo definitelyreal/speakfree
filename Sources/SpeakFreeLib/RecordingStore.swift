@@ -7,11 +7,19 @@ public struct Recording {
 }
 
 public class RecordingStore {
-    public static var recordingsDir = Config.configDir.appendingPathComponent("recordings")
+    // Computed on every access, NOT stored: a stored static snapshots Config.configDir at
+    // first touch, so a test setting Config.configDirOverride afterwards would silently
+    // read/write the REAL ~/.config path (the exact hole behind the 2026-06-11 live-config
+    // clobber). Tests redirect via Config.configDirOverride, same as everything else.
+    public static var recordingsDir: URL {
+        Config.configDir.appendingPathComponent("recordings")
+    }
 
     static let filePrefix = "recording-"
     static let fileExtension = "wav"
-    static let sentinelFile = Config.configDir.appendingPathComponent(".recording-in-progress.json")
+    static var sentinelFile: URL {
+        Config.configDir.appendingPathComponent(".recording-in-progress.json")
+    }
 
     static let dateFormatter: DateFormatter = {
         let f = DateFormatter()

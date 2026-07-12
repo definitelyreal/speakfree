@@ -2,105 +2,94 @@
 import XCTest
 @testable import SpeakFreeLib
 
-/// Pure-helper tests for the Parakeet engine path.
+/// Tests for the Parakeet engine's pure helpers, asserted against the REAL production symbols.
 ///
-/// The arithmetic/mapping invariants below are the FROZEN contract from PLAN §2 (trailing-silence
-/// pad math, model-name→version map, language-hint rules). They are asserted as self-contained spec
-/// invariants so this test target compiles regardless of the exact internal symbol names Unit 4
-/// (ParakeetEngine) and Unit 5 (ParakeetModelManager) choose for their private helpers. The
-/// integrator should additionally point these at the real helper symbols once Units 4/5 land —
-/// see notesForIntegrator.
+/// History: these were originally written as self-contained "spec invariant" mirrors before the
+/// engine landed, with a note to re-point them at the real symbols afterwards. That never
+/// happened, and the mirrors drifted badly: they froze the abandoned 1 s pad (production is 3 s)
+/// and an all-or-nothing pad rule (production clamps to a partial pad near the cap). A test that
+/// mirrors the constant it is testing proves nothing — everything below now calls production.
 ///
 /// Any test that needs the real ~600 MB CoreML model is gated behind
 /// `ParakeetModelManager.shared.isModelDownloaded(...)` with XCTSkip, mirroring the
 /// `Transcriber.modelExists` skip pattern in AudioGoldenTests. Tests NEVER download models.
 final class ParakeetEngineTests: XCTestCase {
 
-    // Contract constants (PLAN §2 / research/01 §4). 16 kHz mono Float32.
-    private let trailingSilenceSamples = 16_000   // 1 s pad to capture final-word punctuation
-    private let maxSingleChunkSamples = 240_000   // single-chunk encoder cap (15 s)
-
     private let defaultModel = "parakeet-tdt-0.6b-v3"
     private let v2Model = "parakeet-tdt-0.6b-v2"
 
-    // MARK: - Trailing-silence pad math (count + 16000 <= 240000)
+    // MARK: - Trailing-silence pad math (production: pad up to 3 s, clamped at the chunk cap)
 
-    /// The pad is appended only when it fits under the single-chunk cap.
-    private func shouldPadTrailingSilence(count: Int) -> Bool {
-        count + trailingSilenceSamples <= maxSingleChunkSamples
-    }
-
-    /// Resulting sample count after applying the trailing-silence pad rule.
-    private func paddedCount(count: Int) -> Int {
-        shouldPadTrailingSilence(count: count) ? count + trailingSilenceSamples : count
+    func testPadConstantsMatchEmpiricalValues() {
+        // 3 s pad (empirical — the TDT decoder needs it to flush final tokens; do NOT tune
+        // without re-verifying against real audio) under the 15 s single-chunk encoder cap.
+        XCTAssertEqual(ParakeetEngine.trailingSilenceSamples, 48_000)
+        XCTAssertEqual(ParakeetEngine.maxSingleChunkSamples, 240_000)
     }
 
     func testPadAppliedWellUnderCap() {
-        let count = 16_000  // 1 s of speech
-        XCTAssertTrue(shouldPadTrailingSilence(count: count))
-        XCTAssertEqual(paddedCount(count: count), 32_000)
+        // 1 s of speech gets the full 3 s pad.
+        XCTAssertEqual(ParakeetEngine.paddedSampleCount(16_000),
+                       16_000 + ParakeetEngine.trailingSilenceSamples)
     }
 
-    func testPadAppliedAtExactBoundary() {
-        // count + 16000 == 240000 exactly → still padded (<= is inclusive).
-        let count = maxSingleChunkSamples - trailingSilenceSamples  // 224_000
-        XCTAssertTrue(shouldPadTrailingSilence(count: count))
-        XCTAssertEqual(paddedCount(count: count), maxSingleChunkSamples)
+    func testFullPadAppliedAtExactBoundary() {
+        // count + pad == cap exactly → full pad still fits.
+        let count = ParakeetEngine.maxSingleChunkSamples - ParakeetEngine.trailingSilenceSamples
+        XCTAssertEqual(ParakeetEngine.paddedSampleCount(count),
+                       ParakeetEngine.maxSingleChunkSamples)
     }
 
-    func testPadSkippedJustOverBoundary() {
-        // count + 16000 == 240001 → would exceed cap, so NOT padded.
-        let count = maxSingleChunkSamples - trailingSilenceSamples + 1  // 224_001
-        XCTAssertFalse(shouldPadTrailingSilence(count: count))
-        XCTAssertEqual(paddedCount(count: count), count)
+    func testPartialPadJustOverBoundary() {
+        // Production clamps rather than skips: one sample past the boundary still pads
+        // up to the cap ("longer clips keep as much pad as fits").
+        let count = ParakeetEngine.maxSingleChunkSamples - ParakeetEngine.trailingSilenceSamples + 1
+        XCTAssertEqual(ParakeetEngine.paddedSampleCount(count),
+                       ParakeetEngine.maxSingleChunkSamples)
     }
 
-    func testPadSkippedAtAndAboveCap() {
-        XCTAssertFalse(shouldPadTrailingSilence(count: maxSingleChunkSamples))
-        XCTAssertEqual(paddedCount(count: maxSingleChunkSamples), maxSingleChunkSamples)
+    func testNoPadAtAndAboveCap() {
+        let cap = ParakeetEngine.maxSingleChunkSamples
+        XCTAssertEqual(ParakeetEngine.paddedSampleCount(cap), cap)
 
-        let big = maxSingleChunkSamples + 50_000
-        XCTAssertFalse(shouldPadTrailingSilence(count: big))
-        XCTAssertEqual(paddedCount(count: big), big)
+        let big = cap + 50_000
+        XCTAssertEqual(ParakeetEngine.paddedSampleCount(big), big,
+                       "clips already past the cap are left to FluidAudio's auto-chunking, unpadded")
     }
 
-    func testPaddedCountNeverExceedsCap() {
+    func testPaddedCountNeverExceedsCapForSubCapClips() {
         for count in stride(from: 0, through: 260_000, by: 8_000) {
-            XCTAssertLessThanOrEqual(paddedCount(count: count), max(count, maxSingleChunkSamples),
+            let padded = ParakeetEngine.paddedSampleCount(count)
+            XCTAssertLessThanOrEqual(padded, max(count, ParakeetEngine.maxSingleChunkSamples),
                 "padded count must not push a sub-cap clip over the cap (count=\(count))")
+            XCTAssertGreaterThanOrEqual(padded, count, "padding never removes samples")
         }
     }
 
-    // MARK: - Model-name → version map
-
-    /// Mirrors PLAN §2: "parakeet-tdt-0.6b-v2"→v2, "-v3"→v3. Asserted via the version *string*
-    /// so the test does not depend on importing FluidAudio's AsrModelVersion type.
-    private func versionString(for modelName: String) -> String? {
-        switch modelName {
-        case v2Model: return "v2"
-        case defaultModel: return "v3"
-        default: return nil
-        }
-    }
+    // MARK: - Model-name → version map (EngineCatalog is the production source of truth)
 
     func testVersionMapV2() {
-        XCTAssertEqual(versionString(for: v2Model), "v2")
+        XCTAssertEqual(EngineCatalog.versionString(forParakeetModelID: v2Model), "v2")
     }
 
     func testVersionMapV3() {
-        XCTAssertEqual(versionString(for: defaultModel), "v3")
+        XCTAssertEqual(EngineCatalog.versionString(forParakeetModelID: defaultModel), "v3")
     }
 
-    func testVersionMapUnknownIsNil() {
-        XCTAssertNil(versionString(for: "parakeet-tdt-0.6b-v9"))
-        XCTAssertNil(versionString(for: "large-v3-turbo"))  // a whisper model id
+    func testVersionMapUnknownDefaultsToV3() {
+        // Production coalesces unknown ids to "v3" (forward-compat: an unrecognized future
+        // model is treated as multilingual rather than crashing or silently downgrading).
+        XCTAssertEqual(EngineCatalog.versionString(forParakeetModelID: "parakeet-tdt-0.6b-v9"), "v3")
+        XCTAssertEqual(EngineCatalog.versionString(forParakeetModelID: "large-v3-turbo"), "v3")
     }
 
     func testDefaultParakeetModelIsEnglishV2() {
         // Product default (Michael, 2026-06-11): new users get Parakeet ENGLISH (v2),
         // written EXPLICITLY into defaultConfig.
         XCTAssertEqual(Config.defaultConfig.parakeetModel, "parakeet-tdt-0.6b-v2")
-        XCTAssertEqual(versionString(for: Config.defaultConfig.parakeetModel!), "v2")
+        XCTAssertEqual(
+            EngineCatalog.versionString(forParakeetModelID: Config.defaultConfig.parakeetModel!),
+            "v2")
     }
 
     func testLegacyNilParakeetModelCoalescesToV3() {
@@ -110,34 +99,40 @@ final class ParakeetEngineTests: XCTestCase {
         let legacyValue: String? = nil
         let resolved = legacyValue ?? defaultModel
         XCTAssertEqual(resolved, defaultModel)
-        XCTAssertEqual(versionString(for: resolved), "v3")
+        XCTAssertEqual(EngineCatalog.versionString(forParakeetModelID: resolved), "v3")
     }
 
-    // MARK: - Language-hint mapping (nil for auto/en/v2; value for v3)
-
-    /// Returns true when a non-nil FluidAudio language hint SHOULD be produced.
-    /// PLAN §2 / research/01 §5: only v3 + an explicit non-"auto" code yields a hint.
-    private func producesLanguageHint(languageCode: String, modelName: String) -> Bool {
-        guard versionString(for: modelName) == "v3" else { return false }
-        guard languageCode != "auto" else { return false }
-        return true
-    }
+    // MARK: - Language-hint mapping (production rule: nil for auto/empty or v2)
 
     func testNoHintForAutoOnV3() {
-        XCTAssertFalse(producesLanguageHint(languageCode: "auto", modelName: defaultModel))
+        XCTAssertNil(ParakeetEngine.languageHint(for: "auto", isV3: true))
+    }
+
+    func testNoHintForEmptyOrWhitespaceCode() {
+        XCTAssertNil(ParakeetEngine.languageHint(for: "", isV3: true))
+        XCTAssertNil(ParakeetEngine.languageHint(for: "   ", isV3: true))
     }
 
     func testNoHintForAnyLanguageOnV2() {
         // v2 is English-only; never emits a hint regardless of requested language.
-        XCTAssertFalse(producesLanguageHint(languageCode: "en", modelName: v2Model))
-        XCTAssertFalse(producesLanguageHint(languageCode: "fr", modelName: v2Model))
-        XCTAssertFalse(producesLanguageHint(languageCode: "auto", modelName: v2Model))
+        XCTAssertNil(ParakeetEngine.languageHint(for: "en", isV3: false))
+        XCTAssertNil(ParakeetEngine.languageHint(for: "fr", isV3: false))
+        XCTAssertNil(ParakeetEngine.languageHint(for: "auto", isV3: false))
     }
 
     func testHintForExplicitLanguageOnV3() {
-        XCTAssertTrue(producesLanguageHint(languageCode: "en", modelName: defaultModel))
-        XCTAssertTrue(producesLanguageHint(languageCode: "fr", modelName: defaultModel))
-        XCTAssertTrue(producesLanguageHint(languageCode: "es", modelName: defaultModel))
+        XCTAssertNotNil(ParakeetEngine.languageHint(for: "en", isV3: true))
+        XCTAssertNotNil(ParakeetEngine.languageHint(for: "fr", isV3: true))
+        XCTAssertNotNil(ParakeetEngine.languageHint(for: "es", isV3: true))
+    }
+
+    func testHintStripsRegionSubtagAndCase() {
+        XCTAssertEqual(ParakeetEngine.stripRegionSubtag("en-us"), "en")
+        XCTAssertEqual(ParakeetEngine.stripRegionSubtag("en_us"), "en")
+        // "en-US" resolves to the same hint as plain "en".
+        XCTAssertEqual(ParakeetEngine.languageHint(for: "en-US", isV3: true),
+                       ParakeetEngine.languageHint(for: "en", isV3: true))
+        XCTAssertNotNil(ParakeetEngine.languageHint(for: "en-US", isV3: true))
     }
 
     // MARK: - ParakeetModelManager.isModelDownloaded (frozen Unit 5 surface)
