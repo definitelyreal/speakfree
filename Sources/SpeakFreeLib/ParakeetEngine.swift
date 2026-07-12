@@ -255,6 +255,10 @@ public final class ParakeetEngine: TranscriptionEngine {
 
     public var supportsStreaming: Bool { false }
 
+    /// Parakeet has no prompt/initial-text knob — `transcribe`'s `prompt` is ignored, so
+    /// prompt-building work (screen-context OCR) must be skipped for this engine.
+    public var supportsPrompt: Bool { false }
+
     public var isLoaded: Bool {
         stateLock.lock()
         defer { stateLock.unlock() }

@@ -29,6 +29,7 @@ final class FakeEngine: TranscriptionEngine {
     var keepModelLoaded: String = "auto"
 
     var supportsStreaming: Bool { supportsStreamingFlag }
+    var supportsPrompt: Bool = true
 
     init(engineID: String = "fake",
          cannedTranscript: String = "hello world",
@@ -273,5 +274,18 @@ final class TranscriberDelegationTests: XCTestCase {
 
         await transcriber.unloadModel()
         XCTAssertEqual(fake.unloadCallCount, 1)
+    }
+
+    func testSupportsPromptCapabilityMatchesEngineReality() {
+        // The screen-context OCR gate keys off this: Parakeet ignores `prompt`, so
+        // claiming true there would resurrect a full-screen OCR on every recording
+        // whose result the engine throws away.
+        XCTAssertFalse(ParakeetEngine().supportsPrompt)
+        XCTAssertTrue(WhisperEngine().supportsPrompt)
+
+        let fake = FakeEngine()
+        fake.supportsPrompt = false
+        let transcriber = Transcriber(engine: fake, modelID: "fake-model", language: "en")
+        XCTAssertFalse(transcriber.supportsPrompt, "Transcriber must pass the capability through")
     }
 }

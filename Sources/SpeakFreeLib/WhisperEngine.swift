@@ -27,6 +27,7 @@ class WhisperEngine: TranscriptionEngine {
 
     var engineID: String { "whisper" }
     var supportsStreaming: Bool { true }
+    var supportsPrompt: Bool { true }
 
     var isLoaded: Bool {
         var result = false
