@@ -820,54 +820,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Hotkey Row
-
-    private var hotkeyRow: some View {
-        settingsRow("Hotkey") {
-            Picker("", selection: $hotkeyPickerSelection) {
-                if isCustomHotkey {
-                    Text(hotkeyDisplay).tag(viewModel.hotkeyKeyCode)
-                    Divider()
-                }
-                ForEach(standardHotkeyOptions) { option in
-                    Text(option.label).tag(option.keyCode)
-                }
-                Divider()
-                Text("Other\u{2026}").tag(otherHotkeyTag)
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .frame(maxWidth: .infinity)
-
-            Picker("", selection: $viewModel.toggleMode) {
-                Text("Hold").tag(false)
-                Text("Toggle").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .controlSize(.small)
-            .labelsHidden()
-            .frame(width: 100)
-            .padding(.trailing, 4)
-        }
-    }
-
-    // MARK: - Language Row
-
-    private var languageRow: some View {
-        settingsRow("Language") {
-            Picker("", selection: $viewModel.language) {
-                Text("Auto-detect").tag("auto")
-                Divider()
-                ForEach(sortedLanguages) { lang in
-                    Text(lang.name).tag(lang.id)
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .frame(maxWidth: .infinity)
-        }
-    }
-
     // MARK: - Model Status Banner
 
     /// Display name for the current language selection (e.g. "Estonian" not "et")
@@ -948,55 +900,6 @@ struct SettingsView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.orange.opacity(0.3), lineWidth: 0.5)
             )
-        }
-    }
-
-    // MARK: - Model Row
-
-    private var modelRow: some View {
-        let models = availableModels(language: viewModel.language)
-        return VStack(alignment: .leading, spacing: 4) {
-            settingsRow("Model") {
-                Picker("", selection: $viewModel.modelSize) {
-                    ForEach(models) { model in
-                        Text(model.label)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .tag(model.id)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
-                .lineLimit(1)
-                .onChange(of: viewModel.language) { newLang in
-                    if previousLanguage != newLang {
-                        viewModel.languageModels[previousLanguage] = viewModel.modelSize
-                    }
-                    previousLanguage = newLang
-
-                    if let savedModel = viewModel.languageModels[newLang] {
-                        let newModels = availableModels(language: newLang)
-                        if newModels.contains(where: { $0.id == savedModel }) {
-                            viewModel.modelSize = savedModel
-                            return
-                        }
-                    }
-
-                    let newModels = availableModels(language: newLang)
-                    if !newModels.contains(where: { $0.id == viewModel.modelSize }) {
-                        let base = viewModel.modelSize.replacingOccurrences(of: ".en", with: "")
-                        if let match = newModels.first(where: { $0.id.hasPrefix(base) }) {
-                            viewModel.modelSize = match.id
-                        }
-                    }
-                }
-            }
-
-            Text("Larger models are more accurate but use more memory.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .padding(.leading, 0)
         }
     }
 
