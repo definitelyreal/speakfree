@@ -96,7 +96,8 @@ func focusedWindowFrame() -> NSRect? {
           let windowElement = focusedWindowValue else {
         return nil
     }
-    // swiftlint:disable:next force_cast — CF bridging, type checked by AX attribute contract
+    // CF bridging — the type is checked by the AX attribute contract.
+    // swiftlint:disable:next force_cast
     let axWindow = windowElement as! AXUIElement
 
     var posValue: CFTypeRef?

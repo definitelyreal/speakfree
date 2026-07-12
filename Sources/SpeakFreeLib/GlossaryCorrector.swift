@@ -58,7 +58,7 @@ public enum GlossaryCorrector {
                                glossary: [String],
                                overrides: [String: String] = [:],
                                isRealWord: (String) -> Bool = GlossaryCorrector.systemIsRealWord) -> String {
-        guard !text.isEmpty, (!glossary.isEmpty || !overrides.isEmpty) else { return text }
+        guard !text.isEmpty, !glossary.isEmpty || !overrides.isEmpty else { return text }
 
         // Build lowercased-term → canonical-spelling map (single-word terms only).
         var canonical: [String: String] = [:]
