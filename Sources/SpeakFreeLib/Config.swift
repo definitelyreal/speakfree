@@ -161,6 +161,7 @@ public struct Config: Codable {
             let backupFile = configDir.appendingPathComponent("config.json.bak")
             try? FileManager.default.removeItem(at: backupFile)
             try? FileManager.default.copyItem(at: configFile, to: backupFile)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backupFile.path)
             return Config.defaultConfig
         }
     }
@@ -170,11 +171,17 @@ public struct Config: Codable {
     }
 
     public func save() throws {
-        try FileManager.default.createDirectory(at: Config.configDir, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        try fm.createDirectory(at: Config.configDir, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
         let data = try encoder.encode(self)
         try data.write(to: Config.configFile)
+        // config.json carries localAPIToken; the dir attribute above only applies on
+        // first creation, so re-assert both on every save.
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: Config.configDir.path)
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Config.configFile.path)
     }
 }
 

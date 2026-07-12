@@ -453,7 +453,8 @@ class WhisperEngine: TranscriptionEngine {
             let noSpeechProb = whisper_full_get_segment_no_speech_prob(ctx, i)
             if noSpeechProb > 0.6 {
                 let segText = whisper_full_get_segment_text(ctx, i).map { String(cString: $0) } ?? ""
-                DiagnosticLogger.shared.log("WhisperEngine: skipping no-speech segment (p=\(String(format: "%.2f", noSpeechProb))): \"\(segText.prefix(50))\"")
+                // Log length only — transcript content must never reach the diagnostic log.
+                DiagnosticLogger.shared.log("WhisperEngine: skipping no-speech segment (p=\(String(format: "%.2f", noSpeechProb)), \(segText.count) chars)")
                 if noSpeechProb < bestSalvageProb {
                     bestSalvageProb = noSpeechProb
                     bestSalvageSeg = i
@@ -470,7 +471,7 @@ class WhisperEngine: TranscriptionEngine {
         if text.isEmpty, bestSalvageSeg >= 0, bestSalvageProb < 0.9 {
             if let cStr = whisper_full_get_segment_text(ctx, bestSalvageSeg) {
                 let salvaged = String(cString: cStr)
-                DiagnosticLogger.shared.log("WhisperEngine: salvaged segment (p=\(String(format: "%.2f", bestSalvageProb))): \"\(salvaged.prefix(50))\"")
+                DiagnosticLogger.shared.log("WhisperEngine: salvaged segment (p=\(String(format: "%.2f", bestSalvageProb)), \(salvaged.count) chars)")
                 text = salvaged
             }
         }
