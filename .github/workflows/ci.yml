@@ -297,11 +297,10 @@ jobs:
       - name: Install SwiftLint
         run: brew install swiftlint
 
-      - name: SwiftLint (warning-only — non-blocking)
-        # Non-blocking: exit code is ignored. Gate (removing continue-on-error) comes
-        # once the codebase is cleaned up (post-M1).
-        continue-on-error: true
-        run: swiftlint
+      - name: SwiftLint (blocking)
+        # Gating since 2026-07-11: the codebase lints clean under --strict, so any
+        # violation is new. A reporting-only gate trains everyone to ignore it.
+        run: swiftlint --strict
 
   version-check:
     runs-on: macos-15
