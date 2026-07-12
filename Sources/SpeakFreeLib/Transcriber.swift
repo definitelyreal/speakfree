@@ -13,6 +13,7 @@ public class Transcriber {
     // MARK: - Engine lifecycle passthroughs (used by AppDelegate)
 
     public var supportsStreaming: Bool { engine.supportsStreaming }
+    public var supportsPrompt: Bool { engine.supportsPrompt }
     public var isLoaded: Bool { engine.isLoaded }
     public var keepModelLoaded: String {
         get { engine.keepModelLoaded }

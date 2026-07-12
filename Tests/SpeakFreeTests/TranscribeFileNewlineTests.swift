@@ -32,6 +32,7 @@ final class TranscribeFileNewlineTests: XCTestCase {
         let engineID: String = "parakeet"
         var keepModelLoaded: String = "auto"
         var supportsStreaming: Bool { false }
+        var supportsPrompt: Bool { false }
         private(set) var isLoaded: Bool = false
 
         private let canned: String

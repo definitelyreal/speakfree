@@ -20,6 +20,7 @@ final class FakeScriptedEngine: TranscriptionEngine {
     var engineID: String
     var isLoaded: Bool = true
     var supportsStreaming: Bool
+    var supportsPrompt: Bool = true
     var keepModelLoaded: String = "auto"
 
     /// Final-pass result. If `error` is set, `transcribe` throws it instead.

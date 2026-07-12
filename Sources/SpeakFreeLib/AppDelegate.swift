@@ -866,8 +866,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Capture screen context in background if enabled.
         // Skip for remote desktop apps — OCR captures the remote screen content
         // which whisper then parrots instead of transcribing speech.
+        // Skip when the engine ignores prompts (Parakeet, the default engine): the OCR text
+        // only ever feeds the inference prompt, so capturing the full screen for it is
+        // wasted work AND a needless read of everything visible.
         let isRemoteDesktop = inserter.isRemoteDesktopFrontmost()
-        if config.screenContext?.value == true && !isRemoteDesktop {
+        let engineUsesPrompt = transcriber?.supportsPrompt ?? false
+        if config.screenContext?.value == true && !isRemoteDesktop && engineUsesPrompt {
             // Bump generation so any in-flight OCR from a previous recording is discarded.
             let capturedGeneration = UUID()
             screenCaptureGeneration = capturedGeneration
