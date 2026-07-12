@@ -11,7 +11,9 @@ class UsageStats {
     }
 
     private var data = Data()
-    private let statsFile = Config.configDir.appendingPathComponent("stats.json")
+    // Computed per access so Config.configDirOverride (the test-isolation seam) is honored
+    // even when the singleton was first touched before the override was set.
+    private var statsFile: URL { Config.configDir.appendingPathComponent("stats.json") }
 
     private init() {
         load()
