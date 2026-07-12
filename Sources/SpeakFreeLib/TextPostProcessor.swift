@@ -6,23 +6,30 @@ public struct TextPostProcessor {
     private static let ws = "(?<=[\\s.,!?;:]|^)"
     private static let we = "(?=[\\s.,!?;:]|$)"
 
+    // A negation/auxiliary directly before a command word is never a command: "didn't new
+    // line that" is a garble ("didn't realize that", 2026-07-03 recording FD2F92D7), and
+    // converting it eats the garbled word AND inserts fake punctuation. Bounded-alternation
+    // lookbehind (ICU requires bounded length).
+    private static let notAfterNegation =
+        "(?<!\\b(?:didn['’]t|don['’]t|doesn['’]t|can['’]t|cannot|couldn['’]t|won['’]t|wouldn['’]t|shouldn['’]t|never)\\s)"
+
     // Unambiguous: these phrases are almost never used as regular words in speech.
-    // Always safe to replace regardless of context.
+    // Always safe to replace regardless of context (except right after a negation).
     private static var alwaysReplace: [(pattern: String, replacement: String)] {[
-        ("\(ws)question marks?\(we)", "?"),
-        ("\(ws)exclamation marks?\(we)", "!"),
-        ("\(ws)exclamation points?\(we)", "!"),
-        ("\(ws)semicolon\(we)", ";"),
-        ("\(ws)semi colon\(we)", ";"),
+        ("\(ws)\(notAfterNegation)question marks?\(we)", "?"),
+        ("\(ws)\(notAfterNegation)exclamation marks?\(we)", "!"),
+        ("\(ws)\(notAfterNegation)exclamation points?\(we)", "!"),
+        ("\(ws)\(notAfterNegation)semicolon\(we)", ";"),
+        ("\(ws)\(notAfterNegation)semi colon\(we)", ";"),
         // Ellipsis removed — whisper generates "..." from pauses causing false positives
-        ("\(ws)full stop\(we)", "."),
-        ("\(ws)open quote\(we)", "\""),
-        ("\(ws)close quote\(we)", "\""),
-        ("\(ws)open paren\(we)", "("),
-        ("\(ws)close paren\(we)", ")"),
-        ("\(ws)new line\(we)", "\n"),
-        ("\(ws)newline\(we)", "\n"),
-        ("\(ws)new paragraph\(we)", "\n\n"),
+        ("\(ws)\(notAfterNegation)full stop\(we)", "."),
+        ("\(ws)\(notAfterNegation)open quote\(we)", "\""),
+        ("\(ws)\(notAfterNegation)close quote\(we)", "\""),
+        ("\(ws)\(notAfterNegation)open paren\(we)", "("),
+        ("\(ws)\(notAfterNegation)close paren\(we)", ")"),
+        ("\(ws)\(notAfterNegation)new line\(we)", "\n"),
+        ("\(ws)\(notAfterNegation)newline\(we)", "\n"),
+        ("\(ws)\(notAfterNegation)new paragraph\(we)", "\n\n"),
     ]}
 
     // Ambiguous: these words are commonly used as regular words ("comma separating",
@@ -339,23 +346,39 @@ public struct TextPostProcessor {
         return mutable as String
     }
 
+    /// Words that mark an ambiguous punctuation word as a NOUN phrase rather than a command:
+    /// a pure article or possessive directly before it ("like a colon", "add the comma",
+    /// "their period") means the user is talking *about* the thing. Deliberately excludes
+    /// demonstratives ("I like that comma and then…" is a plausible genuine command).
+    /// Root cause of the 2026-07-03 login→colon incident: Parakeet garbled "login" into
+    /// "colon" inside "like a colon where", and the unguarded standalone rule converted one
+    /// recognition error into fake punctuation.
+    private static let nounDeterminers: Set<String> = [
+        "a", "an", "the", "my", "your", "his", "her", "its", "our", "their",
+    ]
+
     /// In hybrid mode, convert ambiguous punctuation words when they appear as standalone
     /// words between phrases. "things like comma San Francisco" → "things like, San Francisco".
-    /// Only skips conversion when the word is part of a compound like "comma separated".
+    /// Skips conversion when the word is part of a compound like "comma separated", when a
+    /// real-word command follows an article/possessive (noun usage), or when a real-word
+    /// command opens a multi-word utterance (punctuation with nothing before it is the garble
+    /// signature — see the ": what about…" false conversion, recording 2026-07-03-010745).
     private static func convertStandaloneAmbiguous(_ text: String) -> String {
         var result = text
-        let ambiguousWords: [(word: String, replacement: String, skipBefore: Set<String>)] = [
-            ("comma", ",", ["separated", "delimited", "splice", "operator", "issue", "issues", "problem", "problems", "key", "question", "thing", "things", "usage", "placement", "rule", "rules", "character"]),
-            ("komma", ",", []),
-            ("kana", ",", []),
-            ("kanna", ",", []),
-            ("period", ".", ["of", "piece"]),
-            ("colon", ":", ["cancer", "surgery", "cleanse", "polyp"]),
-            ("dash", " —", ["of", "board", "cam"]),
-            ("hyphen", "-", ["ated", "ation"]),
+        // `guarded` = the word is a real English word, so position guards apply. The comma
+        // garble family (komma/kana/kanna) are non-words and always convert.
+        let ambiguousWords: [(word: String, replacement: String, skipBefore: Set<String>, guarded: Bool)] = [
+            ("comma", ",", ["separated", "delimited", "splice", "operator", "issue", "issues", "problem", "problems", "key", "question", "thing", "things", "usage", "placement", "rule", "rules", "character"], true),
+            ("komma", ",", [], false),
+            ("kana", ",", [], false),
+            ("kanna", ",", [], false),
+            ("period", ".", ["of", "piece"], true),
+            ("colon", ":", ["cancer", "surgery", "cleanse", "polyp"], true),
+            ("dash", " —", ["of", "board", "cam"], true),
+            ("hyphen", "-", ["ated", "ation"], true),
         ]
 
-        for (word, replacement, skipBefore) in ambiguousWords {
+        for (word, replacement, skipBefore, guarded) in ambiguousWords {
             // Match the word as a standalone token (word boundaries on both sides)
             let pattern = "(?i)(?<=\\s|^)\(word)(?=\\s|$|[.,!?;:])"
             guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
@@ -370,6 +393,24 @@ public struct TextPostProcessor {
                     .drop(while: { $0.isWhitespace })
                 let nextWord = String(afterMatch.prefix(while: { $0.isLetter })).lowercased()
                 if skipBefore.contains(nextWord) { continue }
+
+                // Position guards for real-word commands. An utterance-FINAL command word is
+                // always converted ("…and end with a comma." → "…and end with a," — trailing
+                // commands are the most common spoken-punctuation use, and this position had
+                // no guards before). Mid-utterance, apply the garble-signature checks.
+                if guarded && !nextWord.isEmpty {
+                    let before = result[..<range.lowerBound]
+                    let beforeTrimmed = before.reversed().drop(while: { $0.isWhitespace }).reversed()
+                    if beforeTrimmed.isEmpty {
+                        // Utterance-opening command with more words after it: garble signature
+                        // (": what about…", recording 2026-07-03-010745).
+                        continue
+                    }
+                    let precedingWord = String(
+                        beforeTrimmed.reversed().prefix(while: { $0.isLetter || $0 == "'" }).reversed()
+                    ).lowercased()
+                    if nounDeterminers.contains(precedingWord) { continue }
+                }
 
                 // If the next non-space character is whisper auto-punct, consume it —
                 // user's spoken word wins ("comma." → "," not ",.", "period?" → "." not ".?").
