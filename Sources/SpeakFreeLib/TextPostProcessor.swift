@@ -11,7 +11,8 @@ public struct TextPostProcessor {
     // converting it eats the garbled word AND inserts fake punctuation. Bounded-alternation
     // lookbehind (ICU requires bounded length).
     private static let notAfterNegation =
-        "(?<!\\b(?:didn['’]t|don['’]t|doesn['’]t|can['’]t|cannot|couldn['’]t|won['’]t|wouldn['’]t|shouldn['’]t|never)\\s)"
+        "(?<!\\b(?:didn['’]t|don['’]t|doesn['’]t|can['’]t|cannot|couldn['’]t|won['’]t|wouldn['’]t"
+        + "|shouldn['’]t|hasn['’]t|haven['’]t|isn['’]t|wasn['’]t|weren['’]t|not|never)\\s)"
 
     // Unambiguous: these phrases are almost never used as regular words in speech.
     // Always safe to replace regardless of context (except right after a negation).
@@ -397,8 +398,16 @@ public struct TextPostProcessor {
                 // Position guards for real-word commands. An utterance-FINAL command word is
                 // always converted ("…and end with a comma." → "…and end with a," — trailing
                 // commands are the most common spoken-punctuation use, and this position had
-                // no guards before). Mid-utterance, apply the garble-signature checks.
-                if guarded && !nextWord.isEmpty {
+                // no guards before). Utterance-final means nothing follows but one optional
+                // auto-punct char and whitespace — a digit or a following sentence does NOT
+                // count ("talk about your period. It hurts" is mid-utterance noun usage).
+                // Mid-utterance, apply the garble-signature checks.
+                let isUtteranceFinal: Bool = {
+                    var rest = afterMatch
+                    if let first = rest.first, ".,!?;:".contains(first) { rest = rest.dropFirst() }
+                    return rest.allSatisfy { $0.isWhitespace }
+                }()
+                if guarded && !isUtteranceFinal {
                     let before = result[..<range.lowerBound]
                     let beforeTrimmed = before.reversed().drop(while: { $0.isWhitespace }).reversed()
                     if beforeTrimmed.isEmpty {

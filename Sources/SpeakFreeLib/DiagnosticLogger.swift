@@ -40,7 +40,11 @@ public class DiagnosticLogger {
         Self.pruneOldLogs(in: logsDir)
         let dateStr = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let file = logsDir.appendingPathComponent("speakfree-\(dateStr).log")
-        fm.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        // Never truncate: production and the streaming variant share this dir, and two
+        // instances starting in the same second would otherwise clobber each other.
+        if !fm.fileExists(atPath: file.path) {
+            fm.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
         logFile = file
         log("Session started — \(Bundle.main.bundleIdentifier ?? "unknown") v\(SpeakFree.version)")
         log("Machine: \(ProcessInfo.processInfo.operatingSystemVersionString), RAM: \(ProcessInfo.processInfo.physicalMemory / (1024*1024*1024))GB")
