@@ -983,12 +983,27 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let audioURL = recording.url
-        let samples = recording.samples
 
-        // Skip transcription for very short recordings (<300ms) — likely an accidental tap.
+        // Pre-transcription gates (too-short / silent), with the wav on disk as arbiter:
+        // if the in-memory samples fail a gate but the just-written wav passes, transcribe
+        // the wav's samples instead of dropping the dictation (2026-06-29: a good AirPods
+        // recording was dropped as "silent"; the wav transcribed fine offline).
         // Threshold + RMS live in FinalizePipeline so the test harness gates on the SAME values.
-        if samples.count < FinalizePipeline.minSamples {
-            print("Recording too short (\(samples.count) samples / \(Int(Double(samples.count) / 16000.0 * 1000))ms) — skipping")
+        let gate = FinalizePipeline.resolveGateSamples(
+            memorySamples: recording.samples,
+            readWav: { try? ProcessCommand.loadSamples(from: audioURL) }
+        )
+        if let failure = gate.failure {
+            switch failure {
+            case .tooShort(let count):
+                // Likely an accidental tap — skip quietly.
+                DiagnosticLogger.shared.log(
+                    "Recording too short (\(count) samples / \(Int(Double(count) / 16000.0 * 1000))ms) — skipping")
+            default:
+                DiagnosticLogger.shared.log(
+                    "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples)), wav agrees) — audio engine may be dead, rebuilding")
+                recorder.ensureAudioHealthy()
+            }
             RecordingStore.clearSentinel()
             recordingSourceElement = nil
             recordingContextText = nil
@@ -996,19 +1011,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             recordingOverlay.hide()
             return
         }
-
-        // Check for dead audio (all silence) — engine may have died mid-recording
-        let rms = FinalizePipeline.rms(of: samples)
-        if rms < FinalizePipeline.silenceRMSThreshold {
-            DiagnosticLogger.shared.log("Recording was silent (RMS \(rms)) — audio engine may be dead, rebuilding")
-            recorder.ensureAudioHealthy()
-            RecordingStore.clearSentinel()
-            recordingSourceElement = nil
-            recordingContextText = nil
-            statusBar.state = .idle
-            recordingOverlay.hide()
-            return
+        if gate.usedWavFallback {
+            // Divergence between the tap's in-memory copy and the wav is an upstream bug —
+            // the dictation is saved, but leave a trace so it can be chased.
+            DiagnosticLogger.shared.log(
+                "Gate override: in-memory samples failed (count \(recording.samples.count), RMS \(FinalizePipeline.rms(of: recording.samples))) but wav passed — transcribing wav samples")
         }
+        let samples = gate.samples
 
         statusBar.state = .transcribing
         recordingOverlay.update(state: .transcribing)
@@ -1215,7 +1224,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             self.showSettings()
                         }
                     } else {
-                        print("Error: Transcription failed")
+                        // Must be VISIBLE: a swallowed throw here means a good recording
+                        // silently produces nothing (the 2026-06-29 dropped-dictation event
+                        // took 12 days to trace because this branch only printed to stdout).
+                        // Error type/description only — never transcript content.
+                        let message = "Transcription failed: \(error)"
+                        print("Error: \(message)")
+                        DiagnosticLogger.shared.log(message)
+                        NSApp.activate(ignoringOtherApps: true)
+                        let alert = NSAlert()
+                        alert.messageText = "Transcription Failed"
+                        alert.informativeText = "The engine reported an error. Your recording was kept"
+                            + " and can be transcribed from the recordings folder.\n\n\(error.localizedDescription)"
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
                     }
                     self.statusBar.state = .idle
                     self.statusBar.buildMenu()
