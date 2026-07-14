@@ -285,5 +285,31 @@
   "mode": "hybrid",
   "input": "I talked to the person in question?",
   "expected": "I talked to the person in question?"
+ },
+ {
+  "name": "glowing-line-quark-and-comment-garbles",
+  "note": "2026-07-14 live repro (recording-152144, MacBook mic): spoken 'question mark' garbled to 'Quark.', spoken 'comma' garbled to one-word sentence 'Comment.'",
+  "mode": "hybrid",
+  "input": "I see a glowing line between two videos. Period. What is that? Quark. It looks weird. Comment. I think that there should be some.",
+  "expected": "I see a glowing line between two videos. What is that? It looks weird, I think that there should be some."
+ },
+ {
+  "name": "spoken-comma-beats-preceding-engine-period",
+  "note": "2026-07-14 live repro (recording-152037): 'unreal. Kama have' must become 'unreal, have' — the user's comma outranks the engine's period on BOTH sides.",
+  "mode": "hybrid",
+  "input": "The growing glow and the shape of it make it feel unreal. Kama have the glow happen over a few frames and don't have it glow as a shape",
+  "expected": "The growing glow and the shape of it make it feel unreal, have the glow happen over a few frames and don't have it glow as a shape"
+ },
+ {
+  "name": "genuine-comment-noun-survives",
+  "mode": "hybrid",
+  "input": "Please leave a comment on the PR when you review it.",
+  "expected": "Please leave a comment on the PR when you review it."
+ },
+ {
+  "name": "genuine-quark-mid-sentence-survives",
+  "mode": "hybrid",
+  "input": "The quark is a fundamental particle.",
+  "expected": "The quark is a fundamental particle."
  }
 ]

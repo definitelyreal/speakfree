@@ -52,7 +52,13 @@ public struct TextPostProcessor {
         // emits its own period/comma, then the mis-heard command). The gate is what keeps
         // a real "Kamala" or "good karma" in plain prose from being turned into a comma;
         // only the punctuation-preceded position converts. Runs BEFORE GlossaryCorrector.
-        ("(?<=[.,!?;:])\\s*(?:kamala|[ck]omma|kana|kanna|kama|karma)(?:[.,!?;:]|(?=\\s|$))", ","),
+        // Sentence-punct BEFORE the comma garble is CONSUMED (not just required): the
+        // user's spoken comma outranks the engine's auto-period on both sides, so
+        // "unreal. Kama have" → "unreal, have" — not "unreal. Have" (2026-07-14: the
+        // period used to win the collision and turn a spoken comma into a fake
+        // sentence break).
+        ("[.;]\\s*(?:kamala|[ck]omma|kana|kanna|kama|karma)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("(?<=[,!?:])\\s*(?:kamala|[ck]omma|kana|kanna|kama|karma)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[.,!?;:])\\s*period(?:[.,!?;:]|(?=\\s|$))", "."),
         ("(?<=[.,!?;:])\\s*colon(?:[.,!?;:]|(?=\\s|$))", ":"),
         ("(?<=[.,!?;:])\\s*dash(?:[.,!?;:]|(?=\\s|$))", " —"),
@@ -120,6 +126,10 @@ public struct TextPostProcessor {
         // text (2026-07-14: "…as they get shot at question?"). Guarded by the same
         // noun-context rule as the standalone converter ("What is the question?" stays).
         result = collapseHalfConvertedQuestionMark(result)
+
+        // 2c. Command-word garbles that arrive as their own one-word sentence
+        // (2026-07-14 glowing-line dictation, MacBook mic — engine garbles, not audio).
+        result = collapseCommandWordGarbles(result)
 
         // 2a. Trim spaces adjacent to spoken line-breaks (audit M2).
         // The alwaysReplace lookbehind/lookahead for "new line"/"new paragraph" are
@@ -386,6 +396,30 @@ public struct TextPostProcessor {
             if questionNounContext.contains(precedingWord) { continue }
             if precedingWord.isEmpty { continue }  // "Question?" alone — leave it
             result.replaceSubrange(range, with: "?")
+        }
+        return result
+    }
+
+    /// Command-word garbles observed 2026-07-14 (glowing-line dictation, MacBook mic —
+    /// recognition garbles, not Bluetooth audio):
+    /// - "…? Quark." — spoken "question mark" where the engine already emitted the "?"
+    ///   and rendered the leftover as "Quark". Strip the stray word ("quark" as a real
+    ///   word directly after a question mark is essentially nonexistent in dictation).
+    /// - "…. Comment. X" — spoken "comma" rendered as a one-word sentence between two
+    ///   engine periods. Join the clauses with the comma the user actually said. The
+    ///   one-word-sentence signature (period on BOTH sides) is what protects genuine
+    ///   uses like "leave a comment on the PR".
+    static func collapseCommandWordGarbles(_ text: String) -> String {
+        var result = text
+        if let quark = try? NSRegularExpression(
+            pattern: "(?<=\\?)\\s+[Qq]uark(?:\\.|(?=\\s|$))", options: []) {
+            result = quark.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
+        }
+        if let comment = try? NSRegularExpression(
+            pattern: "\\.\\s+[Cc]omment\\.(?=\\s|$)", options: []) {
+            result = comment.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result), withTemplate: ",")
         }
         return result
     }
