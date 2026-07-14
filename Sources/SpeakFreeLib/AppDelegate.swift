@@ -66,6 +66,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // it every few hours until the user decides keep/delete. Main-only.
     private var recordingsNoticeController: RecordingsNoticeController?
     private var recordingsNoticeTimer: Timer?
+    // Graceful SIGTERM (2026-07-14): a reinstall/kill must never eat an in-flight
+    // dictation. The source is retained for process lifetime.
+    private var sigtermSource: DispatchSourceSignal?
 
     // Adaptive post-buffer (T2.1): poll trailing audio after key release and finalize as soon as
     // ~150ms of trailing silence is observed, hard-capped at 300ms (never worse than the old flat
@@ -102,6 +105,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         statusBar = StatusBarController()
         recorder = AudioRecorder()
         inserter = TextInserter()
+        installGracefulTermination()
+
+        // Multi-device AirPods contention: the detector throttles itself (max one
+        // notice per hour) — surface it visibly when it fires.
+        recorder.onContention = { message in
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "AirPods Interference Detected"
+                alert.informativeText = message
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.setup()
@@ -275,9 +293,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Recordings apology notice (2026-07-14): saving shipped on-by-default through
         // v1.7.1; the notice lets users keep or delete what accumulated. Returns every
-        // launch (and every few hours, below) until resolved.
-        switch RecordingsNotice.launchAction(decision: config.recordingsNoticeDecision,
-                                             hasRecordings: RecordingStore.hasAudioFiles()) {
+        // launch (and every few hours, below) until resolved. Dev machines are exempt —
+        // the corpus there is intentional.
+        switch DevMode.isActive
+            ? RecordingsNotice.LaunchAction.nothing
+            : RecordingsNotice.launchAction(decision: config.recordingsNoticeDecision,
+                                            hasRecordings: RecordingStore.hasAudioFiles()) {
         case .markNotApplicable:
             var updated = Config.load()
             updated.recordingsNoticeDecision = "none-found"
@@ -391,6 +412,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Configure pre-buffer
         recorder.preBufferEnabled = config.preBuffer?.value ?? true
+
+        // Microphone pin (menu-bar selector) + dual-capture flag
+        recorder.dualCaptureEnabled = config.dualMicCapture?.value ?? false
+        recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
 
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
@@ -688,10 +713,65 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Graceful termination (2026-07-14)
+
+    /// SIGTERM (pkill, reinstall scripts, logout) waits for an in-flight dictation to
+    /// finish — and for 10 s of quiet after it — before exiting, instead of cutting the
+    /// user off mid-sentence. SIGKILL is unaffected (nothing can be).
+    func installGracefulTermination() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler { [weak self] in
+            guard let self else { NSApp.terminate(nil); return }
+            let busy = self.statusBar.state == .recording || self.statusBar.state == .transcribing
+            if !busy {
+                NSApp.terminate(nil)
+                return
+            }
+            DiagnosticLogger.shared.log("SIGTERM: dictation in flight — waiting to exit")
+            self.terminateAfterQuiet(consecutiveIdle: 0,
+                                     deadline: Date().addingTimeInterval(5 * 60))
+        }
+        source.resume()
+        sigtermSource = source
+    }
+
+    /// Poll every 0.5 s; require 10 s of continuous idle (no recording/transcribing)
+    /// before terminating. Hard deadline so a stuck state can't make the app unkillable.
+    private func terminateAfterQuiet(consecutiveIdle: Int, deadline: Date) {
+        let busy = statusBar.state == .recording || statusBar.state == .transcribing
+        let idleCount = busy ? 0 : consecutiveIdle + 1
+        if idleCount >= 20 || Date() > deadline {
+            DiagnosticLogger.shared.log("SIGTERM: quiet — exiting now")
+            NSApp.terminate(nil)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.terminateAfterQuiet(consecutiveIdle: idleCount, deadline: deadline)
+        }
+    }
+
+    /// Microphone pin plumbing for the menu-bar selector.
+    public func currentInputDeviceUID() -> String? { config.inputDeviceUID }
+
+    public func selectInputDevice(uid: String?) {
+        var updated = Config.load()
+        updated.inputDeviceUID = uid
+        try? updated.save()
+        config.inputDeviceUID = uid
+        recorder.setPinnedInputDevice(uid: uid)
+        statusBar.buildMenu()
+        DiagnosticLogger.shared.log("Microphone selector: \(uid ?? "system default")")
+    }
+
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
     private func reloadHotkeyAndSettings() {
         // Configure pre-buffer
         recorder.preBufferEnabled = config.preBuffer?.value ?? true
+
+        // Microphone pin (menu-bar selector) + dual-capture flag
+        recorder.dualCaptureEnabled = config.dualMicCapture?.value ?? false
+        recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
 
         // Update spoken punctuation on existing transcriber
         transcriber?.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
@@ -1062,7 +1142,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples))) and the wav did not rescue it — audio engine may be dead, rebuilding")
                 recorder.ensureAudioHealthy()
             }
-            if !(config.saveRecordings?.value ?? false) {
+            if !DevMode.effectiveSaveRecordings(config) {
                 // Saving is opt-out: a gate-failed capture must not linger on disk.
                 try? FileManager.default.removeItem(at: audioURL)
             }
@@ -1108,7 +1188,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // struct so reads and writes are not atomic across threads.
         let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         // Recordings privacy: persisting audio + transcripts is opt-in (2026-07-14).
-        let keepRecording = config.saveRecordings?.value ?? false
+        let keepRecording = DevMode.effectiveSaveRecordings(config)
+        // Dual-capture comparison track (flag-gated prototype) — snapshot on main.
+        let btSamples = recorder.lastSecondarySamples
         let mode = config.spokenPunctuation ?? .off
         let glossary = Config.loadVocabulary()
         let overrides = Config.loadOverrides()
@@ -1116,7 +1198,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Provenance snapshot for the .meta.json sidecar — engine/model from the ACTIVE
         // transcriber (not config, which can disagree after a model fallback).
         let metaEngine = activeEngineID
-        let metaDevice = AudioRecorder.defaultInputDeviceName()
+        let metaDevice = recorder.currentCaptureDeviceName()
 
         // Snapshot the transcriber on main BEFORE crossing into the async Task. A settings
         // change mid-finalize (reloadConfig) can swap self.transcriber out from under us; the
@@ -1212,6 +1294,25 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 RecordingStore.clearSentinel()
                 if keepRecording && maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
+                }
+
+                // Dual-capture corpus diagnostics (flag-gated prototype): the built-in
+                // track above is what gets inserted; transcribe the Bluetooth comparison
+                // track too and record how much they agree. Detached task — zero added
+                // dictation latency. Content goes only into 0600 sidecars, never logs.
+                if keepRecording && btSamples.count >= FinalizePipeline.minSamples {
+                    Task {
+                        let btURL = audioURL.deletingPathExtension().appendingPathExtension("bt.wav")
+                        try? DualCapture.writeWav(samples: btSamples, to: btURL)
+                        let btRaw = (try? await transcriber.transcribe(
+                            audioURL: btURL, samples: btSamples, prompt: prompt)) ?? ""
+                        RecordingStore.saveRaw(text: btRaw, for: btURL)
+                        let agreement = DualCapture.tokenAgreement(raw, btRaw)
+                        DiagnosticLogger.shared.log(String(
+                            format: "DualCapture: agreement %.1f%% (primary %d chars, bt %d chars, bt %.1fs)",
+                            agreement * 100, raw.count, btRaw.count,
+                            Double(btSamples.count) / 16000.0))
+                    }
                 }
 
                 DispatchQueue.main.async {
