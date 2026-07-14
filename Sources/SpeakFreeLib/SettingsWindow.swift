@@ -374,12 +374,16 @@ struct SettingsView: View {
 
     /// Tracks the picker selection separately so we can intercept "Other..." (999)
     @State private var hotkeyPickerSelection: UInt16 = 0
-    /// Gates the "Show Recording Folder" button: enabled only when the folder exists
-    /// and holds at least one audio file. Refreshed on appear and when the toggle flips.
+    /// Gates the "Open Recordings / Transcripts Folder" button (enabled only when audio
+    /// files exist) and feeds the stored-count line. Refreshed on appear, on toggle
+    /// flips, and after an in-app delete.
     @State private var recordingsFolderHasAudio = false
+    @State private var storedRecordingCount = 0
+    @State private var showDeleteRecordingsSheet = false
 
     private func refreshRecordingsFolderState() {
-        recordingsFolderHasAudio = RecordingStore.hasAudioFiles()
+        storedRecordingCount = RecordingStore.recordingCount()
+        recordingsFolderHasAudio = storedRecordingCount > 0
     }
 
     /// Consistent label width across ALL Grid sections.
@@ -493,7 +497,7 @@ struct SettingsView: View {
 
                             GridRow {
                                 Text("Recordings")
-                                Toggle("Save recordings for debugging", isOn: $viewModel.saveRecordings)
+                                Toggle("Save recordings and transcripts", isOn: $viewModel.saveRecordings)
                                     .onChange(of: viewModel.saveRecordings) { _ in
                                         viewModel.save()
                                         refreshRecordingsFolderState()
@@ -516,21 +520,34 @@ struct SettingsView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                        HStack(spacing: 8) {
-                            Text("Recordings and transcripts are saved only to this Mac. They are never sent anywhere.")
-                                .font(.footnote)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            Button("Show Recording Folder") {
-                                NSWorkspace.shared.activateFileViewerSelecting([RecordingStore.recordingsDir])
-                            }
-                            .controlSize(.small)
-                            .disabled(!recordingsFolderHasAudio)
+                        Button("Open Recordings / Transcripts Folder…") {
+                            NSWorkspace.shared.activateFileViewerSelecting([RecordingStore.recordingsDir])
                         }
-                        .onAppear { refreshRecordingsFolderState() }
+                        .controlSize(.small)
+                        .disabled(!recordingsFolderHasAudio)
+
+                        if storedRecordingCount > 0 {
+                            HStack(spacing: 4) {
+                                Text("You have \(storedRecordingCount) recordings and their "
+                                     + "transcripts stored on your computer.")
+                                    .font(.footnote)
+                                    .foregroundColor(.secondary)
+                                Button("Click here to delete") { showDeleteRecordingsSheet = true }
+                                    .buttonStyle(.link)
+                                    .font(.footnote)
+                            }
+                        }
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
+                    .onAppear { refreshRecordingsFolderState() }
+                    .sheet(isPresented: $showDeleteRecordingsSheet) {
+                        DeleteRecordingsConfirmView(
+                            fileCount: RecordingStore.recordingFileCount(),
+                            folderPath: RecordingStore.recordingsDir.path,
+                            onDeleted: { refreshRecordingsFolderState() }
+                        )
+                    }
                 }
 
                 // -- TRANSCRIPTION -----------------------------------------

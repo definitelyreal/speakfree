@@ -783,6 +783,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.recordingsNoticeController = nil
                 self?.reloadConfig()
             },
+            onConfigChanged: { [weak self] in self?.reloadConfig() },
             onDismissed: { [weak self] in
                 guard let self else { return }
                 self.recordingsNoticeController = nil
