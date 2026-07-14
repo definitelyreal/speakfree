@@ -209,6 +209,27 @@ public class RecordingStore {
         }
     }
 
+    /// True when the recordings folder currently holds at least one audio file.
+    /// Gates the Settings "Show Recording Folder" button and the apology notice.
+    public static func hasAudioFiles() -> Bool {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: recordingsDir.path) else { return false }
+        return files.contains { $0.hasSuffix(".\(fileExtension)") && $0.hasPrefix(filePrefix) }
+    }
+
+    /// Persist or dispose a finished dictation's artifacts per the user's opt-in.
+    /// `keep: false` deletes the wav and writes no sidecars — nothing persists.
+    public static func finishRecording(audioURL: URL, keep: Bool,
+                                       raw: String, text: String, meta: RecordingMeta) {
+        if keep {
+            saveRaw(text: raw, for: audioURL)
+            saveTranscription(text: text, for: audioURL)
+            saveMeta(meta, for: audioURL)
+        } else {
+            try? FileManager.default.removeItem(at: audioURL)
+        }
+    }
+
     public static func deleteAllRecordings() {
         for recording in listRecordings() {
             do {

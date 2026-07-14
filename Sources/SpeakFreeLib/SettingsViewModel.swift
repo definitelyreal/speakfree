@@ -24,6 +24,7 @@ public class SettingsViewModel: ObservableObject {
     @Published public var parakeetModel: String
     @Published public var localAPIEnabled: Bool
     @Published public var localAPIPort: Int
+    @Published public var saveRecordings: Bool
 
     // MARK: - Callback
 
@@ -62,6 +63,7 @@ public class SettingsViewModel: ObservableObject {
         self.parakeetModel = c.parakeetModel ?? "parakeet-tdt-0.6b-v3"
         self.localAPIEnabled = c.localAPI?.value ?? false
         self.localAPIPort = c.localAPIPort ?? 5765
+        self.saveRecordings = c.saveRecordings?.value ?? false
     }
 
     // MARK: - Conversion
@@ -86,6 +88,7 @@ public class SettingsViewModel: ObservableObject {
         config.parakeetModel = parakeetModel
         config.localAPI = FlexBool(localAPIEnabled)
         config.localAPIPort = localAPIPort
+        config.saveRecordings = FlexBool(saveRecordings)
         return config
     }
 

@@ -34,6 +34,17 @@ public struct Config: Codable {
     public var localAPIAllowBrowser: FlexBool?  // nil = false — gate any CORS (Access-Control-*) headers
     public var localAPIToken: String?           // nil = no auth — when set, require "Authorization: Bearer <token>"
 
+    // Recordings privacy (Michael, 2026-07-14): persisting dictation audio + transcript
+    // sidecars is OPT-IN. nil/false = nothing persists — the wav is deleted once the
+    // dictation finalizes and no sidecars are written. Saving was accidentally
+    // on-by-default for every user through v1.7.1 (it was meant as a dev-machine
+    // debugging corpus); the apology notice below tells users and lets them choose.
+    public var saveRecordings: FlexBool?
+    // Resolution of the recordings apology notice: "keep" | "delete" | "none-found".
+    // nil = undecided — the notice returns every launch and every few hours until the
+    // user chooses. Never shown again once set.
+    public var recordingsNoticeDecision: String?
+
     // Recordings are kept forever by DEFAULT — they are the dictation corpus that
     // makes accuracy regressions diagnosable (and ~1 MB per 30 s of speech is cheap).
     // Pruning happens ONLY when the user explicitly picks a cap in Settings.
@@ -82,6 +93,13 @@ public struct Config: Codable {
 
     public static var configDir: URL {
         if let override = configDirOverride { return override }
+        // Integration-test seam: launching a whole app instance against a scratch config
+        // dir. HOME env is NOT enough — homeDirectoryForCurrentUser reads passwd and
+        // ignores it (verified 2026-07-14 when a "scratch" test instance wrote to the
+        // real config). Same trust domain as configDirOverride: user-level, local-only.
+        if let env = ProcessInfo.processInfo.environment["SPEAKFREE_CONFIG_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
         let home = FileManager.default.homeDirectoryForCurrentUser
         // Use bundle identifier to isolate beta from production
         let dirName: String
