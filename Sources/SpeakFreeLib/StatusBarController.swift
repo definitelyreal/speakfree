@@ -133,6 +133,41 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Microphone selector — FIRST section (Michael, 2026-07-14): the AirPods link
+        // degrades unpredictably, and switching the capture device must be one click.
+        // Radio list: System Default + every input device; checkmark = active pin.
+        let micHeader = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        micHeader.isEnabled = false
+        menu.addItem(micHeader)
+
+        let pinnedUID = (NSApplication.shared.delegate as? AppDelegate)?.currentInputDeviceUID()
+        let defaultName = AudioRecorder.defaultInputDeviceName() ?? "System Default"
+        let defaultTarget = MenuItemTarget {
+            (NSApplication.shared.delegate as? AppDelegate)?.selectInputDevice(uid: nil)
+        }
+        menuItemTargets.append(defaultTarget)
+        let defaultItem = NSMenuItem(title: "System Default (\(defaultName))",
+                                     action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+        defaultItem.target = defaultTarget
+        defaultItem.state = pinnedUID == nil ? .on : .off
+        menu.addItem(defaultItem)
+
+        for device in AudioDeviceCatalog.inputDevices() {
+            let uid = device.uid
+            let target = MenuItemTarget {
+                (NSApplication.shared.delegate as? AppDelegate)?.selectInputDevice(uid: uid)
+            }
+            menuItemTargets.append(target)
+            let item = NSMenuItem(title: device.name,
+                                  action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
+            item.state = pinnedUID == uid ? .on : .off
+            item.indentationLevel = 1
+            menu.addItem(item)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
         // Settings — opens the SwiftUI Settings window (first after title)
         let settingsTarget = MenuItemTarget {
             guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
