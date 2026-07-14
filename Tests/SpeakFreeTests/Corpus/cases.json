@@ -266,5 +266,24 @@
   "mode": "hybrid",
   "input": "I did not new line that it was happening",
   "expected": "I did not new line that it was happening"
+ },
+ {
+  "name": "half-converted-question-mark-collapses",
+  "note": "2026-07-14 live repro: Parakeet converted spoken 'mark' to '?' itself, leaving 'question?'.",
+  "mode": "hybrid",
+  "input": "Where are we at with the deterministic behavior of things as they get shot at question?",
+  "expected": "Where are we at with the deterministic behavior of things as they get shot at?"
+ },
+ {
+  "name": "genuine-noun-question-not-collapsed",
+  "mode": "hybrid",
+  "input": "What is the question?",
+  "expected": "What is the question?"
+ },
+ {
+  "name": "in-question-idiom-not-collapsed",
+  "mode": "hybrid",
+  "input": "I talked to the person in question?",
+  "expected": "I talked to the person in question?"
  }
 ]
