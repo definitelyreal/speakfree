@@ -54,7 +54,7 @@ public enum RecordingsNotice {
 // MARK: - Copy (Michael's words)
 
 enum NoticeCopy {
-    static let header = "We had local recordings saved on your device. Your decision."
+    static let header = "We were saving local recordings on your device. It's off now."
     static let noteLabel = "A note from Michael:"
     static let note = """
     Speakfree has a dev mode feature that saves local recordings, which I use to \
@@ -68,7 +68,8 @@ enum NoticeCopy {
     static let deleteLinkText = "delete them for you"
     static let deleteLeadOut = ", but I suggest you do it yourself for safety:"
     static let openFolderLabel = "Open Recordings / Transcripts Folder…"
-    static let acknowledgeLabel = "Got it"
+    static let continueKeepLabel = "Continue without deleting »"
+    static let continueLabel = "Continue »"
 
     static let confirmTitle = "Delete your recordings and transcripts"
     static func confirmBody(fileCount: Int, folder: String) -> String {
@@ -119,8 +120,9 @@ final class RecordingsNoticeController: NSWindowController, NSWindowDelegate {
                 RecordingsNotice.persistSaveToggle(save)
                 self?.onConfigChanged?()
             },
-            onAcknowledge: { [weak self] in self?.resolve("keep") },
-            onDeleted: { [weak self] in self?.resolve("delete") }
+            onContinue: { [weak self] didDelete in
+                self?.resolve(didDelete ? "delete" : "keep")
+            }
         )
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
@@ -143,12 +145,17 @@ struct RecordingsNoticeView: View {
     /// In the shipping dialog these persist config / delete files; the preview
     /// command injects inert versions, so a preview can never touch user data.
     var onToggle: (Bool) -> Void
-    var onAcknowledge: () -> Void
-    var onDeleted: () -> Void
+    /// Resolves the notice. `didDelete` reports whether the in-app delete ran.
+    var onContinue: (Bool) -> Void
     var deleteAction: () -> Void = { RecordingStore.deleteAllRecordings() }
 
     @State private var saveToggle = false
     @State private var showDeleteConfirm = false
+    /// Deleting (in-app) or opening the folder flips the continue button from
+    /// "Continue without deleting »" to plain "Continue »" — the qualifier only
+    /// makes sense while doing nothing is still the choice being made.
+    @State private var didDelete = false
+    @State private var tookAction = false
 
     fileprivate static let purple = Color(nsColor: WelcomeController.purple)
 
@@ -195,16 +202,19 @@ struct RecordingsNoticeView: View {
                 HStack {
                     Spacer()
                     Button(NoticeCopy.openFolderLabel) {
+                        tookAction = true
                         NSWorkspace.shared.activateFileViewerSelecting([RecordingStore.recordingsDir])
                     }
                     .fixedSize()
                     .accessibilityIdentifier("open-folder")
-                    Button(NoticeCopy.acknowledgeLabel) { onAcknowledge() }
-                        .fixedSize()
-                        .keyboardShortcut(.defaultAction)
-                        .buttonStyle(.borderedProminent)
-                        .tint(Self.purple)
-                        .accessibilityIdentifier("got-it")
+                    Button(tookAction ? NoticeCopy.continueLabel : NoticeCopy.continueKeepLabel) {
+                        onContinue(didDelete)
+                    }
+                    .fixedSize()
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Self.purple)
+                    .accessibilityIdentifier("continue-btn")
                 }
             }
             .padding(20)
@@ -216,7 +226,12 @@ struct RecordingsNoticeView: View {
                 fileCount: RecordingStore.recordingFileCount(),
                 folderPath: RecordingStore.recordingsDir.path,
                 deleteAction: deleteAction,
-                onDeleted: onDeleted
+                onDeleted: {
+                    // Deletion no longer closes the notice — the user returns to it
+                    // with the button reading "Continue »".
+                    didDelete = true
+                    tookAction = true
+                }
             )
         }
     }
@@ -301,8 +316,7 @@ public enum RecordingsNoticePreview {
         let view = RecordingsNoticeView(
             initialSaveToggle: false,
             onToggle: { print("preview: toggle → \($0) — inert") },
-            onAcknowledge: { print("preview: Got it — inert") },
-            onDeleted: { print("preview: delete resolved — inert") },
+            onContinue: { print("preview: Continue (didDelete=\($0)) — inert") },
             deleteAction: { print("preview: DELETE clicked — inert, nothing deleted") }
         )
         let hosting = NSHostingController(rootView: view)
