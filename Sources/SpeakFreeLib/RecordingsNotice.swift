@@ -2,19 +2,20 @@
 import AppKit
 import SwiftUI
 
-/// The recordings apology notice (Michael, 2026-07-14).
+/// The recordings notice (Michael, 2026-07-14; copy revised same day).
 ///
 /// Through v1.7.1 every dictation's audio and transcript were saved to disk by
 /// default — a dev-machine debugging setting that accidentally shipped to everyone.
 /// Saving is now opt-in, and rather than silently deleting what accumulated, this
-/// notice tells the user and lets THEM decide: keep the existing files or delete
-/// them. It returns every launch and every few hours until they choose; once a
-/// choice is persisted it never shows again.
+/// notice tells the user and leaves the decision to them: keep the files (default),
+/// open the folder and delete manually, or use the in-app delete confirmation.
+/// It returns every launch and every few hours until acknowledged; once resolved
+/// it never shows again.
 public enum RecordingsNotice {
 
     public enum LaunchAction: Equatable {
-        /// No recordings exist — nothing to apologize for. Persist "none-found" so a
-        /// user who later opts in and accumulates recordings never sees the notice.
+        /// No recordings exist — nothing to disclose. Persist "none-found" so a user
+        /// who later opts in and accumulates recordings never sees the notice.
         case markNotApplicable
         /// Undecided and recordings exist — show the notice.
         case show
@@ -32,34 +33,69 @@ public enum RecordingsNotice {
     /// runs for days between launches, so launch-time-only would never re-ask.
     public static let reshowInterval: TimeInterval = 4 * 60 * 60
 
-    /// Persist the user's choice. `deleteExisting` removes every recording and
-    /// sidecar; `saveFutureRecordings` mirrors the dialog's toggle into Settings.
-    static func resolve(deleteExisting: Bool, saveFutureRecordings: Bool) {
-        if deleteExisting {
-            RecordingStore.deleteAllRecordings()
-        }
+    /// Persist the notice resolution ("keep" | "delete"). Deletion itself happens in
+    /// the confirmation sheet BEFORE this is called — persisting is decision-only.
+    static func persistDecision(_ decision: String) {
         var config = Config.load()
-        config.recordingsNoticeDecision = deleteExisting ? "delete" : "keep"
-        config.saveRecordings = FlexBool(saveFutureRecordings)
+        config.recordingsNoticeDecision = decision
         try? config.save()
-        DiagnosticLogger.shared.log(
-            "RecordingsNotice: resolved (\(deleteExisting ? "delete" : "keep"), saveFuture=\(saveFutureRecordings))")
+        DiagnosticLogger.shared.log("RecordingsNotice: resolved (\(decision))")
+    }
+
+    /// Persist the dialog's toggle immediately (same semantics as the Settings toggle) —
+    /// a user who flips it and closes the window without acknowledging keeps their choice.
+    static func persistSaveToggle(_ save: Bool) {
+        var config = Config.load()
+        config.saveRecordings = FlexBool(save)
+        try? config.save()
     }
 }
 
+// MARK: - Copy (Michael's words)
+
+enum NoticeCopy {
+    static let header = "We had local recordings saved on your device. Your decision."
+    static let noteLabel = "A note from Michael:"
+    static let note = """
+    Speakfree has a dev mode feature that saves local recordings, which I use to \
+    improve it. It wasn't supposed to be on for everyone, but it was. I'm committed \
+    to privacy and transparency, so I wanted to let you know rather than silently \
+    delete them.
+    """
+    static let turnedOff = "It's turned off now. Change the behavior here or in settings:"
+    static let toggleLabel = "Save recordings and transcripts"
+    static let deleteLeadIn = "We can "
+    static let deleteLinkText = "delete them for you"
+    static let deleteLeadOut = ", but I suggest you do it yourself for safety:"
+    static let openFolderLabel = "Open Recordings / Transcripts Folder…"
+    static let acknowledgeLabel = "Got it"
+
+    static let confirmTitle = "Delete your recordings and transcripts"
+    static func confirmBody(fileCount: Int, folder: String) -> String {
+        "This will permanently delete \(fileCount) files in \(folder)."
+    }
+    static let confirmQuestion = "Are you sure you want to do this?"
+}
+
+// MARK: - Window controller
+
 final class RecordingsNoticeController: NSWindowController, NSWindowDelegate {
 
-    /// Called when the user makes a keep/delete decision (notice is done forever).
+    /// Called when the user resolves the notice (acknowledge or delete) — never again.
     private var onResolved: (() -> Void)?
-    /// Called when the window closes WITHOUT a decision (caller schedules a re-show).
+    /// Called when the window closes WITHOUT a resolution (caller schedules a re-show).
     private var onDismissed: (() -> Void)?
+    /// Called when the dialog's toggle changes config (caller reloads its config cache).
+    private var onConfigChanged: (() -> Void)?
     private var resolved = false
 
     static func present(onResolved: @escaping () -> Void,
+                        onConfigChanged: @escaping () -> Void,
                         onDismissed: @escaping () -> Void) -> RecordingsNoticeController {
         let controller = RecordingsNoticeController(window: nil)
         controller.onResolved = onResolved
         controller.onDismissed = onDismissed
+        controller.onConfigChanged = onConfigChanged
         controller.loadNoticeWindow()
         controller.window?.center()
         controller.window?.makeKeyAndOrderFront(nil)
@@ -67,18 +103,24 @@ final class RecordingsNoticeController: NSWindowController, NSWindowDelegate {
         return controller
     }
 
+    private func resolve(_ decision: String) {
+        RecordingsNotice.persistDecision(decision)
+        resolved = true
+        // Close BEFORE notifying: onResolved drops the owner's strong reference, and a
+        // deallocated controller can't close its window (weak self → stranded window).
+        close()
+        onResolved?()
+    }
+
     private func loadNoticeWindow() {
         let view = RecordingsNoticeView(
-            onDecision: { [weak self] deleteExisting, saveFuture in
-                RecordingsNotice.resolve(deleteExisting: deleteExisting,
-                                         saveFutureRecordings: saveFuture)
-                self?.resolved = true
-                // Close BEFORE notifying: onResolved drops the owner's strong reference,
-                // and a deallocated controller can't close its window (weak self → no-op,
-                // leaving the window stranded on screen — caught by the AX harness).
-                self?.close()
-                self?.onResolved?()
-            }
+            initialSaveToggle: Config.load().saveRecordings?.value ?? false,
+            onToggle: { [weak self] save in
+                RecordingsNotice.persistSaveToggle(save)
+                self?.onConfigChanged?()
+            },
+            onAcknowledge: { [weak self] in self?.resolve("keep") },
+            onDeleted: { [weak self] in self?.resolve("delete") }
         )
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
@@ -94,111 +136,141 @@ final class RecordingsNoticeController: NSWindowController, NSWindowDelegate {
     }
 }
 
-private struct RecordingsNoticeView: View {
-    /// (deleteExisting, saveFutureRecordings)
-    let onDecision: (Bool, Bool) -> Void
+// MARK: - The notice view (banner design, Michael 2026-07-14)
 
-    @State private var saveAudio = false
-    @State private var showLetter = false
+struct RecordingsNoticeView: View {
+    var initialSaveToggle = false
+    /// In the shipping dialog these persist config / delete files; the preview
+    /// command injects inert versions, so a preview can never touch user data.
+    var onToggle: (Bool) -> Void
+    var onAcknowledge: () -> Void
+    var onDeleted: () -> Void
+    var deleteAction: () -> Void = { RecordingStore.deleteAllRecordings() }
 
-    // Michael's letter, verbatim.
-    private static let letter = """
-    Hey there, it's Michael, developer of Speakfree.
+    @State private var saveToggle = false
+    @State private var showDeleteConfirm = false
 
-    As part of developing Speakfree, I had my local dev version recording all my \
-    dictations, so I could troubleshoot. It makes it really easy to point Claude to \
-    an issue and have it diagnose it, and improve transcription. What I didn't \
-    realize was this turned on saving recordings for everyone. Your Speakfree has \
-    been saving your recordings into a folder.
-
-    They haven't left your computer, but this is a privacy-first app and recording \
-    without your permission never should have happened.
-
-    It's been turned off, and rather than silently delete your recordings and \
-    pretend it didn't happen, I wanted to let you know.
-
-    I'm committed to creating a privacy-first application that respects your data. \
-    This is also a vibe-coded project, so sometimes these kinds of things can happen.
-
-    Help me with the project and feel free to contribute on GitHub!
-
-    Thanks for using Speakfree, and please tell your friends :)
-    """
-
-    private static let purple = Color(nsColor: WelcomeController.purple)
+    fileprivate static let purple = Color(nsColor: WelcomeController.purple)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Brand header: the speakfree waveform + heading, centered.
-            VStack(spacing: 10) {
-                WaveformMark()
-                    .frame(width: 46, height: 30)
-                Text("We apologize!")
-                    .font(.title3.weight(.semibold))
+            HStack(spacing: 12) {
+                WaveformMark().frame(width: 36, height: 24)
+                Text(NoticeCopy.header)
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.bottom, 16)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .background(Self.purple.opacity(0.1))
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("I accidentally turned on saving your recordings locally.")
-
-                Text("You can now choose to save your recordings in preferences. "
-                     + "It's been turned off, but you can turn it back on here:")
+                Text(NoticeCopy.noteLabel)
+                    .font(.callout.weight(.semibold))
                     .foregroundColor(.secondary)
+                Text(NoticeCopy.note)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Toggle("Save my recording audio", isOn: $saveAudio)
+                Text(NoticeCopy.turnedOff)
+                    .padding(.top, 4)
+
+                Toggle(NoticeCopy.toggleLabel, isOn: $saveToggle)
                     .toggleStyle(.switch)
                     .accessibilityIdentifier("save-recordings-toggle")
-                    .padding(.top, 2)
+                    .onChange(of: saveToggle) { newValue in onToggle(newValue) }
 
-                Button(showLetter ? "Read less «" : "Read more »") {
-                    withAnimation { showLetter.toggle() }
+                // "We can [delete them for you], but I suggest you do it yourself for safety:"
+                HStack(spacing: 0) {
+                    Text(NoticeCopy.deleteLeadIn)
+                    Button(NoticeCopy.deleteLinkText) { showDeleteConfirm = true }
+                        .buttonStyle(.link)
+                        .accessibilityIdentifier("delete-link")
+                    Text(NoticeCopy.deleteLeadOut)
                 }
-                .buttonStyle(.link)
-                .accessibilityIdentifier("read-more")
-                .padding(.top, 2)
-            }
+                .padding(.top, 6)
 
-            if showLetter {
-                Divider().padding(.vertical, 12)
-                Text(Self.letter)
-                    .font(.callout)
-                    .fixedSize(horizontal: false, vertical: true)
-                Link("https://definitelyreal.github.io/speakfree/",
-                     destination: URL(string: "https://definitelyreal.github.io/speakfree/")!)
-                    .font(.callout)
-                    .padding(.top, 6)
-            }
+                Divider().padding(.vertical, 8)
 
-            Divider().padding(.vertical, 14)
+                HStack {
+                    Spacer()
+                    Button(NoticeCopy.openFolderLabel) {
+                        NSWorkspace.shared.activateFileViewerSelecting([RecordingStore.recordingsDir])
+                    }
+                    .fixedSize()
+                    .accessibilityIdentifier("open-folder")
+                    Button(NoticeCopy.acknowledgeLabel) { onAcknowledge() }
+                        .fixedSize()
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                        .tint(Self.purple)
+                        .accessibilityIdentifier("got-it")
+                }
+            }
+            .padding(20)
+        }
+        .frame(width: 540)
+        .onAppear { saveToggle = initialSaveToggle }
+        .sheet(isPresented: $showDeleteConfirm) {
+            DeleteRecordingsConfirmView(
+                fileCount: RecordingStore.recordingFileCount(),
+                folderPath: RecordingStore.recordingsDir.path,
+                deleteAction: deleteAction,
+                onDeleted: onDeleted
+            )
+        }
+    }
+}
+
+// MARK: - Delete confirmation (shared with Settings)
+
+/// "Open Folder…" keeps the sheet up (per spec); "Delete" performs the deletion and
+/// dismisses. Cancel/Esc added beyond the spec — a permanent-delete confirmation
+/// needs a way out that isn't one of the two actions.
+struct DeleteRecordingsConfirmView: View {
+    let fileCount: Int
+    let folderPath: String
+    var deleteAction: () -> Void = { RecordingStore.deleteAllRecordings() }
+    var onDeleted: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(NoticeCopy.confirmTitle)
+                .font(.headline)
+            Text(NoticeCopy.confirmBody(fileCount: fileCount, folder: folderPath))
+                .fixedSize(horizontal: false, vertical: true)
+            Text(NoticeCopy.confirmQuestion)
 
             HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
                 Spacer()
-
-                Button("Keep my recordings, or I'll delete them myself »") {
-                    onDecision(false, saveAudio)
+                Button("Open Folder…") {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: folderPath)])
                 }
-                .fixedSize()
-                .accessibilityIdentifier("keep-recordings")
-
-                Button("Delete my recordings »") {
-                    onDecision(true, saveAudio)
+                .accessibilityIdentifier("confirm-open-folder")
+                Button("Delete") {
+                    deleteAction()
+                    dismiss()
+                    onDeleted()
                 }
-                .fixedSize()
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .tint(Self.purple)
-                .accessibilityIdentifier("delete-recordings")
+                .tint(.red)
+                .accessibilityIdentifier("confirm-delete")
             }
+            .padding(.top, 8)
         }
-        .padding(24)
-        .frame(width: 580)
+        .padding(20)
+        .frame(width: 460)
     }
 }
 
 /// The five-bar speakfree waveform mark (same geometry as WelcomeController's LogoView).
-private struct WaveformMark: View {
+struct WaveformMark: View {
     var body: some View {
         GeometryReader { geo in
             let heights: [CGFloat] = [0.28, 0.52, 0.78, 0.52, 0.28]
@@ -214,5 +286,35 @@ private struct WaveformMark: View {
                               y: geo.size.height / 2)
             }
         }
+    }
+}
+
+// MARK: - Design-review preview (`speakfree notice-preview`)
+
+/// Opens the shipping dialog with INERT actions — clicks only print to stdout;
+/// nothing reads or writes config, and delete deletes nothing.
+public enum RecordingsNoticePreview {
+    public static func run() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
+
+        let view = RecordingsNoticeView(
+            initialSaveToggle: false,
+            onToggle: { print("preview: toggle → \($0) — inert") },
+            onAcknowledge: { print("preview: Got it — inert") },
+            onDeleted: { print("preview: delete resolved — inert") },
+            deleteAction: { print("preview: DELETE clicked — inert, nothing deleted") }
+        )
+        let hosting = NSHostingController(rootView: view)
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "Recordings notice — preview (inert)"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.orderFront(nil)
+
+        app.activate(ignoringOtherApps: true)
+        print("notice-preview: dialog on screen (inert) — Ctrl-C or close to quit")
+        app.run()
     }
 }

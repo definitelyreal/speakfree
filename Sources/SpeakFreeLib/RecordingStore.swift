@@ -210,11 +210,24 @@ public class RecordingStore {
     }
 
     /// True when the recordings folder currently holds at least one audio file.
-    /// Gates the Settings "Show Recording Folder" button and the apology notice.
+    /// Gates the Settings "Open Recordings / Transcripts Folder" button and the notice.
     public static func hasAudioFiles() -> Bool {
+        recordingCount() > 0
+    }
+
+    /// Number of recordings (wav files) on disk.
+    public static func recordingCount() -> Int {
         let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(atPath: recordingsDir.path) else { return false }
-        return files.contains { $0.hasSuffix(".\(fileExtension)") && $0.hasPrefix(filePrefix) }
+        guard let files = try? fm.contentsOfDirectory(atPath: recordingsDir.path) else { return 0 }
+        return files.filter { $0.hasSuffix(".\(fileExtension)") && $0.hasPrefix(filePrefix) }.count
+    }
+
+    /// Total number of recording artifacts on disk (wavs + transcript/meta sidecars) —
+    /// the "# files" shown by the delete-confirmation dialog.
+    public static func recordingFileCount() -> Int {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: recordingsDir.path) else { return 0 }
+        return files.filter { $0.hasPrefix(filePrefix) }.count
     }
 
     /// Persist or dispose a finished dictation's artifacts per the user's opt-in.

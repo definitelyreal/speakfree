@@ -249,6 +249,9 @@ case "download-parakeet":
     cmdDownloadParakeet(id)
 case "status":
     cmdStatus()
+case "notice-preview":
+    // Dev-only: tile every recordings-notice design variant on screen, buttons inert.
+    RecordingsNoticePreview.run()
 case "--help", "-h", "help":
     printUsage()
 case nil:

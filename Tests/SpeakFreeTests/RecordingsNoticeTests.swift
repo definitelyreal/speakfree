@@ -61,21 +61,21 @@ final class RecordingsNoticeTests: XCTestCase {
 
     // MARK: - Resolution
 
-    func testResolveKeepLeavesFilesAndPersistsDecision() {
+    func testAcknowledgeLeavesFilesAndPersistsDecision() {
         let wav = makeRecording()
-        RecordingsNotice.resolve(deleteExisting: false, saveFutureRecordings: false)
+        RecordingsNotice.persistDecision("keep")
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: wav.path),
-                      "'Keep my recordings' must not touch the files")
-        let config = Config.load()
-        XCTAssertEqual(config.recordingsNoticeDecision, "keep")
-        XCTAssertEqual(config.saveRecordings?.value, false)
+                      "'Got it' must not touch the files")
+        XCTAssertEqual(Config.load().recordingsNoticeDecision, "keep")
     }
 
-    func testResolveDeleteRemovesWavAndAllSidecars() {
+    func testDeleteAllRemovesWavAndAllSidecars() {
+        // The confirmation sheet's Delete = deleteAllRecordings + persistDecision.
         let wav = makeRecording()
         let base = wav.deletingPathExtension()
-        RecordingsNotice.resolve(deleteExisting: true, saveFutureRecordings: false)
+        RecordingStore.deleteAllRecordings()
+        RecordingsNotice.persistDecision("delete")
 
         for path in [wav.path, base.appendingPathExtension("txt").path,
                      base.appendingPathExtension("raw.txt").path,
@@ -86,13 +86,34 @@ final class RecordingsNoticeTests: XCTestCase {
         XCTAssertEqual(Config.load().recordingsNoticeDecision, "delete")
     }
 
-    func testResolveCanEnableFutureSavingWhileDeletingOld() {
+    func testToggleAndDecisionAreIndependent() {
         _ = makeRecording()
-        RecordingsNotice.resolve(deleteExisting: true, saveFutureRecordings: true)
+        RecordingsNotice.persistSaveToggle(true)
+        RecordingsNotice.persistDecision("delete")
         let config = Config.load()
         XCTAssertEqual(config.recordingsNoticeDecision, "delete")
         XCTAssertEqual(config.saveRecordings?.value, true,
-                       "dialog toggle and keep/delete buttons are independent choices")
+                       "the save toggle and the delete decision are independent choices")
+    }
+
+    func testToggleAlonePersistsWithoutResolvingNotice() {
+        // Flipping the toggle then closing the window must keep the toggle but
+        // leave the notice unresolved (it re-shows later).
+        RecordingsNotice.persistSaveToggle(true)
+        let config = Config.load()
+        XCTAssertEqual(config.saveRecordings?.value, true)
+        XCTAssertNil(config.recordingsNoticeDecision)
+    }
+
+    // MARK: - Counts (drive the settings line and the confirmation sheet)
+
+    func testRecordingAndFileCounts() {
+        XCTAssertEqual(RecordingStore.recordingCount(), 0)
+        XCTAssertEqual(RecordingStore.recordingFileCount(), 0)
+        _ = makeRecording()                                   // wav + 3 sidecars
+        _ = makeRecording("recording-2026-07-02-090000-BBBB0000", sidecars: false)
+        XCTAssertEqual(RecordingStore.recordingCount(), 2)
+        XCTAssertEqual(RecordingStore.recordingFileCount(), 5)
     }
 
     // MARK: - hasAudioFiles (gates the Show Recording Folder button)
