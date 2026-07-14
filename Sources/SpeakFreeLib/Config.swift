@@ -45,6 +45,17 @@ public struct Config: Codable {
     // user chooses. Never shown again once set.
     public var recordingsNoticeDecision: String?
 
+    // Microphone pin (2026-07-14): CoreAudio device UID the recorder captures from.
+    // nil = follow the system default input (historical behavior). Set from the
+    // menu-bar microphone selector; falls back to the default if the device vanishes.
+    public var inputDeviceUID: String?
+
+    // Dual-mic capture prototype (2026-07-14, flag-gated, default OFF): when the
+    // default input is Bluetooth, pin the always-on engine to the built-in mic
+    // (pre-roll + A2DP release) and record a second comparison track from the
+    // Bluetooth mic during dictation. See DualCapture.swift.
+    public var dualMicCapture: FlexBool?
+
     // Recordings are kept forever by DEFAULT — they are the dictation corpus that
     // makes accuracy regressions diagnosable (and ~1 MB per 30 s of speech is cheap).
     // Pruning happens ONLY when the user explicitly picks a cap in Settings.
