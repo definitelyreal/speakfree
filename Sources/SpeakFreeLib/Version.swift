@@ -12,14 +12,18 @@ public enum SpeakFree {
     ///   released DMG, which `scripts/build.sh` stamps with Info.plist `SFBuildChannel = release`.
     public static var menuTitle: String {
         menuTitle(bundleID: Bundle.main.bundleIdentifier ?? "",
-                  buildChannel: Bundle.main.object(forInfoDictionaryKey: "SFBuildChannel") as? String)
+                  buildChannel: Bundle.main.object(forInfoDictionaryKey: "SFBuildChannel") as? String,
+                  devMode: DevMode.isActive)
     }
 
     /// Pure core of `menuTitle`, parameterized on the bundle facts so tests can pin the
-    /// variant/channel matrix without a bundle.
-    public static func menuTitle(bundleID: String, buildChannel: String?) -> String {
-        if bundleID.hasSuffix(".streaming") { return "SpeakFree Streaming \(version) Testing" }
-        if bundleID.hasSuffix(".beta") { return "SpeakFree Beta \(version) Testing" }
-        return buildChannel == "release" ? "speakfree \(version)" : "speakfree \(version) Testing"
+    /// variant/channel matrix without a bundle. Dev-mode machines get a " Dev" tag so a
+    /// forced-dev instance is never mistaken for stock behavior.
+    public static func menuTitle(bundleID: String, buildChannel: String?, devMode: Bool = false) -> String {
+        let base: String
+        if bundleID.hasSuffix(".streaming") { base = "SpeakFree Streaming \(version) Testing" }
+        else if bundleID.hasSuffix(".beta") { base = "SpeakFree Beta \(version) Testing" }
+        else { base = buildChannel == "release" ? "speakfree \(version)" : "speakfree \(version) Testing" }
+        return devMode ? base + " Dev" : base
     }
 }
