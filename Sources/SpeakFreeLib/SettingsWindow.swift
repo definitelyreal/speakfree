@@ -374,6 +374,13 @@ struct SettingsView: View {
 
     /// Tracks the picker selection separately so we can intercept "Other..." (999)
     @State private var hotkeyPickerSelection: UInt16 = 0
+    /// Gates the "Show Recording Folder" button: enabled only when the folder exists
+    /// and holds at least one audio file. Refreshed on appear and when the toggle flips.
+    @State private var recordingsFolderHasAudio = false
+
+    private func refreshRecordingsFolderState() {
+        recordingsFolderHasAudio = RecordingStore.hasAudioFiles()
+    }
 
     /// Consistent label width across ALL Grid sections.
     private let labelWidth: CGFloat = 105
@@ -485,22 +492,42 @@ struct SettingsView: View {
                             }
 
                             GridRow {
-                                Text("Past Recordings")
-                                Picker("", selection: $viewModel.maxRecordings) {
-                                    ForEach(maxRecordingsOptions, id: \.value) { option in
-                                        Text(option.label).tag(option.value)
+                                Text("Recordings")
+                                Toggle("Save recordings for debugging", isOn: $viewModel.saveRecordings)
+                                    .onChange(of: viewModel.saveRecordings) { _ in
+                                        viewModel.save()
+                                        refreshRecordingsFolderState()
                                     }
+                            }
+
+                            if viewModel.saveRecordings {
+                                GridRow {
+                                    Text("Past Recordings")
+                                    Picker("", selection: $viewModel.maxRecordings) {
+                                        ForEach(maxRecordingsOptions, id: \.value) { option in
+                                            Text(option.label).tag(option.value)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .labelsHidden()
+                                    .frame(width: 150, alignment: .leading)
                                 }
-                                .pickerStyle(.menu)
-                                .labelsHidden()
-                                .frame(width: 150, alignment: .leading)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                        Text("Shows recent dictations in the toolbar menu.")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
+                        HStack(spacing: 8) {
+                            Text("Recordings and transcripts are saved only to this Mac. They are never sent anywhere.")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button("Show Recording Folder") {
+                                NSWorkspace.shared.activateFileViewerSelecting([RecordingStore.recordingsDir])
+                            }
+                            .controlSize(.small)
+                            .disabled(!recordingsFolderHasAudio)
+                        }
+                        .onAppear { refreshRecordingsFolderState() }
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)

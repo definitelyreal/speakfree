@@ -62,6 +62,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // Last time the transcription-failure alert was shown; a persistently broken engine
     // fails every attempt, and the modal is throttled to one per 5 minutes (main-only).
     private var lastTranscriptionFailureAlert: Date?
+    // Recordings apology notice (2026-07-14): retained while showing; the timer re-shows
+    // it every few hours until the user decides keep/delete. Main-only.
+    private var recordingsNoticeController: RecordingsNoticeController?
+    private var recordingsNoticeTimer: Timer?
 
     // Adaptive post-buffer (T2.1): poll trailing audio after key release and finalize as soon as
     // ~150ms of trailing silence is observed, hard-capped at 300ms (never worse than the old flat
@@ -245,8 +249,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Start Sparkle from the real launch path only (see updaterController's
         // comment — starting it at construction deadlocked the test suite).
         // setupInner runs off-main; the updater expects a main-thread start.
-        DispatchQueue.main.async { [weak self] in
-            self?.updaterController.startUpdater()
+        // Bundle-gated: the bare CLI binary has no Info.plist, so Sparkle cannot
+        // initialize there and throws an "Unable to Check For Updates" alert at launch.
+        if Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil {
+            DispatchQueue.main.async { [weak self] in
+                self?.updaterController.startUpdater()
+            }
         }
 
         // Check for crash recovery before touching recordings
@@ -263,6 +271,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         if maxRecordings > 0 {
             RecordingStore.prune(maxCount: maxRecordings)
+        }
+
+        // Recordings apology notice (2026-07-14): saving shipped on-by-default through
+        // v1.7.1; the notice lets users keep or delete what accumulated. Returns every
+        // launch (and every few hours, below) until resolved.
+        switch RecordingsNotice.launchAction(decision: config.recordingsNoticeDecision,
+                                             hasRecordings: RecordingStore.hasAudioFiles()) {
+        case .markNotApplicable:
+            var updated = Config.load()
+            updated.recordingsNoticeDecision = "none-found"
+            try? updated.save()
+        case .show:
+            DispatchQueue.main.async { [weak self] in self?.showRecordingsNotice() }
+        case .nothing:
+            break
         }
 
         // One-time migration: clean garbage auto-learned entries
@@ -748,6 +771,31 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.show(viewModel: settingsViewModel!)
     }
 
+    /// Present the recordings apology notice. Main-only. A dismissal without a
+    /// keep/delete decision re-arms it a few hours out; a decision (persisted by the
+    /// controller) reloads config so the dialog's toggle takes effect immediately.
+    private func showRecordingsNotice() {
+        guard recordingsNoticeController == nil else { return }
+        recordingsNoticeController = RecordingsNoticeController.present(
+            onResolved: { [weak self] in
+                self?.recordingsNoticeTimer?.invalidate()
+                self?.recordingsNoticeTimer = nil
+                self?.recordingsNoticeController = nil
+                self?.reloadConfig()
+            },
+            onDismissed: { [weak self] in
+                guard let self else { return }
+                self.recordingsNoticeController = nil
+                self.recordingsNoticeTimer?.invalidate()
+                self.recordingsNoticeTimer = Timer.scheduledTimer(
+                    withTimeInterval: RecordingsNotice.reshowInterval, repeats: false
+                ) { [weak self] _ in
+                    self?.showRecordingsNotice()
+                }
+            }
+        )
+    }
+
     private func handleKeyDown() {
         guard isReady else { return }
 
@@ -1013,6 +1061,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples))) and the wav did not rescue it — audio engine may be dead, rebuilding")
                 recorder.ensureAudioHealthy()
             }
+            if !(config.saveRecordings?.value ?? false) {
+                // Saving is opt-out: a gate-failed capture must not linger on disk.
+                try? FileManager.default.removeItem(at: audioURL)
+            }
             RecordingStore.clearSentinel()
             recordingSourceElement = nil
             recordingContextText = nil
@@ -1054,6 +1106,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Accessing self.config.* from a background queue is a torn-read race — Config is a
         // struct so reads and writes are not atomic across threads.
         let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
+        // Recordings privacy: persisting audio + transcripts is opt-in (2026-07-14).
+        let keepRecording = config.saveRecordings?.value ?? false
         let mode = config.spokenPunctuation ?? .off
         let glossary = Config.loadVocabulary()
         let overrides = Config.loadOverrides()
@@ -1141,21 +1195,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 if reusedPartial {
                     DiagnosticLogger.shared.log("T2.3: reused last streaming partial (skipped final inference)")
                 }
-                RecordingStore.saveRaw(text: raw, for: audioURL)
                 let text = TextPipeline.run(makeInput(raw), precomputedPrompt: .some(prompt)).finalText
-                RecordingStore.saveTranscription(text: text, for: audioURL)
-                RecordingStore.saveMeta(RecordingStore.RecordingMeta(
-                    appVersion: SpeakFree.version,
-                    engine: metaEngine,
-                    model: transcriber.modelID,
-                    inputDevice: metaDevice,
-                    date: ISO8601DateFormatter().string(from: Date()),
-                    durationSeconds: Double(samples.count) / 16000.0,
-                    transcriptChars: text.count
-                ), for: audioURL)
+                RecordingStore.finishRecording(
+                    audioURL: audioURL, keep: keepRecording, raw: raw, text: text,
+                    meta: RecordingStore.RecordingMeta(
+                        appVersion: SpeakFree.version,
+                        engine: metaEngine,
+                        model: transcriber.modelID,
+                        inputDevice: metaDevice,
+                        date: ISO8601DateFormatter().string(from: Date()),
+                        durationSeconds: Double(samples.count) / 16000.0,
+                        transcriptChars: text.count
+                    ))
 
                 RecordingStore.clearSentinel()
-                if maxRecordings > 0 {
+                if keepRecording && maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
                 }
 
