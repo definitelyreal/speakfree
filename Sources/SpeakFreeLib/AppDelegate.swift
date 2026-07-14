@@ -751,14 +751,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Microphone pin plumbing for the menu-bar selector.
-    public func currentInputDeviceUID() -> String? { config.inputDeviceUID }
+    /// Microphone pin plumbing for the menu-bar selector. `config` is nil until setup
+    /// loads it, and StatusBarController builds its first menu BEFORE that (launch
+    /// crash caught by the AX harness 2026-07-14) — both entry points must nil-tolerate.
+    public func currentInputDeviceUID() -> String? { config?.inputDeviceUID }
 
     public func selectInputDevice(uid: String?) {
         var updated = Config.load()
         updated.inputDeviceUID = uid
         try? updated.save()
-        config.inputDeviceUID = uid
+        config?.inputDeviceUID = uid
         recorder.setPinnedInputDevice(uid: uid)
         statusBar.buildMenu()
         DiagnosticLogger.shared.log("Microphone selector: \(uid ?? "system default")")
