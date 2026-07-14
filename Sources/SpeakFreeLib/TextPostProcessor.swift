@@ -115,6 +115,12 @@ public struct TextPostProcessor {
             )
         }
 
+        // 2b. Collapse the engine's HALF-converted "question mark": Parakeet sometimes
+        // converts the spoken word "mark" into "?" itself, leaving "question?" in the
+        // text (2026-07-14: "…as they get shot at question?"). Guarded by the same
+        // noun-context rule as the standalone converter ("What is the question?" stays).
+        result = collapseHalfConvertedQuestionMark(result)
+
         // 2a. Trim spaces adjacent to spoken line-breaks (audit M2).
         // The alwaysReplace lookbehind/lookahead for "new line"/"new paragraph" are
         // non-consuming: they match on a word boundary but leave the adjacent spaces in place,
@@ -357,6 +363,32 @@ public struct TextPostProcessor {
     private static let nounDeterminers: Set<String> = [
         "a", "an", "the", "my", "your", "his", "her", "its", "our", "their",
     ]
+
+    /// Words that mark "question?" as a real noun phrase rather than a half-converted
+    /// spoken "question mark": determiners/possessives plus the "in question" idiom.
+    private static let questionNounContext: Set<String> =
+        nounDeterminers.union(["that", "this", "these", "those", "in", "no", "any"])
+
+    /// Collapse "…question?" → "…?" when the engine itself converted the spoken word
+    /// "mark" into "?" (leaving the word "question" behind). Skips noun usage:
+    /// "What is the question?", "the person in question?".
+    static func collapseHalfConvertedQuestionMark(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?i)(?:^|\\s+)question\\?(?=\\s|$)", options: []) else { return text }
+        var result = text
+        let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+        for match in matches.reversed() {
+            guard let range = Range(match.range, in: result) else { continue }
+            let before = result[..<range.lowerBound]
+            let precedingWord = String(
+                before.reversed().prefix(while: { $0.isLetter || $0 == "'" }).reversed()
+            ).lowercased()
+            if questionNounContext.contains(precedingWord) { continue }
+            if precedingWord.isEmpty { continue }  // "Question?" alone — leave it
+            result.replaceSubrange(range, with: "?")
+        }
+        return result
+    }
 
     /// In hybrid mode, convert ambiguous punctuation words when they appear as standalone
     /// words between phrases. "things like comma San Francisco" → "things like, San Francisco".
