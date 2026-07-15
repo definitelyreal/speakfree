@@ -19,9 +19,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var crashRecoveryURL: URL?
     private var crashRecoveryHandler: ((URL) -> Void)?
 
-    // Captured before the menu opens — so reprocess can type without any delay
-    var elementBeforeMenuOpen: AXUIElement?
-
     func showCrashRecovery(url: URL, handler: @escaping (URL) -> Void) {
         crashRecoveryURL = url
         crashRecoveryHandler = handler
@@ -63,19 +60,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
 
         buildMenu()
-    }
-
-    // Called by AppKit before the menu appears — capture focus before menu steals it
-    func menuWillOpen(_ menu: NSMenu) {
-        let systemWide = AXUIElementCreateSystemWide()
-        var elementRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef) == .success,
-           let element = elementRef {
-            // swiftlint:disable:next force_cast
-            elementBeforeMenuOpen = (element as! AXUIElement)
-        } else {
-            elementBeforeMenuOpen = nil
-        }
     }
 
     // Called before the menu is displayed — rebuild items so state changes are reflected

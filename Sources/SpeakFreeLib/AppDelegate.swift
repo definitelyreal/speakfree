@@ -107,6 +107,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastStreamingCompletedAt: Double = 0
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        // Cap ALL AX messaging process-wide at 0.5 s. The AX default is an INDEFINITE block
+        // when the target app is hung — set once on the system-wide element so no AX call
+        // anywhere (insert path, RecordingOverlay, menu focus queries) can stall us into a
+        // beachball waiting on an unresponsive frontmost app (AX-A).
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
+
         statusBar = StatusBarController()
         recorder = AudioRecorder()
         inserter = TextInserter()
@@ -627,6 +633,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         ProcessInfo.processInfo.environment["SPEAKFREE_ENGINE"] ?? config.engine ?? "whisper"
     }
 
+    /// Decision for reloadConfig's Parakeet branch (UI-B). Settings saves the config the instant a
+    /// Parakeet model is picked (EnginePickerView `.onChange` → save → reloadConfig), which can name
+    /// a model that hasn't been downloaded yet (the inline Download button is tapped afterward).
+    /// Swapping the live transcriber onto an undownloaded model would leave the hotkey active on an
+    /// engine that can't transcribe. So rebuild only when the model is actually on disk; otherwise
+    /// keep the current transcriber running. Pure so the guard is unit-testable.
+    enum ParakeetReloadDecision: Equatable {
+        case rebuild(modelID: String)
+        case keepCurrent
+    }
+
+    static func parakeetReloadDecision(modelID: String, isModelDownloaded: Bool) -> ParakeetReloadDecision {
+        isModelDownloaded ? .rebuild(modelID: modelID) : .keepCurrent
+    }
+
     public func reloadConfig() {
         // In noModel state: only restart full setup if the user has now downloaded a model.
         // Without this check, opening Settings (which calls reloadConfig on save) would
@@ -660,7 +681,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         if effectiveEngineID == "parakeet" {
             // Same transient-window fallback as above — see resolveLegacyParakeetModel.
             let modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
-            finishReloadConfig(modelID: modelID)
+            switch Self.parakeetReloadDecision(
+                modelID: modelID,
+                isModelDownloaded: ParakeetModelManager.shared.isModelDownloaded(modelID)) {
+            case .rebuild(let id):
+                finishReloadConfig(modelID: id)
+            case .keepCurrent:
+                // Model not downloaded yet — keep the current transcriber usable rather than
+                // swapping the hotkey onto an engine that can't transcribe. The Settings
+                // Parakeet download banner drives the fetch; a later save rebuilds onto it.
+                print("Parakeet model \(modelID) not downloaded — keeping current engine (\(activeEngineID))")
+                reloadHotkeyAndSettings()
+            }
             return
         }
 
@@ -986,9 +1018,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
            CFGetTypeID(rangeValue) == AXValueGetTypeID() {
             var range = CFRange()
             AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
+            // range.location is a UTF-16 offset — convert via the utf16 view (AX-E).
             let cursorIndex = max(0, range.location)
-            if cursorIndex > 0, let swiftIndex = fullText.index(fullText.startIndex, offsetBy: cursorIndex, limitedBy: fullText.endIndex) {
-                let before = String(fullText[..<swiftIndex])
+            if cursorIndex > 0, let before = TextInserter.textBeforeUTF16Offset(fullText, cursorIndex) {
                 // Take last 500 chars to stay within whisper's prompt limits
                 return String(before.suffix(500))
             }

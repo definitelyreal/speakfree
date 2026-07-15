@@ -44,6 +44,12 @@ class TextInserter {
     /// test process.
     var focusedElementProvider: () -> AXUIElement? = { TextInserter.queryFocusedElement() }
 
+    /// Seam for the async refocus closure's direct AX SelectedText write to the refocused element.
+    /// Production leaves it nil (real `AXUIElementIsAttributeSettable` + set). Tests inject
+    /// `{ _, _ in false }` to force the post-AX fallback branch WITHOUT performing real AX IPC
+    /// (which can block a headless runner), so the focus-moved guard (AX-C) is reachable in the suite.
+    var directAXInsert: ((AXUIElement, String) -> Bool)?
+
     /// Pure check: should a space be prepended given the text ALREADY captured before
     /// the cursor at record-start?
     ///
@@ -63,6 +69,27 @@ class TextInserter {
         guard let text = text, !text.isEmpty else { return false }
         let lastChar = text.last!
         return !lastChar.isWhitespace && !lastChar.isNewline
+    }
+
+    /// Slice `fullText` at a cursor position expressed as a UTF-16 offset, returning the text
+    /// before the cursor. AX's `kAXSelectedTextRangeAttribute` CFRange.location is ALWAYS a
+    /// UTF-16 offset, so it must be converted through the utf16 view — indexing a String directly
+    /// with it mis-slices any text containing multi-UTF-16-unit characters (emoji, some CJK).
+    /// Rounds safely: if the offset lands inside a surrogate pair it walks back to the nearest
+    /// Character boundary. Returns "" for offset 0 and nil if the offset is out of range (AX-E).
+    static func textBeforeUTF16Offset(_ fullText: String, _ offset: Int) -> String? {
+        guard offset > 0 else { return "" }
+        let utf16 = fullText.utf16
+        guard offset <= utf16.count,
+              let rawIndex = utf16.index(utf16.startIndex, offsetBy: offset, limitedBy: utf16.endIndex) else {
+            return nil
+        }
+        var boundary = rawIndex
+        while String.Index(boundary, within: fullText) == nil, boundary > utf16.startIndex {
+            boundary = utf16.index(before: boundary)
+        }
+        guard let stringIndex = String.Index(boundary, within: fullText) else { return nil }
+        return String(fullText[..<stringIndex])
     }
 
     /// Check if a space should be prepended before inserting text.
@@ -98,11 +125,9 @@ class TextInserter {
             guard AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success,
                   let fullText = valueRef as? String, !fullText.isEmpty else { semaphore.signal(); return }
 
-            let cursorPos = range.location
-            guard cursorPos <= fullText.count,
-                  let index = fullText.index(fullText.startIndex, offsetBy: cursorPos, limitedBy: fullText.endIndex) else { semaphore.signal(); return }
-
-            let charBefore = fullText[fullText.index(before: index)]
+            // range.location is a UTF-16 offset — convert via the utf16 view (AX-E).
+            guard let before = TextInserter.textBeforeUTF16Offset(fullText, range.location),
+                  let charBefore = before.last else { semaphore.signal(); return }
             result = !charBefore.isWhitespace && !charBefore.isNewline
             semaphore.signal()
         }
@@ -153,11 +178,29 @@ class TextInserter {
                             onFocusLost?()
                             return
                         }
-                        // Try direct AX insertion on the refocused element first
-                        var settable: DarwinBoolean = false
-                        if AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
-                           settable.boolValue,
-                           AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success {
+                        // Try direct AX insertion on the refocused element first. This targets
+                        // `element` specifically, so it is safe even if focus moved.
+                        let axInserted: Bool
+                        if let directAXInsert = self.directAXInsert {
+                            axInserted = directAXInsert(element, text)
+                        } else {
+                            var settable: DarwinBoolean = false
+                            axInserted = AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success
+                                && settable.boolValue
+                                && AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success
+                        }
+                        if axInserted { return }
+
+                        // AX insertion into the intended element failed. Before blind-pasting Cmd+V
+                        // into whatever is frontmost, re-verify focus is STILL the element we
+                        // refocused: focus can move during the 150ms settle (TOCTOU), and a paste
+                        // would then land in the wrong app. If it moved, conceal-copy the text and
+                        // notify instead of pasting (AX-C).
+                        let stillFocused = self.currentFocusedElement().map { CFEqual($0, element) } ?? false
+                        if !stillFocused {
+                            DiagnosticLogger.shared.log("TextInserter: focus moved during settle — concealed clipboard fallback instead of blind paste")
+                            self.secureInputClipboardFallback(text)
+                            onFocusLost?()
                             return
                         }
                         // Fall back to clipboard paste (through the test seam so a unit test
@@ -545,8 +588,10 @@ class TextInserter {
     }
 
     private func copyToClipboard(_ text: String) {
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        // Focus-lost fallback: mark the write Concealed + Transient exactly like the two sibling
+        // clipboard paths (pasteViaClipboard / secureInputClipboardFallback) so clipboard-history
+        // tools skip recording the dictated text (AX-D).
+        TextInserter.writeTransientString(text, to: pasteboard)
     }
 
     /// How long dictated text may sit on the clipboard after a Secure-Input fallback before it
@@ -695,7 +740,10 @@ class TextInserter {
         keyUp.flags = .maskCommand
 
         keyDown.post(tap: .cghidEventTap)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        // Schedule the key-up on a background queue, not main: if the main thread is stalled the
+        // synthetic Cmd+V key-DOWN would otherwise be left held (Command stuck) until main drains,
+        // so post the key-up independently of main-thread health (AX-F).
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.05) {
             keyUp.post(tap: .cghidEventTap)
         }
     }

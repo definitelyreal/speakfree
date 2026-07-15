@@ -57,13 +57,31 @@ class WelcomeController: NSObject, NSWindowDelegate {
         assert(Thread.isMainThread)
         var result = (engine: "parakeet", modelID: "parakeet-tdt-0.6b-v2", language: "en", shouldContinue: false)
         let controller = WelcomeController()
-        controller.selectedWhisperModel = suggestedModel
+        controller.applySuggestion(engine: suggestedEngine, model: suggestedModel)
         controller.completion = { engine, model, lang, ok in result = (engine, model, lang, ok) }
         NSApp.showDockIconIfNeeded()
         NSApp.installMinimalMenu()
         controller.buildPanel()
         NSApp.runModal(for: controller.panel)
         return result
+    }
+
+    /// Apply the caller's suggested engine + model to the correct slot. Extracted from `show`
+    /// (which is a modal run loop and not directly testable). The model MUST land in the slot
+    /// matching the engine — the old code filed every suggestion into the whisper slot and ignored
+    /// the engine, so a suggested Parakeet model was dropped and onboarding defaulted wrong (UI-A).
+    func applySuggestion(engine: String, model: String) {
+        selectedEngine = engine
+        if engine == "parakeet" {
+            selectedParakeetModel = model
+        } else {
+            selectedWhisperModel = model
+        }
+    }
+
+    /// The engine + model that `dismiss` would report for the current selection. Internal for tests.
+    var currentSelection: (engine: String, model: String) {
+        (selectedEngine, selectedEngine == "parakeet" ? selectedParakeetModel : selectedWhisperModel)
     }
 
     // MARK: - Panel construction
