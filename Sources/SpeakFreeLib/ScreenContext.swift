@@ -59,6 +59,9 @@ class ScreenContext {
             return CGWindowListCreateImage(.null, .optionIncludingWindow, windowID, [.boundsIgnoreFraming])
         }
 
-        return CGDisplayCreateImage(CGMainDisplayID())
+        // No front window matched — return nil rather than falling back to a whole-display
+        // capture. The display fallback would OCR every other app's visible text into the
+        // whisper prompt, leaking unrelated on-screen content (privacy, AX-G).
+        return nil
     }
 }
