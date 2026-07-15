@@ -102,11 +102,6 @@ public enum AudioDeviceCatalog {
         inputDevices().first { $0.uid == uid }
     }
 
-    /// The first built-in input device (the MacBook mic), if this Mac has one.
-    public static func builtInInputDevice() -> AudioInputDevice? {
-        inputDevices().first { $0.isBuiltIn }
-    }
-
     /// The system default input as a catalog entry (nil when there is no input device).
     public static func defaultInputDevice() -> AudioInputDevice? {
         var addr = address(kAudioHardwarePropertyDefaultInputDevice)
@@ -116,20 +111,6 @@ public enum AudioDeviceCatalog {
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr,
             id != 0 else { return nil }
         return inputDevices().first { $0.id == id }
-    }
-
-    /// True when the system default INPUT is a Bluetooth device (the contention-prone
-    /// case — built-in and wired mics don't fight across devices).
-    public static func defaultInputIsBluetooth() -> Bool {
-        var addr = address(kAudioHardwarePropertyDefaultInputDevice)
-        var id = AudioDeviceID(0)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr,
-            id != 0 else { return false }
-        let transport = transportType(of: id)
-        return transport == kAudioDeviceTransportTypeBluetooth
-            || transport == kAudioDeviceTransportTypeBluetoothLE
     }
 
     // MARK: - CoreAudio plumbing

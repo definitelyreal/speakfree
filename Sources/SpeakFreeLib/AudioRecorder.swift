@@ -100,35 +100,6 @@ class AudioRecorder {
 
     // MARK: - Audio device change monitoring
 
-    /// Name of the current default input device (e.g. "MacBook Pro Microphone",
-    /// "Michael's AirPods Pro"). Logged at recording start so transcription-quality
-    /// regressions can be correlated with the capture device (AirPods in Bluetooth
-    /// hands-free mode record narrowband audio that degrades ASR).
-    static func defaultInputDeviceName() -> String? {
-        var deviceID = AudioDeviceID(0)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID
-        ) == noErr, deviceID != 0 else { return nil }
-
-        var name: CFString = "" as CFString
-        var nameSize = UInt32(MemoryLayout<CFString>.size)
-        var nameAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceNameCFString,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        guard AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &nameSize, &name) == noErr else {
-            return nil
-        }
-        return name as String
-    }
-
     /// Microphone pin (2026-07-14): CoreAudio device UID to capture from; nil = system
     /// default. Set via `setPinnedInputDevice` from the menu-bar selector. If the pinned
     /// device is missing at engine build time, capture falls back to the default (logged).
@@ -147,6 +118,10 @@ class AudioRecorder {
         }
     }
     private let secondaryRecorder = SecondaryRecorder()
+    /// Dedicated serial queue for the secondary (Bluetooth) capture stream's CoreAudio
+    /// start/teardown. Keeps HAL calls off the main thread (2026-07-15 wedge): a stuck
+    /// coreaudiod must never block a menu-bar click while speakfree holds the event tap.
+    private let secondaryQueue = DispatchQueue(label: "com.speakfree.secondarycapture", qos: .utility)
     /// The Bluetooth comparison track from the most recent recording (empty when dual
     /// capture didn't engage). Consumed by finalize for the corpus diagnostics.
     private(set) var lastSecondarySamples: [Float] = []
@@ -450,8 +425,12 @@ class AudioRecorder {
             }
             stateLock.unlock()
         } else {
-            stateLock.unlock()
-            // Recording mode: write to file + accumulate samples
+            // Recording mode: write to file + accumulate samples.
+            // Enqueue the write BEFORE releasing stateLock so it is ordered ahead of any
+            // drain in stopRecording(): stop() can't take stateLock (to flip _isRecording)
+            // until this closure is already on the serial writeQueue, so the final buffer
+            // can never lose the race and be dropped. The closure takes no stateLock, so
+            // enqueuing under the lock cannot deadlock.
             writeQueue.async {
                 self.pcmSamples.append(contentsOf: samples)
                 do {
@@ -460,6 +439,7 @@ class AudioRecorder {
                     fputs("AudioRecorder write error: \(error.localizedDescription)\n", stderr)
                 }
             }
+            stateLock.unlock()
         }
     }
 
@@ -492,6 +472,10 @@ class AudioRecorder {
         ]
 
         let file = try AVAudioFile(forWriting: outputURL, settings: settings)
+        // Lock the recording down to owner-only before any audio lands in it (mirrors
+        // DualCapture's comparison-track wav). AVAudioFile creates with the default umask,
+        // so without this the capture is group/other-readable.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: outputURL.path)
         currentOutputURL = outputURL
 
         // Atomically: drain pre-roll, set up file, flip to recording mode
@@ -518,12 +502,31 @@ class AudioRecorder {
         // If engine isn't running (pre-buffer off), start it now
         if audioEngine == nil {
             startEngine()
+            // startEngine() can no-op (invalid input format, converter/tap failure) and leave
+            // audioEngine nil. With pre-buffer off there is no always-on stream to fall back
+            // on, so the flag would be set with nothing capturing — a silent empty dictation.
+            // Unwind: drop back to not-recording, close/remove the file, and surface the
+            // failure so the caller (AppDelegate) resets its UI instead of "recording".
+            if audioEngine == nil {
+                DiagnosticLogger.shared.log(
+                    "AudioRecorder: engine failed to start with pre-buffer off — aborting recording")
+                stateLock.lock()
+                _isRecording = false
+                audioFile = nil
+                prerollBuffer = preroll  // coherent: pre-buffer off means preroll is empty
+                pcmSamples = []
+                stateLock.unlock()
+                currentOutputURL = nil
+                try? FileManager.default.removeItem(at: outputURL)
+                throw AudioRecorderError.engineStartFailed
+            }
         }
 
         // Dual capture: open the Bluetooth comparison stream for this recording only.
+        // CoreAudio start runs on the dedicated secondary queue, never main (AU-D).
         lastSecondarySamples = []
         if dualEngagedNow(), let bt = AudioDeviceCatalog.cachedDefaultInput, !bt.isBuiltIn {
-            _ = secondaryRecorder.start(device: bt)
+            secondaryQueue.async { _ = self.secondaryRecorder.start(device: bt) }
         }
     }
 
@@ -564,7 +567,12 @@ class AudioRecorder {
         DiagnosticLogger.shared.log("AudioRecorder: recording stopped, \(samples.count) samples (\(duration)s)")
 
         // Close the Bluetooth comparison stream (no-op when dual capture didn't engage).
-        lastSecondarySamples = secondaryRecorder.stop()
+        // Read the captured samples synchronously — collectSamples() is a cheap lock-guarded
+        // buffer read, NO CoreAudio — so the caller has the comparison track the moment
+        // stopRecording() returns. The actual HAL teardown (removeTap/stop) runs off main on
+        // the secondary queue so a stuck coreaudiod can't wedge the main thread (AU-D).
+        lastSecondarySamples = secondaryRecorder.collectSamples()
+        secondaryQueue.async { self.secondaryRecorder.teardown() }
         if !lastSecondarySamples.isEmpty {
             DiagnosticLogger.shared.log(
                 "AudioRecorder: dual capture collected \(lastSecondarySamples.count) BT samples "
@@ -585,5 +593,18 @@ class AudioRecorder {
 
         guard let url = currentOutputURL else { return nil }
         return (url: url, samples: samples)
+    }
+}
+
+enum AudioRecorderError: LocalizedError {
+    /// The capture engine could not be started (pre-buffer off path), so there is no
+    /// stream to record from. Thrown from `startRecording` so the caller can reset its UI.
+    case engineStartFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .engineStartFailed:
+            return "Audio engine failed to start"
+        }
     }
 }

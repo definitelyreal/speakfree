@@ -35,12 +35,16 @@ public struct StreamingTextAssembler {
         let newPortion: String
         if trimmed.hasPrefix(committedFlat) {
             newPortion = String(trimmed.dropFirst(committedFlat.count)).trimmingCharacters(in: .whitespaces)
-        } else if trimmed.count > committedFlat.count {
-            // Text diverged slightly but is longer — take the new tail
-            newPortion = String(trimmed.dropFirst(committedFlat.count)).trimmingCharacters(in: .whitespaces)
         } else {
-            // Text is same length or shorter — show committed
-            return committedStreamingText
+            // The new partial does NOT start with what we committed — whisper re-transcribed the
+            // audio and the earlier text changed under us. Positionally dropping `committedFlat.count`
+            // chars here would slice mid-word and garble the overlay. Instead, discard the stale
+            // commit and adopt the fresh partial wholesale; it self-corrects to the re-transcription.
+            committedStreamingText = ""
+            if let lastPunct = trimmed.lastIndex(where: { ".!?".contains($0) }) {
+                committedStreamingText = String(trimmed[...lastPunct])
+            }
+            return trimmed
         }
 
         if newPortion.isEmpty { return committedStreamingText }

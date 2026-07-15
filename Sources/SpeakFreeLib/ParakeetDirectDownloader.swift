@@ -22,6 +22,7 @@
 // install. Every file is written atomically (temp → move) so an interrupted pre-fetch leaves no
 // partial file that FluidAudio's existence check would wrongly skip.
 
+import CryptoKit
 import Foundation
 
 final class ParakeetDirectDownloader: NSObject, @unchecked Sendable {
@@ -47,11 +48,38 @@ final class ParakeetDirectDownloader: NSObject, @unchecked Sendable {
     struct RemoteFile {
         let path: String
         let size: Int64
+        /// SHA256 hex from the HF tree API's `lfs.oid`, when the file is LFS-tracked. `nil` for
+        /// small non-LFS files (config/vocab), which are not content-hashed by HF and skip verify.
+        let oid: String?
     }
 
-    enum DownloadError: Error {
+    enum DownloadError: Error, LocalizedError {
         case listFailed
         case httpError(Int)
+        case checksumMismatch(path: String, expected: String, actual: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .listFailed: return "HuggingFace file listing failed"
+            case .httpError(let code): return "HuggingFace HTTP error \(code)"
+            case .checksumMismatch(let path, let expected, let actual):
+                return "SHA256 mismatch for \(path): expected \(expected.prefix(12))…, got \(actual.prefix(12))…"
+            }
+        }
+    }
+
+    /// Streaming SHA256 of a file as lowercase hex, read in 4 MB chunks so a ~450 MB weight file is
+    /// never loaded whole into memory. `internal static` so it is unit-testable against a temp file.
+    static func sha256Hex(ofFileAt url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk = try autoreleasepool { try handle.read(upToCount: 4 * 1024 * 1024) }
+            guard let chunk = chunk, !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// Pre-fetches the planned large bundles into `cacheDir`, reporting aggregate progress as
@@ -98,7 +126,7 @@ final class ParakeetDirectDownloader: NSObject, @unchecked Sendable {
                 attempt += 1
                 do {
                     try await downloader.downloadFile(
-                        repo: plan.repo, path: file.path, to: dest,
+                        repo: plan.repo, path: file.path, to: dest, expectedOID: file.oid,
                         onBytes: { written in progress(base + written, totalBytes) })
                     break
                 } catch is CancellationError {
@@ -155,10 +183,13 @@ final class ParakeetDirectDownloader: NSObject, @unchecked Sendable {
                 (item["type"] as? String) == "file",
                 prefixes.contains(where: { path.hasPrefix($0) })
             else { continue }
-            // LFS weight files carry the real size under `lfs.size`; small files use top-level `size`.
-            let lfsSize = (item["lfs"] as? [String: Any])?["size"] as? NSNumber
+            // LFS weight files carry the real size under `lfs.size` and their SHA256 under
+            // `lfs.oid`; small files use top-level `size` and have no LFS oid (skip verify).
+            let lfs = item["lfs"] as? [String: Any]
+            let lfsSize = lfs?["size"] as? NSNumber
             let size = lfsSize?.int64Value ?? (item["size"] as? NSNumber)?.int64Value ?? -1
-            result.append(RemoteFile(path: path, size: size))
+            let oid = lfs?["oid"] as? String
+            result.append(RemoteFile(path: path, size: size, oid: oid))
         }
         return result
     }
@@ -166,7 +197,8 @@ final class ParakeetDirectDownloader: NSObject, @unchecked Sendable {
     // MARK: - Single-file download with byte progress
 
     private func downloadFile(
-        repo: String, path: String, to dest: URL, onBytes: @escaping (_ written: Int64) -> Void
+        repo: String, path: String, to dest: URL, expectedOID: String?,
+        onBytes: @escaping (_ written: Int64) -> Void
     ) async throws {
         let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
         guard let url = URL(string: "https://huggingface.co/\(repo)/resolve/main/\(encoded)") else {
@@ -174,6 +206,22 @@ final class ParakeetDirectDownloader: NSObject, @unchecked Sendable {
         }
         let tempURL = try await downloadToTemp(url, onBytes: onBytes)
         let fm = FileManager.default
+
+        // Content-verify LFS files against the HF `lfs.oid` (SHA256) BEFORE promoting into the
+        // cache. A corrupted/truncated/tampered weight file that matched on size would otherwise
+        // be moved into place and skipped by FluidAudio's existence check forever. Non-LFS files
+        // (no oid) skip verification. On mismatch: delete the temp and throw (the caller retries,
+        // then falls back to FluidAudio's own download).
+        if let expectedOID = expectedOID {
+            let actual = try Self.sha256Hex(ofFileAt: tempURL)
+            if actual.lowercased() != expectedOID.lowercased() {
+                try? fm.removeItem(at: tempURL)
+                DiagnosticLogger.shared.log(
+                    "ParakeetDirectDownloader: SHA256 mismatch for \(path) — rejecting downloaded file")
+                throw DownloadError.checksumMismatch(path: path, expected: expectedOID, actual: actual)
+            }
+        }
+
         try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
         if fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
         try fm.moveItem(at: tempURL, to: dest)  // atomic: a partial download is never left at `dest`

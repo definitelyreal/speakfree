@@ -78,11 +78,14 @@ public class Transcriber {
         ]
         if hallucinationPatterns.contains(lower) { return true }
 
-        // Subtitle/training data leakage
+        // Subtitle/training data leakage. NOTE: "subscribe" alone is a legitimate imperative
+        // ("Please subscribe Alex to the release updates.") — only the YouTube-outro PHRASES are
+        // hallucinations. "please subscribe" is deliberately NOT listed: it collides with real
+        // dictation. Match phrase forms that don't appear in ordinary sentences.
         let substringHallucinations = [
             "amara.org", "amara. org", "subtitles by", "translated by",
             "transcribed by", "captioned by", "captions by",
-            "subscribe", "like and subscribe",
+            "like and subscribe", "subscribe to my channel", "don't forget to subscribe",
         ]
         for pattern in substringHallucinations {
             if lower.contains(pattern) { return true }
@@ -206,9 +209,14 @@ public class Transcriber {
         if suppressAutoPunctuation {
             args += ["--suppress-regex", "[,\\.\\?!;:\\-—]"]
         }
-        // Pass context from text field so whisper can match style/terminology
+        // Context-derived prompt is DROPPED on the CLI fallback: whisper-cli only accepts the
+        // prompt via `--prompt` (in argv, ps-readable — a privacy leak of the surrounding text),
+        // and offers no `--prompt-file`. The in-process engine path (the normal case) still
+        // primes with the prompt safely; the CLI fallback runs promptless.
         if let prompt = prompt, !prompt.isEmpty {
-            args += ["--prompt", prompt]
+            DiagnosticLogger.shared.log(
+                "Transcriber: whisper CLI fallback running promptless — dropped \(prompt.count)-char "
+                + "context prompt (no argv-free prompt path on whisper-cli)")
         }
         process.arguments = args
 
