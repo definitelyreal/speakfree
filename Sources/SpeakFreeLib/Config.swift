@@ -205,18 +205,32 @@ public struct Config: Codable {
         }
     }
 
-    /// One-time migration (PR-A): a pre-2026-06 build wrote maxRecordings=30 as a DEFAULT
-    /// (not a user choice). Because prune runs unconditionally at launch, those on-disk
-    /// configs silently auto-delete recordings, contradicting the keep-forever-by-default
-    /// contract. When we see the legacy 30 with no user-confirmation marker, clear the cap
-    /// and stamp the marker (so a user who later re-picks 30 in Settings still sticks), then
-    /// persist so it only happens once. Static + pure-ish so it's unit-testable.
+    /// Guards the one-shot migration log line. The migration itself re-runs (in-memory) on
+    /// every load; only the diagnostic line is throttled to once per process.
+    private static var didLogLegacyMigration = false
+
+    /// Migration (PR-A): a pre-2026-06 build wrote maxRecordings=30 as a DEFAULT (not a user
+    /// choice). Because prune runs unconditionally at launch, those on-disk configs silently
+    /// auto-delete recordings, contradicting the keep-forever-by-default contract. When we see
+    /// the legacy 30 with no user-confirmation marker, clear the cap and stamp the marker so a
+    /// user who later re-picks 30 in Settings still sticks.
+    ///
+    /// P3: this mutates ONLY the in-memory config — it must NOT save() inside load(). load()
+    /// has ~20 call sites, several off-main; a non-atomic write racing a concurrent load could
+    /// truncate config.json and reset every setting to defaults. The transform is pure and
+    /// idempotent, so re-deriving it on every load is free; the nil cap is persisted the next
+    /// time the user saves Settings (SettingsViewModel.toConfig stamps maxRecordingsUserConfirmed).
+    /// Static + pure so it's unit-testable.
     static func migrateLegacyMaxRecordings(_ config: inout Config) {
         guard config.maxRecordings == 30, config.maxRecordingsUserConfirmed == nil else { return }
         config.maxRecordings = nil
         config.maxRecordingsUserConfirmed = true
-        try? config.save()
-        DiagnosticLogger.shared.log("Config: legacy default cap cleared — recordings will not be auto-pruned")
+        if !didLogLegacyMigration {
+            didLogLegacyMigration = true
+            DiagnosticLogger.shared.log(
+                "Config: legacy default cap cleared in-memory — recordings will not be auto-pruned "
+                    + "(persists on next Settings save)")
+        }
     }
 
     public static func decode(from data: Data) throws -> Config {
@@ -230,7 +244,10 @@ public struct Config: Codable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
         let data = try encoder.encode(self)
-        try data.write(to: Config.configFile)
+        // P3: write atomically (temp file + rename) so a concurrent Config.load() can never
+        // observe a half-written config.json and fall into the corrupt-file reset-to-defaults
+        // path. load() has ~20 call sites, several off-main.
+        try data.write(to: Config.configFile, options: .atomic)
         // config.json carries localAPIToken; the dir attribute above only applies on
         // first creation, so re-assert both on every save.
         try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: Config.configDir.path)

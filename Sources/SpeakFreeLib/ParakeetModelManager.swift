@@ -216,9 +216,16 @@ public final class ParakeetModelManager {
             let size = (try? fm.attributesOfItem(atPath: vocab.path))?[.size] as? NSNumber,
             size.intValue > 0,
             let data = try? Data(contentsOf: vocab),
-            (try? JSONSerialization.jsonObject(with: data)) != nil
+            let json = try? JSONSerialization.jsonObject(with: data)
         else { return false }
-        return true
+        // P6: "parseable JSON" is too weak — `{}`, `[]`, a bare number/string, or a collection
+        // whose entries aren't strings all parse yet make FluidAudio's decoder throw at load,
+        // leaving the user stuck (enforceOffline blocks self-heal). Require one of the two shapes
+        // FluidAudio actually parses: a non-empty array of strings, or a non-empty object of
+        // string values.
+        if let arr = json as? [String] { return !arr.isEmpty }
+        if let dict = json as? [String: String] { return !dict.isEmpty }
+        return false
     }
 
     /// Removes any `.mlmodelc` bundle in the cache whose compiled `coremldata.bin` is missing or

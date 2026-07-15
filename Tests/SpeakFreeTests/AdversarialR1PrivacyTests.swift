@@ -131,6 +131,11 @@ final class AdversarialR1PrivacyTests: XCTestCase {
         try Data("stale".utf8).write(to: leftover)
         XCTAssertTrue(FileManager.default.fileExists(atPath: leftover.path))
 
+        // P4: the sweep now only removes files older than an hour so it can't delete another
+        // instance's in-flight upload. Backdate this orphan two hours to make it eligible.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-7200)], ofItemAtPath: leftover.path)
+
         let swept = LocalAPIServer.sweepTmpAPI()
 
         XCTAssertEqual(swept, 1)
