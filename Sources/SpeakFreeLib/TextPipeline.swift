@@ -13,6 +13,12 @@ public enum TextPipeline {
         public let glossaryWords: String?
         /// Curated exact garble→correct overrides (lowercased key → replacement).
         public let overrides: [String: String]
+        /// Recording length. Chunk-seam artifacts (duplicate recapitalized words) only
+        /// exist when FluidAudio actually chunked (>~14.9s), so the seam-dedup pass is
+        /// skipped for short dictations — where "mark Mark" is far more likely a real
+        /// verb+name pair than a seam dup (adversarial review 2026-07-15, round 2).
+        /// nil = unknown duration; dedup stays enabled.
+        public let audioDurationSeconds: Double?
 
         /// `raw` defaults to `""` so callers can construct a context-only Input for prompt
         /// assembly without needing a dummy empty-string placeholder.
@@ -22,7 +28,8 @@ public enum TextPipeline {
                     screenContextText: String? = nil,
                     styleMode: TextPostProcessor.StyleMode = .none,
                     glossaryWords: String? = nil,
-                    overrides: [String: String] = [:]) {
+                    overrides: [String: String] = [:],
+                    audioDurationSeconds: Double? = nil) {
             self.raw = raw
             self.cursorContextText = cursorContextText
             self.screenContextText = screenContextText
@@ -30,6 +37,7 @@ public enum TextPipeline {
             self.styleMode = styleMode
             self.glossaryWords = glossaryWords
             self.overrides = overrides
+            self.audioDurationSeconds = audioDurationSeconds
         }
     }
 
@@ -152,7 +160,11 @@ public enum TextPipeline {
             prompt = provided
         }
         let sanitized = sanitize(input.raw)
-        let stripped = collapseBoundaryDuplicateWord(stripWhisperBracketMarkers(sanitized))
+        // Seam dedup only where a seam can exist: FluidAudio chunks at ~14.9s, so short
+        // dictations can't have seam artifacts and skip the pass (12s = margin).
+        let seamPossible = input.audioDurationSeconds.map { $0 > 12 } ?? true
+        let marker = stripWhisperBracketMarkers(sanitized)
+        let stripped = seamPossible ? collapseBoundaryDuplicateWord(marker) : marker
         let hybrid = input.punctuationMode == .hybrid
         let processed = (input.punctuationMode == .off)
             ? stripped

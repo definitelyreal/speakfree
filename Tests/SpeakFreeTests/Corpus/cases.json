@@ -374,5 +374,47 @@
   "mode": "hybrid",
   "input": "Hey. Kamala, where do you want to meet?",
   "expected": "Hey, where do you want to meet?"
+ },
+ {
+  "name": "cooling-off-period-survives",
+  "note": "R2: hyphen used to stop the precedingWord scan, making the listed 'cooling-off' literalPreceder unreachable.",
+  "mode": "hybrid",
+  "input": "We observed a cooling-off period.",
+  "expected": "We observed a cooling-off period."
+ },
+ {
+  "name": "follow-up-question-survives",
+  "note": "R2: hyphen defeated the 2-word lookback ('a follow-up question?' lost the noun).",
+  "mode": "hybrid",
+  "input": "Can I ask a follow-up question?",
+  "expected": "Can I ask a follow-up question?"
+ },
+ {
+  "name": "possessive-question-survives",
+  "note": "R2: possessive directly before 'question' is a real noun phrase.",
+  "mode": "hybrid",
+  "input": "What was John's question?",
+  "expected": "What was John's question?"
+ },
+ {
+  "name": "billing-period-survives",
+  "note": "R2 literalPreceders addition.",
+  "mode": "hybrid",
+  "input": "This covers the billing period.",
+  "expected": "This covers the billing period."
+ },
+ {
+  "name": "sentence-initial-comma-usage-survives",
+  "note": "R2: contextReplace ran before the skipBefore guards and deleted 'Comma' from '. Comma usage varies.' Lookaheads added.",
+  "mode": "hybrid",
+  "input": "We discussed punctuation. Comma usage varies.",
+  "expected": "We discussed punctuation. Comma usage varies."
+ },
+ {
+  "name": "sentence-initial-colon-cancer-survives",
+  "note": "R2: same bypass for '. Colon cancer'.",
+  "mode": "hybrid",
+  "input": "He was screened. Colon cancer runs in the family.",
+  "expected": "He was screened. Colon cancer runs in the family."
  }
 ]

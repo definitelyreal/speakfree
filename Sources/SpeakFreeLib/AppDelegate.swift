@@ -74,6 +74,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastInsertionTail: String?
     private var lastInsertionBundleID: String?
     private var lastInsertionAt: Date?
+    // P1: a config reload that lands while a dictation is in flight (fn held) must NOT rebuild
+    // the HotkeyManager mid-press — recreating the event tap loses the pending key-release, so
+    // the recording never stops and the next utterance merges in. When that happens the rebuild
+    // is deferred by setting this flag; it is applied the moment the dictation ends (finalize /
+    // key-up / abort). Main-only.
+    private var pendingHotkeyReload = false
 
     // Adaptive post-buffer (T2.1): poll trailing audio after key release and finalize as soon as
     // ~150ms of trailing silence is observed, hard-capped at 300ms (never worse than the old flat
@@ -805,6 +811,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         config?.inputDeviceUID = uid
         recorder.setPinnedInputDevice(uid: uid)
         statusBar.buildMenu()
+        // P2: this is an external writer of config.json. If Settings is open, its cached view
+        // model now holds a stale inputDeviceUID and its next save would revert this pick — re-sync
+        // it from disk. Only when visible: refreshing mid-edit would clobber the user's in-progress
+        // changes (and reloadConfig must NOT drive this, to avoid refreshing during a Settings save).
+        if SettingsWindowController.isWindowVisible {
+            settingsViewModel?.refreshFromDisk()
+        }
         DiagnosticLogger.shared.log("Microphone selector: \(uid ?? "system default")")
     }
 
@@ -820,6 +833,26 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Update spoken punctuation on existing transcriber
         transcriber?.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
+        // P1: rebuilding the HotkeyManager tears down and recreates the event tap. If a dictation
+        // is in flight (fn physically held, isPressed == true), the new tap never sees the key-up
+        // for the press the OLD tap began, so the release is lost, the recording never stops, and
+        // the next utterance merges in. Defer the hotkey rebuild until the dictation ends; every
+        // other part of the reload proceeds now.
+        if isPressed {
+            pendingHotkeyReload = true
+            DiagnosticLogger.shared.log("Hotkey: rebuild deferred — dictation in flight")
+        } else {
+            rebuildHotkeyManager()
+        }
+
+        statusBar.buildMenu()
+
+        syncLocalAPIServerState()
+    }
+
+    /// Tear down and recreate the HotkeyManager from the current config. Split out of
+    /// reloadHotkeyAndSettings (P1) so it can be deferred past an in-flight dictation.
+    private func rebuildHotkeyManager() {
         hotkeyManager?.stop()
         hotkeyManager = HotkeyManager(
             keyCode: config.hotkey.keyCode,
@@ -830,10 +863,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             onKeyUp: { [weak self] in self?.handleKeyUp() },
             onAbort: { [weak self] in self?.handleRecordingAbort() }
         )
+    }
 
-        statusBar.buildMenu()
-
-        syncLocalAPIServerState()
+    /// P1: apply a hotkey rebuild that was deferred because a dictation was in flight when
+    /// reloadHotkeyAndSettings ran. Called from every path that ends a dictation
+    /// (finalizeRecording, handleKeyUp, handleRecordingAbort); the flag guard makes it fire once.
+    private func performPendingHotkeyReloadIfNeeded() {
+        guard pendingHotkeyReload else { return }
+        pendingHotkeyReload = false
+        DiagnosticLogger.shared.log("Hotkey: applying deferred rebuild — dictation finished")
+        rebuildHotkeyManager()
     }
 
     /// Start or stop the LocalAPIServer based on the current config.
@@ -906,8 +945,19 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.recordingsNoticeTimer = nil
                 self?.recordingsNoticeController = nil
                 self?.reloadConfig()
+                // P2: external writer of saveRecordings/recordingsNoticeDecision. Re-sync an open
+                // Settings view model from disk so its next save can't resurrect the stale value.
+                if SettingsWindowController.isWindowVisible {
+                    self?.settingsViewModel?.refreshFromDisk()
+                }
             },
-            onConfigChanged: { [weak self] in self?.reloadConfig() },
+            onConfigChanged: { [weak self] in
+                self?.reloadConfig()
+                // P2: same external-writer re-sync as onResolved (window-visible only).
+                if SettingsWindowController.isWindowVisible {
+                    self?.settingsViewModel?.refreshFromDisk()
+                }
+            },
             onDismissed: { [weak self] in
                 guard let self else { return }
                 self.recordingsNoticeController = nil
@@ -943,6 +993,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         if isToggle { return }
 
         handleRecordingStop()
+
+        // P1: the key was released via the still-installed old hotkey manager (the rebuild was
+        // deferred while held) — now safe to apply any deferred hotkey rebuild.
+        performPendingHotkeyReloadIfNeeded()
     }
 
     private func showAccessibilityAlert() {
@@ -1092,6 +1146,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             RecordingStore.clearSentinel()
             isPressed = false
             recordingSourceElement = nil
+            recordingContextText = nil
+            // I4: OCR was kicked off just above, but recording never started so nothing will
+            // consume it. Clear it and invalidate the in-flight capture so a late OCR write can't
+            // bias the next dictation's prompt.
+            screenContextText = nil
+            screenCaptureGeneration = UUID()
             statusBar.state = .idle
             recordingOverlay.hide()
         }
@@ -1116,6 +1176,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         statusBar.state = .idle
         recordingOverlay.hide()
         statusBar.buildMenu()
+
+        // P1: the dictation ended (aborted) — apply any hotkey rebuild deferred while fn was held.
+        performPendingHotkeyReloadIfNeeded()
     }
 
     private func handleRecordingStop() {
@@ -1170,6 +1233,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
+        // P1: the key was released before the post-buffer scheduled this call (isPressed is
+        // already false). Applying a deferred hotkey rebuild here — ahead of every return below —
+        // guarantees no exit path (toggle-mode stop, gate failure, nil transcriber, success) leaves
+        // the rebuild stranded. The rebuild is independent of the async transcription that follows.
+        performPendingHotkeyReloadIfNeeded()
+
         let stopTime = keyReleaseTime
 
         guard let recording = recorder.stopRecording() else {
@@ -1210,6 +1279,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             RecordingStore.clearSentinel()
             recordingSourceElement = nil
             recordingContextText = nil
+            // I4: a gate-failed dictation never consumes its OCR, so clear it and invalidate any
+            // in-flight capture — otherwise this recording's screenContextText survives and biases
+            // the NEXT dictation's prompt with stale on-screen text.
+            screenContextText = nil
+            screenCaptureGeneration = UUID()
             statusBar.state = .idle
             recordingOverlay.hide()
             return
@@ -1326,7 +1400,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         screenContextText: capturedScreenText,
                         styleMode: capturedStyleMode,
                         glossaryWords: glossary,
-                        overrides: overrides
+                        overrides: overrides,
+                        audioDurationSeconds: Double(samples.count) / 16000.0
                     )
                 }
                 // T2.3 — reuse the saved streaming partial when the gate approved, else run the
