@@ -6,8 +6,9 @@
 # (i.e. fn hasn't been held for 10 s), then sends SIGTERM — which new builds
 # additionally handle by finishing any dictation that slipped in.
 #
-# Usage: scripts/safe-restart.sh [--kill-only]
-#   default: waits, kills; caller reinstalls/relaunches afterwards.
+# Usage: scripts/safe-restart.sh
+#   Waits, then kills; caller reinstalls/relaunches afterwards (kill-only by
+#   default — there is no separate --kill-only flag, this is just what it does).
 set -u
 
 SENTINEL="$HOME/.config/speakfree/.recording-in-progress.json"

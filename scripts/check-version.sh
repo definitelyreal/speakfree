@@ -31,6 +31,17 @@ VERSION_APPCAST=$(grep -m1 '<sparkle:shortVersionString>' \
     | sed 's/.*<sparkle:shortVersionString>\(.*\)<\/sparkle:shortVersionString>.*/\1/' \
     | tr -d '[:space:]')
 
+# Also check <sparkle:version> and the version embedded in the enclosure's
+# download URL (speakfree-X.Y.Z.dmg) — build.sh writes all three from the same
+# $VERSION, but a hand edit or a partial regen could desync them independently
+# of VERSION_APPCAST above.
+VERSION_APPCAST_SPARKLE=$(grep -m1 '<sparkle:version>' \
+    "$REPO_DIR/docs/appcast.xml" \
+    | sed 's/.*<sparkle:version>\(.*\)<\/sparkle:version>.*/\1/' \
+    | tr -d '[:space:]')
+VERSION_APPCAST_URL=$(grep -m1 -oE 'speakfree-[0-9]+\.[0-9]+\.[0-9]+\.dmg' "$REPO_DIR/docs/appcast.xml" \
+    | sed -E 's/speakfree-([0-9.]+)\.dmg/\1/')
+
 # Pages site: the download URL, the visible "vX.Y.Z" label, and the newest
 # changelog <h3>vX.Y.Z</h3> (topmost = current release).
 VERSION_PAGES_URL=$(grep -m1 -oE 'speakfree-[0-9]+\.[0-9]+\.[0-9]+\.dmg' "$INDEX" \
@@ -44,6 +55,8 @@ VERSION_PAGES_CHANGELOG=$(grep -m1 -oE '<h3>v[0-9]+\.[0-9]+\.[0-9]+</h3>' "$INDE
 echo "Version.swift            : $VERSION_SWIFT"
 echo "Resources/Info.plist     : $VERSION_PLIST"
 echo "docs/appcast.xml         : $VERSION_APPCAST"
+echo "appcast sparkle:version  : $VERSION_APPCAST_SPARKLE"
+echo "appcast enclosure URL    : $VERSION_APPCAST_URL"
 echo "index.html download URL  : $VERSION_PAGES_URL"
 echo "index.html version label : $VERSION_PAGES_LABEL"
 echo "index.html changelog top : $VERSION_PAGES_CHANGELOG"
@@ -58,6 +71,8 @@ check() {  # check <name> <value>
 }
 check "Info.plist"             "$VERSION_PLIST"
 check "appcast"                "$VERSION_APPCAST"
+check "appcast sparkle:version" "$VERSION_APPCAST_SPARKLE"
+check "appcast enclosure URL"   "$VERSION_APPCAST_URL"
 check "index.html download URL" "$VERSION_PAGES_URL"
 check "index.html version label" "$VERSION_PAGES_LABEL"
 check "index.html changelog top" "$VERSION_PAGES_CHANGELOG"

@@ -1,12 +1,24 @@
 #!/bin/bash
 # install-dev.sh — build + install for local testing WITHOUT full DMG/notarize cycle.
-# Always applies the libwhisper rpath fix so the installed app doesn't crash.
+#
+# Builds a fresh dev bundle via scripts/bundle-app.sh (which Developer-ID-signs it
+# when available, so TCC grants survive rebuilds) and installs it per CLAUDE.md's
+# mandatory trash-then-copy policy: NEVER mutate the installed bundle in place —
+# that leaves stale files and corrupts TCC (Microphone/Accessibility) state.
+#
+# Dev bundles resolve libwhisper from Homebrew's absolute path (no rpath rewrite,
+# no bundled dylib) — see scripts/bundle-app.sh. Do not re-point it to @rpath here;
+# the dev bundle never ships a Frameworks/libwhisper*.dylib for @rpath to resolve,
+# so doing so previously broke dyld at launch.
 set -e
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP="/Applications/speakfree.app"
-SIGN_ID="Developer ID Application: Michael Morgenstern (AZ53Y7V4UZ)"
-ENTITLEMENTS="$(dirname "$0")/speakfree.entitlements"
+TMP_DIR="$(mktemp -d)"
+TMP_APP="$TMP_DIR/speakfree.app"
+
+cleanup() { rm -rf "$TMP_DIR"; }
+trap cleanup EXIT
 
 cd "$REPO_DIR"
 
@@ -15,22 +27,25 @@ xcrun swift build
 
 BINARY=".build/debug/speakfree"
 
-# Verify the rpath fix is needed and apply it
-WHISPER_REF=$(otool -L "$BINARY" | awk '/libwhisper\.1\.dylib/ {print $1; exit}')
-if [ -n "$WHISPER_REF" ] && [ "$WHISPER_REF" != "@rpath/libwhisper.1.dylib" ]; then
-    echo "Fixing libwhisper rpath ($WHISPER_REF → @rpath/libwhisper.1.dylib)..."
-    install_name_tool -change "$WHISPER_REF" "@rpath/libwhisper.1.dylib" "$BINARY"
-fi
+echo "Bundling app (dev)..."
+bash scripts/bundle-app.sh "$BINARY" "$TMP_APP" dev
 
 echo "Stopping existing speakfree..."
 pkill -x speakfree 2>/dev/null || true
 sleep 0.5
 
-echo "Installing to $APP..."
-cp "$BINARY" "$APP/Contents/MacOS/speakfree"
+echo "Removing old install (trash, not in-place mutation — see CLAUDE.md)..."
+if [ -d "$APP" ]; then
+    if command -v /usr/bin/trash &>/dev/null; then
+        /usr/bin/trash "$APP"
+    else
+        # No `trash` utility available — fall back to rm -rf (loses Trash recoverability).
+        rm -rf "$APP"
+    fi
+fi
 
-echo "Re-signing..."
-codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP"
+echo "Installing to $APP..."
+cp -R "$TMP_APP" "$APP"
 
 echo "Launching..."
 open "$APP"

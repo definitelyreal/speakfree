@@ -127,8 +127,8 @@ find "$APP" -exec xattr -c {} \; 2>/dev/null || true
 # Sign dylibs and whisper-cli first (no entitlements needed for these).
 # Use find -type f to skip symlinks — codesign fails with "timestamp expected"
 # when re-signing an already-signed file via a symlink to it.
-find "$APP/Contents/Frameworks" -maxdepth 1 -type f -name '*.dylib' \
-    -exec codesign --force --options runtime --sign "$SIGN_ID" {} \;
+find "$APP/Contents/Frameworks" -maxdepth 1 -type f -name '*.dylib' -print0 \
+    | xargs -0 -n1 codesign --force --options runtime --sign "$SIGN_ID"
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/Sparkle.framework"
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/MacOS/whisper-cli"
@@ -187,6 +187,27 @@ if [[ -z "$SIGNATURE" || "$SIGNATURE" =~ ^[0-9]+$ || ${#SIGNATURE} -lt 40 ]]; th
     echo "FATAL: extracted Sparkle signature looks invalid ('$SIGNATURE'). Aborting release." >&2
     exit 1
 fi
+
+# Guard: the DMG was just signed with whatever private key lives in this
+# machine's Keychain. Verify that key's matching public key is the one the
+# shipped app actually trusts (SUPublicEDKey in Info.plist) — signing with the
+# wrong key produces a signature that passes the format check above but Sparkle
+# will silently reject at update time.
+echo "Verifying Sparkle signing key matches the app's pinned public key..."
+KEYCHAIN_PUB_KEY=$("$SPARKLE_BIN/generate_keys" -p 2>/dev/null | tr -d '[:space:]')
+APP_PUB_KEY=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$APP/Contents/Info.plist" 2>/dev/null | tr -d '[:space:]')
+if [ -z "$KEYCHAIN_PUB_KEY" ] || [ -z "$APP_PUB_KEY" ]; then
+    echo "FATAL: could not read Sparkle public key (keychain='$KEYCHAIN_PUB_KEY' plist='$APP_PUB_KEY'). Aborting release." >&2
+    exit 1
+fi
+if [ "$KEYCHAIN_PUB_KEY" != "$APP_PUB_KEY" ]; then
+    echo "FATAL: Sparkle signing key mismatch." >&2
+    echo "  Keychain public key : $KEYCHAIN_PUB_KEY" >&2
+    echo "  App's SUPublicEDKey : $APP_PUB_KEY" >&2
+    echo "  The DMG was signed with a different key than the app trusts — Sparkle would reject the update. Aborting." >&2
+    exit 1
+fi
+echo "Sparkle signing key OK (matches SUPublicEDKey)."
 PUB_DATE=$(date -u "+%a, %d %b %Y %H:%M:%S %z")
 
 # Build new appcast with this release at the top

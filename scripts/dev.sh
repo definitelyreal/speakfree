@@ -119,6 +119,14 @@ cur_punct=$(read_config spokenPunctuation false)
 cur_max_recordings=$(read_config maxRecordings 0)
 cur_toggle=$(read_config toggleMode false)
 
+# Fields this script never prompts for — read them so the rewritten config below
+# preserves them instead of silently dropping them (omit when absent rather than
+# writing null, since these are optional String?/Bool? fields upstream).
+cur_engine=$(read_config engine "")
+cur_parakeet_model=$(read_config parakeetModel "")
+cur_remember_words=$(read_config rememberWords "")
+cur_screen_context=$(read_config screenContext "")
+
 # Model
 echo ""
 echo "  Model sizes:"
@@ -209,6 +217,26 @@ else
     fi
 fi
 
+# Build preserved-field lines — omitted entirely (not written as null) when the
+# key was absent from the existing config.
+preserved_fields=""
+add_preserved_string() {  # add_preserved_string <key> <value>
+    if [ -n "$2" ]; then
+        preserved_fields="${preserved_fields}  \"$1\": \"$2\",
+"
+    fi
+}
+add_preserved_bool() {  # add_preserved_bool <key> <value>
+    if [ -n "$2" ]; then
+        preserved_fields="${preserved_fields}  \"$1\": $2,
+"
+    fi
+}
+add_preserved_string engine "$cur_engine"
+add_preserved_string parakeetModel "$cur_parakeet_model"
+add_preserved_bool rememberWords "$cur_remember_words"
+add_preserved_bool screenContext "$cur_screen_context"
+
 # Write config
 mkdir -p "$(dirname "$CONFIG_FILE")"
 cat > "$CONFIG_FILE" << EOF
@@ -218,7 +246,7 @@ cat > "$CONFIG_FILE" << EOF
   "spokenPunctuation": $punct,
   "maxRecordings": $max_recordings,
   "toggleMode": $toggle,
-  "hotkey": { "keyCode": $hotkey_code, "modifiers": $hotkey_mods_json }
+${preserved_fields}  "hotkey": { "keyCode": $hotkey_code, "modifiers": $hotkey_mods_json }
 }
 EOF
 

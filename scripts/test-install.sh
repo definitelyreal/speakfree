@@ -73,7 +73,11 @@ trap - EXIT
 
 echo ""
 echo "Testing app bundle..."
-bash scripts/bundle-app.sh "$BIN" /tmp/SpeakfreeTest.app 0.0.0-test
+if bash scripts/bundle-app.sh "$BIN" /tmp/SpeakfreeTest.app 0.0.0-test; then
+    pass "bundle-app.sh exits 0"
+else
+    fail "bundle-app.sh exited nonzero"
+fi
 
 if [ -x "/tmp/SpeakfreeTest.app/Contents/MacOS/speakfree" ]; then
     pass "App bundle has executable"
