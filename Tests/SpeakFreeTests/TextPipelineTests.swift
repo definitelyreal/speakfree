@@ -532,4 +532,30 @@ final class TextPipelineTests: XCTestCase {
             TextPipeline.collapseBoundaryDuplicateWord("the settings should Should update"),
             "the settings should update")
     }
+
+    // MARK: - Adversarial review round 2: dedup gated on chunkable duration
+
+    func test_collapseBoundaryDup_shortDictationSkipsSeamDedup() {
+        // A 5s dictation cannot have a FluidAudio chunk seam, so "mark Mark" is a real
+        // verb+name pair and must survive end-to-end.
+        let r = TextPipeline.run(TextPipeline.Input(
+            raw: "please mark Mark absent", punctuationMode: .hybrid,
+            audioDurationSeconds: 5))
+        XCTAssertTrue(r.finalText.lowercased().contains("mark mark"),
+                      "short dictation must keep verb+name pair. Got: \(r.finalText)")
+    }
+
+    func test_collapseBoundaryDup_longDictationStillDedups() {
+        let r = TextPipeline.run(TextPipeline.Input(
+            raw: "parameters should Should be allowed", punctuationMode: .hybrid,
+            audioDurationSeconds: 20))
+        XCTAssertFalse(r.finalText.contains("should Should"),
+                       "long dictation seam dup must collapse. Got: \(r.finalText)")
+    }
+
+    func test_collapseBoundaryDup_nilDurationKeepsDedupEnabled() {
+        let r = TextPipeline.run(TextPipeline.Input(
+            raw: "parameters should Should be allowed", punctuationMode: .hybrid))
+        XCTAssertFalse(r.finalText.contains("should Should"))
+    }
 }

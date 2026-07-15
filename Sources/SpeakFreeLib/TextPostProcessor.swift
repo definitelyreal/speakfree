@@ -62,15 +62,25 @@ public struct TextPostProcessor {
         // dogfood 2026-07-02 garble shape). A following word instead of punctuation means a
         // real sentence-initial use, and converting would delete the word (adversarial
         // review 2026-07-15, round 1). The non-word family keeps the loose tail.
-        ("[.;]\\s*(?:[ck]omma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
+        // Each real-word rule carries a negative lookahead mirroring the word's skipBefore
+        // list from convertStandaloneAmbiguous — these rules run FIRST and used to bypass
+        // those guards entirely ("…punctuation. Comma usage varies." lost the word "Comma";
+        // ". Colon cancer screening" lost "Colon" — adversarial review 2026-07-15, round 2).
+        ("[.;]\\s*(?:[ck]omma|kana|kanna|kama)\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("[.;]\\s*(?:kamala|karma)[.,!?;:]", ","),
-        ("(?<=[,!?:])\\s*(?:[ck]omma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("(?<=[,!?:])\\s*(?:[ck]omma|kana|kanna|kama)\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:kamala|karma)[.,!?;:]", ","),
-        ("(?<=[.,!?;:])\\s*period(?:[.,!?;:]|(?=\\s|$))", "."),
-        ("(?<=[.,!?;:])\\s*colon(?:[.,!?;:]|(?=\\s|$))", ":"),
-        ("(?<=[.,!?;:])\\s*dash(?:[.,!?;:]|(?=\\s|$))", " —"),
+        ("(?<=[.,!?;:])\\s*period(?!\\s+(?:of|piece)\\b)(?:[.,!?;:]|(?=\\s|$))", "."),
+        ("(?<=[.,!?;:])\\s*colon(?!\\s+(?:cancer|surgery|cleanse|polyps?)\\b)(?:[.,!?;:]|(?=\\s|$))", ":"),
+        ("(?<=[.,!?;:])\\s*dash(?!\\s+(?:of|board|cam)\\b)(?:[.,!?;:]|(?=\\s|$))", " —"),
         ("(?<=[.,!?;:])\\s*hyphen(?:[.,!?;:]|(?=\\s|$))", "-"),
     ]}
+
+    /// Negative lookahead mirroring `comma`'s skipBefore list ("comma separated values",
+    /// "Comma usage varies") for the punctuation-preceded rules above.
+    private static let commaSkipAhead =
+        "(?!\\s+(?:separated|delimited|splices?|operator|issues?|problems?|key|questions?|"
+        + "things?|usage|placement|rules?|characters?)\\b)"
 
     // Ellipsis support removed — whisper generates "..." from pauses, causing false positives.
     // All multi-dot sequences are now stripped unconditionally.
@@ -397,18 +407,26 @@ public struct TextPostProcessor {
         for match in matches.reversed() {
             guard let range = Range(match.range, in: result) else { continue }
             let before = result[..<range.lowerBound]
+            // Scan accepts hyphens and BOTH apostrophe forms so "follow-up" and "student’s"
+            // are single tokens (round 2: the curly ’ and the hyphen used to stop the scan,
+            // defeating the guards below).
+            let isWordChar: (Character) -> Bool = { $0.isLetter || $0 == "'" || $0 == "’" || $0 == "-" }
             let precedingWord = String(
-                before.reversed().prefix(while: { $0.isLetter || $0 == "'" }).reversed()
+                before.reversed().prefix(while: isWordChar).reversed()
             ).lowercased()
             if questionNounContext.contains(precedingWord) { continue }
             if precedingWord.isEmpty { continue }  // "Question?" alone — leave it
-            // Look one word further back: "a quick question?" / "the follow-up question?"
+            // A possessive directly before "question" is always a real noun phrase
+            // ("What was John's question?") — round 2.
+            if precedingWord.hasSuffix("'s") || precedingWord.hasSuffix("’s")
+                || precedingWord.hasSuffix("'") || precedingWord.hasSuffix("’") { continue }
+            // Look one word further back: "a quick question?" / "a follow-up question?"
             // put an adjective between the determiner and the noun, and collapsing there
             // deletes a real word (adversarial review 2026-07-15, round 1).
             let beforeRest = before.dropLast(precedingWord.count)
             let secondPreceding = String(
                 beforeRest.reversed().drop(while: { $0.isWhitespace })
-                    .prefix(while: { $0.isLetter || $0 == "'" }).reversed()
+                    .prefix(while: isWordChar).reversed()
             ).lowercased()
             if questionNounContext.contains(secondPreceding) { continue }
             result.replaceSubrange(range, with: "?")
@@ -461,7 +479,8 @@ public struct TextPostProcessor {
             ("kana", ",", [], [], false),
             ("kanna", ",", [], [], false),
             ("period", ".", ["of", "piece"],
-             ["transition", "grace", "grading", "trial", "notice", "probationary", "incubation", "menstrual", "cooling-off"], true),
+             ["transition", "grace", "grading", "trial", "notice", "probationary", "probation",
+              "incubation", "menstrual", "cooling-off", "billing", "waiting", "recovery"], true),
             ("colon", ":", ["cancer", "surgery", "cleanse", "polyp"],
              ["sigmoid", "transverse", "ascending", "descending"], true),
             ("dash", " —", ["of", "board", "cam"], [], true),
@@ -506,8 +525,13 @@ public struct TextPostProcessor {
                         // (": what about…", recording 2026-07-03-010745).
                         continue
                     }
+                    // Accept hyphens and both apostrophe forms so "cooling-off" is one
+                    // token — the hyphen used to stop this scan, making the hyphenated
+                    // literalPreceders unreachable (round 2).
                     let precedingWord = String(
-                        beforeTrimmed.reversed().prefix(while: { $0.isLetter || $0 == "'" }).reversed()
+                        beforeTrimmed.reversed()
+                            .prefix(while: { $0.isLetter || $0 == "'" || $0 == "’" || $0 == "-" })
+                            .reversed()
                     ).lowercased()
                     // Utterance-final articles stay convertible: the live capture
                     // "…and end with a comma." (recording 2026-04-29-022224) is a spoken

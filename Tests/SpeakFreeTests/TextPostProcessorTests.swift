@@ -901,4 +901,51 @@ final class TextPostProcessorTests: XCTestCase {
             TextPostProcessor.process("Things improved. Karma caught up with him.", hybrid: true),
             "Things improved. Karma caught up with him.")
     }
+
+    // MARK: - Adversarial review 2026-07-15 round 2
+
+    // 66. Hyphenated and curly-apostrophe tokens must not defeat the noun guards.
+    func testHybrid66_hyphenAndCurlyApostropheTokens() {
+        XCTAssertEqual(
+            TextPostProcessor.process("We observed a cooling-off period.", hybrid: true),
+            "We observed a cooling-off period.")
+        XCTAssertEqual(
+            TextPostProcessor.process("Can I ask a follow-up question?", hybrid: true),
+            "Can I ask a follow-up question?")
+        XCTAssertEqual(
+            TextPostProcessor.process("What was the student\u{2019}s question?", hybrid: true),
+            "What was the student\u{2019}s question?")
+    }
+
+    // 67. Possessive directly before "question" is a real noun phrase.
+    func testHybrid67_possessiveQuestionSurvives() {
+        XCTAssertEqual(
+            TextPostProcessor.process("What was John's question?", hybrid: true),
+            "What was John's question?")
+    }
+
+    // 68. literalPreceders round-2 additions.
+    func testHybrid68_billingPeriodSurvives() {
+        XCTAssertEqual(
+            TextPostProcessor.process("This covers the billing period.", hybrid: true),
+            "This covers the billing period.")
+    }
+
+    // 69. The punctuation-preceded contextReplace rules must honor the skipBefore
+    // guards ("Comma usage", "Colon cancer") instead of bypassing them.
+    func testHybrid69_contextReplaceHonorsSkipLists() {
+        XCTAssertEqual(
+            TextPostProcessor.process("We discussed punctuation. Comma usage varies.", hybrid: true),
+            "We discussed punctuation. Comma usage varies.")
+        XCTAssertEqual(
+            TextPostProcessor.process("He was screened. Colon cancer runs in the family.", hybrid: true),
+            "He was screened. Colon cancer runs in the family.")
+    }
+
+    // 69b. Guard sanity: the plain punctuation-preceded command still converts.
+    func testHybrid69b_contextReplaceStillConverts() {
+        XCTAssertEqual(
+            TextPostProcessor.process("first, comma second", hybrid: true),
+            "first, second")
+    }
 }
