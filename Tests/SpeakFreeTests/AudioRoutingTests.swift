@@ -19,6 +19,23 @@ final class AudioRoutingTests: XCTestCase {
         XCTAssertNil(AudioDeviceCatalog.device(withUID: "no-such-device-uid"))
     }
 
+    func testCachePopulatesOffMainAndServesLookups() {
+        // The cache is the only surface main-thread code may touch (2026-07-15 hang).
+        AudioDeviceCatalog.startCache()
+        let deadline = Date().addingTimeInterval(3)
+        while AudioDeviceCatalog.cachedInputDevices.isEmpty && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        // On a real Mac the cache fills; on a headless CI runner zero devices is legal.
+        // Either way the cached accessors must be non-blocking and consistent.
+        let devices = AudioDeviceCatalog.cachedInputDevices
+        XCTAssertNil(AudioDeviceCatalog.cachedDevice(withUID: "no-such-device-uid"))
+        if let builtIn = AudioDeviceCatalog.cachedBuiltInInput {
+            XCTAssertTrue(devices.contains(builtIn))
+            XCTAssertFalse(builtIn.isBluetooth, "a built-in mic is never Bluetooth")
+        }
+    }
+
     // MARK: - Contention detector
 
     func testDetectorStaysQuietBelowThreshold() {

@@ -112,6 +112,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         inserter = TextInserter()
         installGracefulTermination()
 
+        // Device catalog cache: the ONLY CoreAudio the main thread ever sees. Refreshes
+        // off-main at launch and on device changes; the menu rebuilds from the cache.
+        AudioDeviceCatalog.onCacheRefreshed = { [weak self] in self?.statusBar.buildMenu() }
+        AudioDeviceCatalog.startCache()
+
         // Multi-device AirPods contention: the detector throttles itself (max one
         // notice per hour) — surface it visibly when it fires.
         recorder.onContention = { message in
