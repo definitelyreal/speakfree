@@ -57,8 +57,15 @@ public struct TextPostProcessor {
         // "unreal. Kama have" → "unreal, have" — not "unreal. Have" (2026-07-14: the
         // period used to win the collision and turn a spoken comma into a fake
         // sentence break).
-        ("[.;]\\s*(?:kamala|[ck]omma|kana|kanna|kama|karma)(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("(?<=[,!?:])\\s*(?:kamala|[ck]omma|kana|kanna|kama|karma)(?:[.,!?;:]|(?=\\s|$))", ","),
+        // kamala/karma are REAL words that legitimately start sentences ("…ended. Kamala won."),
+        // so for them the punctuation break must appear on BOTH sides (". Kamala," — the
+        // dogfood 2026-07-02 garble shape). A following word instead of punctuation means a
+        // real sentence-initial use, and converting would delete the word (adversarial
+        // review 2026-07-15, round 1). The non-word family keeps the loose tail.
+        ("[.;]\\s*(?:[ck]omma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("[.;]\\s*(?:kamala|karma)[.,!?;:]", ","),
+        ("(?<=[,!?:])\\s*(?:[ck]omma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("(?<=[,!?:])\\s*(?:kamala|karma)[.,!?;:]", ","),
         ("(?<=[.,!?;:])\\s*period(?:[.,!?;:]|(?=\\s|$))", "."),
         ("(?<=[.,!?;:])\\s*colon(?:[.,!?;:]|(?=\\s|$))", ":"),
         ("(?<=[.,!?;:])\\s*dash(?:[.,!?;:]|(?=\\s|$))", " —"),
@@ -377,7 +384,7 @@ public struct TextPostProcessor {
     /// Words that mark "question?" as a real noun phrase rather than a half-converted
     /// spoken "question mark": determiners/possessives plus the "in question" idiom.
     private static let questionNounContext: Set<String> =
-        nounDeterminers.union(["that", "this", "these", "those", "in", "no", "any"])
+        nounDeterminers.union(["that", "this", "these", "those", "in", "no", "any", "another", "one"])
 
     /// Collapse "…question?" → "…?" when the engine itself converted the spoken word
     /// "mark" into "?" (leaving the word "question" behind). Skips noun usage:
@@ -395,6 +402,15 @@ public struct TextPostProcessor {
             ).lowercased()
             if questionNounContext.contains(precedingWord) { continue }
             if precedingWord.isEmpty { continue }  // "Question?" alone — leave it
+            // Look one word further back: "a quick question?" / "the follow-up question?"
+            // put an adjective between the determiner and the noun, and collapsing there
+            // deletes a real word (adversarial review 2026-07-15, round 1).
+            let beforeRest = before.dropLast(precedingWord.count)
+            let secondPreceding = String(
+                beforeRest.reversed().drop(while: { $0.isWhitespace })
+                    .prefix(while: { $0.isLetter || $0 == "'" }).reversed()
+            ).lowercased()
+            if questionNounContext.contains(secondPreceding) { continue }
             result.replaceSubrange(range, with: "?")
         }
         return result
@@ -434,18 +450,25 @@ public struct TextPostProcessor {
         var result = text
         // `guarded` = the word is a real English word, so position guards apply. The comma
         // garble family (komma/kana/kanna) are non-words and always convert.
-        let ambiguousWords: [(word: String, replacement: String, skipBefore: Set<String>, guarded: Bool)] = [
-            ("comma", ",", ["separated", "delimited", "splice", "operator", "issue", "issues", "problem", "problems", "key", "question", "thing", "things", "usage", "placement", "rule", "rules", "character"], true),
-            ("komma", ",", [], false),
-            ("kana", ",", [], false),
-            ("kanna", ",", [], false),
-            ("period", ".", ["of", "piece"], true),
-            ("colon", ":", ["cancer", "surgery", "cleanse", "polyp"], true),
-            ("dash", " —", ["of", "board", "cam"], true),
-            ("hyphen", "-", ["ated", "ation"], true),
+        // `literalPreceders` = words that mark the command word as a real noun regardless of
+        // position ("the Oxford comma.", "a transition period.") — the determiner guard can't
+        // see them because an adjective sits between the determiner and the noun.
+        let ambiguousWords: [(word: String, replacement: String, skipBefore: Set<String>,
+                              literalPreceders: Set<String>, guarded: Bool)] = [
+            ("comma", ",", ["separated", "delimited", "splice", "operator", "issue", "issues", "problem", "problems", "key", "question", "thing", "things", "usage", "placement", "rule", "rules", "character"],
+             ["oxford", "serial", "trailing", "inverted"], true),
+            ("komma", ",", [], [], false),
+            ("kana", ",", [], [], false),
+            ("kanna", ",", [], [], false),
+            ("period", ".", ["of", "piece"],
+             ["transition", "grace", "grading", "trial", "notice", "probationary", "incubation", "menstrual", "cooling-off"], true),
+            ("colon", ":", ["cancer", "surgery", "cleanse", "polyp"],
+             ["sigmoid", "transverse", "ascending", "descending"], true),
+            ("dash", " —", ["of", "board", "cam"], [], true),
+            ("hyphen", "-", ["ated", "ation"], [], true),
         ]
 
-        for (word, replacement, skipBefore, guarded) in ambiguousWords {
+        for (word, replacement, skipBefore, literalPreceders, guarded) in ambiguousWords {
             // Match the word as a standalone token (word boundaries on both sides)
             let pattern = "(?i)(?<=\\s|^)\(word)(?=\\s|$|[.,!?;:])"
             guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
@@ -461,22 +484,24 @@ public struct TextPostProcessor {
                 let nextWord = String(afterMatch.prefix(while: { $0.isLetter })).lowercased()
                 if skipBefore.contains(nextWord) { continue }
 
-                // Position guards for real-word commands. An utterance-FINAL command word is
-                // always converted ("…and end with a comma." → "…and end with a," — trailing
-                // commands are the most common spoken-punctuation use, and this position had
-                // no guards before). Utterance-final means nothing follows but one optional
-                // auto-punct char and whitespace — a digit or a following sentence does NOT
-                // count ("talk about your period. It hurts" is mid-utterance noun usage).
-                // Mid-utterance, apply the garble-signature checks.
+                // Position guards for real-word commands. Utterance-final means nothing
+                // follows but one optional auto-punct char and whitespace — a digit or a
+                // following sentence does NOT count ("talk about your period. It hurts" is
+                // mid-utterance noun usage). Trailing commands are the most common
+                // spoken-punctuation use ("…went to the store period"), so utterance-final
+                // still converts by default — but the determiner and literal-preceder guards
+                // apply in EVERY position: "I need to track my period." and "we discussed
+                // the Oxford comma." end utterances too, and converting there deletes a real
+                // word (adversarial review 2026-07-15, round 1).
                 let isUtteranceFinal: Bool = {
                     var rest = afterMatch
                     if let first = rest.first, ".,!?;:".contains(first) { rest = rest.dropFirst() }
                     return rest.allSatisfy { $0.isWhitespace }
                 }()
-                if guarded && !isUtteranceFinal {
+                if guarded {
                     let before = result[..<range.lowerBound]
                     let beforeTrimmed = before.reversed().drop(while: { $0.isWhitespace }).reversed()
-                    if beforeTrimmed.isEmpty {
+                    if beforeTrimmed.isEmpty && !isUtteranceFinal {
                         // Utterance-opening command with more words after it: garble signature
                         // (": what about…", recording 2026-07-03-010745).
                         continue
@@ -484,7 +509,16 @@ public struct TextPostProcessor {
                     let precedingWord = String(
                         beforeTrimmed.reversed().prefix(while: { $0.isLetter || $0 == "'" }).reversed()
                     ).lowercased()
-                    if nounDeterminers.contains(precedingWord) { continue }
+                    // Utterance-final articles stay convertible: the live capture
+                    // "…and end with a comma." (recording 2026-04-29-022224) is a spoken
+                    // command demo, and "a/an <command>" at the very end reads as command
+                    // far more often than noun. Possessives and "the" read as noun
+                    // ("track my period.") in every position.
+                    let finalGuard: Set<String> = isUtteranceFinal
+                        ? nounDeterminers.subtracting(["a", "an"])
+                        : nounDeterminers
+                    if finalGuard.contains(precedingWord) { continue }
+                    if literalPreceders.contains(precedingWord) { continue }
                 }
 
                 // If the next non-space character is whisper auto-punct, consume it —

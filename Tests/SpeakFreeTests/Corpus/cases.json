@@ -311,5 +311,68 @@
   "mode": "hybrid",
   "input": "The quark is a fundamental particle.",
   "expected": "The quark is a fundamental particle."
+ },
+ {
+  "name": "utterance-final-determiner-period-noun-survives",
+  "note": "Adversarial review 2026-07-15 R1: utterance-final position used to bypass the determiner guard, deleting the noun ('track my.'). Determiner guard now applies in every position.",
+  "mode": "hybrid",
+  "input": "I need to track my period.",
+  "expected": "I need to track my period."
+ },
+ {
+  "name": "utterance-final-oxford-comma-survives",
+  "note": "Adversarial review 2026-07-15 R1: 'the Oxford comma.' lost the noun ('the Oxford,'). literalPreceders guard (oxford/serial/trailing) marks noun usage the determiner guard can't see.",
+  "mode": "hybrid",
+  "input": "We discussed the Oxford comma.",
+  "expected": "We discussed the Oxford comma."
+ },
+ {
+  "name": "utterance-final-transition-period-survives",
+  "note": "Adversarial review 2026-07-15 R1: adjective between determiner and noun ('a transition period.') bypassed the determiner guard.",
+  "mode": "hybrid",
+  "input": "We are in a transition period.",
+  "expected": "We are in a transition period."
+ },
+ {
+  "name": "trailing-period-command-after-noun-still-converts",
+  "note": "Guard sanity: trailing spoken 'period' after an ordinary noun (no determiner directly before, not a literal-preceder) must keep converting.",
+  "mode": "hybrid",
+  "input": "I went to the store period",
+  "expected": "I went to the store."
+ },
+ {
+  "name": "adjective-question-not-collapsed",
+  "note": "Adversarial review 2026-07-15 R1: 'a quick question?' lost the word 'question' (half-converted-mark collapse looked only 1 word back). 2-word lookback added.",
+  "mode": "hybrid",
+  "input": "Can I ask a quick question?",
+  "expected": "Can I ask a quick question?"
+ },
+ {
+  "name": "another-question-not-collapsed",
+  "note": "Adversarial review 2026-07-15 R1: 'another'/'one' added to questionNounContext.",
+  "mode": "hybrid",
+  "input": "Can I ask another question?",
+  "expected": "Can I ask another question?"
+ },
+ {
+  "name": "sentence-initial-kamala-survives",
+  "note": "Adversarial review 2026-07-15 R1: '. Kamala spoke' was converted to ', spoke' deleting the name. Real-word homophones (kamala/karma) now need punctuation on BOTH sides (the garble shape '. Kamala,').",
+  "mode": "hybrid",
+  "input": "I met Harris. Kamala spoke about it.",
+  "expected": "I met Harris. Kamala spoke about it."
+ },
+ {
+  "name": "sentence-initial-karma-survives",
+  "note": "Adversarial review 2026-07-15 R1: same both-sides gate for 'karma'.",
+  "mode": "hybrid",
+  "input": "Things improved. Karma caught up with him.",
+  "expected": "Things improved. Karma caught up with him."
+ },
+ {
+  "name": "kamala-garble-both-sides-still-converts",
+  "note": "Guard sanity: the dogfood 2026-07-02 garble shape '. Kamala,' (punct on both sides) must still convert to a comma.",
+  "mode": "hybrid",
+  "input": "Hey. Kamala, where do you want to meet?",
+  "expected": "Hey, where do you want to meet?"
  }
 ]

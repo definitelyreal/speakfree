@@ -839,4 +839,66 @@ final class TextPostProcessorTests: XCTestCase {
             "He said, \" hello \"."
         )
     }
+
+    // MARK: - Adversarial review 2026-07-15 round 1 (word-deletion S1s)
+
+    // 61. Utterance-final noun after a determiner must survive — this position used to
+    // bypass the determiner guard entirely ("I need to track my." + fake punctuation).
+    func testHybrid61_utteranceFinalDeterminerNounSurvives() {
+        XCTAssertEqual(
+            TextPostProcessor.process("I need to track my period.", hybrid: true),
+            "I need to track my period.")
+        XCTAssertEqual(
+            TextPostProcessor.process("I need to track my period", hybrid: true),
+            "I need to track my period")
+    }
+
+    // 62. literalPreceders: adjective between determiner and noun defeats the determiner
+    // guard ("the Oxford comma.", "a transition period.").
+    func testHybrid62_literalPrecederNounSurvives() {
+        XCTAssertEqual(
+            TextPostProcessor.process("We discussed the Oxford comma.", hybrid: true),
+            "We discussed the Oxford comma.")
+        XCTAssertEqual(
+            TextPostProcessor.process("We are in a transition period.", hybrid: true),
+            "We are in a transition period.")
+    }
+
+    // 63. Guard sanity: ordinary trailing spoken "period" still converts.
+    func testHybrid63_trailingPeriodCommandStillConverts() {
+        XCTAssertEqual(
+            TextPostProcessor.process("I went to the store period", hybrid: true),
+            "I went to the store.")
+    }
+
+    // 64. "question?" collapse must not eat adjective/another/one-modified questions.
+    func testHybrid64_modifiedQuestionSurvives() {
+        XCTAssertEqual(
+            TextPostProcessor.process("Can I ask a quick question?", hybrid: true),
+            "Can I ask a quick question?")
+        XCTAssertEqual(
+            TextPostProcessor.process("Can I ask another question?", hybrid: true),
+            "Can I ask another question?")
+        XCTAssertEqual(
+            TextPostProcessor.process("Was that a stupid question?", hybrid: true),
+            "Was that a stupid question?")
+    }
+
+    // 64b. Guard sanity: the real half-converted-mark garble still collapses.
+    func testHybrid64b_halfConvertedQuestionStillCollapses() {
+        XCTAssertEqual(
+            TextPostProcessor.process("as they get shot at question?", hybrid: true),
+            "as they get shot at?")
+    }
+
+    // 65. Sentence-initial "Kamala"/"Karma" (real words, punctuation on ONE side only)
+    // must survive; the garble shape has punctuation on BOTH sides (". Kamala,").
+    func testHybrid65_sentenceInitialKamalaKarmaSurvive() {
+        XCTAssertEqual(
+            TextPostProcessor.process("I met Harris. Kamala spoke about it.", hybrid: true),
+            "I met Harris. Kamala spoke about it.")
+        XCTAssertEqual(
+            TextPostProcessor.process("Things improved. Karma caught up with him.", hybrid: true),
+            "Things improved. Karma caught up with him.")
+    }
 }
