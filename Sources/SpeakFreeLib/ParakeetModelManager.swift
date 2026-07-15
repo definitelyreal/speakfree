@@ -179,6 +179,15 @@ public final class ParakeetModelManager {
         let dir = AsrModels.defaultCacheDirectory(for: v)
         // Names must all be present first (also covers a wholly missing model dir).
         guard AsrModels.modelsExist(at: dir, version: v) else { return false }
+        // The vocab is required to decode; FluidAudio's existence check only confirms the file
+        // is present-by-name. An interrupted download can leave a 0-byte or truncated
+        // parakeet_vocab.json that passes existence yet makes loadFromCache throw. Treat a
+        // missing/empty/unparseable vocab as "not downloaded" so the visible download re-fetches it.
+        guard Self.parakeetVocabIsValid(inDir: dir) else {
+            DiagnosticLogger.shared.log(
+                "ParakeetModelManager: cache vocab missing/empty/unparseable — treating cache as incomplete")
+            return false
+        }
         let fm = FileManager.default
         guard
             let enumerator = fm.enumerator(
@@ -193,6 +202,23 @@ public final class ParakeetModelManager {
             if (size?.intValue ?? 0) <= 0 { return false }  // present but empty/missing → corrupt
         }
         return foundModel
+    }
+
+    /// Whether `parakeet_vocab.json` in `dir` exists, is non-empty, and parses as JSON.
+    /// FluidAudio's TDT models (both v2 and v3) name the vocab `parakeet_vocab.json`
+    /// (`ModelNames.Parakeet.vocabularyFile`); it is small (~18 KB v2 / ~150 KB v3), so a full
+    /// `JSONSerialization` parse per launch is cheap. `internal static` so it is unit-testable
+    /// against a temp directory without a real FluidAudio cache.
+    static func parakeetVocabIsValid(inDir dir: URL) -> Bool {
+        let vocab = dir.appendingPathComponent("parakeet_vocab.json")
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: vocab.path),
+            let size = (try? fm.attributesOfItem(atPath: vocab.path))?[.size] as? NSNumber,
+            size.intValue > 0,
+            let data = try? Data(contentsOf: vocab),
+            (try? JSONSerialization.jsonObject(with: data)) != nil
+        else { return false }
+        return true
     }
 
     /// Removes any `.mlmodelc` bundle in the cache whose compiled `coremldata.bin` is missing or

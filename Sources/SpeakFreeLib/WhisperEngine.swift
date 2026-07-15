@@ -550,8 +550,12 @@ class WhisperEngine: TranscriptionEngine {
             }
         }
 
-        // Convert window indices back to sample indices, with safety buffers
-        let startSample = max(0, startWindow * (windowSize / 2) - windowSize)
+        // Convert window indices back to sample indices, with safety buffers. The LEADING
+        // buffer is 3 windows (was 1): a soft-onset first word (a quiet consonant, or a word
+        // spoken before the speaker leans in) can sit just under the adaptive threshold, and a
+        // 1-window pad clipped it. 3 windows (~300ms) protects the attack without re-admitting
+        // real silence (the 80% over-trim guard below still bounds worst case).
+        let startSample = max(0, startWindow * (windowSize / 2) - 3 * windowSize)
         let endSample   = min(samples.count, (endWindow + 1) * (windowSize / 2) + windowSize * 2)
 
         if startSample >= endSample { return samples }
@@ -576,9 +580,13 @@ class WhisperEngine: TranscriptionEngine {
 
     func startMemoryPressureMonitoring() {
         memoryPressureSource?.cancel()
+        // Run the handler on engineQueue (NOT .main) so its reads of lastTranscriptionTime /
+        // keepModelLoaded are serialized with the transcribe machinery that writes them (both
+        // now on engineQueue). The handler only reads state, logs, and dispatches the unload —
+        // no main-thread/AppKit work — so engineQueue is safe.
         let source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.warning, .critical],
-            queue: .main
+            queue: engineQueue
         )
         source.setEventHandler { [weak self] in
             guard let self = self else { return }

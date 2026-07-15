@@ -151,17 +151,32 @@ final class SecondaryRecorder {
         lock.unlock()
     }
 
-    /// Stop capturing and return whatever was collected (empty when start failed).
-    @discardableResult
-    func stop() -> [Float] {
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
-        engine = nil
-        converter = nil
+    /// Return whatever was captured so far and clear the buffer. Cheap and lock-guarded —
+    /// does NO CoreAudio work, so it is safe to call from the main thread (the caller reads
+    /// the comparison track here, then tears the HAL engine down off main via `teardown()`).
+    func collectSamples() -> [Float] {
         lock.lock()
         let out = samples
         samples = []
         lock.unlock()
         return out
+    }
+
+    /// Tear down the capture engine. CoreAudio (removeTap/stop) — must run OFF the main
+    /// thread; a stuck coreaudiod would otherwise wedge the main run loop.
+    func teardown() {
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        engine = nil
+        converter = nil
+    }
+
+    /// Stop capturing and return whatever was collected (empty when start failed).
+    /// Convenience for callers already off the main thread; splits into `teardown()` +
+    /// `collectSamples()` for the main-thread path (see AudioRecorder.stopRecording).
+    @discardableResult
+    func stop() -> [Float] {
+        teardown()
+        return collectSamples()
     }
 }
