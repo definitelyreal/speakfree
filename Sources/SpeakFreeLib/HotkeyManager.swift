@@ -252,13 +252,32 @@ class HotkeyManager {
     // MARK: - NSEvent global monitor (non-modifier keys)
 
     private func startGlobalMonitor() {
-        let mask: NSEvent.EventTypeMask = [.keyDown, .keyUp]
+        // .flagsChanged is required for the modifier-only fallback (I5): when the CGEventTap can't
+        // be created, a fn hotkey arrives here as flagsChanged, never keyDown/keyUp. Without it the
+        // fallback monitor is silently dead for fn even though it looks installed.
+        let mask: NSEvent.EventTypeMask = [.keyDown, .keyUp, .flagsChanged]
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             self?.handleNSEvent(event)
         }
     }
 
+    /// The fn transition implied by a flagsChanged event in the global-monitor fallback, given the
+    /// currently-observed fn state and whether we already consider the modifier pressed. Mirrors the
+    /// CGEventTap logic (handleCGEvent) so the fallback path behaves identically. Pure so it is
+    /// unit-testable without posting real flagsChanged events (I5).
+    enum FnTransition: Equatable { case keyDown, keyUp, none }
+
+    static func fnTransition(fnDown: Bool, modifierPressed: Bool) -> FnTransition {
+        if fnDown && !modifierPressed { return .keyDown }
+        if !fnDown && modifierPressed { return .keyUp }
+        return .none
+    }
+
     private func handleNSEvent(_ event: NSEvent) {
+        if event.type == .flagsChanged {
+            handleModifierFlagsChanged(event)
+            return
+        }
         guard event.keyCode == keyCode else { return }
         if requiredModifiers != 0 {
             let currentMods = UInt64(event.modifierFlags.rawValue) & 0x00FF0000
@@ -268,6 +287,29 @@ class HotkeyManager {
             onKeyDown?()
         } else if event.type == .keyUp {
             onKeyUp?()
+        }
+    }
+
+    /// Fallback fn handling for the global monitor (I5). Only relevant for modifier-only hotkeys —
+    /// non-modifier keys already come through as keyDown/keyUp and ignore flagsChanged.
+    private func handleModifierFlagsChanged(_ event: NSEvent) {
+        guard isModifierOnlyKey(keyCode), event.keyCode == keyCode else { return }
+        let fnDown = event.modifierFlags.contains(.function)
+        switch Self.fnTransition(fnDown: fnDown, modifierPressed: modifierPressed) {
+        case .keyDown:
+            // Gate required modifiers only on the down transition (mirrors handleCGEvent); on
+            // release the modifiers are already gone.
+            if requiredModifiers != 0 {
+                let currentMods = UInt64(event.modifierFlags.rawValue) & 0x00FF0000
+                guard currentMods & requiredModifiers == requiredModifiers else { return }
+            }
+            modifierPressed = true
+            onKeyDown?()
+        case .keyUp:
+            modifierPressed = false
+            onKeyUp?()
+        case .none:
+            break
         }
     }
 

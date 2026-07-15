@@ -185,9 +185,19 @@ class TextInserter {
                             axInserted = directAXInsert(element, text)
                         } else {
                             var settable: DarwinBoolean = false
-                            axInserted = AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success
+                            let isSettable = AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success
                                 && settable.boolValue
-                                && AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success
+                            if isSettable {
+                                // I3: bound this AX round-trip at 2s. The system-wide messaging
+                                // timeout is 0.5s (AppDelegate.setupInner), which can fail a
+                                // slow-but-committing SetAttributeValue — the .success is lost, we
+                                // fall through to typeViaKeyEvents, and the text the set DID write
+                                // ends up duplicated. A per-element 2s bound shrinks that window.
+                                AXUIElementSetMessagingTimeout(element, 2.0)
+                                axInserted = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success
+                            } else {
+                                axInserted = false
+                            }
                         }
                         if axInserted { return }
 
@@ -196,8 +206,14 @@ class TextInserter {
                         // refocused: focus can move during the 150ms settle (TOCTOU), and a paste
                         // would then land in the wrong app. If it moved, conceal-copy the text and
                         // notify instead of pasting (AX-C).
-                        let stillFocused = self.currentFocusedElement().map { CFEqual($0, element) } ?? false
-                        if !stillFocused {
+                        //
+                        // I2: conceal ONLY when the re-query affirmatively returns a DIFFERENT
+                        // element. A nil result means the AX query couldn't determine focus (the
+                        // 0.5s process cap or a flaky WindowServer read), NOT that focus moved — the
+                        // old `?? false` treated nil as "moved" and concealed a paste that should
+                        // have proceeded, booking a phantom success. nil now falls through to paste.
+                        let focusMovedAway = self.currentFocusedElement().map { !CFEqual($0, element) } ?? false
+                        if focusMovedAway {
                             DiagnosticLogger.shared.log("TextInserter: focus moved during settle — concealed clipboard fallback instead of blind paste")
                             self.secureInputClipboardFallback(text)
                             onFocusLost?()
@@ -330,6 +346,11 @@ class TextInserter {
               settable.boolValue else {
             return false
         }
+
+        // I3: bound this AX round-trip at 2s (see the note in insert()). Without it the 0.5s
+        // system-wide cap can prematurely fail a set that actually commits, so this path returns
+        // false, typeViaKeyEvents runs, and the text ends up typed twice.
+        AXUIElementSetMessagingTimeout(element, 2.0)
 
         // Set the selected text — this replaces current selection or inserts at cursor
         let result = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
