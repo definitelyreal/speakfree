@@ -140,8 +140,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
         micHeader.isEnabled = false
         menu.addItem(micHeader)
 
+        // Cache-only reads: menu builds happen on the main thread on every state flip,
+        // and live CoreAudio reads here are what wedged the app on 2026-07-15.
         let pinnedUID = (NSApplication.shared.delegate as? AppDelegate)?.currentInputDeviceUID()
-        let defaultName = AudioRecorder.defaultInputDeviceName() ?? "System Default"
+        let defaultName = AudioDeviceCatalog.cachedDefaultInput?.name ?? "System Default"
         let defaultTarget = MenuItemTarget {
             (NSApplication.shared.delegate as? AppDelegate)?.selectInputDevice(uid: nil)
         }
@@ -152,7 +154,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         defaultItem.state = pinnedUID == nil ? .on : .off
         menu.addItem(defaultItem)
 
-        for device in AudioDeviceCatalog.inputDevices() {
+        for device in AudioDeviceCatalog.cachedInputDevices {
             let uid = device.uid
             let target = MenuItemTarget {
                 (NSApplication.shared.delegate as? AppDelegate)?.selectInputDevice(uid: uid)

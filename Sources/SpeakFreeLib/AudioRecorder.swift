@@ -152,11 +152,13 @@ class AudioRecorder {
     private(set) var lastSecondarySamples: [Float] = []
 
     private func dualEngagedNow() -> Bool {
+        // Cache-only: this runs inside startEngine (main thread via the rebuild path);
+        // live HAL reads here contributed to the 2026-07-15 main-thread wedge.
         DualCapture.shouldEngage(
             flagOn: dualCaptureEnabled,
             pinnedUID: pinnedInputDeviceUID,
-            defaultIsBluetooth: AudioDeviceCatalog.defaultInputIsBluetooth(),
-            hasBuiltIn: AudioDeviceCatalog.builtInInputDevice() != nil)
+            defaultIsBluetooth: AudioDeviceCatalog.cachedDefaultIsBluetooth(),
+            hasBuiltIn: AudioDeviceCatalog.cachedBuiltInInput != nil)
     }
 
     /// Change the capture device and rebuild the engine onto it.
@@ -171,10 +173,10 @@ class AudioRecorder {
     /// Name of the device the recorder is actually capturing from (the pin when set and
     /// present, else the system default). Logged into each recording's meta sidecar.
     func currentCaptureDeviceName() -> String? {
-        if let uid = pinnedInputDeviceUID, let dev = AudioDeviceCatalog.device(withUID: uid) {
+        if let uid = pinnedInputDeviceUID, let dev = AudioDeviceCatalog.cachedDevice(withUID: uid) {
             return dev.name
         }
-        return Self.defaultInputDeviceName()
+        return AudioDeviceCatalog.cachedDefaultInput?.name
     }
 
     private var deviceChangeObserver: NSObjectProtocol?
@@ -253,7 +255,7 @@ class AudioRecorder {
     /// Call from any disruption site (device change, engine death, buffer stall).
     /// Only counts while the capture path is Bluetooth — built-in mics don't fight.
     private func noteDisruption() {
-        guard AudioDeviceCatalog.defaultInputIsBluetooth() else { return }
+        guard AudioDeviceCatalog.cachedDefaultIsBluetooth() else { return }
         if contention.recordDisruption(at: Date()) {
             DiagnosticLogger.shared.log("Contention detected: \(ContentionDetector.noticeText)")
             onContention?(ContentionDetector.noticeText)
@@ -347,9 +349,9 @@ class AudioRecorder {
         // always-on engine to the built-in mic implicitly (Bluetooth stays released
         // until a recording actually starts).
         let effectivePin = pinnedInputDeviceUID
-            ?? (dualEngagedNow() ? AudioDeviceCatalog.builtInInputDevice()?.uid : nil)
+            ?? (dualEngagedNow() ? AudioDeviceCatalog.cachedBuiltInInput?.uid : nil)
         if let uid = effectivePin {
-            if let dev = AudioDeviceCatalog.device(withUID: uid), let unit = inputNode.audioUnit {
+            if let dev = AudioDeviceCatalog.cachedDevice(withUID: uid), let unit = inputNode.audioUnit {
                 var deviceID = dev.id
                 let status = AudioUnitSetProperty(
                     unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
@@ -505,7 +507,7 @@ class AudioRecorder {
         stateLock.unlock()
 
         print("AudioRecorder: recording started, pre-roll: \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms)")
-        let device = Self.defaultInputDeviceName() ?? "unknown"
+        let device = currentCaptureDeviceName() ?? "unknown"
         DiagnosticLogger.shared.log("AudioRecorder: recording started, pre-roll \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms), input device: \(device)")
 
         // Write pre-roll to WAV file (async, flag is already set so tap writes new audio too)
@@ -520,7 +522,7 @@ class AudioRecorder {
 
         // Dual capture: open the Bluetooth comparison stream for this recording only.
         lastSecondarySamples = []
-        if dualEngagedNow(), let bt = AudioDeviceCatalog.defaultInputDevice(), !bt.isBuiltIn {
+        if dualEngagedNow(), let bt = AudioDeviceCatalog.cachedDefaultInput, !bt.isBuiltIn {
             _ = secondaryRecorder.start(device: bt)
         }
     }

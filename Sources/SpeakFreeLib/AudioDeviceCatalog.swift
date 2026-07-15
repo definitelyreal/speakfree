@@ -8,6 +8,7 @@ public struct AudioInputDevice: Equatable {
     public let uid: String
     public let name: String
     public let isBuiltIn: Bool
+    public let isBluetooth: Bool
 }
 
 /// CoreAudio input-device enumeration for the microphone selector and (future)
@@ -15,14 +16,85 @@ public struct AudioInputDevice: Equatable {
 /// AudioRecorder via the input unit's current-device property.
 public enum AudioDeviceCatalog {
 
+    // MARK: - Cached snapshot (the ONLY surface main-thread code may touch)
+    //
+    // 2026-07-15 hang postmortem: the menu-bar selector enumerated devices LIVE on the
+    // main thread on every menu build, and CoreAudio HAL property reads block on
+    // coreaudiod — when the daemon wedged (virtual Splashtop/Zoom devices in the mix),
+    // the main thread hung inside a status-bar click, and because speakfree holds an
+    // active keyboard event tap, typing died system-wide. Live HAL access is therefore
+    // confined to the background refresh below; everything else reads the cache.
+
+    private static let refreshQueue = DispatchQueue(label: "com.speakfree.devicecatalog", qos: .utility)
+    private static let cacheLock = NSLock()
+    private static var _cachedDevices: [AudioInputDevice] = []
+    private static var _cachedDefault: AudioInputDevice?
+    /// Called on main after every cache refresh (AppDelegate rebuilds the menu).
+    public static var onCacheRefreshed: (() -> Void)?
+
+    public static var cachedInputDevices: [AudioInputDevice] {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        return _cachedDevices
+    }
+
+    public static var cachedDefaultInput: AudioInputDevice? {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        return _cachedDefault
+    }
+
+    public static func cachedDevice(withUID uid: String) -> AudioInputDevice? {
+        cachedInputDevices.first { $0.uid == uid }
+    }
+
+    public static var cachedBuiltInInput: AudioInputDevice? {
+        cachedInputDevices.first { $0.isBuiltIn }
+    }
+
+    public static func cachedDefaultIsBluetooth() -> Bool {
+        cachedDefaultInput?.isBluetooth ?? false
+    }
+
+    /// Start the background cache: initial refresh plus listeners for device-list and
+    /// default-input changes. Call once, from any thread; never blocks the caller.
+    public static func startCache() {
+        refreshQueue.async { refreshCacheNow() }
+        var devicesAddr = address(kAudioHardwarePropertyDevices)
+        var defaultAddr = address(kAudioHardwarePropertyDefaultInputDevice)
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &devicesAddr, refreshQueue) { _, _ in
+            refreshCacheNow()
+        }
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &defaultAddr, refreshQueue) { _, _ in
+            refreshCacheNow()
+        }
+    }
+
+    /// Live HAL read + cache swap. Runs ONLY on refreshQueue.
+    private static func refreshCacheNow() {
+        let devices = inputDevices()
+        let def = defaultInputDevice()
+        cacheLock.lock()
+        _cachedDevices = devices
+        _cachedDefault = def
+        cacheLock.unlock()
+        DispatchQueue.main.async { onCacheRefreshed?() }
+    }
+
+    // MARK: - Live enumeration (background/refresh use only — blocks on coreaudiod)
+
     public static func inputDevices() -> [AudioInputDevice] {
         allDeviceIDs().compactMap { id in
             guard inputChannelCount(of: id) > 0,
                   let uid = stringProperty(id, kAudioDevicePropertyDeviceUID),
                   let name = stringProperty(id, kAudioDevicePropertyDeviceNameCFString)
             else { return nil }
-            return AudioInputDevice(id: id, uid: uid, name: name,
-                                    isBuiltIn: transportType(of: id) == kAudioDeviceTransportTypeBuiltIn)
+            let transport = transportType(of: id)
+            return AudioInputDevice(
+                id: id, uid: uid, name: name,
+                isBuiltIn: transport == kAudioDeviceTransportTypeBuiltIn,
+                isBluetooth: transport == kAudioDeviceTransportTypeBluetooth
+                    || transport == kAudioDeviceTransportTypeBluetoothLE)
         }
     }
 
