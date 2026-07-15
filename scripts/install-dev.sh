@@ -32,7 +32,21 @@ bash scripts/bundle-app.sh "$BINARY" "$TMP_APP" dev
 
 echo "Stopping existing speakfree..."
 pkill -x speakfree 2>/dev/null || true
-sleep 0.5
+
+# The app defers termination while a dictation is in flight, so a fixed sleep
+# isn't enough — poll until the process actually exits (up to ~20s, 0.5s
+# interval) before trashing/copying the bundle underneath it.
+tries=0
+max_tries=40  # 40 * 0.5s = 20s
+while pgrep -x speakfree >/dev/null 2>&1 && [ "$tries" -lt "$max_tries" ]; do
+    sleep 0.5
+    tries=$((tries + 1))
+done
+if pgrep -x speakfree >/dev/null 2>&1; then
+    echo "Warning: speakfree still running after ~20s wait; force-killing..."
+    pkill -9 -x speakfree 2>/dev/null || true
+    sleep 1
+fi
 
 echo "Removing old install (trash, not in-place mutation — see CLAUDE.md)..."
 if [ -d "$APP" ]; then

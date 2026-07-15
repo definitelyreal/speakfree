@@ -55,7 +55,8 @@ keycode_to_name() {
 }
 
 name_to_keycode() {
-    local name="${1,,}"
+    local name
+    name="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
     case "$name" in
         a) echo 0 ;; s) echo 1 ;; d) echo 2 ;; f) echo 3 ;;
         h) echo 4 ;; g) echo 5 ;; z) echo 6 ;; x) echo 7 ;;
@@ -86,7 +87,7 @@ parse_hotkey_input() {
     local input="$1"
     local IFS='+' parts
     read -ra parts <<< "$input"
-    local key="${parts[-1]}"
+    local key="${parts[$((${#parts[@]}-1))]}"
     local mods=()
     for ((i=0; i<${#parts[@]}-1; i++)); do
         mods+=("$(echo "${parts[$i]}" | tr -d ' ' | tr '[:upper:]' '[:lower:]')")
@@ -126,6 +127,7 @@ cur_engine=$(read_config engine "")
 cur_parakeet_model=$(read_config parakeetModel "")
 cur_remember_words=$(read_config rememberWords "")
 cur_screen_context=$(read_config screenContext "")
+cur_max_recordings_confirmed=$(read_config maxRecordingsUserConfirmed "")
 
 # Model
 echo ""
@@ -236,6 +238,7 @@ add_preserved_string engine "$cur_engine"
 add_preserved_string parakeetModel "$cur_parakeet_model"
 add_preserved_bool rememberWords "$cur_remember_words"
 add_preserved_bool screenContext "$cur_screen_context"
+add_preserved_bool maxRecordingsUserConfirmed "$cur_max_recordings_confirmed"
 
 # Write config
 mkdir -p "$(dirname "$CONFIG_FILE")"
