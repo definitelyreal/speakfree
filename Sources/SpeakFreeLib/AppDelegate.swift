@@ -69,6 +69,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // Graceful SIGTERM (2026-07-14): a reinstall/kill must never eat an in-flight
     // dictation. The source is retained for process lifetime.
     private var sigtermSource: DispatchSourceSignal?
+    // Tail of the last successful insertion (2026-07-15): feeds the cursor-context
+    // fallback for AX-opaque editors. Main-only.
+    private var lastInsertionTail: String?
+    private var lastInsertionBundleID: String?
+    private var lastInsertionAt: Date?
 
     // Adaptive post-buffer (T2.1): poll trailing audio after key release and finalize as soon as
     // ~150ms of trailing silence is observed, hard-capped at 300ms (never worse than the old flat
@@ -944,6 +949,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
         recordingSourceElement = capturedElement
         recordingContextText = capturedContext
+
+        // Electron editors (VS Code) expose no AXValue — fall back to the tail of our
+        // own last insertion when it plausibly still sits before the cursor, so the
+        // mid-sentence-lowercase and prepend-space features keep working there.
+        if recordingContextText == nil {
+            let fallback = FinalizePipeline.fallbackCursorContext(
+                lastInsertedTail: lastInsertionTail,
+                lastInsertedBundleID: lastInsertionBundleID,
+                lastInsertedAt: lastInsertionAt,
+                frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                now: Date())
+            if let fallback {
+                recordingContextText = fallback
+                DiagnosticLogger.shared.log(
+                    "captureFocusedElement: AX gave no context — using tail of last insertion (\(fallback.count) chars)")
+            }
+        }
     }
 
     /// Reads up to 500 characters before the cursor without changing selection or focus.
@@ -1349,6 +1371,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                                 }
                             }
                         })
+                        if pasted {
+                            // Remember what now sits before the cursor — the context
+                            // fallback for AX-opaque editors (VS Code) reads this on
+                            // the next recording start. Chain onto the context THIS
+                            // dictation used, so back-to-back dictations accumulate
+                            // ("…weird," + " I think…") instead of resetting.
+                            self.lastInsertionTail =
+                                String(((capturedInputText ?? "") + insertText).suffix(500))
+                            self.lastInsertionBundleID =
+                                NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                            self.lastInsertionAt = Date()
+                        }
                         if pasted {
                             let elapsed = CFAbsoluteTimeGetCurrent() - stopTime
                             DiagnosticLogger.shared.log("Transcription complete: \(String(format: "%.2f", elapsed))s from key-release to text-inserted, \(text.count) chars")

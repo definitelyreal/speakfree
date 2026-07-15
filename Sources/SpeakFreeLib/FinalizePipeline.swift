@@ -100,6 +100,29 @@ public enum FinalizePipeline {
         prependSpace ? " " + text : text
     }
 
+    /// Cursor-context fallback for AX-opaque editors (2026-07-15). Electron apps
+    /// (VS Code) expose no AXValue, so the mid-sentence-lowercase and prepend-space
+    /// features silently died there. When AX yields nothing but the user is still in
+    /// the SAME app within `window` seconds of speakfree's own last insertion, the
+    /// tail of what was just typed IS the text before the cursor. The tight window
+    /// bounds the risk of the user having moved the cursor in between.
+    public static func fallbackCursorContext(
+        lastInsertedTail: String?,
+        lastInsertedBundleID: String?,
+        lastInsertedAt: Date?,
+        frontmostBundleID: String?,
+        now: Date,
+        window: TimeInterval = 15
+    ) -> String? {
+        guard let tail = lastInsertedTail, !tail.isEmpty,
+              let at = lastInsertedAt,
+              now.timeIntervalSince(at) >= 0,
+              now.timeIntervalSince(at) <= window,
+              let front = frontmostBundleID,
+              front == lastInsertedBundleID else { return nil }
+        return tail
+    }
+
     /// Run the finalize core.
     ///
     /// - Parameters:
