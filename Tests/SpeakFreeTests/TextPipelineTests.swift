@@ -501,4 +501,35 @@ final class TextPipelineTests: XCTestCase {
             TextPipeline.collapseBoundaryDuplicateWord("It is allowed. Should Should be"),
             "It is allowed. Should Should be")
     }
+
+    // MARK: - Adversarial review 2026-07-15 round 1: seam signature is directional
+
+    func test_collapseBoundaryDup_capitonymPairSurvives() {
+        // Capitalized→lowercase is NOT the seam shape (window 2 re-capitalizes, so seam
+        // dups are always lowercase→Capitalized). "May may", "Polish polish", "Mark mark"
+        // are legitimate English and used to be eaten.
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("I think May may work for the meeting"),
+            "I think May may work for the meeting")
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("the Polish polish their boots"),
+            "the Polish polish their boots")
+    }
+
+    func test_collapseBoundaryDup_shortEmphasisPairSurvives() {
+        // <3 letters: "no No, keep it" (emphasis restart) and "it IT" (acronym) survive.
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("I said no No, keep the original"),
+            "I said no No, keep the original")
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("send it IT will handle the rest"),
+            "send it IT will handle the rest")
+    }
+
+    func test_collapseBoundaryDup_seamShapeStillCollapses() {
+        // Guard sanity: the real seam shape (lowercase→Capitalized, ≥3 letters) collapses.
+        XCTAssertEqual(
+            TextPipeline.collapseBoundaryDuplicateWord("the settings should Should update"),
+            "the settings should update")
+    }
 }

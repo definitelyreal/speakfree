@@ -302,8 +302,16 @@ public enum TextPipeline {
             let sepLen = b.location - sepStart
             let sep = ns.substring(with: NSRange(location: sepStart, length: sepLen))
             let wa = ns.substring(with: a), wb = ns.substring(with: b)
+            // Seam signature is DIRECTIONAL: window 1 emits the word in natural (lowercase)
+            // case, the SOS-primed window 2 re-emits it Capitalized — "should Should".
+            // Requiring lowercase→Capitalized plus ≥3 letters spares legitimate adjacent
+            // case-variants: capitonyms ("May may work", "the Polish polish"), emphasis
+            // restarts ("no No, keep it"), and acronym pairs ("send it IT") — all of which
+            // this collapse used to eat (adversarial review 2026-07-15, round 1).
             if sepLen > 0, sep.allSatisfy({ $0 == " " || $0 == "\t" }),
-               wa.lowercased() == wb.lowercased(), wa != wb {
+               wa.lowercased() == wb.lowercased(), wa != wb,
+               wa.count >= 3,
+               wa.first?.isLowercase == true, wb.first?.isUppercase == true {
                 dropRanges.append(NSRange(location: sepStart, length: sepLen + b.length))
                 i += 2   // consume the dropped copy so chains don't cascade
             } else {
