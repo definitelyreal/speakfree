@@ -522,20 +522,30 @@ final class LocalAPIServer {
     /// Directory where in-flight upload audio is staged before decode.
     static var tmpAPIDir: URL { Config.configDir.appendingPathComponent("tmp/api") }
 
-    /// NW-A: remove ALL files left in tmp/api. Called at server start (nothing is in flight
-    /// then), so any residue is orphaned upload audio from a crash mid-transcription. Returns
-    /// the count swept. Internal + static so it's unit-testable without a live socket.
+    /// NW-A / P4: remove STALE files left in tmp/api (last-modified more than `maxAge` ago).
+    /// Called at server start. The naive "delete everything" version deleted another instance's
+    /// in-flight upload: a Settings-save restart re-enters start() while a concurrent
+    /// transcription (or a second instance sharing the config dir) still has its upload staged
+    /// here. A legitimate upload+decode completes well within an hour, so anything older than
+    /// that is genuinely orphaned crash residue and safe to remove. Returns the count swept.
+    /// Internal + static (with an injectable age) so it's unit-testable without a live socket.
     @discardableResult
-    static func sweepTmpAPI() -> Int {
+    static func sweepTmpAPI(olderThan maxAge: TimeInterval = 3600) -> Int {
         let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: tmpAPIDir,
-                                                      includingPropertiesForKeys: nil) else { return 0 }
+        guard let files = try? fm.contentsOfDirectory(
+            at: tmpAPIDir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return 0 }
+        let now = Date()
         var swept = 0
         for file in files {
+            let mtime = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            // Only sweep files whose mtime is older than the cutoff. A missing mtime (unreadable
+            // orphan) falls toward cleanup.
+            if let mtime = mtime, now.timeIntervalSince(mtime) < maxAge { continue }
             if (try? fm.removeItem(at: file)) != nil { swept += 1 }
         }
         if swept > 0 {
-            DiagnosticLogger.shared.log("LocalAPI: swept \(swept) leftover temp file(s) from \(tmpAPIDir.path)")
+            DiagnosticLogger.shared.log("LocalAPI: swept \(swept) stale temp file(s) from \(tmpAPIDir.path)")
         }
         return swept
     }

@@ -107,8 +107,13 @@ final class SecondaryRecorder {
                 "SecondaryRecorder: \(device.name) format not ready — skipping dual capture")
             return false
         }
+        // P5: reset the shared buffer under the lock. `samples` is mutated from the audio-thread
+        // `append` and read/cleared from `collectSamples` on main; an unlocked `samples = []` here
+        // is a real Array race against either. `converter` is reset alongside it for coherence.
+        lock.lock()
         converter = conv
         samples = []
+        lock.unlock()
 
         var tapErr: NSError?
         let tapOK = CTryCatch({

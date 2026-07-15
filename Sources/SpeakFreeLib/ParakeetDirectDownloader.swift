@@ -108,12 +108,29 @@ final class ParakeetDirectDownloader: NSObject, @unchecked Sendable {
             try Task.checkCancellation()
             let dest = cacheDir.appendingPathComponent(file.path)
 
-            // Skip a file already present at the correct size (resume / re-run is free).
+            // Skip a file already present at the correct size (resume / re-run is free) — but a
+            // size match alone can't prove integrity for an LFS weight. P7: when we know the file's
+            // SHA256 (its HF `oid`), verify it before trusting the on-disk copy; a same-size but
+            // corrupt/tampered/truncated-then-repadded weight would otherwise be skipped forever
+            // (FluidAudio's existence check never re-hashes it). On mismatch (or an unreadable file
+            // we can't hash), delete and fall through to a fresh download — a rare path, cost fine.
+            // No oid (small non-LFS file) → the size match is all HF gives us, so skip as before.
             if let existing = try? fm.attributesOfItem(atPath: dest.path)[.size] as? NSNumber,
                 existing.int64Value == file.size, file.size > 0 {
-                completedBytes += file.size
-                progress(completedBytes, totalBytes)
-                continue
+                var hashOK = true
+                if let oid = file.oid {
+                    let actual = (try? Self.sha256Hex(ofFileAt: dest))?.lowercased()
+                    hashOK = (actual == oid.lowercased())
+                }
+                if hashOK {
+                    completedBytes += file.size
+                    progress(completedBytes, totalBytes)
+                    continue
+                }
+                DiagnosticLogger.shared.log(
+                    "ParakeetDirectDownloader: existing \(file.path) matched size but FAILED SHA256 "
+                        + "— deleting and redownloading")
+                try? fm.removeItem(at: dest)
             }
 
             DiagnosticLogger.shared.log(

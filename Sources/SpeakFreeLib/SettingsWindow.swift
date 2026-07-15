@@ -6,6 +6,13 @@ import SwiftUI
 class SettingsWindowController: NSWindowController {
     private static var shared: SettingsWindowController?
 
+    /// P2: whether the Settings window is currently on-screen. External config writers
+    /// (recordings notice, menu-bar mic selector) use this to know they must re-sync the
+    /// cached view model from disk so its next save can't overlay a stale snapshot.
+    static var isWindowVisible: Bool {
+        shared?.window?.isVisible == true
+    }
+
     static func show(viewModel: SettingsViewModel) {
         // PR-B: the view model is long-lived and cached by AppDelegate. If the recordings
         // notice (or anything else) changed config on disk while the window was closed, the

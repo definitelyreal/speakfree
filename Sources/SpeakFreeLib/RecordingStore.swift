@@ -17,6 +17,14 @@ public class RecordingStore {
 
     static let filePrefix = "recording-"
     static let fileExtension = "wav"
+
+    /// P8: serializes the three mutating operations that otherwise race each other —
+    /// `finishRecording` (writes wav + sidecars), `deleteAllRecordings`, and `prune`. Without it
+    /// a "Delete All" from Settings can interleave with a dictation's finalize (TOCTOU: the
+    /// fileExists guard passes, another thread deletes the wav, then the sidecar writes resurrect
+    /// an orphan) and two concurrent prunes can double-remove the same file. Static because all
+    /// three operations are static. The read-only listing/count helpers stay un-locked.
+    private static let mutationLock = NSLock()
     static var sentinelFile: URL {
         Config.configDir.appendingPathComponent(".recording-in-progress.json")
     }
@@ -198,6 +206,8 @@ public class RecordingStore {
 
     public static func prune(maxCount: Int) {
         guard maxCount > 0 else { return }
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
         let recordings = listRecordings()
         guard recordings.count > maxCount else { return }
 
@@ -239,6 +249,8 @@ public class RecordingStore {
     /// `keep: false` deletes the wav and writes no sidecars — nothing persists.
     public static func finishRecording(audioURL: URL, keep: Bool,
                                        raw: String, text: String, meta: RecordingMeta) {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
         if keep {
             // PR-C: a concurrent "Delete All" can remove the wav mid-dictation. Writing
             // sidecars now would resurrect orphaned transcripts with no audio behind them —
@@ -256,6 +268,8 @@ public class RecordingStore {
     }
 
     public static func deleteAllRecordings() {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
         for recording in listRecordings() {
             do {
                 try FileManager.default.removeItem(at: recording.url)
