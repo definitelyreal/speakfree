@@ -7,6 +7,13 @@ class SettingsWindowController: NSWindowController {
     private static var shared: SettingsWindowController?
 
     static func show(viewModel: SettingsViewModel) {
+        // PR-B: the view model is long-lived and cached by AppDelegate. If the recordings
+        // notice (or anything else) changed config on disk while the window was closed, the
+        // cached view model holds a stale snapshot whose next save would overlay it back.
+        // Re-sync from disk whenever we're (re)opening a window that isn't already visible.
+        if shared?.window?.isVisible != true {
+            viewModel.refreshFromDisk()
+        }
         if shared == nil {
             shared = SettingsWindowController(viewModel: viewModel)
             // Hide dock icon when settings window closes
@@ -433,16 +440,6 @@ struct SettingsView: View {
     /// Display string for the current hotkey
     private var hotkeyDisplay: String {
         KeyCodes.describe(keyCode: viewModel.hotkeyKeyCode, modifiers: viewModel.hotkeyModifiers)
-    }
-
-    /// Helper for consistent label-control rows.
-    /// Labels left-aligned in a fixed column, controls fill remaining space.
-    private func settingsRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 8) {
-            Text(label)
-                .frame(width: labelWidth, alignment: .leading)
-            content()
-        }
     }
 
     var body: some View {
@@ -947,33 +944,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Punctuation Row
-
-    private var punctuationRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            settingsRow("Punctuation") {
-                Picker("", selection: $viewModel.punctuationMode) {
-                    Text("Automatic & Spoken").tag(PunctuationMode.hybrid)
-                    Text("Automatic Only").tag(PunctuationMode.off)
-                    Text("Spoken Only").tag(PunctuationMode.spoken)
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
-            }
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Automatic Only: Natural punctuation. \u{201C}comma\u{201D} transcribes as a word.")
-                Text("Spoken Only: No auto-punctuation. Say \u{201C}comma\u{201D} or \u{201C}period\u{201D} explicitly.")
-                Text("Automatic & Spoken: Auto-punctuation plus spoken commands.")
-            }
-            .font(.caption)
-            .foregroundColor(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.leading, 2)
-        }
-    }
-
     // MARK: - Local API Row
 
     private var localAPIRow: some View {
@@ -1029,28 +999,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Storage Row
-
-    private var storageRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            settingsRow("Past Recordings") {
-                Picker("", selection: $viewModel.maxRecordings) {
-                    ForEach(maxRecordingsOptions, id: \.value) { option in
-                        Text(option.label).tag(option.value)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(width: 150, alignment: .leading)
-            Spacer()
-            }
-            Text("Shows recent dictations in the toolbar menu.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .padding(.leading, 0)
-        }
-    }
-
     // MARK: - Pre-Buffer Row
 
     private var preBufferRow: some View {
@@ -1063,43 +1011,4 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Streaming Preview Row
-
-    private var streamingPreviewRow: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Toggle("Show Live Preview", isOn: $viewModel.streamingEnabled)
-                .toggleStyle(.checkbox)
-            Text("Shows transcribed text in the overlay as you speak. May use more CPU.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-    }
-
-    // MARK: - Keep Model Loaded Row
-
-    private var keepModelLoadedRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            settingsRow("Keep Model Loaded") {
-                Picker("", selection: $viewModel.keepModelLoaded) {
-                    Text("Automatic").tag("auto")
-                    Text("Always").tag("always")
-                    Text("Off").tag("off")
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(width: 120, alignment: .leading)
-            Spacer()
-            }
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac.")
-                Text("Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)).")
-                Text("Automatic unloads the model whenever your Mac needs the memory.")
-            }
-            .font(.caption)
-            .foregroundColor(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.leading, 2)
-        }
-    }
 }

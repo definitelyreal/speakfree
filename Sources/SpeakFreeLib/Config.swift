@@ -7,6 +7,14 @@ public struct Config: Codable {
     public var language: String
     public var spokenPunctuation: PunctuationMode?
     public var maxRecordings: Int?
+    // PR-A marker: was maxRecordings set by an explicit user choice (Settings cap picker
+    // or the one-time legacy migration), or is it a pre-2026-06 build's DEFAULT of 30?
+    // nil = never confirmed. Pre-2026-06 builds wrote maxRecordings=30 as a default (not a
+    // user choice) and prune runs unconditionally at launch, which silently auto-deletes
+    // recordings — violating the keep-forever-by-default contract below. The migration in
+    // load() clears a legacy 30 and stamps this marker so a user who deliberately re-picks
+    // 30 in Settings still sticks.
+    public var maxRecordingsUserConfirmed: Bool?
     public var toggleMode: FlexBool?
     public var screenContext: FlexBool?
     // Deprecated 2026-06-11: the correction learner was removed (it polluted the
@@ -183,7 +191,9 @@ public struct Config: Codable {
         }
 
         do {
-            return try JSONDecoder().decode(Config.self, from: data)
+            var config = try JSONDecoder().decode(Config.self, from: data)
+            migrateLegacyMaxRecordings(&config)
+            return config
         } catch {
             fputs("Warning: unable to parse \(configFile.path): \(error.localizedDescription)\n", stderr)
             // Back up the corrupted file so user can recover it
@@ -193,6 +203,20 @@ public struct Config: Codable {
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backupFile.path)
             return Config.defaultConfig
         }
+    }
+
+    /// One-time migration (PR-A): a pre-2026-06 build wrote maxRecordings=30 as a DEFAULT
+    /// (not a user choice). Because prune runs unconditionally at launch, those on-disk
+    /// configs silently auto-delete recordings, contradicting the keep-forever-by-default
+    /// contract. When we see the legacy 30 with no user-confirmation marker, clear the cap
+    /// and stamp the marker (so a user who later re-picks 30 in Settings still sticks), then
+    /// persist so it only happens once. Static + pure-ish so it's unit-testable.
+    static func migrateLegacyMaxRecordings(_ config: inout Config) {
+        guard config.maxRecordings == 30, config.maxRecordingsUserConfirmed == nil else { return }
+        config.maxRecordings = nil
+        config.maxRecordingsUserConfirmed = true
+        try? config.save()
+        DiagnosticLogger.shared.log("Config: legacy default cap cleared — recordings will not be auto-pruned")
     }
 
     public static func decode(from data: Data) throws -> Config {
