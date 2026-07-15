@@ -15,11 +15,17 @@ Two modes, composable:
                       the stored .raw.txt baseline, and report similarity + the
                       largest diffs. Reporting only — ANE inference is slightly
                       nondeterministic, so treat diffs as leads, not failures.
+  --allow-missing     A missing canary wav counts as SKIP (exit 0) instead of a
+                      failure. Default is fail-closed: a canary whose wav is gone
+                      can no longer prove the regression it pins stays fixed, so
+                      treat that silently as a hole in coverage, not a pass.
 
-Exit code is 1 only when a canary fails. Audio never leaves this machine.
+Exit code is 1 when a canary fails, or (without --allow-missing) when a canary's
+wav is missing. Audio never leaves this machine.
 
 Examples:
   python3 scripts/replay-regression.py --canaries
+  python3 scripts/replay-regression.py --canaries --allow-missing
   python3 scripts/replay-regression.py --corpus 40
   python3 scripts/replay-regression.py --corpus 40 --binary .build/debug/speakfree
 """
@@ -66,12 +72,18 @@ def find_wav(basename):
     return None
 
 
-def run_canaries(binary):
+def run_canaries(binary, allow_missing=False):
     failed = 0
     for basename, field, needle, why in CANARIES:
         wav = find_wav(basename)
         if not wav:
-            print(f"CANARY SKIP (wav missing): {basename}")
+            if allow_missing:
+                print(f"CANARY SKIP (wav missing): {basename}")
+                continue
+            print(f"CANARY FAIL (wav missing): {basename}")
+            print(f"  why pinned: {why}")
+            print("  pass --allow-missing to treat a missing wav as SKIP instead of FAIL")
+            failed += 1
             continue
         out = process(binary, wav)
         text = (out or {}).get(field, "")
@@ -134,12 +146,14 @@ def main():
     ap.add_argument("--canaries", action="store_true")
     ap.add_argument("--corpus", type=int, metavar="N")
     ap.add_argument("--binary", default=PROD_BIN)
+    ap.add_argument("--allow-missing", action="store_true",
+                     help="treat a missing canary wav as SKIP instead of FAIL")
     args = ap.parse_args()
     if not (args.canaries or args.corpus):
         ap.error("pick --canaries and/or --corpus N")
     failed = 0
     if args.canaries:
-        failed = run_canaries(args.binary)
+        failed = run_canaries(args.binary, allow_missing=args.allow_missing)
     if args.corpus:
         run_corpus(args.binary, args.corpus)
     sys.exit(1 if failed else 0)

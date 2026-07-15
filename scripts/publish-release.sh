@@ -22,6 +22,15 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "Publishing speakfree ${TAG}..."
 
+# 0. Refuse to publish from any branch but main — this script pushes appcast.xml
+# and docs/index.html straight to main (step 4), so running it off-branch would
+# either fail confusingly or publish content from the wrong tree.
+CURRENT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)
+if [ "$CURRENT_BRANCH" != "main" ]; then
+    echo "Error: publish-release.sh must be run from main (currently on '$CURRENT_BRANCH')." >&2
+    exit 1
+fi
+
 # 1. Verify the draft exists
 RELEASE_STATE=$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq '.isDraft' 2>/dev/null || echo "missing")
 if [ "$RELEASE_STATE" = "missing" ]; then

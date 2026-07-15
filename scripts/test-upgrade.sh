@@ -10,10 +10,12 @@ NC='\033[0m'
 APP_DIR=~/Applications/speakfree.app
 SERVICE_LOG=/opt/homebrew/var/log/speakfree.log
 
+FAILED=0
+
 step() { printf "\n${BOLD}==> %s${NC}\n" "$1"; }
 ok()   { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
 info() { printf "  ${DIM}%s${NC}\n" "$1"; }
-fail() { printf "  ${RED}✗${NC} %s\n" "$1"; }
+fail() { FAILED=1; printf "  ${RED}✗${NC} %s\n" "$1"; }
 
 build_and_install() {
     local label="$1"
@@ -112,4 +114,9 @@ printf "\n"
 
 step "Cleaning up"
 brew services stop speakfree 2>/dev/null || true
+
+if [ "$FAILED" -ne 0 ]; then
+    fail "Upgrade test failed — see above"
+    exit 1
+fi
 ok "Done"
