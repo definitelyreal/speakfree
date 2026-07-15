@@ -63,6 +63,24 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
-codesign --force --sign - --identifier com.definitelyreal.speakfree "$APP_DIR"
+# Sign with the Developer ID when present, else ad-hoc. Ad-hoc signatures change
+# identity on EVERY rebuild, so macOS treats each dev build as a new app and
+# silently drops its TCC grants (Accessibility/Automation) — a month of dev
+# builds lost permissions this way (2026-07-15: the Accessibility pane kept
+# honoring a stale row while the real app had nothing). A Developer ID signature
+# has a stable designated requirement, so grants survive rebuilds.
+# Deliberately NOT --options runtime: hardened-runtime library validation would
+# reject the Homebrew libwhisper dylib and Sparkle.framework in dev bundles.
+DEV_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
+if [ -n "$DEV_ID" ]; then
+    find "$APP_DIR/Contents/Frameworks" -name "*.framework" -maxdepth 1 2>/dev/null \
+        | while read -r fw; do codesign --force --sign "$DEV_ID" "$fw" || true; done
+    codesign --force --sign "$DEV_ID" --identifier com.definitelyreal.speakfree "$APP_DIR"
+    echo "Signed with: $DEV_ID"
+else
+    codesign --force --sign - --identifier com.definitelyreal.speakfree "$APP_DIR"
+    echo "Signed: ad-hoc (no Developer ID — TCC grants will NOT survive rebuilds)"
+fi
 
 echo "Built $APP_DIR"
