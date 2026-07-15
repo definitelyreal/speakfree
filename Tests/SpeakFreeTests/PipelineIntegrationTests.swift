@@ -293,6 +293,58 @@ final class PipelineIntegrationTests: XCTestCase {
         XCTAssertEqual(inserter.insertCallCount, 0)
     }
 
+    // MARK: cursor-context fallback (2026-07-15: mid-sentence lowercase died in VS Code)
+
+    func test_fallbackContext_sameAppWithinWindow_returnsTail() {
+        let now = Date()
+        let ctx = FinalizePipeline.fallbackCursorContext(
+            lastInsertedTail: "It looks weird,",
+            lastInsertedBundleID: "com.microsoft.VSCode",
+            lastInsertedAt: now.addingTimeInterval(-5),
+            frontmostBundleID: "com.microsoft.VSCode",
+            now: now)
+        XCTAssertEqual(ctx, "It looks weird,")
+    }
+
+    func test_fallbackContext_expiredWindow_returnsNil() {
+        let now = Date()
+        XCTAssertNil(FinalizePipeline.fallbackCursorContext(
+            lastInsertedTail: "tail", lastInsertedBundleID: "com.app",
+            lastInsertedAt: now.addingTimeInterval(-20),
+            frontmostBundleID: "com.app", now: now),
+            "a 15s-stale insertion no longer predicts the cursor position")
+    }
+
+    func test_fallbackContext_differentApp_returnsNil() {
+        let now = Date()
+        XCTAssertNil(FinalizePipeline.fallbackCursorContext(
+            lastInsertedTail: "tail", lastInsertedBundleID: "com.microsoft.VSCode",
+            lastInsertedAt: now.addingTimeInterval(-2),
+            frontmostBundleID: "com.apple.Notes", now: now),
+            "switching apps invalidates the remembered insertion point")
+    }
+
+    func test_fallbackContext_noHistory_returnsNil() {
+        XCTAssertNil(FinalizePipeline.fallbackCursorContext(
+            lastInsertedTail: nil, lastInsertedBundleID: nil, lastInsertedAt: nil,
+            frontmostBundleID: "com.app", now: Date()))
+    }
+
+    func test_fallbackContext_drivesMidSentenceLowercase() {
+        // End-to-end intent check: a fallback tail ending mid-sentence lowercases the
+        // next dictation's leading capital; a sentence-final tail leaves it alone.
+        XCTAssertEqual(
+            TextPipeline.adjustCaseForInsertion("I think so", contextBefore: "It looks weird,"),
+            "i think so".replacingOccurrences(of: "i think", with: "I think"),
+            "leading 'I' is deliberate capitalization and must survive")
+        XCTAssertEqual(
+            TextPipeline.adjustCaseForInsertion("Have the glow happen", contextBefore: "feels unreal,"),
+            "have the glow happen")
+        XCTAssertEqual(
+            TextPipeline.adjustCaseForInsertion("Have the glow happen", contextBefore: "That is done."),
+            "Have the glow happen")
+    }
+
     // MARK: wav-arbiter gate (2026-06-29 AirPods incident: good wav dropped as "silent")
 
     func test_gateArbiter_memoryPasses_wavNeverRead() {
