@@ -84,6 +84,13 @@ class WelcomeController: NSObject, NSWindowDelegate {
         (selectedEngine, selectedEngine == "parakeet" ? selectedParakeetModel : selectedWhisperModel)
     }
 
+    /// The enginePicker row index for an engine id: 0 == Parakeet, 1 == Whisper (matches the item
+    /// order set up in `buildPanel` and read back by `engineChanged`). Pure so buildPanel's I6 fix
+    /// is unit-testable without constructing the modal panel.
+    static func enginePickerIndex(for engine: String) -> Int {
+        engine == "parakeet" ? 0 : 1
+    }
+
     // MARK: - Panel construction
 
     private func buildPanel() {
@@ -146,7 +153,10 @@ class WelcomeController: NSObject, NSWindowDelegate {
         // index 0 == parakeet — keep the two in sync if this order ever changes.
         enginePicker.addItem(withTitle: "Parakeet (Apple Neural Engine) — Recommended")
         enginePicker.addItem(withTitle: "Whisper (CPU/GPU)")
-        enginePicker.selectItem(at: 0)
+        // I6: reflect the applied suggestion instead of hard-selecting index 0. applySuggestion may
+        // have set selectedEngine to "whisper", but the picker used to always show Parakeet, so the
+        // visible engine disagreed with the model row below it.
+        enginePicker.selectItem(at: Self.enginePickerIndex(for: selectedEngine))
         enginePicker.target = self
         enginePicker.action = #selector(engineChanged)
         c.addSubview(enginePicker)

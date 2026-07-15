@@ -28,6 +28,10 @@ final class AdversarialR1InsertionTests: XCTestCase {
 
     /// If focus MOVED during the 150ms settle, the closure must NOT blind-paste into the frontmost
     /// app. It must conceal-copy the text and fire onFocusLost instead.
+    ///
+    /// I2 refinement: "moved" now means the re-query affirmatively returns a DIFFERENT element (nil
+    /// no longer counts as moved — see test_i2_nilRequeryProceedsToPaste). So this simulates a real
+    /// move by returning an element that is not the refocus target.
     func test_axC_focusMovedDuringSettle_concealsInsteadOfBlindPaste() {
         let exp = expectation(description: "async fallback fires onFocusLost")
         let inserter = TextInserter()
@@ -35,9 +39,13 @@ final class AdversarialR1InsertionTests: XCTestCase {
         inserter.pasteboard.clearContents()
         inserter.secureInputClipboardClearDelay = 60  // don't auto-clear during assertions
         inserter.isSecureInputActive = { false }
-        // Focus is never the target element — nil on both the sync check and the closure re-check,
-        // so the sync path schedules the closure and the closure sees "focus moved".
-        inserter.focusedElementProvider = { nil }
+        let target = AXUIElementCreateSystemWide()
+        // Focus is a DIFFERENT element (an application element, never CFEqual to the system-wide
+        // target) on both the sync check and the closure re-check, so the sync path schedules the
+        // closure and the closure affirmatively sees "focus moved to a different element".
+        let other = AXUIElementCreateApplication(getpid())
+        XCTAssertFalse(CFEqual(other, target), "precondition: the two elements must be distinct")
+        inserter.focusedElementProvider = { other }
         inserter.refocusElement = { _ in true }        // force the async closure to be scheduled
         inserter.directAXInsert = { _, _ in false }    // force the post-AX fallback branch, no real AX IPC
 
@@ -46,7 +54,6 @@ final class AdversarialR1InsertionTests: XCTestCase {
         inserter.performInsertion = { blindPasted = $0 }
 
         var focusLostFired = false
-        let target = AXUIElementCreateSystemWide()
         let scheduled = inserter.insert(text: "secret text", refocusing: target, onFocusLost: {
             focusLostFired = true
             exp.fulfill()

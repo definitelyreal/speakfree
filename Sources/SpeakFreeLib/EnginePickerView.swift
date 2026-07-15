@@ -262,6 +262,12 @@ struct EnginePickerView: View {
                     self.isDownloading = false
                     self.downloadTask = nil
                     self.refreshDownloadState()
+                    // I1: while the model was undownloaded, reloadConfig took the `.keepCurrent`
+                    // branch (see AppDelegate.parakeetReloadDecision) and left the live transcriber
+                    // on the OLD engine. Now that the model is on disk, re-save so reloadConfig
+                    // re-runs and hits `.rebuild(modelID:)` — otherwise the new engine wouldn't
+                    // take effect until the app restarts.
+                    self.viewModel.save()
                 }
             } catch is CancellationError {
                 await MainActor.run {
