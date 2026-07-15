@@ -71,6 +71,10 @@ final class LocalAPIServer {
 
     func start(transcriber: Transcriber, allowBrowser: Bool = false, authToken: String? = nil) {
         stop()
+        // NW-A: the server just started, so nothing is in flight. Sweep any temp audio left
+        // behind in tmp/api by a crash/kill during a previous transcription (the per-request
+        // defer that deletes them never ran).
+        Self.sweepTmpAPI()
         self.transcriber = transcriber
         self.allowBrowser = allowBrowser
         // Treat empty/whitespace token as "no auth".
@@ -477,7 +481,7 @@ final class LocalAPIServer {
                  allowOrigin: allowOrigin); return
         }
 
-        let tmpDir = Config.configDir.appendingPathComponent("tmp/api")
+        let tmpDir = Self.tmpAPIDir
         try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         let tmpFile = tmpDir.appendingPathComponent("\(UUID().uuidString).audio")
 
@@ -500,6 +504,11 @@ final class LocalAPIServer {
                 }
                 let ct = format == "text" ? "text/plain" : "application/json"
                 self.send(conn, status: 200, body: body, contentType: ct, allowOrigin: allowOrigin)
+            } catch LocalAPIError.audioTooLong {
+                // NW-B: over the decode-duration cap → 413, same class as an oversize body.
+                self.send(conn, status: 413,
+                          body: #"{"error":"\#(Self.jsonEscape(LocalAPIError.audioTooLong.errorDescription ?? "Audio too long"))"}"#,
+                          allowOrigin: allowOrigin)
             } catch {
                 self.send(conn, status: 500,
                           body: #"{"error":"\#(Self.jsonEscape(error.localizedDescription))"}"#,
@@ -508,7 +517,42 @@ final class LocalAPIServer {
         }
     }
 
+    // MARK: - Temp-file housekeeping
+
+    /// Directory where in-flight upload audio is staged before decode.
+    static var tmpAPIDir: URL { Config.configDir.appendingPathComponent("tmp/api") }
+
+    /// NW-A: remove ALL files left in tmp/api. Called at server start (nothing is in flight
+    /// then), so any residue is orphaned upload audio from a crash mid-transcription. Returns
+    /// the count swept. Internal + static so it's unit-testable without a live socket.
+    @discardableResult
+    static func sweepTmpAPI() -> Int {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: tmpAPIDir,
+                                                      includingPropertiesForKeys: nil) else { return 0 }
+        var swept = 0
+        for file in files {
+            if (try? fm.removeItem(at: file)) != nil { swept += 1 }
+        }
+        if swept > 0 {
+            DiagnosticLogger.shared.log("LocalAPI: swept \(swept) leftover temp file(s) from \(tmpAPIDir.path)")
+        }
+        return swept
+    }
+
     // MARK: - Audio decoding
+
+    /// NW-B: max decoded output before we refuse. A 32 MB compressed upload can expand to
+    /// GBs of PCM; cap the *decoded* length at 30 minutes of 16 kHz mono samples.
+    static let maxDecodedFrames = 30 * 60 * 16_000  // 28,800,000
+
+    /// True if a source of `srcFrames` at `srcSampleRate` would decode to more than
+    /// maxDecodedFrames of 16 kHz mono PCM. Pure so the limit math is unit-testable.
+    static func exceedsDurationCap(srcFrames: AVAudioFrameCount, srcSampleRate: Double) -> Bool {
+        guard srcSampleRate > 0 else { return false }
+        let ratio = 16_000.0 / srcSampleRate
+        return Double(srcFrames) * ratio > Double(maxDecodedFrames)
+    }
 
     static func decodePCM(from url: URL) throws -> [Float] {
         let targetFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
@@ -516,6 +560,11 @@ final class LocalAPIServer {
         let srcFile = try AVAudioFile(forReading: url)
         let srcFmt = srcFile.processingFormat
         let srcFrames = AVAudioFrameCount(srcFile.length)
+
+        // NW-B: reject over-long audio BEFORE allocating any (potentially multi-GB) buffer.
+        if Self.exceedsDurationCap(srcFrames: srcFrames, srcSampleRate: srcFmt.sampleRate) {
+            throw LocalAPIError.audioTooLong
+        }
 
         guard let srcBuf = AVAudioPCMBuffer(pcmFormat: srcFmt, frameCapacity: srcFrames) else {
             throw LocalAPIError.audioDecodeFailed
@@ -709,5 +758,11 @@ final class LocalAPIServer {
 
 enum LocalAPIError: LocalizedError {
     case audioDecodeFailed
-    var errorDescription: String? { "Failed to decode audio to PCM samples" }
+    case audioTooLong
+    var errorDescription: String? {
+        switch self {
+        case .audioDecodeFailed: return "Failed to decode audio to PCM samples"
+        case .audioTooLong:      return "Audio exceeds the maximum supported duration (30 minutes)"
+        }
+    }
 }

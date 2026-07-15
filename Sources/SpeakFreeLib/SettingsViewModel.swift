@@ -66,6 +66,35 @@ public class SettingsViewModel: ObservableObject {
         self.saveRecordings = c.saveRecordings?.value ?? false
     }
 
+    /// Re-read config from disk and refresh baseConfig plus every published field.
+    /// PR-B: AppDelegate caches ONE long-lived SettingsViewModel. The recordings notice can
+    /// flip saveRecordings on disk while that view model holds a stale snapshot; a later
+    /// Settings save would then overlay the stale value back on. Re-syncing when the Settings
+    /// window (re)opens keeps the view model consistent with what's actually on disk.
+    public func refreshFromDisk() {
+        let c = Config.load()
+        self.baseConfig = c
+        self.hotkeyKeyCode = c.hotkey.keyCode
+        self.hotkeyModifiers = c.hotkey.modifiers
+        self.toggleMode = c.toggleMode?.value ?? false
+        self.modelSize = c.modelSize
+        self.language = c.language
+        self.punctuationMode = c.spokenPunctuation ?? .hybrid
+        self.maxRecordings = c.maxRecordings ?? 0
+        self.screenContext = c.screenContext?.value ?? false
+        self.preBuffer = c.preBuffer?.value ?? true
+        self.keepModelLoaded = c.keepModelLoaded ?? "auto"
+        let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
+        self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
+        self.streamingEnabled = c.streamingEnabled?.value ?? false
+        self.languageModels = c.languageModels ?? [:]
+        self.engine = c.engine ?? "whisper"
+        self.parakeetModel = c.parakeetModel ?? "parakeet-tdt-0.6b-v3"
+        self.localAPIEnabled = c.localAPI?.value ?? false
+        self.localAPIPort = c.localAPIPort ?? 5765
+        self.saveRecordings = c.saveRecordings?.value ?? false
+    }
+
     // MARK: - Conversion
 
     /// Convert the current view model state back to a Config struct.
@@ -77,6 +106,10 @@ public class SettingsViewModel: ObservableObject {
         config.language = language
         config.spokenPunctuation = punctuationMode
         config.maxRecordings = maxRecordings
+        // PR-A: any Settings save is an explicit user choice — stamp the marker so the
+        // legacy-30 migration never re-fires (a user re-picking 30 sticks; a non-30 legacy
+        // value gets confirmed on next save).
+        config.maxRecordingsUserConfirmed = true
         config.toggleMode = FlexBool(toggleMode)
         config.screenContext = FlexBool(screenContext)
         config.preBuffer = FlexBool(preBuffer)

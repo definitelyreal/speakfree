@@ -31,7 +31,12 @@ public class RecordingStore {
     public static func ensureDirectory() {
         let fm = FileManager.default
         do {
-            try fm.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
+            // PR-D: pass 0700 straight to createDirectory so a newly-created dir is never
+            // briefly world-readable in the create-then-chmod window. The setAttributes below
+            // still re-asserts permissions for a pre-existing dir (attributes: is ignored when
+            // the directory already exists).
+            try fm.createDirectory(at: recordingsDir, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
         } catch {
             fputs("Warning: could not create recordings directory: \(error.localizedDescription)\n", stderr)
             return
@@ -235,6 +240,13 @@ public class RecordingStore {
     public static func finishRecording(audioURL: URL, keep: Bool,
                                        raw: String, text: String, meta: RecordingMeta) {
         if keep {
+            // PR-C: a concurrent "Delete All" can remove the wav mid-dictation. Writing
+            // sidecars now would resurrect orphaned transcripts with no audio behind them —
+            // skip the writes if the wav is already gone.
+            guard FileManager.default.fileExists(atPath: audioURL.path) else {
+                DiagnosticLogger.shared.log("RecordingStore: wav vanished before finish — skipping sidecar writes for \(audioURL.lastPathComponent)")
+                return
+            }
             saveRaw(text: raw, for: audioURL)
             saveTranscription(text: text, for: audioURL)
             saveMeta(meta, for: audioURL)
