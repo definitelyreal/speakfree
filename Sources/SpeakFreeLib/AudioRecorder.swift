@@ -178,13 +178,10 @@ class AudioRecorder {
                 return
             }
 
-            // Delay 0.5s to let AVAudioEngine finish its internal reconfiguration
-            // before we tear down and rebuild. Without this, removeTap deadlocks
-            // on the engine's recursive_mutex (AVAudioEngineImpl::IOUnitConfigurationChanged).
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self = self else { return }
-                self.reinstallTap()
-            }
+            // Debounced: also gives AVAudioEngine time to finish its internal
+            // reconfiguration before teardown (removeTap during
+            // IOUnitConfigurationChanged deadlocks on the engine's recursive_mutex).
+            self.scheduleReinstallDebounced()
         }
 
         // CoreAudio listener — catches Bluetooth handoffs (AirPods switching between
@@ -210,7 +207,7 @@ class AudioRecorder {
                 if self.isRecording {
                     self.needsTapReinstall = true
                 } else {
-                    self.reinstallTap()
+                    self.scheduleReinstallDebounced()
                 }
             }
         }
@@ -218,6 +215,33 @@ class AudioRecorder {
 
     private var needsTapReinstall = false
     private var isRebuilding = false
+
+    /// Trailing-edge coalescing for device-change events. A Bluetooth handoff storm
+    /// (AirPods flapping, degraded coreaudiod) delivers dozens of configuration-change
+    /// events in seconds; each used to run its own teardown+rebuild ON MAIN (44 cycles
+    /// in ~100s observed 2026-07-16), making the whole app sluggish for the storm's
+    /// duration. Every event now just re-arms this work item, so one rebuild runs after
+    /// the burst goes quiet.
+    private var pendingReinstall: DispatchWorkItem?
+    static let reinstallDebounceSeconds: TimeInterval = 0.7
+
+    /// Main-thread only. Re-arms the debounced reinstall; checks recording state at
+    /// FIRE time (a recording may have started while the burst was in flight).
+    private func scheduleReinstallDebounced() {
+        pendingReinstall?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.pendingReinstall = nil
+            if self.isRecording {
+                self.needsTapReinstall = true
+            } else {
+                self.reinstallTap()
+            }
+        }
+        pendingReinstall = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.reinstallDebounceSeconds, execute: item)
+    }
 
     // MARK: - Multi-device contention detection (2026-07-14)
 
