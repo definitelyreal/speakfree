@@ -188,13 +188,22 @@ class TextInserter {
                             let isSettable = AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success
                                 && settable.boolValue
                             if isSettable {
-                                // I3: bound this AX round-trip at 2s. The system-wide messaging
-                                // timeout is 0.5s (AppDelegate.setupInner), which can fail a
-                                // slow-but-committing SetAttributeValue — the .success is lost, we
-                                // fall through to typeViaKeyEvents, and the text the set DID write
-                                // ends up duplicated. A per-element 2s bound shrinks that window.
-                                AXUIElementSetMessagingTimeout(element, 2.0)
-                                axInserted = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success
+                                // L4: no per-element 2s messaging timeout (it stalled main up to 2s).
+                                // Keep the process-wide 0.5s cap and react three-way to the result: a
+                                // `.cannotComplete` under that cap may have COMMITTED, so conceal-copy
+                                // + notify rather than fall through and duplicate via paste/keystrokes.
+                                let setResult = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
+                                switch Self.axSetOutcome(setResult) {
+                                case .inserted:
+                                    axInserted = true
+                                case .concealClipboard:
+                                    DiagnosticLogger.shared.log("TextInserter: refocus AX set timed out (may have committed) — concealed clipboard fallback instead of blind paste")
+                                    self.secureInputClipboardFallback(text)
+                                    onFocusLost?()
+                                    return
+                                case .fallbackToKeystrokes:
+                                    axInserted = false
+                                }
                             } else {
                                 axInserted = false
                             }
@@ -276,9 +285,20 @@ class TextInserter {
         }
 
         // Try direct AX text insertion first — no clipboard involvement
-        if insertViaAccessibility(text) {
+        switch insertViaAccessibility(text) {
+        case .inserted:
             DiagnosticLogger.shared.log("TextInserter: used AX insertion")
             return
+        case .concealClipboard:
+            // L4: the AX set timed out under the 0.5s cap — it may have COMMITTED. Retyping via
+            // keystrokes (or blind-pasting) would duplicate it, so conceal-copy the text and fire
+            // the auto-clear notify instead, mirroring the Secure-Input fallback.
+            DiagnosticLogger.shared.log("TextInserter: AX insertion timed out (may have committed) — concealed clipboard fallback instead of retyping")
+            secureInputClipboardFallback(text)
+            onSecureInputFallback?()
+            return
+        case .fallbackToKeystrokes:
+            break
         }
 
         // Try typing via CGEvent unicode — works in most apps
@@ -336,25 +356,46 @@ class TextInserter {
             + "If the app never appears there, its Info.plist is missing NSAppleEventsUsageDescription (rebuild).")
     }
 
-    /// Insert text directly via the Accessibility API. Returns true on success.
-    private func insertViaAccessibility(_ text: String) -> Bool {
-        guard let element = currentFocusedElement() else { return false }
+    /// L4: how to react to the AXError from a SelectedText SetAttributeValue. Three-way because
+    /// the round-2 per-element `AXUIElementSetMessagingTimeout(element, 2.0)` was REMOVED — it
+    /// stalled the main thread up to 2s on a slow target. Under the process-wide 0.5s messaging
+    /// cap a slow-but-committing set reports `.cannotComplete`; blindly retyping via keystrokes
+    /// (or blind-pasting) would then DUPLICATE the text the set may already have written. So:
+    ///   - `.success`                       → `.inserted` (done)
+    ///   - `.cannotComplete` (0.5s-cap timeout, may have committed) → `.concealClipboard`
+    ///     (never re-type — conceal-copy + notify, exactly like the Secure-Input fallback)
+    ///   - any other error (a clean rejection — attribute unsupported, invalid element, …)
+    ///     → `.fallbackToKeystrokes` (nothing was written; safe to retype)
+    /// Pure so the AXError→decision mapping is unit-testable without a real AX round-trip.
+    enum AXSetOutcome: Equatable { case inserted, fallbackToKeystrokes, concealClipboard }
+
+    static func axSetOutcome(_ error: AXError) -> AXSetOutcome {
+        switch error {
+        case .success: return .inserted
+        case .cannotComplete: return .concealClipboard
+        default: return .fallbackToKeystrokes
+        }
+    }
+
+    /// Insert text directly via the Accessibility API. Returns the three-way `AXSetOutcome` so the
+    /// caller can distinguish a clean rejection (safe to retype) from a timeout that may have
+    /// committed (must NOT retype — conceal instead). See `axSetOutcome`.
+    private func insertViaAccessibility(_ text: String) -> AXSetOutcome {
+        guard let element = currentFocusedElement() else { return .fallbackToKeystrokes }
 
         // Check if the element supports setting the SelectedText attribute
         var settable: DarwinBoolean = false
         guard AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
               settable.boolValue else {
-            return false
+            return .fallbackToKeystrokes
         }
 
-        // I3: bound this AX round-trip at 2s (see the note in insert()). Without it the 0.5s
-        // system-wide cap can prematurely fail a set that actually commits, so this path returns
-        // false, typeViaKeyEvents runs, and the text ends up typed twice.
-        AXUIElementSetMessagingTimeout(element, 2.0)
-
-        // Set the selected text — this replaces current selection or inserts at cursor
+        // Set the selected text — this replaces current selection or inserts at cursor. No
+        // per-element messaging timeout (L4): keep the process-wide 0.5s cap so a stuck target
+        // can't hang the main thread; a `.cannotComplete` under that cap routes to conceal, not
+        // a duplicating retype.
         let result = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
-        return result == .success
+        return Self.axSetOutcome(result)
     }
 
     /// Remote desktop apps that don't properly forward CGEvent unicode key events.

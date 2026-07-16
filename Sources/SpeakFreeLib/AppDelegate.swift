@@ -74,12 +74,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastInsertionTail: String?
     private var lastInsertionBundleID: String?
     private var lastInsertionAt: Date?
-    // P1: a config reload that lands while a dictation is in flight (fn held) must NOT rebuild
-    // the HotkeyManager mid-press — recreating the event tap loses the pending key-release, so
-    // the recording never stops and the next utterance merges in. When that happens the rebuild
-    // is deferred by setting this flag; it is applied the moment the dictation ends (finalize /
-    // key-up / abort). Main-only.
-    private var pendingHotkeyReload = false
+    // L1: a config reload that lands while a dictation is in flight (fn held) must NOT mutate live
+    // dictation state — it would (a) rebuild the HotkeyManager mid-press (recreating the event tap
+    // loses the pending key-release, so the recording never stops and the next utterance merges
+    // in), (b) swap the transcriber, finalizing THIS utterance on the wrong engine, and (c) flip
+    // config.toggleMode so a Hold→Toggle switch mid-press makes handleKeyUp return early and strand
+    // the running recording. So the ENTIRE reloadConfig is deferred by setting this flag; it is
+    // re-run in full the moment the dictation ends (finalize / key-up / abort). The old
+    // pendingHotkeyReload folded into this — the hotkey rebuild happens inside the deferred
+    // reloadConfig, same as when not pressed. Main-only.
+    private var pendingConfigReload = false
 
     // Adaptive post-buffer (T2.1): poll trailing audio after key release and finalize as soon as
     // ~150ms of trailing silence is observed, hard-capped at 300ms (never worse than the old flat
@@ -655,6 +659,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func reloadConfig() {
+        // L1: never mutate live dictation state mid-utterance. If fn is held (a dictation is in
+        // flight), defer the ENTIRE reload — not just the hotkey rebuild — because it also swaps
+        // the transcriber (this utterance would finalize on the wrong engine) and flips
+        // config.toggleMode (a Hold→Toggle switch while held makes handleKeyUp return early and
+        // never stops the recording). Set the flag and bail; every dictation-end path re-runs the
+        // full reload once (performPendingConfigReloadIfNeeded), reloading fresh Config.load()
+        // state from disk. This is reached from settings save, notice callbacks, and mic select —
+        // all correctly get the same defer-if-pressed semantics.
+        if isPressed {
+            pendingConfigReload = true
+            DiagnosticLogger.shared.log("Config: reload deferred — dictation in flight")
+            return
+        }
+
         // In noModel state: only restart full setup if the user has now downloaded a model.
         // Without this check, opening Settings (which calls reloadConfig on save) would
         // re-trigger the welcome dialog even though the user deliberately skipped it.
@@ -833,17 +851,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Update spoken punctuation on existing transcriber
         transcriber?.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
-        // P1: rebuilding the HotkeyManager tears down and recreates the event tap. If a dictation
-        // is in flight (fn physically held, isPressed == true), the new tap never sees the key-up
-        // for the press the OLD tap began, so the release is lost, the recording never stops, and
-        // the next utterance merges in. Defer the hotkey rebuild until the dictation ends; every
-        // other part of the reload proceeds now.
-        if isPressed {
-            pendingHotkeyReload = true
-            DiagnosticLogger.shared.log("Hotkey: rebuild deferred — dictation in flight")
-        } else {
-            rebuildHotkeyManager()
-        }
+        // L1: rebuilding the HotkeyManager tears down and recreates the event tap, which would
+        // lose an in-flight press's key-release. That deferral now lives at the TOP of reloadConfig
+        // (the whole reload is deferred while fn is held), so this method is only ever reached when
+        // fn is NOT held — the rebuild is always safe here.
+        rebuildHotkeyManager()
 
         statusBar.buildMenu()
 
@@ -865,14 +877,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    /// P1: apply a hotkey rebuild that was deferred because a dictation was in flight when
-    /// reloadHotkeyAndSettings ran. Called from every path that ends a dictation
-    /// (finalizeRecording, handleKeyUp, handleRecordingAbort); the flag guard makes it fire once.
-    private func performPendingHotkeyReloadIfNeeded() {
-        guard pendingHotkeyReload else { return }
-        pendingHotkeyReload = false
-        DiagnosticLogger.shared.log("Hotkey: applying deferred rebuild — dictation finished")
-        rebuildHotkeyManager()
+    /// L1: apply a config reload that was deferred because a dictation was in flight when
+    /// reloadConfig was called. Called from every path that ends a dictation (finalizeRecording,
+    /// handleKeyUp, handleRecordingAbort); the guard-then-clear makes it fire once and is
+    /// idempotent, so overlapping end paths don't double-reload. reloadConfig reloads fresh
+    /// Config.load() state from disk, and by the time any of these callers runs isPressed is
+    /// already false, so the reload proceeds (does not re-defer) — the hotkey rebuild included.
+    private func performPendingConfigReloadIfNeeded() {
+        guard pendingConfigReload else { return }
+        pendingConfigReload = false
+        DiagnosticLogger.shared.log("Config: applying deferred reload — dictation finished")
+        reloadConfig()
     }
 
     /// Start or stop the LocalAPIServer based on the current config.
@@ -994,9 +1009,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         handleRecordingStop()
 
-        // P1: the key was released via the still-installed old hotkey manager (the rebuild was
-        // deferred while held) — now safe to apply any deferred hotkey rebuild.
-        performPendingHotkeyReloadIfNeeded()
+        // L1: the key was released via the still-installed old hotkey manager (the reload was
+        // deferred while held) and isPressed is now false — safe to apply any deferred config
+        // reload in full (transcriber swap + hotkey rebuild + settings).
+        performPendingConfigReloadIfNeeded()
     }
 
     private func showAccessibilityAlert() {
@@ -1177,8 +1193,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         recordingOverlay.hide()
         statusBar.buildMenu()
 
-        // P1: the dictation ended (aborted) — apply any hotkey rebuild deferred while fn was held.
-        performPendingHotkeyReloadIfNeeded()
+        // L1: the dictation ended (aborted) — apply any config reload deferred while fn was held.
+        performPendingConfigReloadIfNeeded()
     }
 
     private func handleRecordingStop() {
@@ -1233,11 +1249,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
-        // P1: the key was released before the post-buffer scheduled this call (isPressed is
-        // already false). Applying a deferred hotkey rebuild here — ahead of every return below —
+        // L1: the key was released before the post-buffer scheduled this call (isPressed is
+        // already false). Applying a deferred FULL reload here — ahead of every return below —
         // guarantees no exit path (toggle-mode stop, gate failure, nil transcriber, success) leaves
-        // the rebuild stranded. The rebuild is independent of the async transcription that follows.
-        performPendingHotkeyReloadIfNeeded()
+        // it stranded, and it is the un-defer point for toggle mode (where handleKeyUp returned
+        // early). Running before the transcriber snapshot below means the swap is atomic w.r.t.
+        // this finalize: the snapshot picks up the freshly-applied engine and the whole
+        // finalization runs on ONE engine (no torn mid-async swap). Idempotent with the handleKeyUp
+        // / abort calls via the flag guard.
+        performPendingConfigReloadIfNeeded()
 
         let stopTime = keyReleaseTime
 
@@ -1442,7 +1462,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         try? DualCapture.writeWav(samples: btSamples, to: btURL)
                         let btRaw = (try? await transcriber.transcribe(
                             audioURL: btURL, samples: btSamples, prompt: prompt)) ?? ""
-                        RecordingStore.saveRaw(text: btRaw, for: btURL)
+                        // L2: this detached task can outlive a "Delete All". Route the sidecar write
+                        // through RecordingStore so it takes the mutationLock and re-checks the wav
+                        // still exists — otherwise it resurrects an orphan transcript with no audio.
+                        RecordingStore.saveBluetoothRaw(text: btRaw, btAudioURL: btURL, mainAudioURL: audioURL)
                         let agreement = DualCapture.tokenAgreement(raw, btRaw)
                         DiagnosticLogger.shared.log(String(
                             format: "DualCapture: agreement %.1f%% (primary %d chars, bt %d chars, bt %.1fs)",
