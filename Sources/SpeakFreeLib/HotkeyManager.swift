@@ -169,6 +169,14 @@ class HotkeyManager {
         startSema.wait()  // ensure run loop is live before enabling
 
         CGEvent.tapEnable(tap: tap, enable: true)
+        // L3: the tap is the primary (and self-suppressing) path now. If an earlier tap-creation
+        // failure had installed the global-monitor fallback, it is superseded — leaving it running
+        // would double-dispatch every fn transition (handleNSEvent AND handleCGEvent). Remove it.
+        if let monitor = globalMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMonitor = nil
+            DiagnosticLogger.shared.log("HotkeyManager: event tap up — removed superseded global-monitor fallback")
+        }
         DiagnosticLogger.shared.log("HotkeyManager: event tap created on dedicated thread")
     }
 
@@ -252,6 +260,10 @@ class HotkeyManager {
     // MARK: - NSEvent global monitor (non-modifier keys)
 
     private func startGlobalMonitor() {
+        // L3: never double-install. `start()`, the tap-creation-failure fallback, and a retry can
+        // all reach here; without this guard a second install leaks the first monitor AND makes
+        // every event dispatch handleNSEvent twice (a latent double-fire of onKeyDown/onKeyUp).
+        guard globalMonitor == nil else { return }
         // .flagsChanged is required for the modifier-only fallback (I5): when the CGEventTap can't
         // be created, a fn hotkey arrives here as flagsChanged, never keyDown/keyUp. Without it the
         // fallback monitor is silently dead for fn even though it looks installed.

@@ -267,6 +267,24 @@ public class RecordingStore {
         }
     }
 
+    /// L2: persist the dual-capture Bluetooth comparison transcript (`<audio>.bt.raw.txt`).
+    /// It is produced by a DETACHED task that runs AFTER the main dictation finished, so it must
+    /// take the same `mutationLock` and honor the same wav-exists guard as `finishRecording` —
+    /// otherwise a "Delete All" that lands during the detached transcription can be raced: the
+    /// files are removed, then this write resurrects an orphaned sidecar with no audio behind it.
+    /// `btAudioURL` is the `<audio>.bt.wav` the sidecar pairs with; `mainAudioURL` is the primary
+    /// wav. If BOTH are already gone the recording set was deleted — skip the write.
+    public static func saveBluetoothRaw(text: String, btAudioURL: URL, mainAudioURL: URL) {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: mainAudioURL.path) || fm.fileExists(atPath: btAudioURL.path) else {
+            DiagnosticLogger.shared.log("RecordingStore: recording vanished before bt-finish — skipping bt sidecar for \(btAudioURL.lastPathComponent)")
+            return
+        }
+        saveRaw(text: text, for: btAudioURL)
+    }
+
     public static func deleteAllRecordings() {
         mutationLock.lock()
         defer { mutationLock.unlock() }
