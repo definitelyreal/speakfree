@@ -948,4 +948,12 @@ final class TextPostProcessorTests: XCTestCase {
             TextPostProcessor.process("first, comma second", hybrid: true),
             "first, second")
     }
+
+    // 70. Round 3: the skip-ahead guard must NOT protect the non-word garble family —
+    // "Kama" can never be legitimate prose, so it converts even before a skip word.
+    func testHybrid70_kamaGarbleConvertsBeforeSkipWords() {
+        XCTAssertEqual(
+            TextPostProcessor.process("The errors. Kama problems everywhere.", hybrid: true),
+            "The errors, problems everywhere.")
+    }
 }

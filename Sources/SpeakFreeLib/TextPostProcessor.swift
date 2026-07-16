@@ -66,9 +66,14 @@ public struct TextPostProcessor {
         // list from convertStandaloneAmbiguous — these rules run FIRST and used to bypass
         // those guards entirely ("…punctuation. Comma usage varies." lost the word "Comma";
         // ". Colon cancer screening" lost "Colon" — adversarial review 2026-07-15, round 2).
-        ("[.;]\\s*(?:[ck]omma|kana|kanna|kama)\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
+        // The skip-ahead guard applies ONLY to the real word "comma" — the non-word garble
+        // family (komma/kana/kanna/kama) can never be legitimate prose, so guarding them
+        // would just leave visible garbles ("…note. Kama usage varies" — round 3).
+        ("[.;]\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("[.;]\\s*(?:komma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("[.;]\\s*(?:kamala|karma)[.,!?;:]", ","),
-        ("(?<=[,!?:])\\s*(?:[ck]omma|kana|kanna|kama)\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("(?<=[,!?:])\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:kamala|karma)[.,!?;:]", ","),
         ("(?<=[.,!?;:])\\s*period(?!\\s+(?:of|piece)\\b)(?:[.,!?;:]|(?=\\s|$))", "."),
         ("(?<=[.,!?;:])\\s*colon(?!\\s+(?:cancer|surgery|cleanse|polyps?)\\b)(?:[.,!?;:]|(?=\\s|$))", ":"),

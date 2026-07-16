@@ -78,7 +78,11 @@ public enum ProcessCommand {
             throw Error.transcriptionFailed(error)
         }
         let punctuationMode = config.spokenPunctuation ?? .hybrid
-        let input = TextPipeline.Input(raw: raw, punctuationMode: punctuationMode)
+        // Pass the real duration when we decoded samples so the seam-dedup gate can tell
+        // single-window recordings from chunkable ones (nil = dedup stays enabled).
+        let duration = samples.map { Double($0.count) / 16000.0 }
+        let input = TextPipeline.Input(raw: raw, punctuationMode: punctuationMode,
+                                       audioDurationSeconds: duration)
         let result = TextPipeline.run(input)
         return ProcessResult(raw: raw, processed: result.processedText, styled: result.finalText)
     }

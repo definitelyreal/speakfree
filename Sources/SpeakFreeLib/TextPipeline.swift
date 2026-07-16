@@ -160,9 +160,10 @@ public enum TextPipeline {
             prompt = provided
         }
         let sanitized = sanitize(input.raw)
-        // Seam dedup only where a seam can exist: FluidAudio chunks at ~14.9s, so short
-        // dictations can't have seam artifacts and skip the pass (12s = margin).
-        let seamPossible = input.audioDurationSeconds.map { $0 > 12 } ?? true
+        // Seam dedup only where a seam can exist: FluidAudio chunks at ~14.92s, so any
+        // dictation at or under 14s is single-window and can't have seam artifacts
+        // (round 3: the earlier 12s gate needlessly deduped 12-14s dictations).
+        let seamPossible = input.audioDurationSeconds.map { $0 > 14 } ?? true
         let marker = stripWhisperBracketMarkers(sanitized)
         let stripped = seamPossible ? collapseBoundaryDuplicateWord(marker) : marker
         let hybrid = input.punctuationMode == .hybrid
