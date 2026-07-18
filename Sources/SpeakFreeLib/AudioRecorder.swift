@@ -27,9 +27,19 @@ class AudioRecorder {
                 // Stop the engine when not recording
                 audioEngine?.inputNode.removeTap(onBus: 0)
                 audioEngine?.stop()
-                audioEngine = nil
+                releaseEngineOffMain(&audioEngine)
             }
         }
+    }
+
+    /// Drop the last reference to an engine on a background queue, never on main:
+    /// -[AVAudioEngine dealloc] dispatch_syncs onto its internal queue, and mid-device-change
+    /// that sync can never return — main deadlocked with the overlay stuck on screen
+    /// (observed live 2026-07-17; see reinstallTap's retirement comment).
+    private func releaseEngineOffMain(_ engine: inout AVAudioEngine?) {
+        guard let doomed = engine else { return }
+        engine = nil
+        DispatchQueue.global(qos: .utility).async { _ = doomed }
     }
 
     // MARK: - State (synchronized via stateLock)
@@ -58,7 +68,7 @@ class AudioRecorder {
     func shutdown() {
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
-        audioEngine = nil
+        releaseEngineOffMain(&audioEngine)
     }
 
     /// Start the always-on audio engine. Call once on app launch.
@@ -306,6 +316,14 @@ class AudioRecorder {
                 self.retiredEnginesLock.lock()
                 self.retiredEngines.removeAll { $0 === oldEngine }
                 self.retiredEnginesLock.unlock()
+                // NEVER let the last engine reference drop on the main thread:
+                // -[AVAudioEngine dealloc] dispatch_syncs onto the engine's internal
+                // queue, and if that queue is mid-device-change the sync never returns —
+                // main deadlocks with the recording overlay stuck on screen (observed
+                // live 2026-07-17, sampled: dispose → _Block_release → AVAudioEngine
+                // dealloc → _dispatch_sync_f_slow, 4-hour wedge). Handing the reference
+                // to a background queue moves the dealloc (and any wait) off main.
+                DispatchQueue.global(qos: .utility).async { _ = oldEngine }
             }
         }
 
@@ -607,7 +625,7 @@ class AudioRecorder {
         if !preBufferEnabled {
             audioEngine?.inputNode.removeTap(onBus: 0)
             audioEngine?.stop()
-            audioEngine = nil
+            releaseEngineOffMain(&audioEngine)
         }
 
         // If a device change happened during recording, reinstall the tap now
