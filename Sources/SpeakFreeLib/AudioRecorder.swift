@@ -499,6 +499,34 @@ class AudioRecorder {
         return samples
     }
 
+    /// R3: current sample count WITHOUT copying the growing PCM buffer. Matches
+    /// `currentSamples().count` exactly (both `guard isRecording` then read pcmSamples
+    /// under `writeQueue`), so it is a drop-in for the `.count`-only call sites.
+    func currentSampleCount() -> Int {
+        guard isRecording else { return 0 }
+        var count = 0
+        writeQueue.sync { count = self.pcmSamples.count }
+        return count
+    }
+
+    /// R3: the trailing slice of captured audio after `index`, copying ONLY the tail
+    /// under `writeQueue` so the 30ms post-buffer poll stops materializing the full
+    /// (growing) sample array on every tick. Byte-identical to the old inline
+    /// `currentSamples()[index...]` computation — see `trailingSlice`.
+    func samples(after index: Int) -> [Float] {
+        guard isRecording else { return [] }
+        var tail: [Float] = []
+        writeQueue.sync { tail = AudioRecorder.trailingSlice(self.pcmSamples, after: index) }
+        return tail
+    }
+
+    /// Pure slice used by `samples(after:)`, extracted so the old-vs-new equivalence is
+    /// unit-testable on a synthetic buffer with no real audio. Preserves the prior
+    /// post-buffer computation exactly: `all.count > index ? Array(all[index...]) : []`.
+    static func trailingSlice(_ samples: [Float], after index: Int) -> [Float] {
+        return samples.count > index ? Array(samples[index...]) : []
+    }
+
     // MARK: - Recording
 
     func startRecording(to outputURL: URL) throws {

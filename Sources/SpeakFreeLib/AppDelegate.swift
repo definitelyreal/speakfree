@@ -48,10 +48,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) lazy var updaterController = SPUStandardUpdaterController(
         startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
 
-    // The AXUIElement focused when recording started — used to refocus before pasting
-    private var recordingSourceElement: AXUIElement?
-    // Text before cursor at recording start — passed to whisper as context prompt
-    private var recordingContextText: String?
+    // R1: focus capture (the AXUIElement focused at record-start, used to refocus before
+    // pasting, plus the cursor-context text passed to whisper as a prompt). The AX read now
+    // runs OFF-MAIN so record-start never blocks on an unresponsive frontmost app's AX tree:
+    // `begin()` at record-start, the background reader `publish`es when it lands, and
+    // finalize `consume(waitingUpTo:)`s it (waiting briefly only if still in flight — never
+    // on the start path; nil on timeout, exactly the old AX-timeout semantics).
+    private let focusCapture = FocusCaptureBox<(AXUIElement?, String?)>()
     // Screen OCR text captured at recording start (opt-in). Written only on main via
     // generation-token check, so no lock needed.
     private var screenContextText: String?
@@ -1030,14 +1033,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func captureFocusedElement() {
-        // Run AX queries with a timeout — if the frontmost app is unresponsive,
-        // AXUIElementCopyAttributeValue blocks indefinitely, stalling the main thread
-        // and eventually causing macOS to disable our event tap.
-        let semaphore = DispatchSemaphore(value: 0)
-        var capturedElement: AXUIElement?
-        var capturedContext: String?
+        // R1: fire-and-commit. The AX read used to block the main thread up to 0.5s at
+        // record-START — and an unresponsive frontmost app would stall it long enough for
+        // macOS to disable our event tap. It now runs on the background queue and publishes
+        // into `focusCapture`; finalize consumes the result (waiting briefly only if it is
+        // still in flight). Record-start no longer waits on it at all. Pre-roll (500ms)
+        // means no audio is lost by starting the recorder before the read completes.
+        let token = focusCapture.begin()
+        // Snapshot the main-only fallback inputs now (we're on main) so the background
+        // reader can compute the Electron cursor-context fallback without touching main state.
+        let lastTail = lastInsertionTail
+        let lastBundle = lastInsertionBundleID
+        let lastAt = lastInsertionAt
+        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
 
-        DispatchQueue.global(qos: .userInteractive).async {
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            var capturedElement: AXUIElement?
+            var capturedContext: String?
             let systemWide = AXUIElementCreateSystemWide()
             var elementRef: CFTypeRef?
             let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef)
@@ -1045,33 +1057,28 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 // swiftlint:disable:next force_cast
                 let axElement = element as! AXUIElement
                 capturedElement = axElement
-                capturedContext = self.readTextBeforeCursor(in: axElement)
+                capturedContext = self?.readTextBeforeCursor(in: axElement)
             }
-            semaphore.signal()
-        }
 
-        let timeout = semaphore.wait(timeout: .now() + 0.5)
-        if timeout == .timedOut {
-            DiagnosticLogger.shared.log("captureFocusedElement: AX query timed out — skipping context")
-        }
-        recordingSourceElement = capturedElement
-        recordingContextText = capturedContext
-
-        // Electron editors (VS Code) expose no AXValue — fall back to the tail of our
-        // own last insertion when it plausibly still sits before the cursor, so the
-        // mid-sentence-lowercase and prepend-space features keep working there.
-        if recordingContextText == nil {
-            let fallback = FinalizePipeline.fallbackCursorContext(
-                lastInsertedTail: lastInsertionTail,
-                lastInsertedBundleID: lastInsertionBundleID,
-                lastInsertedAt: lastInsertionAt,
-                frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-                now: Date())
-            if let fallback {
-                recordingContextText = fallback
-                DiagnosticLogger.shared.log(
-                    "captureFocusedElement: AX gave no context — using tail of last insertion (\(fallback.count) chars)")
+            // Electron editors (VS Code) expose no AXValue — fall back to the tail of our
+            // own last insertion when it plausibly still sits before the cursor, so the
+            // mid-sentence-lowercase and prepend-space features keep working there.
+            if capturedContext == nil {
+                let fallback = FinalizePipeline.fallbackCursorContext(
+                    lastInsertedTail: lastTail,
+                    lastInsertedBundleID: lastBundle,
+                    lastInsertedAt: lastAt,
+                    frontmostBundleID: frontBundle,
+                    now: Date())
+                if let fallback {
+                    capturedContext = fallback
+                    DiagnosticLogger.shared.log(
+                        "captureFocusedElement: AX gave no context — using tail of last insertion (\(fallback.count) chars)")
+                }
             }
+
+            // Generation-guarded: a stale capture from a previous recording is dropped.
+            self?.focusCapture.publish((capturedElement, capturedContext), token: token)
         }
     }
 
@@ -1122,8 +1129,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         if !inserter.isRemoteDesktopFrontmost() {
             captureFocusedElement()
         } else {
-            recordingSourceElement = nil
-            recordingContextText = nil
+            // Remote desktop: AX would read the Splashtop UI, not the remote field. Reset the
+            // capture box to a published-nil so finalize consumes no stale context.
+            focusCapture.reset()
         }
 
         // Capture screen context in background if enabled.
@@ -1161,8 +1169,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             print("Error: \(error.localizedDescription)")
             RecordingStore.clearSentinel()
             isPressed = false
-            recordingSourceElement = nil
-            recordingContextText = nil
+            focusCapture.reset()  // recording never started — invalidate the in-flight capture
             // I4: OCR was kicked off just above, but recording never started so nothing will
             // consume it. Clear it and invalidate the in-flight capture so a late OCR write can't
             // bias the next dictation's prompt.
@@ -1185,8 +1192,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             try? FileManager.default.removeItem(at: result.url)
         }
         RecordingStore.clearSentinel()
-        recordingSourceElement = nil
-        recordingContextText = nil
+        focusCapture.reset()  // invalidate any in-flight focus capture
         screenContextText = nil
         screenCaptureGeneration = UUID()  // invalidate any in-flight OCR
         statusBar.state = .idle
@@ -1214,7 +1220,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // finalize as soon as ~150ms of trailing silence is observed — hard-capped at 300ms so we
         // are NEVER worse than the old flat wait. The wait DECISION is the pure PostBufferPolicy
         // (unit-tested over RMS windows); this loop only feeds it the live trailing samples.
-        let samplesAtRelease = recorder.currentSamples().count
+        let samplesAtRelease = recorder.currentSampleCount()
         runAdaptivePostBuffer(samplesAtRelease: samplesAtRelease) { [weak self] in
             self?.finalizeRecording(keyReleaseTime: keyReleaseTime)
         }
@@ -1234,8 +1240,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         postBufferTimer = Timer.scheduledTimer(withTimeInterval: windowMs / 1000.0, repeats: true) { [weak self] timer in
             guard let self = self else { timer.invalidate(); return }
             let elapsedMs = (CFAbsoluteTimeGetCurrent() - startTick) * 1000.0
-            let all = self.recorder.currentSamples()
-            let trailing = all.count > samplesAtRelease ? Array(all[samplesAtRelease...]) : []
+            // R3: copy only the trailing slice, not the full (growing) sample array each tick.
+            let trailing = self.recorder.samples(after: samplesAtRelease)
             // Ask the pure policy how long it wants given the trailing audio seen so far.
             let decided = PostBufferPolicy.decideWaitMs(trailingSamples: trailing, windowMs: windowMs)
 
@@ -1263,7 +1269,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard let recording = recorder.stopRecording() else {
             RecordingStore.clearSentinel()
-            recordingSourceElement = nil
+            focusCapture.reset()
             statusBar.state = .idle
             recordingOverlay.hide()
             return
@@ -1297,8 +1303,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 try? FileManager.default.removeItem(at: audioURL)
             }
             RecordingStore.clearSentinel()
-            recordingSourceElement = nil
-            recordingContextText = nil
+            focusCapture.reset()
             // I4: a gate-failed dictation never consumes its OCR, so clear it and invalidate any
             // in-flight capture — otherwise this recording's screenContextText survives and biases
             // the NEXT dictation's prompt with stale on-screen text.
@@ -1319,13 +1324,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         statusBar.state = .transcribing
         recordingOverlay.update(state: .transcribing)
 
-        let capturedElement = recordingSourceElement
-        let capturedInputText = recordingContextText
+        // R1: consume the off-main focus capture. In the normal case it published while the
+        // user was still speaking, so this returns immediately; only if the AX read is still
+        // in flight does it wait briefly (0.5s budget, the same as the old synchronous
+        // capture — but off the felt start path). nil on timeout is identical to the old
+        // AX-timeout behavior.
+        let (capturedElement, capturedInputText) = focusCapture.consume(waitingUpTo: 0.5) ?? (nil, nil)
         let capturedScreenText = screenContextText
         screenContextText = nil
         screenCaptureGeneration = UUID()  // invalidate any late-arriving OCR
-        recordingSourceElement = nil
-        recordingContextText = nil
 
         // T2.2 — Precompute shouldPrependSpace NOW, on main, from the cursor-context string
         // that was already captured at record-start (off main, inside captureFocusedElement).
@@ -1752,5 +1759,91 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 return sizeA < sizeB
             })
             .map { String($0.dropFirst(5).dropLast(4)) }  // "ggml-base.en.bin" → "base.en"
+    }
+}
+
+/// R1: a generation-guarded holder for an off-main capture result.
+///
+/// `begin()` opens a new generation (invalidating any in-flight prior capture) and returns
+/// a token. The background reader calls `publish(_:token:)` when its work lands. The
+/// consumer calls `consume(waitingUpTo:)`, which returns the published value immediately if
+/// it has already arrived, or waits up to `timeout` for it — and returns `nil` on timeout,
+/// matching the old "AX query timed out → no context" behavior. `publish` is always called
+/// off the consumer's thread and signals a semaphore, so `consume` waiting on the consumer
+/// (main) thread can never deadlock. `reset()` puts the box into a published-nil state so a
+/// consume returns immediately with no value (used when a capture is skipped or invalidated).
+final class FocusCaptureBox<Value> {
+    private let lock = NSLock()
+    private var generation = 0
+    private var value: Value?
+    private var published = false
+    private var semaphore: DispatchSemaphore?
+    /// When the current generation was opened. A capture is only valid within
+    /// `captureDeadline` of this instant — see `publish`/`consume`.
+    private var beganAt: Date?
+    /// Start-relative validity window. Restores HEAD's "context is from record-START"
+    /// semantics: a result that only lands (or that a consumer would only wait for) more than
+    /// this long after `begin()` reflects mid-recording focus, not the focus at record-start,
+    /// so it is discarded rather than accepted.
+    private let captureDeadline: TimeInterval
+
+    init(captureDeadline: TimeInterval = 0.5) {
+        self.captureDeadline = captureDeadline
+    }
+
+    /// Open a new generation. Returns the token the background reader must pass to `publish`.
+    func begin() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        generation += 1
+        value = nil
+        published = false
+        semaphore = DispatchSemaphore(value: 0)
+        beganAt = Date()
+        return generation
+    }
+
+    /// Publish the captured value. Dropped if `token` is stale (a newer `begin()`/`reset()`
+    /// ran), the current generation was already published, or the capture landed more than
+    /// `captureDeadline` after `begin()` (a late read reflects mid-recording, not record-start).
+    func publish(_ newValue: Value?, token: Int) {
+        lock.lock()
+        let tooLate = beganAt.map { Date().timeIntervalSince($0) > captureDeadline } ?? true
+        guard token == generation, !published, !tooLate else { lock.unlock(); return }
+        value = newValue
+        published = true
+        let sem = semaphore
+        lock.unlock()
+        sem?.signal()
+    }
+
+    /// Return the published value, waiting only until the start-relative deadline (and at most
+    /// `timeout`) if the capture is still in flight. Never blocks the caller beyond that; `nil`
+    /// on timeout (graceful degradation). Clears the stored value/element on return so the AX
+    /// element and cursor-adjacent text are never retained past a single consume (privacy).
+    func consume(waitingUpTo timeout: TimeInterval) -> Value? {
+        lock.lock()
+        if published { let v = value; value = nil; lock.unlock(); return v }
+        // If the capture can no longer legally publish (past its start-relative deadline),
+        // return immediately rather than blocking main on a result that will be rejected. This
+        // also kills the between-dictations 0.5s block when no capture is in flight for this gen.
+        let remaining: TimeInterval = beganAt.map { captureDeadline - Date().timeIntervalSince($0) } ?? 0
+        if remaining <= 0 { let v = value; value = nil; lock.unlock(); return v }
+        let sem = semaphore
+        lock.unlock()
+        _ = sem?.wait(timeout: .now() + min(timeout, remaining))
+        lock.lock(); let v = value; value = nil; lock.unlock()
+        return v
+    }
+
+    /// Invalidate any in-flight capture and put the box into a published-nil state so the
+    /// next `consume` returns `nil` immediately (no wait).
+    func reset() {
+        lock.lock()
+        generation += 1
+        value = nil
+        published = true
+        semaphore = nil
+        beganAt = nil
+        lock.unlock()
     }
 }
