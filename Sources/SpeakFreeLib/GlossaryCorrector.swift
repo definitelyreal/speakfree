@@ -120,11 +120,14 @@ public enum GlossaryCorrector {
             return canon
         }
 
-        // Guards: long enough, and not a legitimate word.
+        // Guard: long enough to fuzzy-match.
         guard token.count >= 4 else { return token }
-        if isRealWord(token) { return token }
 
         // Eligible only if within a tight edit distance of EXACTLY ONE glossary term.
+        // Compute the (cheap) edit-distance match BEFORE the (expensive) real-word check:
+        // most tokens have no candidate, so returning here skips the NSSpellChecker call
+        // entirely on the common path. Outcome is identical — a token with no candidate is
+        // returned unchanged regardless of isRealWord.
         var matches: [String] = []
         for t in terms {
             let d = LevenshteinDistance.distance(lower, t)
@@ -136,6 +139,10 @@ public enum GlossaryCorrector {
             }
         }
         guard matches.count == 1, let canon = canonical[matches[0]] else { return token }
+
+        // A correction would apply — now consult the real-word guard: never mangle a
+        // legitimate word ("marina" similar to "Maryna" stays put).
+        if isRealWord(token) { return token }
         return canon
     }
 }

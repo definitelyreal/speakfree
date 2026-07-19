@@ -142,16 +142,57 @@ public struct Config: Codable {
         configDir.appendingPathComponent("overrides.json")
     }
 
+    // mtime-checked parse cache for vocabulary.txt / overrides.json. These are read on
+    // main every finalize; the parse is pure so a (mtime, size) stamp lets us skip re-reading
+    // an unchanged file. Keyed on the file's absolute path so a different Config.configDirOverride
+    // (each test uses its own scratch dir) never returns another dir's cached value — this is
+    // load-bearing for the suite's isolation. Guarded by a lock: load() has off-main callers.
+    private static let fileCacheLock = NSLock()
+    private static var overridesCache: [String: (stamp: FileStamp, value: [String: String])] = [:]
+    private static var vocabularyCache: [String: (stamp: FileStamp, value: String?)] = [:]
+
+    private struct FileStamp: Equatable {
+        let mtime: Date
+        let size: Int
+        let inode: Int
+    }
+
+    /// (modificationDate, size, inode) of `url`, or nil if it can't be stat'd (missing file).
+    /// A change in any field invalidates the cache. size guards against a same-instant rewrite
+    /// whose mtime granularity didn't move; the inode (fileSystemFileNumber) guards against a
+    /// timestamp-PRESERVING replacement — a Dropbox sync/restore or `mv` swaps the file to a new
+    /// inode while keeping the same mtime and size, which (mtime,size) alone would serve stale.
+    private static func fileStamp(_ url: URL) -> FileStamp? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let mtime = attrs[.modificationDate] as? Date else { return nil }
+        return FileStamp(mtime: mtime,
+                         size: (attrs[.size] as? Int) ?? -1,
+                         inode: (attrs[.systemFileNumber] as? Int) ?? -1)
+    }
+
     /// Load curated exact garble→correct overrides from ~/.config/speakfree/overrides.json
     /// (a flat JSON object, lowercased keys). For recurring mistranscriptions the fuzzy
     /// GlossaryCorrector can't safely fix — real-word-colliding garbles ("kama"→"Karma")
     /// or short tokens ("crf"→"CRM"). Curated only; nothing auto-learns into it.
     public static func loadOverrides() -> [String: String] {
-        guard let data = try? Data(contentsOf: overridesFile),
+        let url = overridesFile
+        let stamp = fileStamp(url)
+        if let stamp = stamp {
+            fileCacheLock.lock()
+            let cached = overridesCache[url.path]
+            fileCacheLock.unlock()
+            if let cached = cached, cached.stamp == stamp { return cached.value }
+        }
+        guard let data = try? Data(contentsOf: url),
               let raw = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
         // Normalize keys to lowercase (the corrector matches on lowercased tokens).
         var out: [String: String] = [:]
         for (k, v) in raw { out[k.lowercased()] = v }
+        if let stamp = stamp {
+            fileCacheLock.lock()
+            overridesCache[url.path] = (stamp, out)
+            fileCacheLock.unlock()
+        }
         return out
     }
 
@@ -163,12 +204,25 @@ public struct Config: Codable {
     /// ` # brain` / ` # auto` — which is stripped here. Full-line comments (starting
     /// with `#`) are dropped.
     public static func loadVocabulary() -> String? {
-        guard let content = try? String(contentsOf: vocabularyFile, encoding: .utf8) else { return nil }
+        let url = vocabularyFile
+        let stamp = fileStamp(url)
+        if let stamp = stamp {
+            fileCacheLock.lock()
+            let cached = vocabularyCache[url.path]
+            fileCacheLock.unlock()
+            if let cached = cached, cached.stamp == stamp { return cached.value }
+        }
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let words = content.components(separatedBy: .newlines)
             .map { stripInlineComment($0).trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.hasPrefix("#") }
-        guard !words.isEmpty else { return nil }
-        return words.joined(separator: ", ")
+        let result: String? = words.isEmpty ? nil : words.joined(separator: ", ")
+        if let stamp = stamp {
+            fileCacheLock.lock()
+            vocabularyCache[url.path] = (stamp, result)
+            fileCacheLock.unlock()
+        }
+        return result
     }
 
     /// Strip an inline ` # <provenance>` comment from a vocabulary line, leaving the
