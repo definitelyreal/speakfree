@@ -1234,19 +1234,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private func runAdaptivePostBuffer(samplesAtRelease: Int, finalize: @escaping () -> Void) {
         let windowMs = postBufferWindowMs
         let capMs = PostBufferPolicy.defaultCapMs
-        let startTick = CFAbsoluteTimeGetCurrent()
+        // Perf adjudication dispute #1: bound the total wait by a MONOTONIC deadline. DispatchTime
+        // is a monotonic clock (unlike wall-clock CFAbsoluteTimeGetCurrent, which NTP/clock-set can
+        // jump), so a congested runloop firing a late tick still stops at the first tick past the
+        // cap — we check the CURRENT clock against the deadline each tick, never trust tick count.
+        let startTick = DispatchTime.now().uptimeNanoseconds
 
         postBufferTimer?.invalidate()
         postBufferTimer = Timer.scheduledTimer(withTimeInterval: windowMs / 1000.0, repeats: true) { [weak self] timer in
             guard let self = self else { timer.invalidate(); return }
-            let elapsedMs = (CFAbsoluteTimeGetCurrent() - startTick) * 1000.0
+            let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds &- startTick) / 1_000_000.0
             // R3: copy only the trailing slice, not the full (growing) sample array each tick.
             let trailing = self.recorder.samples(after: samplesAtRelease)
             // Ask the pure policy how long it wants given the trailing audio seen so far.
             let decided = PostBufferPolicy.decideWaitMs(trailingSamples: trailing, windowMs: windowMs)
 
-            // Stop once we've waited at least the policy's decision, or we hit the hard cap.
-            if elapsedMs >= decided || elapsedMs >= capMs {
+            // Stop once the decided wait has elapsed, or the monotonic cap deadline is reached.
+            if PostBufferPolicy.postBufferShouldFinalize(elapsedMs: elapsedMs, decidedMs: decided, capMs: capMs) {
                 timer.invalidate()
                 self.postBufferTimer = nil
                 finalize()

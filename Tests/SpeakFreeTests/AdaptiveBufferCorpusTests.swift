@@ -33,8 +33,8 @@ final class AdaptiveBufferCorpusTests: XCTestCase {
     }
 
     private let sampleRate: Double = 16_000.0
-    private let cap = PostBufferPolicy.defaultCapMs              // 300
-    private let silenceTarget = PostBufferPolicy.defaultSilenceNeededMs  // 150
+    private let cap = PostBufferPolicy.defaultCapMs              // 220 (retuned 2026-07-19)
+    private let silenceTarget = PostBufferPolicy.defaultSilenceNeededMs  // 90 (retuned 2026-07-19)
 
     /// Pin transcription to the model the fixtures were generated against (manifest modelSHA is the
     /// tiny.en hash), independent of the developer's config.modelSize (which may be base.en).
@@ -95,7 +95,7 @@ final class AdaptiveBufferCorpusTests: XCTestCase {
         ]
         var waits = try names.map { adaptiveWaitMs(forSamples: try samples($0)) }
         waits.sort()
-        // 4 values → median = mean of the two middle. With [150, 300, 300, 300] → 300.
+        // 4 values → median = mean of the two middle. With [90, 220, 220, 220] → 220.
         let median = (waits[1] + waits[2]) / 2.0
         XCTAssertEqual(median, cap, accuracy: 0.001,
             "median adaptive post-buffer across the corpus must equal the flat cap (\(cap)ms): only " +

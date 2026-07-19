@@ -35,17 +35,24 @@ import Foundation
 ///     at the threshold counts as silence.
 ///   * Stop as soon as a CONTIGUOUS run of silent windows reaches `silenceNeededMs` of audio —
 ///     return the elapsed time up to and including the window that completed that run.
-///   * Never wait longer than `capMs` (the old flat behavior is the worst case — never worse).
+///   * Never wait longer than `capMs` (never worse than the legacy 300 ms flat wait — the retuned
+///     220 ms cap is strictly below it).
 ///   * If silence is observed from the very first window, the wait collapses toward
 ///     `silenceNeededMs` instead of the full cap.
 ///   * If the windows run out before a full silence run (or before the cap), fall back to `capMs` —
-///     the last-word-clipping guard: when in doubt, wait the full old amount. (Live: the caller
-///     keeps polling as more windows arrive until silence is met or the cap is hit.)
+///     the last-word-clipping guard: when in doubt, wait the full amount. Post-retune that fallback
+///     waits the new 220 ms cap (down from 300 ms), still the conservative worst case. (Live: the
+///     caller keeps polling as more windows arrive until silence is met or the cap is hit.)
 public enum PostBufferPolicy {
 
-    /// Defaults locked by PLAN T2.1: stop on ~150 ms trailing silence, hard cap 300 ms.
-    public static let defaultSilenceNeededMs: Double = 150.0
-    public static let defaultCapMs: Double = 300.0
+    /// Post-buffer defaults, retuned 150→90 ms silence / 300→220 ms cap after the 2026-07-19
+    /// empirical A/B (see `build/26-07-15-adversarial-review/perf/POSTBUFFER-AB.md`): a full-corpus
+    /// census of n=5,583 recordings with 478 transcribed A/B, showing only ~0.04% (≈2 clips)
+    /// voiced-tail regressions — the shortened buffer only harms audio where a real word follows a
+    /// 90–149 ms pause, and Parakeet's 3 s flush pad re-normalizes the truncated trailing silence
+    /// away (median 10 ms removed). Michael ruled GO on that evidence.
+    public static let defaultSilenceNeededMs: Double = 90.0
+    public static let defaultCapMs: Double = 220.0
 
     /// Default poll/window cadence (ms). The live runtime polls the recorder at this grain.
     public static let defaultWindowMs: Double = 30.0
@@ -108,6 +115,27 @@ public enum PostBufferPolicy {
         // the cap (last-word-clipping guard: when in doubt, wait the full old amount). In live use
         // the caller keeps polling as more windows arrive until silence is met or the cap is hit.
         return capMs
+    }
+
+    /// Monotonic-deadline stop guard for the LIVE post-buffer poll loop (perf adjudication
+    /// dispute #1). The loop samples a MONOTONIC clock at every tick and passes the elapsed time
+    /// since key-release here, rather than counting ticks. Because the cap is enforced as a fixed
+    /// deadline (`start + capMs`) checked against the current clock, a congested main runloop that
+    /// fires a late tick still finalizes at the first tick past the cap — it can never keep waiting
+    /// a whole extra tick beyond the cap the way tick-count reliance would allow.
+    ///
+    /// - Parameters:
+    ///   - elapsedMs: Monotonic milliseconds elapsed since key-release (poll start).
+    ///   - decidedMs: The policy's current decided wait (`decideWaitMs`), always `≤ capMs`.
+    ///   - capMs: Hard cap / deadline (the retuned 220 ms flat worst case).
+    /// - Returns: `true` when the loop must finalize now — either the decided wait has elapsed or
+    ///   the monotonic cap deadline has been reached/passed.
+    public static func postBufferShouldFinalize(
+        elapsedMs: Double,
+        decidedMs: Double,
+        capMs: Double = defaultCapMs
+    ) -> Bool {
+        return elapsedMs >= decidedMs || elapsedMs >= capMs
     }
 
     /// Convenience: compute per-window RMS over a flat sample buffer, then decide.
