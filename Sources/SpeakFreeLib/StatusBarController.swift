@@ -6,6 +6,16 @@ class MenuItemTarget: NSObject {
     @objc func invoke() { handler() }
 }
 
+/// M1: dedicated delegate for the "Recent Dictations" submenu so its lazy population is never
+/// confused with the top-level menu's `menuNeedsUpdate:` (which rebuilds every item). The submenu's
+/// transcript sidecars are read only here — when the user actually opens the submenu — instead of on
+/// every programmatic `buildMenu()`.
+private final class RecentMenuDelegate: NSObject, NSMenuDelegate {
+    let populate: (NSMenu) -> Void
+    init(populate: @escaping (NSMenu) -> Void) { self.populate = populate }
+    func menuNeedsUpdate(_ menu: NSMenu) { populate(menu) }
+}
+
 class StatusBarController: NSObject, NSMenuDelegate {
     private(set) var statusItem: NSStatusItem
     private var animationTimer: Timer?
@@ -14,6 +24,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var downloadProgress: String?
     private var copiedFeedback = false
     private var menuItemTargets: [MenuItemTarget] = []
+    // M1: the recent-submenu's targets are retained separately from the main menu's so a top-level
+    // rebuild (which clears `menuItemTargets`) can't invalidate the actions of an open submenu.
+    private var recentMenuTargets: [MenuItemTarget] = []
+    private var recentMenuDelegate: RecentMenuDelegate?
 
     var reprocessHandler: ((URL) -> Void)?
     private var crashRecoveryURL: URL?
@@ -199,14 +213,24 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 menu.addItem(NSMenuItem.separator())
             } else if case .waitingForPermission = state {
                 let target = MenuItemTarget {
-                    // Clear the stale TCC entry then re-prompt
+                    // Clear the stale TCC entry then re-prompt. M4: never block the main thread on
+                    // `waitUntilExit()` — run tccutil async and fire the AX prompt from the
+                    // termination handler (back on main). If launch fails, prompt anyway.
+                    let promptForAccessibility = {
+                        DispatchQueue.main.async {
+                            let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true]
+                            AXIsProcessTrustedWithOptions(options)
+                        }
+                    }
                     let task = Process()
                     task.launchPath = "/usr/bin/tccutil"
                     task.arguments = ["reset", "Accessibility", Bundle.main.bundleIdentifier ?? "com.definitelyreal.speakfree"]
-                    try? task.run()
-                    task.waitUntilExit()
-                    let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true]
-                    AXIsProcessTrustedWithOptions(options)
+                    task.terminationHandler = { _ in promptForAccessibility() }
+                    do {
+                        try task.run()
+                    } catch {
+                        promptForAccessibility()
+                    }
                 }
                 menuItemTargets.append(target)
                 let stateItem = NSMenuItem(title: stateText, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
@@ -230,55 +254,20 @@ class StatusBarController: NSObject, NSMenuDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        // Recent Dictations submenu — crash recovery, last dictation, then older recordings
+        // Recent Dictations submenu — populated LAZILY (M1). buildMenu() runs on every state flip;
+        // reading a transcript sidecar per recording here opened thousands of files per build on a
+        // large corpus. The submenu's own delegate reads sidecars only when it's actually opened,
+        // and only for the newest N (see populateRecentMenu).
         let recentParent = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
         let recentMenu = NSMenu()
-
-        // Crash recovery at top if pending
-        if let recoveryURL = crashRecoveryURL, let recoveryHandler = crashRecoveryHandler {
-            let target = MenuItemTarget { [weak self] in
-                self?.crashRecoveryURL = nil
-                self?.crashRecoveryHandler = nil
-                recoveryHandler(recoveryURL)
-            }
-            menuItemTargets.append(target)
-            let recoveryItem = NSMenuItem(title: "⚠️ Recover Unsaved Recording", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            recoveryItem.target = target
-            recentMenu.addItem(recoveryItem)
-            recentMenu.addItem(NSMenuItem.separator())
+        // Placeholder so the parent shows its submenu-expand arrow before first population; replaced
+        // in menuNeedsUpdate.
+        recentMenu.addItem(NSMenuItem(title: "…", action: nil, keyEquivalent: ""))
+        let delegate = RecentMenuDelegate { [weak self] submenu in
+            self?.populateRecentMenu(submenu)
         }
-
-        let recordings = RecordingStore.listRecordings()
-
-        if recordings.isEmpty && crashRecoveryURL == nil {
-            let emptyItem = NSMenuItem(title: "No recordings yet", action: nil, keyEquivalent: "")
-            emptyItem.isEnabled = false
-            recentMenu.addItem(emptyItem)
-        } else {
-            for (index, recording) in recordings.enumerated() {
-                let age = StatusBarController.relativeTime(from: recording.date)
-                let preview: String
-                if let t = recording.text, !t.isEmpty {
-                    let short = t.prefix(50).replacingOccurrences(of: "\n", with: " ")
-                    preview = t.count > 50 ? "\(short)…" : String(short)
-                } else {
-                    preview = "(no transcript)"
-                }
-                let label = "\(age) — \(preview)"
-                let target = MenuItemTarget { [weak self] in
-                    self?.reprocessHandler?(recording.url)
-                }
-                menuItemTargets.append(target)
-                let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-                item.target = target
-                recentMenu.addItem(item)
-                // Separator after the first (most recent) recording
-                if index == 0 && recordings.count > 1 {
-                    recentMenu.addItem(NSMenuItem.separator())
-                }
-            }
-        }
-
+        recentMenu.delegate = delegate
+        recentMenuDelegate = delegate
         recentParent.submenu = recentMenu
         menu.addItem(recentParent)
 
@@ -314,6 +303,73 @@ class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(helpItem)
 
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    /// M1: build the "Recent Dictations" submenu on demand (when it opens), reading transcript
+    /// sidecars only for the newest 15 recordings — never for the whole corpus, and never on a plain
+    /// `buildMenu()`.
+    private func populateRecentMenu(_ menu: NSMenu) {
+        recentMenuTargets = []
+        menu.removeAllItems()
+
+        // Crash recovery at top if pending
+        if let recoveryURL = crashRecoveryURL, let recoveryHandler = crashRecoveryHandler {
+            let target = MenuItemTarget { [weak self] in
+                self?.crashRecoveryURL = nil
+                self?.crashRecoveryHandler = nil
+                recoveryHandler(recoveryURL)
+            }
+            recentMenuTargets.append(target)
+            let recoveryItem = NSMenuItem(title: "⚠️ Recover Unsaved Recording", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            recoveryItem.target = target
+            menu.addItem(recoveryItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        let recordings = RecordingStore.listRecordings(limit: 15)
+
+        if recordings.isEmpty {
+            if crashRecoveryURL == nil {
+                let emptyItem = NSMenuItem(title: "No recordings yet", action: nil, keyEquivalent: "")
+                emptyItem.isEnabled = false
+                menu.addItem(emptyItem)
+            }
+            return
+        }
+
+        for (index, recording) in recordings.enumerated() {
+            let age = StatusBarController.relativeTime(from: recording.date)
+            let preview: String
+            if let t = recording.text, !t.isEmpty {
+                let short = t.prefix(50).replacingOccurrences(of: "\n", with: " ")
+                preview = t.count > 50 ? "\(short)…" : String(short)
+            } else {
+                preview = "(no transcript)"
+            }
+            let label = "\(age) — \(preview)"
+            let target = MenuItemTarget { [weak self] in
+                self?.reprocessHandler?(recording.url)
+            }
+            recentMenuTargets.append(target)
+            let item = NSMenuItem(title: label, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
+            menu.addItem(item)
+            // Separator after the first (most recent) recording
+            if index == 0 && recordings.count > 1 {
+                menu.addItem(NSMenuItem.separator())
+            }
+        }
+
+        // Cheap affordance: reach the full corpus in Finder rather than materializing thousands of
+        // items in the menu (the submenu is capped at 15).
+        menu.addItem(NSMenuItem.separator())
+        let folderTarget = MenuItemTarget {
+            NSWorkspace.shared.activateFileViewerSelecting([RecordingStore.recordingsDir])
+        }
+        recentMenuTargets.append(folderTarget)
+        let folderItem = NSMenuItem(title: "Open Recordings Folder…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+        folderItem.target = folderTarget
+        menu.addItem(folderItem)
     }
 
     @objc private func reloadConfiguration() {

@@ -29,6 +29,27 @@ public class RecordingStore {
         Config.configDir.appendingPathComponent(".recording-in-progress.json")
     }
 
+    // M5: once-per-launch `ensureDirectory()` guard. Keyed on the recordings-dir PATH (not a plain
+    // Bool) so a `Config.configDirOverride` switch in tests re-ensures the new dir, while production
+    // — where the path is stable — pays the 3 create/perms/backup-exclude syscalls exactly once
+    // instead of on every `newRecordingURL()`/`listRecordings()` call.
+    private static let ensureLock = NSLock()
+    private static var ensuredDir: String?
+
+    // M2: cached wav count for the Settings-open hot path (finding 9 — a 22k-file scan on main took
+    // ~1.9s). Keyed on the recordings-dir path so a `configDirOverride` switch auto-invalidates it
+    // (tests) and production stays warm. Kept live by finishRecording/deleteAllRecordings/prune.
+    // `recordingCount()` stays a live scan (callers/tests rely on it reflecting disk immediately);
+    // only `cachedRecordingCount()` is the fast path.
+    private static let countLock = NSLock()
+    private static var cachedCountDir: String?
+    private static var cachedCount = 0
+
+    // M1 test seam: number of transcript sidecars actually opened by `listRecordings(limit:)`.
+    // Proves the newest-N selection reads at most N sidecars, not one per corpus file. Only touched
+    // on the limit path, which runs on the main thread (menu build), so no locking is needed.
+    internal static var sidecarReadsForTesting = 0
+
     static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd-HHmmss"
@@ -37,7 +58,21 @@ public class RecordingStore {
     }()
 
     public static func ensureDirectory() {
+        ensureLock.lock()
+        defer { ensureLock.unlock() }
+        // M5: skip the full create/perms/backup-exclude syscalls if this exact dir was already
+        // ensured this launch AND still exists. The existence probe is ONE cheap `stat` per call
+        // (not a createDirectory syscall) — it catches the user trashing or moving the recordings
+        // folder mid-session, where the once-guard alone would skip recreation and the next
+        // `AVAudioFile(forWriting:)` would throw. Only a SUCCESSFUL create records the path, so a
+        // failed create is retried on the next call (never cached).
+        let dirPath = recordingsDir.path
         let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if ensuredDir == dirPath,
+           fm.fileExists(atPath: dirPath, isDirectory: &isDir), isDir.boolValue {
+            return
+        }
         do {
             // PR-D: pass 0700 straight to createDirectory so a newly-created dir is never
             // briefly world-readable in the create-then-chmod window. The setAttributes below
@@ -67,6 +102,7 @@ public class RecordingStore {
         } catch {
             fputs("Warning: could not exclude recordings directory from backup: \(error.localizedDescription)\n", stderr)
         }
+        ensuredDir = dirPath
     }
 
     // Always write to recordings dir, never temp — enables crash recovery regardless of maxRecordings setting
@@ -204,6 +240,38 @@ public class RecordingStore {
             .sorted { $0.date > $1.date }
     }
 
+    /// M1: newest-N listing that does NOT open a transcript sidecar for every recording. The
+    /// recording timestamp is embedded in the filename (`recording-yyyy-MM-dd-HHmmss-uuid.wav`), so
+    /// the newest N are selected by filename alone; only that ≤N slice reads its `.txt`. This is what
+    /// the menu-bar "Recent Dictations" submenu calls so a 5,565-file corpus stops causing thousands
+    /// of file-opens on every menu build.
+    public static func listRecordings(limit: Int) -> [Recording] {
+        guard limit > 0 else { return [] }
+        ensureDirectory()
+        let fm = FileManager.default
+        // atPath (names only) — no `.creationDateKey` prefetch; the date comes from the filename.
+        guard let names = try? fm.contentsOfDirectory(atPath: recordingsDir.path) else {
+            return []
+        }
+        // Pass 1 — filename-only: parse the embedded timestamp, no sidecar/attribute reads.
+        let dated: [(url: URL, date: Date)] = names.compactMap { name in
+            guard name.hasPrefix(filePrefix),
+                  name.hasSuffix(".\(fileExtension)") else { return nil }
+            let base = (name as NSString).deletingPathExtension
+            let dateString = String(base.dropFirst(filePrefix.count))
+            let datePart = String(dateString.prefix(17))
+            guard let date = dateFormatter.date(from: datePart) else { return nil }
+            return (recordingsDir.appendingPathComponent(name), date)
+        }
+        // Pass 2 — sidecar read ONLY for the ≤N newest slice.
+        let newest = dated.sorted { $0.date > $1.date }.prefix(limit)
+        return newest.map { entry in
+            sidecarReadsForTesting += 1
+            let text = try? String(contentsOf: sidecarURL(for: entry.url), encoding: .utf8)
+            return Recording(url: entry.url, date: entry.date, text: text)
+        }
+    }
+
     public static func prune(maxCount: Int) {
         guard maxCount > 0 else { return }
         mutationLock.lock()
@@ -222,6 +290,48 @@ public class RecordingStore {
                 fputs("Warning: could not remove old recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
             }
         }
+        // M2: the cached count no longer reflects disk — recompute lazily on the next read.
+        invalidateCachedCount()
+    }
+
+    // MARK: - Cached recording count (M2)
+
+    /// Fast wav count for the Settings-open hot path. Lazily computed once per dir via a live scan,
+    /// then kept current by finishRecording/deleteAllRecordings/prune — so Settings-open stops
+    /// rescanning the whole corpus on the main thread. Not a replacement for `recordingCount()`,
+    /// which stays a live scan for callers that manipulate the folder directly.
+    public static func cachedRecordingCount() -> Int {
+        countLock.lock()
+        defer { countLock.unlock() }
+        let path = recordingsDir.path
+        if cachedCountDir != path {
+            cachedCount = recordingCount()   // one-time live scan for this dir
+            cachedCountDir = path
+        }
+        return cachedCount
+    }
+
+    /// Adjust a WARM cache in place (no rescan). A cold cache is left cold so the next
+    /// `cachedRecordingCount()` recomputes from disk — which already reflects the mutation.
+    private static func bumpCachedCount(by delta: Int) {
+        countLock.lock()
+        defer { countLock.unlock() }
+        if cachedCountDir == recordingsDir.path {
+            cachedCount = max(0, cachedCount + delta)
+        }
+    }
+
+    private static func setCachedCount(_ value: Int) {
+        countLock.lock()
+        defer { countLock.unlock() }
+        cachedCount = value
+        cachedCountDir = recordingsDir.path
+    }
+
+    private static func invalidateCachedCount() {
+        countLock.lock()
+        defer { countLock.unlock() }
+        cachedCountDir = nil
     }
 
     /// True when the recordings folder currently holds at least one audio file.
@@ -262,6 +372,9 @@ public class RecordingStore {
             saveRaw(text: raw, for: audioURL)
             saveTranscription(text: text, for: audioURL)
             saveMeta(meta, for: audioURL)
+            // M2: a kept recording adds one wav — bump the cached count (past the wav-exists guard
+            // so a recording that vanished mid-finalize is never counted).
+            bumpCachedCount(by: 1)
         } else {
             try? FileManager.default.removeItem(at: audioURL)
         }
@@ -285,18 +398,56 @@ public class RecordingStore {
         saveRaw(text: text, for: btAudioURL)
     }
 
+    /// The known recording-artifact extensions, longest-first so a compound suffix
+    /// (`.bt.raw.txt`) is matched before its tail (`.raw.txt`, `.txt`).
+    private static let artifactSuffixes = [".bt.raw.txt", ".raw.txt", ".meta.json", ".bt.wav", ".wav", ".txt"]
+
+    /// True only for a name that is an EXACT recording artifact: `recording-<timestamp>...` with a
+    /// parseable embedded timestamp and one of the known artifact extensions. This is the deletion
+    /// allow-list for Delete All — a human-managed `recording-archive/` (no artifact extension) or
+    /// `recording-notes.pdf` (foreign extension) both fail this and are left untouched. Type
+    /// (regular file vs directory) is checked separately at the call site.
+    static func isRecordingArtifact(_ name: String) -> Bool {
+        guard name.hasPrefix(filePrefix) else { return false }
+        guard let suffix = artifactSuffixes.first(where: { name.hasSuffix($0) }) else { return false }
+        let stem = String(name.dropLast(suffix.count))
+        let dateString = String(stem.dropFirst(filePrefix.count))
+        let datePart = String(dateString.prefix(17))
+        return dateFormatter.date(from: datePart) != nil
+    }
+
     public static func deleteAllRecordings() {
         mutationLock.lock()
         defer { mutationLock.unlock() }
-        for recording in listRecordings() {
-            do {
-                try FileManager.default.removeItem(at: recording.url)
-                try? FileManager.default.removeItem(at: sidecarURL(for: recording.url))
-                try? FileManager.default.removeItem(at: rawSidecarURL(for: recording.url))
-                try? FileManager.default.removeItem(at: metaSidecarURL(for: recording.url))
-            } catch {
-                fputs("Warning: could not remove recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
+        // M3 + orphan-sweep safety: enumerate names directly (no per-file sidecar opens) and remove
+        // ONLY regular files that are EXACT recording artifacts — `recording-<timestamp>` plus a
+        // known extension. Never recurse into directories and never match a foreign extension, so a
+        // human-managed `recording-archive/` folder or a `recording-notes.pdf` survives. Never
+        // touches the crash sentinel (it lives in configDir, not recordingsDir).
+        let fm = FileManager.default
+        var allRemoved = true
+        if let names = try? fm.contentsOfDirectory(atPath: recordingsDir.path) {
+            for name in names where isRecordingArtifact(name) {
+                let url = recordingsDir.appendingPathComponent(name)
+                // Regular files only — a directory whose name happens to match is never removed
+                // (and never recursed into).
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else { continue }
+                do {
+                    try fm.removeItem(at: url)
+                } catch {
+                    allRemoved = false
+                    fputs("Warning: could not remove recording \(url.path): \(error.localizedDescription)\n", stderr)
+                }
             }
+        }
+        // M2 / privacy: only zero the cached count when EVERY removal succeeded. A failed removal
+        // leaves sensitive wavs on disk — invalidate instead so the next read rescans and Settings
+        // keeps showing the survivors rather than reporting zero and hiding the folder controls.
+        if allRemoved {
+            setCachedCount(0)
+        } else {
+            invalidateCachedCount()
         }
     }
 }

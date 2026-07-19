@@ -396,7 +396,9 @@ struct SettingsView: View {
     @State private var showDeleteRecordingsSheet = false
 
     private func refreshRecordingsFolderState() {
-        storedRecordingCount = RecordingStore.recordingCount()
+        // M2: read the cached count so opening Settings no longer rescans a 22k-file corpus on the
+        // main thread (finding 9). The cache is kept live by finishRecording/deleteAll/prune.
+        storedRecordingCount = RecordingStore.cachedRecordingCount()
         recordingsFolderHasAudio = storedRecordingCount > 0
     }
 
