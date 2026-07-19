@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
 
 /// Tracks cumulative usage statistics persisted to disk.
 class UsageStats {
@@ -14,9 +17,20 @@ class UsageStats {
     // Computed per access so Config.configDirOverride (the test-isolation seam) is honored
     // even when the singleton was first touched before the override was set.
     private var statsFile: URL { Config.configDir.appendingPathComponent("stats.json") }
+    // Serial queue so the per-dictation disk write no longer runs on main. Also serializes
+    // saves against flush() so the last write is never lost on quit.
+    private let saveQueue = DispatchQueue(label: "com.speakfree.usagestats.save", qos: .utility)
 
     private init() {
         load()
+        #if canImport(AppKit)
+        // App quit can outrun an async save. Drain the queue synchronously on termination so
+        // the final dictation is always persisted. (Self-registered rather than wired through
+        // AppDelegate so this stays self-contained.)
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
+        ) { [weak self] _ in self?.flush() }
+        #endif
     }
 
     private func load() {
@@ -25,13 +39,26 @@ class UsageStats {
     }
 
     private func save() {
-        try? FileManager.default.createDirectory(at: Config.configDir, withIntermediateDirectories: true)
-        guard let encoded = try? JSONEncoder().encode(data) else { return }
-        try? encoded.write(to: statsFile)
+        // Snapshot the value-type struct on the caller thread, then write off-main. The
+        // snapshot avoids racing a later in-memory increment.
+        let snapshot = data
+        let file = statsFile
+        saveQueue.async {
+            try? FileManager.default.createDirectory(at: Config.configDir, withIntermediateDirectories: true)
+            guard let encoded = try? JSONEncoder().encode(snapshot) else { return }
+            try? encoded.write(to: file)
+        }
+    }
+
+    /// Block until all pending background saves have flushed to disk. Called on app quit.
+    func flush() {
+        saveQueue.sync {}
     }
 
     /// Record a completed dictation
     func recordDictation(characters: Int, audioSeconds: Double) {
+        // Counter update stays synchronous so totalDictations is immediately correct; only the
+        // disk write is deferred off-main.
         data.totalCharacters += characters
         data.totalDictations += 1
         data.totalAudioSeconds += audioSeconds
