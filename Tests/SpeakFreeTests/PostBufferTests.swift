@@ -7,7 +7,7 @@
 // These assertions are written to depend ONLY on the policy's load-bearing contract:
 //   * Silence (RMS clearly below threshold) accumulates; speech (clearly above) resets the run.
 //   * Once `silenceNeededMs` of CONTIGUOUS silence is reached, stop at that elapsed time (< cap).
-//   * Continuous speech / never enough trailing silence → fall back to the 300ms cap.
+//   * Continuous speech / never enough trailing silence → fall back to the 220ms cap.
 //   * The cap is never exceeded.
 // They deliberately avoid the exact-threshold boundary and the "ran out of windows mid-silence"
 // edge so the suite is robust to either tie-break choice.
@@ -18,8 +18,8 @@ import XCTest
 final class PostBufferTests: XCTestCase {
 
     private let windowMs = 30.0
-    private let cap = PostBufferPolicy.defaultCapMs              // 300
-    private let needMs = PostBufferPolicy.defaultSilenceNeededMs // 150
+    private let cap = PostBufferPolicy.defaultCapMs              // 220 (retuned 2026-07-19)
+    private let needMs = PostBufferPolicy.defaultSilenceNeededMs // 90 (retuned 2026-07-19)
     private let speech: Float = 0.2   // well above the 0.01 threshold
     private let silent: Float = 0.0   // well below threshold
 
@@ -33,8 +33,8 @@ final class PostBufferTests: XCTestCase {
     // MARK: - Case 1: silence immediately after release
 
     /// Speaker went silent before lifting the key — every trailing window is silent. With a 30ms
-    /// window and 150ms needed, the 5th silent window completes the run → wait 5 × 30 = 150ms,
-    /// FAR below the 300ms cap. This is the core latency win.
+    /// window and 90ms needed, the 3rd silent window completes the run → wait 3 × 30 = 90ms,
+    /// FAR below the 220ms cap. This is the core latency win.
     func test_silenceImmediately_stopsAtSilenceTarget_wellUnderCap() {
         let w = windows([(silent, 20)])  // 600ms of pure silence available
         let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
@@ -45,32 +45,32 @@ final class PostBufferTests: XCTestCase {
     // MARK: - Case 2: speech up until release, then silence
 
     /// Speaker was still talking at release (first windows are speech), then trails into silence.
-    /// We must NOT stop during speech, and must stop once 150ms of contiguous silence accrues.
-    /// 3 speech windows (90ms) then plenty of silence → the silence run completes at 90 + 150 =
-    /// 240ms (well within the cap; silence supply is ample so the result is unambiguous).
+    /// We must NOT stop during speech, and must stop once 90ms of contiguous silence accrues.
+    /// 3 speech windows (90ms) then plenty of silence → the silence run completes at 90 + 90 =
+    /// 180ms (well within the cap; silence supply is ample so the result is unambiguous).
     func test_speechUntilRelease_thenSilence_stopsAfterTrailingSilence() {
         let w = windows([(speech, 3), (silent, 20)])
         let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
-        XCTAssertEqual(wait, 240.0, accuracy: 0.001)
+        XCTAssertEqual(wait, 180.0, accuracy: 0.001)
         XCTAssertLessThan(wait, cap)
     }
 
     // MARK: - Case 3: speech continuing past release (clipping guard)
 
     /// Speaker is mid-word and keeps producing energy through the whole observation — we never
-    /// accumulate 150ms of contiguous silence, so we fall back to the hard cap (300ms). This is the
-    /// last-word-clipping guard: when in doubt, wait the full old amount.
+    /// accumulate 90ms of contiguous silence, so we fall back to the hard cap (220ms). This is the
+    /// last-word-clipping guard: when in doubt, wait the full amount.
     func test_speechPastRelease_neverSilent_fallsBackToCap() {
         let w = windows([(speech, 40)])  // 1200ms of continuous speech
         let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
         XCTAssertEqual(wait, cap, accuracy: 0.001)
     }
 
-    /// Speech with brief dips that never reach 150ms contiguous silence before the cap → cap.
+    /// Speech with brief dips that never reach 90ms contiguous silence before the cap → cap.
     func test_speechWithShortGaps_underTarget_fallsBackToCap() {
-        // speech, 90ms gap (<150), speech, 90ms gap … never 150 contiguous, runs past the cap.
-        let w = windows([(speech, 2), (silent, 3), (speech, 2), (silent, 3),
-                         (speech, 2), (silent, 3), (speech, 2), (silent, 3)])
+        // speech, 60ms gap (<90), speech, 60ms gap … never 90 contiguous, runs past the cap.
+        let w = windows([(speech, 2), (silent, 2), (speech, 2), (silent, 2),
+                         (speech, 2), (silent, 2), (speech, 2), (silent, 2)])
         let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
         XCTAssertEqual(wait, cap, accuracy: 0.001)
     }
@@ -78,7 +78,8 @@ final class PostBufferTests: XCTestCase {
     // MARK: - Cap boundary
 
     /// Silence whose run only completes AFTER the cap → the cap wins. 9 speech windows (270ms)
-    /// then silence: the run would complete at 270 + 150 = 420ms > 300; we hit the cap mid-walk.
+    /// already exceed the 220ms cap outright, so the trailing silence never gets scored — we hit
+    /// the cap mid-walk (would-be completion 270 + 90 = 360ms is moot).
     func test_lateSilence_capWinsOverTarget() {
         let w = windows([(speech, 9), (silent, 20)])
         let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
@@ -93,11 +94,11 @@ final class PostBufferTests: XCTestCase {
 
     /// Silence after a longer lead-in still resolves before the cap, proving the early-stop is the
     /// silence-completion time, not a fixed value. 1 speech window (30ms) + ample silence → 30 +
-    /// 150 = 180ms.
-    func test_shortSpeechThenSilence_stopsAt180() {
+    /// 90 = 120ms.
+    func test_shortSpeechThenSilence_stopsAt120() {
         let w = windows([(speech, 1), (silent, 20)])
         let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
-        XCTAssertEqual(wait, 180.0, accuracy: 0.001)
+        XCTAssertEqual(wait, 120.0, accuracy: 0.001)
         XCTAssertLessThan(wait, cap)
     }
 
@@ -147,16 +148,16 @@ final class PostBufferTests: XCTestCase {
     // MARK: - trailingSamples convenience (the API AppDelegate + harness call)
 
     /// 2s speech + 250ms trailing silence at 16kHz: the convenience overload resolves well under the
-    /// 300ms cap. 250ms of trailing silence = ~8 whole 30ms windows ≥ the 5 needed for 150ms, so the
+    /// 220ms cap. 250ms of trailing silence = ~8 whole 30ms windows ≥ the 3 needed for 90ms, so the
     /// silence run completes regardless of partial-window handling — machine-independent proof.
     func test_trailingSamples_realisticSilence_beatsFlatCap() {
         let speechSamples = Array(repeating: Float(0.25), count: 16_000 * 2)
         let silentSamples = Array(repeating: Float(0.0), count: Int(16_000 * 0.25))
-        // The runtime scores only the tail it actually polls (last ~cap ms): take the last 300ms.
+        // The runtime scores only the tail it actually polls (last ~cap ms): take the last 220ms.
         let all = speechSamples + silentSamples
         let tail = Array(all.suffix(Int((cap / 1000.0) * 16_000.0)))
         let wait = PostBufferPolicy.decideWaitMs(trailingSamples: tail, windowMs: windowMs)
-        XCTAssertLessThan(wait, cap, "trailing-silence clip should stop before the 300ms cap")
+        XCTAssertLessThan(wait, cap, "trailing-silence clip should stop before the 220ms cap")
         XCTAssertGreaterThanOrEqual(wait, needMs, "must observe at least the silence target")
     }
 
@@ -165,5 +166,38 @@ final class PostBufferTests: XCTestCase {
         let speechSamples = Array(repeating: Float(0.25), count: 16_000)  // 1s speech
         let wait = PostBufferPolicy.decideWaitMs(trailingSamples: speechSamples, windowMs: windowMs)
         XCTAssertEqual(wait, cap, accuracy: 0.001)
+    }
+
+    // MARK: - Retuned defaults tripwire (2026-07-19 A/B: 150→90 / 300→220)
+
+    /// PIN the retuned constants so a silent revert to the old 150/300 fails loudly. The values were
+    /// approved on the empirical A/B in POSTBUFFER-AB.md (n=5,583 census, ~0.04% voiced-tail
+    /// regressions). If someone reverts these, this test — not a subtle latency drift — catches it.
+    func test_retunedDefaults_arePinnedTo90And220() {
+        XCTAssertEqual(PostBufferPolicy.defaultSilenceNeededMs, 90.0, accuracy: 0.0,
+                       "silenceNeeded default must stay 90ms (retuned 2026-07-19); a revert to 150 is a regression")
+        XCTAssertEqual(PostBufferPolicy.defaultCapMs, 220.0, accuracy: 0.0,
+                       "cap default must stay 220ms (retuned 2026-07-19); a revert to 300 is a regression")
+    }
+
+    // MARK: - Monotonic-deadline stop guard (perf adjudication dispute #1)
+
+    /// The live poll loop feeds monotonic elapsed time to `postBufferShouldFinalize`. It must stop
+    /// when the policy's decided wait has elapsed OR the cap deadline is reached — and a congested
+    /// runloop that fires a LATE tick (elapsed already well past the cap) must still stop, never
+    /// wait a whole extra tick. It must NOT stop while both elapsed < decided and elapsed < cap.
+    func test_postBufferDeadlineGuard_stopsAtDecidedOrCap_boundedByDeadline() {
+        // Below both the decided wait and the cap → keep polling.
+        XCTAssertFalse(PostBufferPolicy.postBufferShouldFinalize(elapsedMs: 60, decidedMs: 90, capMs: cap))
+        // Decided wait reached before the cap → stop.
+        XCTAssertTrue(PostBufferPolicy.postBufferShouldFinalize(elapsedMs: 90, decidedMs: 90, capMs: cap))
+        // Policy still wants to wait (decided == cap, the clipping-guard fallback) but the cap
+        // deadline is exactly reached → stop.
+        XCTAssertTrue(PostBufferPolicy.postBufferShouldFinalize(elapsedMs: cap, decidedMs: cap, capMs: cap))
+        // Congested runloop: a late tick lands far past the cap → stop immediately, do not overshoot
+        // by yet another tick.
+        XCTAssertTrue(PostBufferPolicy.postBufferShouldFinalize(elapsedMs: cap + 100, decidedMs: cap, capMs: cap))
+        // Just under the cap with the fallback decided wait → not yet.
+        XCTAssertFalse(PostBufferPolicy.postBufferShouldFinalize(elapsedMs: cap - 1, decidedMs: cap, capMs: cap))
     }
 }

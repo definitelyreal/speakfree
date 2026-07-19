@@ -97,8 +97,8 @@ struct FixtureResult: Codable, Equatable {
     let inferenceMs: Stat        // engine inference wall-clock (key metric)
     let endToEndMs: Stat         // simulated key-release → text-ready (postBuffer + inference + post-proc)
     // T2.1 — the post-buffer wait baked into endToEnd for THIS fixture. With the flat policy this
-    // equals EngineReport.postBufferMs (300); with the adaptive policy it's PostBufferPolicy's
-    // decision over the fixture's trailing audio (≤300). Optional so pre-T2.1 baselines still decode.
+    // equals EngineReport.postBufferMs (the cap); with the adaptive policy it's PostBufferPolicy's
+    // decision over the fixture's trailing audio (≤ cap). Optional so pre-T2.1 baselines still decode.
     let postBufferMs: Double?
 }
 
@@ -106,8 +106,8 @@ struct FixtureResult: Codable, Equatable {
 struct EngineReport: Codable, Equatable {
     let engine: String           // "whisper" | "parakeet"
     let model: String            // model id ("tiny.en", "parakeet-tdt-0.6b-v3")
-    let postBufferMs: Double     // the post-key-release CAP (300) — worst-case wait baked into e2e
-    // T2.1 — "flat" (legacy 300ms tax) or "adaptive" (stop on ~150ms trailing silence, 300 cap).
+    let postBufferMs: Double     // the post-key-release CAP (220) — worst-case wait baked into e2e
+    // T2.1 — "flat" (legacy 300ms tax) or "adaptive" (stop on ~90ms trailing silence, 220 cap).
     // Optional so pre-T2.1 baselines decode as flat.
     let postBufferPolicy: String?
     let fixtures: [FixtureResult]
