@@ -170,6 +170,22 @@ class RecordingOverlay {
         return idx.map { screens[$0] }
     }
 
+    // R2: resolve the overlay's screen ONCE per recording (in show()) and reuse it for
+    // update()/updateStreamingText(), so the AX IPC inside focusedWindowFrame() runs once
+    // per dictation instead of at every state change (previously a second round-trip at
+    // update(.transcribing), plus one per streaming partial). Reset per recording in
+    // show() and cleared in hide(), so a multi-display move BETWEEN dictations still
+    // re-resolves onto the newly-active screen.
+    private var cachedScreen: NSScreen?
+    private var screenResolved = false
+
+    private func resolvedTargetScreen() -> NSScreen? {
+        if screenResolved { return cachedScreen }
+        cachedScreen = targetScreen()
+        screenResolved = true
+        return cachedScreen
+    }
+
     func show(state: OverlayState, recorder: AudioRecorder? = nil) {
         // Hard kill any existing window (no animation)
         animationTimer?.invalidate()
@@ -179,7 +195,10 @@ class RecordingOverlay {
         contentView = nil
         self.recorder = recorder
 
-        guard let screen = targetScreen() else { return }
+        // Fresh screen resolution for this recording (multi-display move since last time).
+        screenResolved = false
+        cachedScreen = nil
+        guard let screen = resolvedTargetScreen() else { return }
 
         let pillSize = OverlayContentView.pillSize(for: state)
         let bottomMargin: CGFloat = 48
@@ -224,7 +243,7 @@ class RecordingOverlay {
     }
 
     func update(state: OverlayState) {
-        guard let view = contentView, let win = window, let screen = targetScreen() else {
+        guard let view = contentView, let win = window, let screen = resolvedTargetScreen() else {
             show(state: state)
             return
         }
@@ -242,7 +261,7 @@ class RecordingOverlay {
     /// Update the overlay with streaming transcription text.
     /// Called from the main thread during recording as partial results arrive.
     func updateStreamingText(_ text: String) {
-        guard let view = contentView, let win = window, let screen = targetScreen() else { return }
+        guard let view = contentView, let win = window, let screen = resolvedTargetScreen() else { return }
 
         // Only grow the text, never shrink — prevents flickering from re-processing
         if text.count < view.streamingText.count { return }
@@ -283,6 +302,10 @@ class RecordingOverlay {
     }
 
     func hide() {
+        // Drop the cached screen so the next recording re-resolves (display may have
+        // changed while the overlay was hidden).
+        screenResolved = false
+        cachedScreen = nil
         guard let win = window, let view = contentView else { return }
 
         // Immediately detach references so show() won't see a stale window
