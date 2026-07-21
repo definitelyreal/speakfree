@@ -184,6 +184,58 @@ final class DualTranscriptMergerTests: XCTestCase {
         XCTAssertEqual(result.reason, .aligned)
     }
 
+    // MARK: - Spoken punctuation + vocabulary guards (corpus 2026-07-21, rec-154324)
+
+    func testSpokenPunctuationWordSurvivesBluetoothMishear() {
+        // Live failure: builtin "…build stack slash collab…" lost "slash" to BT's "flash".
+        let result = DualCapture.mergeTranscripts(
+            primary: "add it to the digital brain slash collab admin build stack",
+            bluetooth: "add it to the digital brain flash collab admin build stack")
+        XCTAssertEqual(result.text, "add it to the digital brain slash collab admin build stack")
+        XCTAssertEqual(result.reason, .punctuationRisk)
+    }
+
+    func testRenderedPunctuationNotReinsertedAsWordFromBluetooth() {
+        // Live failure: builtin already rendered the spoken comma ("later, just");
+        // BT heard it as the word "comment" and the merge re-inserted it.
+        let result = DualCapture.mergeTranscripts(
+            primary: "I would like to implement it later, just add it to the stack today",
+            bluetooth: "I would like to implement it later comment, just add it to the stack today")
+        XCTAssertEqual(
+            result.text, "I would like to implement it later, just add it to the stack today")
+        XCTAssertEqual(result.reason, .punctuationRisk)
+    }
+
+    func testVocabularyTermSurvivesBluetoothSubstitution() {
+        // Live failure: builtin "my EC2" lost to BT's "my PC2".
+        let result = DualCapture.mergeTranscripts(
+            primary: "a VPN router so that my EC2 can use various internet connections",
+            bluetooth: "a VPN router so that my PC2 can use various internet connections",
+            protectedWords: ["ec2"])
+        XCTAssertEqual(
+            result.text, "a VPN router so that my EC2 can use various internet connections")
+        XCTAssertEqual(result.reason, .vocabularyRisk)
+    }
+
+    func testUnprotectedSubstitutionStillMergesWithoutVocabEntry() {
+        // Same shape without a vocabulary entry: BT wording wins by design — documents
+        // that the guard is only as good as the vocabulary list.
+        let result = DualCapture.mergeTranscripts(
+            primary: "a VPN router so that my EC2 can use various internet connections",
+            bluetooth: "a VPN router so that my PC2 can use various internet connections")
+        XCTAssertEqual(result.reason, .aligned)
+    }
+
+    func testBluetoothInsertionAwayFromPunctuationStillMerges() {
+        // The punctuation-seam insertion guard must not block genuine rescues in
+        // plain prose (no punctuation at the seam).
+        let result = DualCapture.mergeTranscripts(
+            primary: "please send the report to them tomorrow morning",
+            bluetooth: "please send the daily report to them tomorrow morning")
+        XCTAssertEqual(result.text, "please send the daily report to them tomorrow morning")
+        XCTAssertEqual(result.reason, .aligned)
+    }
+
     // MARK: - Suffix seam punctuation (adversarial review 2026-07-21)
 
     func testTerminalPunctuationSurvivesWhenBluetoothOmitsIt() {
