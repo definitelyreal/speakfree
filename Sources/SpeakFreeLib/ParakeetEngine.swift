@@ -35,6 +35,57 @@ public final class ParakeetEngine: TranscriptionEngine {
         count + min(trailingSilenceSamples, max(0, maxSingleChunkSamples - count))
     }
 
+    // MARK: - Pad-hallucination strip (2026-07-21)
+
+    /// Tokens that BEGIN this far after the real audio ends are decoding the synthetic
+    /// pad, not speech. Margin absorbs TDT emission-time skew for a genuine last word.
+    static let padHallucinationMarginSeconds = 0.3
+    /// Never strip more than this many words — a timing anomaly must not delete real
+    /// content. Observed hallucinations are 1-3 words ("here.", "being carried down.").
+    static let padHallucinationMaxWords = 6
+
+    /// Drop trailing words the decoder invented over the appended silence pad
+    /// (2026-07-21 corpus, confirmed against whisper-large-v3-turbo on the same wavs:
+    /// "handoff issues" → "handoff issues here.", "sending an email" → "…email
+    /// carrier."). We KNOW where real audio ends — the pad is ours — so tokens whose
+    /// startTime falls beyond it are pad artifacts. Conservative on both sides: the
+    /// dropped tokens must textually match the transcript's tail (the punctuation
+    /// layer may reformat), and oversized strips are refused.
+    static func strippingPadHallucination(
+        text: String, timings: [TokenTiming]?, realAudioSeconds: Double
+    ) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let timings, !timings.isEmpty, realAudioSeconds > 0 else { return trimmed }
+        let threshold = realAudioSeconds + padHallucinationMarginSeconds
+        var cut = timings.count
+        while cut > 0, timings[cut - 1].startTime >= threshold { cut -= 1 }
+        guard cut < timings.count else { return trimmed }
+
+        let droppedNorm = normalizedWordKey(timings[cut...].map(\.token).joined())
+        guard !droppedNorm.isEmpty else { return trimmed }
+
+        // Peel whole words off the transcript tail until they normalize to exactly
+        // the dropped tokens; bail if no clean match within the size cap.
+        var words = trimmed.split(separator: " ", omittingEmptySubsequences: true)
+        var peeled: [Substring] = []
+        while let last = words.last, peeled.count < padHallucinationMaxWords {
+            peeled.insert(last, at: 0)
+            words.removeLast()
+            if normalizedWordKey(peeled.joined(separator: " ")) == droppedNorm {
+                let kept = words.joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return kept.isEmpty ? trimmed : kept
+            }
+        }
+        return trimmed
+    }
+
+    /// Lowercased alphanumerics only — tolerant of the punctuation layer's formatting
+    /// and of BPE word-boundary markers in raw token pieces.
+    private static func normalizedWordKey(_ s: String) -> String {
+        String(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+    }
+
     // MARK: - Core (owns all mutable model state)
 
     /// Serializes all model lifecycle and transcription against a single owner. Every mutable
@@ -199,7 +250,18 @@ public final class ParakeetEngine: TranscriptionEngine {
                 throw TranscriptionEngineError.transcriptionFailed
             }
 
-            return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Strip words the decoder hallucinated over the silence pad we appended
+            // (counts only in the log — never transcript content).
+            let raw = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let stripped = ParakeetEngine.strippingPadHallucination(
+                text: result.text, timings: result.tokenTimings,
+                realAudioSeconds: Double(samples.count) / 16_000.0)
+            if stripped.count != raw.count {
+                DiagnosticLogger.shared.log(String(
+                    format: "ParakeetEngine: stripped pad hallucination (%d chars past %.2fs)",
+                    raw.count - stripped.count, Double(samples.count) / 16_000.0))
+            }
+            return stripped
         }
 
         // MARK: Unload

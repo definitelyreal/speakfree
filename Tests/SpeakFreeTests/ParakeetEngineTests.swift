@@ -1,4 +1,5 @@
 // Claude · 2026-06-07 · Session: 335a0545-b347-40c8-adbc-c0364e1a9aa4
+import FluidAudio
 import XCTest
 @testable import SpeakFreeLib
 
@@ -198,5 +199,83 @@ final class ParakeetEngineTests: XCTestCase {
                 return XCTFail("Expected .streamingUnsupported, got \(error)")
             }
         }
+    }
+
+    // MARK: - Pad-hallucination strip (2026-07-21 corpus, verified vs whisper)
+
+    private func timing(_ token: String, _ start: Double) -> TokenTiming {
+        TokenTiming(token: token, tokenId: 0, startTime: start, endTime: start + 0.1,
+                    confidence: 0.5)
+    }
+
+    func testStripsTrailingWordsThatStartInsidePad() {
+        // Live case rec-130443: audio ends at 12.4s, Parakeet appended "here." over
+        // the pad. Whisper on the same wav hears no "here".
+        let out = ParakeetEngine.strippingPadHallucination(
+            text: "these quality and handoff issues here.",
+            timings: [
+                timing("▁handoff", 10.9), timing("▁issues", 11.5),
+                timing("▁here", 13.1), timing(".", 13.4),
+            ],
+            realAudioSeconds: 12.4)
+        XCTAssertEqual(out, "these quality and handoff issues")
+    }
+
+    func testStripsMultiWordPadPhrase() {
+        // Live case rec-154324: "being carried down." invented past the audio end.
+        let out = ParakeetEngine.strippingPadHallucination(
+            text: "to avoid thought detection being carried down.",
+            timings: [
+                timing("▁detection", 24.0),
+                timing("▁being", 25.6), timing("▁car", 25.9), timing("ried", 26.1),
+                timing("▁down", 26.4), timing(".", 26.6),
+            ],
+            realAudioSeconds: 25.1)
+        XCTAssertEqual(out, "to avoid thought detection")
+    }
+
+    func testKeepsFinalWordFlushedNearTheBoundary() {
+        // A genuine last word can emit just past the audio end — inside the margin
+        // it is speech, not pad.
+        let out = ParakeetEngine.strippingPadHallucination(
+            text: "please look into that period.",
+            timings: [timing("▁period", 9.5), timing(".", 9.75)],
+            realAudioSeconds: 9.7)
+        XCTAssertEqual(out, "please look into that period.")
+    }
+
+    func testNoTimingsMeansNoStrip() {
+        XCTAssertEqual(
+            ParakeetEngine.strippingPadHallucination(
+                text: "unchanged text.", timings: nil, realAudioSeconds: 5),
+            "unchanged text.")
+    }
+
+    func testMismatchedTailRefusesToStrip() {
+        // The dropped tokens must actually match the transcript tail — if the
+        // punctuation layer rewrote them beyond recognition, do nothing.
+        let out = ParakeetEngine.strippingPadHallucination(
+            text: "the transcript ends differently",
+            timings: [timing("▁something", 1.0), timing("▁else", 8.0)],
+            realAudioSeconds: 5.0)
+        XCTAssertEqual(out, "the transcript ends differently")
+    }
+
+    func testOversizedStripIsRefused() {
+        // A timing anomaly flagging 7+ words must never delete real content.
+        let words = (1...8).map { "word\($0)" }
+        let out = ParakeetEngine.strippingPadHallucination(
+            text: words.joined(separator: " "),
+            timings: words.map { timing("▁\($0)", 9.0) },
+            realAudioSeconds: 5.0)
+        XCTAssertEqual(out, words.joined(separator: " "))
+    }
+
+    func testStripNeverEmptiesTheTranscript() {
+        let out = ParakeetEngine.strippingPadHallucination(
+            text: "here.",
+            timings: [timing("▁here", 6.0), timing(".", 6.2)],
+            realAudioSeconds: 5.0)
+        XCTAssertEqual(out, "here.", "an all-pad transcript is kept, not emptied")
     }
 }
