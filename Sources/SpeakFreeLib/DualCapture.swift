@@ -85,6 +85,14 @@ public enum DualCapture {
         /// ("do not forward" → "do please forward" inverts the sentence). Contraction
         /// swaps ("did not"→"didn't") keep the negation on both sides and still merge.
         case negationRisk
+        /// The merge would damage spoken punctuation (2026-07-21 corpus): Bluetooth
+        /// mishears command words ("slash"→"flash") or re-inserts one the primary
+        /// already rendered as punctuation ("later," + BT's "comment" for a spoken
+        /// comma). Both classes keep the primary verbatim.
+        case punctuationRisk
+        /// A substitution would lose a user vocabulary/glossary term the primary heard
+        /// ("my EC2"→"my PC2"). Curated terms outrank Bluetooth wording.
+        case vocabularyRisk
     }
 
     struct MergeResult: Equatable {
@@ -98,7 +106,11 @@ public enum DualCapture {
     /// Merge raw transcripts before TextPipeline runs. Exact word anchors protect the
     /// complete built-in prefix/suffix while allowing Bluetooth's wording between the
     /// anchors to win. Low-confidence alignment always falls back to the built-in text.
-    static func mergeTranscripts(primary: String, bluetooth: String) -> MergeResult {
+    /// `protectedWords`: normalized (lowercased) user vocabulary/glossary terms whose
+    /// loss in a substitution vetoes the merge — curated names outrank BT wording.
+    static func mergeTranscripts(
+        primary: String, bluetooth: String, protectedWords: Set<String> = []
+    ) -> MergeResult {
         let primaryTokens = wordTokens(in: primary)
         let bluetoothTokens = wordTokens(in: bluetooth)
 
@@ -161,15 +173,56 @@ public enum DualCapture {
             // it because both gaps are non-empty). A gap where the primary heard more
             // negation tokens than Bluetooth falls back to the primary verbatim.
             if primaryGap > 0, bluetoothGap > 0 {
-                let primaryNegations = primaryWords[(matches[k].0 + 1)..<matches[k + 1].0]
-                    .filter(Self.isNegationToken).count
-                let bluetoothNegations = bluetoothWords[(matches[k].1 + 1)..<matches[k + 1].1]
-                    .filter(Self.isNegationToken).count
+                let primaryGapWords = primaryWords[(matches[k].0 + 1)..<matches[k + 1].0]
+                let bluetoothGapWords = bluetoothWords[(matches[k].1 + 1)..<matches[k + 1].1]
+                let primaryNegations = primaryGapWords.filter(Self.isNegationToken).count
+                let bluetoothNegations = bluetoothGapWords.filter(Self.isNegationToken).count
                 if primaryNegations > bluetoothNegations {
                     return MergeResult(text: primary, usedBluetooth: false,
                                        confidence: confidence,
                                        matchedTokens: matches.count,
                                        reason: .negationRisk)
+                }
+                // Spoken punctuation commands: the primary's "slash" becoming BT's
+                // "flash" (2026-07-21 corpus, recording-154324) re-words what the user
+                // dictated as structure. If the primary gap holds a command word the
+                // BT gap dropped, keep the primary.
+                let bluetoothGapSet = Set(bluetoothGapWords)
+                if primaryGapWords.contains(where: {
+                    Self.punctuationCommandWords.contains($0) && !bluetoothGapSet.contains($0)
+                }) {
+                    return MergeResult(text: primary, usedBluetooth: false,
+                                       confidence: confidence,
+                                       matchedTokens: matches.count,
+                                       reason: .punctuationRisk)
+                }
+                // Curated vocabulary/glossary terms ("EC2") outrank BT wording — a
+                // substitution that loses one is a name-mangling risk, not a win.
+                if !protectedWords.isEmpty, primaryGapWords.contains(where: {
+                    protectedWords.contains($0) && !bluetoothGapSet.contains($0)
+                }) {
+                    return MergeResult(text: primary, usedBluetooth: false,
+                                       confidence: confidence,
+                                       matchedTokens: matches.count,
+                                       reason: .vocabularyRisk)
+                }
+            }
+            // BT INSERTION right at a primary punctuation seam: the primary already
+            // rendered the spoken command as punctuation ("later,"), and Bluetooth
+            // heard it as a word ("comment" for a spoken comma — 2026-07-21 corpus,
+            // recording-154324). A single-token BT insertion where the primary's
+            // inter-anchor text contains punctuation is that mishear, not a rescue.
+            if primaryGap == 0, bluetoothGap == 1 {
+                let sepStart = primaryTokens[matches[k].0].range.location
+                    + primaryTokens[matches[k].0].range.length
+                let sepEnd = primaryTokens[matches[k + 1].0].range.location
+                let separator = (primary as NSString).substring(
+                    with: NSRange(location: sepStart, length: sepEnd - sepStart))
+                if separator.rangeOfCharacter(from: Self.sentencePunctuation) != nil {
+                    return MergeResult(text: primary, usedBluetooth: false,
+                                       confidence: confidence,
+                                       matchedTokens: matches.count,
+                                       reason: .punctuationRisk)
                 }
             }
         }
@@ -213,6 +266,32 @@ public enum DualCapture {
     static func isNegationToken(_ normalized: String) -> Bool {
         negationWords.contains(normalized) || normalized.hasSuffix("n't")
     }
+
+    /// Build the protected-word set from the comma-joined vocabulary/glossary string
+    /// (`Config.loadVocabulary` format). Multi-word terms protect each component word
+    /// — losing "Reality" out of "Reality Games" manglles the name just the same.
+    static func protectedWordSet(fromGlossary glossary: String?) -> Set<String> {
+        guard let glossary else { return [] }
+        var out = Set<String>()
+        for term in glossary.components(separatedBy: ",") {
+            for token in wordTokens(in: term) where token.normalized.count >= 2 {
+                out.insert(token.normalized)
+            }
+        }
+        return out
+    }
+
+    /// Spoken punctuation/structure command words (normalized) that TextPipeline later
+    /// converts into characters. Multi-word commands ("question mark", "new line") are
+    /// deliberately absent — their component words are common prose.
+    private static let punctuationCommandWords: Set<String> = [
+        "comma", "period", "colon", "semicolon", "slash", "backslash",
+        "dash", "hyphen", "underscore", "ampersand", "asterisk", "percent",
+        "hashtag", "apostrophe", "quote", "unquote",
+    ]
+    /// Punctuation characters that mean "the primary already rendered a spoken
+    /// command here" when found between two adjacent anchors.
+    private static let sentencePunctuation = CharacterSet(charactersIn: ".,;:!?—-/")
 
     private struct WordToken {
         let normalized: String

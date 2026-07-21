@@ -1524,7 +1524,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     DiagnosticLogger.shared.log("T2.3: reused last streaming partial (skipped final inference)")
                 }
                 let merge = bluetoothRaw.map {
-                    DualCapture.mergeTranscripts(primary: primaryRaw, bluetooth: $0)
+                    DualCapture.mergeTranscripts(
+                        primary: primaryRaw, bluetooth: $0,
+                        protectedWords: DualCapture.protectedWordSet(fromGlossary: glossary))
                 } ?? DualCapture.MergeResult(
                     text: primaryRaw, usedBluetooth: false, confidence: 0,
                     matchedTokens: 0, reason: .primaryOnly)
