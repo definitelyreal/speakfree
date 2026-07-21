@@ -38,44 +38,68 @@ final class AudioRoutingTests: XCTestCase {
 
     // MARK: - Contention detector
 
+    /// Feed `count` events spaced `gap` seconds apart, starting at `t0`.
+    /// Returns true if any event fired the notice.
+    private func feedStorm(
+        _ detector: inout ContentionDetector, from t0: Date, count: Int, gap: TimeInterval
+    ) -> Bool {
+        var fired = false
+        for i in 0..<count {
+            if detector.recordDisruption(at: t0.addingTimeInterval(Double(i) * gap)) {
+                fired = true
+            }
+        }
+        return fired
+    }
+
     func testDetectorStaysQuietBelowThreshold() {
         var detector = ContentionDetector()
         let t0 = Date(timeIntervalSince1970: 1_000_000)
-        XCTAssertFalse(detector.recordDisruption(at: t0))
-        XCTAssertFalse(detector.recordDisruption(at: t0.addingTimeInterval(60)))
+        XCTAssertFalse(feedStorm(&detector, from: t0, count: detector.threshold - 1, gap: 3),
+                       "even a rapid burst below the chain threshold stays quiet")
     }
 
-    func testDetectorFiresAtThresholdWithinWindow() {
+    func testDetectorFiresOnRealStorm() {
         var detector = ContentionDetector()
         let t0 = Date(timeIntervalSince1970: 1_000_000)
-        _ = detector.recordDisruption(at: t0)
-        _ = detector.recordDisruption(at: t0.addingTimeInterval(300))
-        XCTAssertTrue(detector.recordDisruption(at: t0.addingTimeInterval(600)),
-                      "3 disruptions in 10 minutes = the multi-device fight signature")
+        // The 2026-07-16 fight delivered 44 rebuild cycles in ~100s — events seconds apart.
+        XCTAssertTrue(feedStorm(&detector, from: t0, count: detector.threshold, gap: 3),
+                      "a sustained rapid chain = the multi-device fight signature")
     }
 
-    func testDetectorIgnoresEventsOutsideWindow() {
+    func testDetectorIgnoresPocketCycles() {
+        // 2026-07-21 false positive: AirPods in/out of a pocket. Each cycle emits a
+        // small burst (disconnect + reconnect + a health-check rebuild), then silence.
         var detector = ContentionDetector()
         let t0 = Date(timeIntervalSince1970: 1_000_000)
-        _ = detector.recordDisruption(at: t0)
-        _ = detector.recordDisruption(at: t0.addingTimeInterval(31 * 60))
-        XCTAssertFalse(detector.recordDisruption(at: t0.addingTimeInterval(62 * 60)),
-                       "events spread beyond the 30-minute window must not accumulate")
+        for cycle in 0..<10 {
+            let cycleStart = t0.addingTimeInterval(Double(cycle) * 10 * 60)
+            XCTAssertFalse(feedStorm(&detector, from: cycleStart, count: 3, gap: 20),
+                           "pocket cycles minutes apart must never read as contention")
+        }
+    }
+
+    func testDetectorGapResetsChain() {
+        var detector = ContentionDetector()
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        _ = feedStorm(&detector, from: t0, count: detector.threshold - 1, gap: 3)
+        // A quiet stretch longer than chainGapSeconds breaks the chain…
+        let t1 = t0.addingTimeInterval(20 * 60)
+        XCTAssertFalse(feedStorm(&detector, from: t1, count: detector.threshold - 1, gap: 3),
+                       "two sub-threshold bursts separated by silence must not accumulate")
     }
 
     func testDetectorCooldownSuppressesRepeatNotifications() {
         var detector = ContentionDetector()
         let t0 = Date(timeIntervalSince1970: 1_000_000)
-        _ = detector.recordDisruption(at: t0)
-        _ = detector.recordDisruption(at: t0.addingTimeInterval(60))
-        XCTAssertTrue(detector.recordDisruption(at: t0.addingTimeInterval(120)))
-        XCTAssertFalse(detector.recordDisruption(at: t0.addingTimeInterval(180)),
+        XCTAssertTrue(feedStorm(&detector, from: t0, count: detector.threshold, gap: 3))
+        // The storm rages on — no nagging within the 1-hour cooldown.
+        let during = t0.addingTimeInterval(Double(detector.threshold) * 3)
+        XCTAssertFalse(feedStorm(&detector, from: during, count: 20, gap: 3),
                        "within the 1-hour cooldown the user is not nagged again")
-        // A fight that persists PAST the cooldown (fresh burst of events) notifies again.
+        // A fight that persists PAST the cooldown (fresh storm) notifies again.
         let t2 = t0.addingTimeInterval(2 * 60 * 60)
-        _ = detector.recordDisruption(at: t2)
-        _ = detector.recordDisruption(at: t2.addingTimeInterval(60))
-        XCTAssertTrue(detector.recordDisruption(at: t2.addingTimeInterval(120)),
+        XCTAssertTrue(feedStorm(&detector, from: t2, count: detector.threshold, gap: 3),
                       "after the cooldown a persisting fight may notify once more")
     }
 
@@ -109,21 +133,41 @@ final class AudioRoutingTests: XCTestCase {
 
     // MARK: - Dual capture engagement (pure rule)
 
-    func testDualCaptureEngagesOnlyInTheExactConfiguration() {
+    func testDualCapturePinsPrimaryBeforeBluetoothAppears() {
+        XCTAssertTrue(DualCapture.shouldUseBuiltInPrimary(
+            flagOn: true, pinnedUID: nil, hasBuiltIn: true))
+        XCTAssertFalse(DualCapture.shouldUseBuiltInPrimary(
+            flagOn: false, pinnedUID: nil, hasBuiltIn: true))
+        XCTAssertFalse(DualCapture.shouldUseBuiltInPrimary(
+            flagOn: true, pinnedUID: "some-mic", hasBuiltIn: true))
+    }
+
+    func testDualCaptureEngagesOnlyWhenBluetoothIsAvailable() {
         XCTAssertTrue(DualCapture.shouldEngage(
-            flagOn: true, pinnedUID: nil, defaultIsBluetooth: true, hasBuiltIn: true))
+            flagOn: true, pinnedUID: nil, hasBuiltIn: true, hasBluetooth: true))
         XCTAssertFalse(DualCapture.shouldEngage(
-            flagOn: false, pinnedUID: nil, defaultIsBluetooth: true, hasBuiltIn: true),
+            flagOn: false, pinnedUID: nil, hasBuiltIn: true, hasBluetooth: true),
             "flag off = byte-identical legacy behavior")
         XCTAssertFalse(DualCapture.shouldEngage(
-            flagOn: true, pinnedUID: "some-mic", defaultIsBluetooth: true, hasBuiltIn: true),
+            flagOn: true, pinnedUID: "some-mic", hasBuiltIn: true, hasBluetooth: true),
             "an explicit user pin always wins")
         XCTAssertFalse(DualCapture.shouldEngage(
-            flagOn: true, pinnedUID: nil, defaultIsBluetooth: false, hasBuiltIn: true),
-            "nothing to consolidate when the default input isn't Bluetooth")
+            flagOn: true, pinnedUID: nil, hasBuiltIn: true, hasBluetooth: false),
+            "Bluetooth need not be default, but it must be available")
         XCTAssertFalse(DualCapture.shouldEngage(
-            flagOn: true, pinnedUID: nil, defaultIsBluetooth: true, hasBuiltIn: false),
+            flagOn: true, pinnedUID: nil, hasBuiltIn: false, hasBluetooth: true),
             "no built-in mic = no primary track to carry pre-roll")
+    }
+
+    func testPinnedAndDualPrimariesIgnoreDefaultRouteChanges() {
+        XCTAssertFalse(DualCapture.primaryFollowsSystemDefault(
+            flagOn: true, pinnedUID: nil, hasBuiltIn: true))
+        XCTAssertFalse(DualCapture.primaryFollowsSystemDefault(
+            flagOn: false, pinnedUID: "studio-mic", hasBuiltIn: true))
+        XCTAssertTrue(DualCapture.primaryFollowsSystemDefault(
+            flagOn: false, pinnedUID: nil, hasBuiltIn: true))
+        XCTAssertTrue(DualCapture.primaryFollowsSystemDefault(
+            flagOn: true, pinnedUID: nil, hasBuiltIn: false))
     }
 
     // MARK: - Token agreement

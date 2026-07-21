@@ -104,6 +104,54 @@ final class AdversarialR2InsertionTests: XCTestCase {
         XCTAssertEqual(HotkeyManager.fnTransition(fnDown: false, modifierPressed: false), .none)
     }
 
+    func test_contextInteractionMonitor_filtersHotkeyAndSyntheticEvents() {
+        let currentPID: Int64 = 1234
+        XCTAssertFalse(HotkeyManager.shouldCountAsUserInteraction(
+            eventType: .keyDown, eventKeyCode: 63, eventModifiers: 0,
+            sourcePID: 0, currentPID: currentPID,
+            hotkeyKeyCode: 63, requiredModifiers: 0))
+        XCTAssertFalse(HotkeyManager.shouldCountAsUserInteraction(
+            eventType: .keyDown, eventKeyCode: 9, eventModifiers: 0,
+            sourcePID: currentPID, currentPID: currentPID,
+            hotkeyKeyCode: 63, requiredModifiers: 0))
+    }
+
+    func test_contextInteractionMonitor_countsRealMouseAndKeyboardNavigation() {
+        let args = (currentPID: Int64(1234), hotkey: UInt16(63))
+        XCTAssertTrue(HotkeyManager.shouldCountAsUserInteraction(
+            eventType: .leftMouseDown, eventKeyCode: 0, eventModifiers: 0,
+            sourcePID: 0, currentPID: args.currentPID,
+            hotkeyKeyCode: args.hotkey, requiredModifiers: 0))
+        XCTAssertTrue(HotkeyManager.shouldCountAsUserInteraction(
+            eventType: .keyDown, eventKeyCode: 48, eventModifiers: 0,
+            sourcePID: 0, currentPID: args.currentPID,
+            hotkeyKeyCode: args.hotkey, requiredModifiers: 0))
+    }
+
+    func test_contextInteractionMonitor_excludesSystemEventsAutomationPaste() {
+        // The remote-desktop insertion path pastes via System Events ("keystroke v" at
+        // +0.4s); that synthetic Cmd-V carries System Events' PID and must NOT
+        // self-invalidate the remembered context remote-desktop apps depend on.
+        let systemEventsPID: Int64 = 777
+        XCTAssertFalse(HotkeyManager.shouldCountAsUserInteraction(
+            eventType: .keyDown, eventKeyCode: 9, eventModifiers: 0x100000,
+            sourcePID: systemEventsPID, currentPID: 1234,
+            hotkeyKeyCode: 63, requiredModifiers: 0,
+            automationPID: systemEventsPID))
+        // A real keystroke from any other source still counts…
+        XCTAssertTrue(HotkeyManager.shouldCountAsUserInteraction(
+            eventType: .keyDown, eventKeyCode: 9, eventModifiers: 0,
+            sourcePID: 0, currentPID: 1234,
+            hotkeyKeyCode: 63, requiredModifiers: 0,
+            automationPID: systemEventsPID))
+        // …and an unknown automation PID (System Events not running) excludes nothing.
+        XCTAssertTrue(HotkeyManager.shouldCountAsUserInteraction(
+            eventType: .keyDown, eventKeyCode: 9, eventModifiers: 0,
+            sourcePID: 777, currentPID: 1234,
+            hotkeyKeyCode: 63, requiredModifiers: 0,
+            automationPID: nil))
+    }
+
     // MARK: - I6: onboarding engine picker index derives from the applied suggestion
 
     func test_i6_enginePickerIndexMatchesSuggestion() {

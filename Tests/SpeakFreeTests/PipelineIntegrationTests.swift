@@ -330,6 +330,43 @@ final class PipelineIntegrationTests: XCTestCase {
             frontmostBundleID: "com.app", now: Date()))
     }
 
+    func test_realTimingRegression_userInteractionStartsFreshSentence() {
+        let now = Date()
+        let context = FinalizePipeline.fallbackCursorContext(
+            lastInsertedTail: "It's",
+            lastInsertedBundleID: "com.google.Chrome",
+            lastInsertedAt: now.addingTimeInterval(-1),
+            frontmostBundleID: "com.google.Chrome",
+            now: now,
+            userInteractedSinceInsertion: true,
+            focusedElementMatches: false)
+        XCTAssertNil(context, "a click into a new field must invalidate the prior insertion tail")
+
+        let final = TextPipeline.run(TextPipeline.Input(
+            raw: "Timing is different than the Premiere version, but doesn't matter, there's no dialogue.",
+            punctuationMode: .off,
+            cursorContextText: context,
+            audioDurationSeconds: 8.5
+        )).finalText
+        XCTAssertEqual(
+            FinalizePipeline.composeInsertText(
+                final,
+                prependSpace: TextInserter.shouldPrependSpace(contextBefore: context)),
+            "Timing is different than the Premiere version, but doesn't matter, there's no dialogue.")
+    }
+
+    func test_fallbackContext_sameElementWithoutInteraction_stillContinues() {
+        let now = Date()
+        XCTAssertEqual(FinalizePipeline.fallbackCursorContext(
+            lastInsertedTail: "It looks weird,",
+            lastInsertedBundleID: "com.microsoft.VSCode",
+            lastInsertedAt: now.addingTimeInterval(-2),
+            frontmostBundleID: "com.microsoft.VSCode",
+            now: now,
+            userInteractedSinceInsertion: false,
+            focusedElementMatches: true), "It looks weird,")
+    }
+
     func test_fallbackContext_drivesMidSentenceLowercase() {
         // End-to-end intent check: a fallback tail ending mid-sentence lowercases the
         // next dictation's leading capital; a sentence-final tail leaves it alone.

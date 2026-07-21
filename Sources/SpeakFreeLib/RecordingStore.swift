@@ -1,6 +1,7 @@
 import Foundation
+import Darwin
 
-public struct Recording {
+public struct Recording: Sendable {
     public let url: URL
     public let date: Date
     public let text: String?
@@ -46,16 +47,20 @@ public class RecordingStore {
     private static var cachedCount = 0
 
     // M1 test seam: number of transcript sidecars actually opened by `listRecordings(limit:)`.
-    // Proves the newest-N selection reads at most N sidecars, not one per corpus file. Only touched
-    // on the limit path, which runs on the main thread (menu build), so no locking is needed.
+    // Proves the newest-N selection reads at most N sidecars, not one per corpus file.
+    // Production never reads these values; tests reset/read them around synchronous calls.
     internal static var sidecarReadsForTesting = 0
+    /// M1 test seam: timestamp parses performed by the capped newest-N path.
+    internal static var dateParsesForTesting = 0
 
-    static let dateFormatter: DateFormatter = {
+    private static func makeDateFormatter() -> DateFormatter {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd-HHmmss"
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
-    }()
+    }
+
+    static let dateFormatter = makeDateFormatter()
 
     public static func ensureDirectory() {
         ensureLock.lock()
@@ -228,7 +233,11 @@ public class RecordingStore {
         }
 
         return files
-            .filter { $0.pathExtension.lowercased() == fileExtension && $0.lastPathComponent.hasPrefix(filePrefix) }
+            .filter {
+                $0.pathExtension.lowercased() == fileExtension
+                    && !$0.lastPathComponent.hasSuffix(".bt.wav")
+                    && $0.lastPathComponent.hasPrefix(filePrefix)
+            }
             .compactMap { url -> Recording? in
                 let name = url.deletingPathExtension().lastPathComponent
                 let dateString = String(name.dropFirst(filePrefix.count))
@@ -248,28 +257,54 @@ public class RecordingStore {
     public static func listRecordings(limit: Int) -> [Recording] {
         guard limit > 0 else { return [] }
         ensureDirectory()
-        let fm = FileManager.default
-        // atPath (names only) — no `.creationDateKey` prefetch; the date comes from the filename.
-        guard let names = try? fm.contentsOfDirectory(atPath: recordingsDir.path) else {
+        // Foundation's `contentsOfDirectory(atPath:)` unexpectedly performs per-entry
+        // metadata work on this 23k-artifact directory (tens of seconds on the real
+        // corpus). POSIX readdir is genuinely names-only and needs no file attributes.
+        guard let names = directoryEntryNames(atPath: recordingsDir.path) else {
             return []
         }
-        // Pass 1 — filename-only: parse the embedded timestamp, no sidecar/attribute reads.
-        let dated: [(url: URL, date: Date)] = names.compactMap { name in
-            guard name.hasPrefix(filePrefix),
-                  name.hasSuffix(".\(fileExtension)") else { return nil }
+        // The fixed-width embedded timestamp sorts chronologically as text. Filter and
+        // select the newest N names FIRST, then parse only those N dates. Parsing all
+        // ~6k primary timestamps on main was still a visible submenu-hover stall.
+        let newestNames = names.filter { name in
+            name.hasPrefix(filePrefix) && name.hasSuffix(".\(fileExtension)")
+                && !name.hasSuffix(".bt.wav")
+        }.sorted(by: >).prefix(limit)
+        // DateFormatter is not thread-safe. This path now runs on the Recent Dictations
+        // utility queue, potentially while the recorder creates a filename on main.
+        let filenameDateFormatter = makeDateFormatter()
+        let dated: [(url: URL, date: Date)] = newestNames.compactMap { name in
             let base = (name as NSString).deletingPathExtension
             let dateString = String(base.dropFirst(filePrefix.count))
             let datePart = String(dateString.prefix(17))
-            guard let date = dateFormatter.date(from: datePart) else { return nil }
+            dateParsesForTesting += 1
+            guard let date = filenameDateFormatter.date(from: datePart) else { return nil }
             return (recordingsDir.appendingPathComponent(name), date)
         }
-        // Pass 2 — sidecar read ONLY for the ≤N newest slice.
-        let newest = dated.sorted { $0.date > $1.date }.prefix(limit)
-        return newest.map { entry in
+        // Sidecar read ONLY for the ≤N newest slice.
+        return dated.map { entry in
             sidecarReadsForTesting += 1
             let text = try? String(contentsOf: sidecarURL(for: entry.url), encoding: .utf8)
             return Recording(url: entry.url, date: entry.date, text: text)
         }
+    }
+
+    private static func directoryEntryNames(atPath path: String) -> [String]? {
+        guard let directory = opendir(path) else { return nil }
+        defer { closedir(directory) }
+
+        var names: [String] = []
+        while let entry = readdir(directory) {
+            let name = withUnsafePointer(to: entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(
+                    to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1
+                ) { String(cString: $0) }
+            }
+            if name != ".", name != ".." {
+                names.append(name)
+            }
+        }
+        return names
     }
 
     public static func prune(maxCount: Int) {
@@ -286,6 +321,11 @@ public class RecordingStore {
                 try? FileManager.default.removeItem(at: sidecarURL(for: recording.url))
                 try? FileManager.default.removeItem(at: rawSidecarURL(for: recording.url))
                 try? FileManager.default.removeItem(at: metaSidecarURL(for: recording.url))
+                let base = recording.url.deletingPathExtension()
+                try? FileManager.default.removeItem(
+                    at: base.appendingPathExtension("builtin.raw.txt"))
+                try? FileManager.default.removeItem(at: base.appendingPathExtension("bt.wav"))
+                try? FileManager.default.removeItem(at: base.appendingPathExtension("bt.raw.txt"))
             } catch {
                 fputs("Warning: could not remove old recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
             }
@@ -344,7 +384,10 @@ public class RecordingStore {
     public static func recordingCount() -> Int {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: recordingsDir.path) else { return 0 }
-        return files.filter { $0.hasSuffix(".\(fileExtension)") && $0.hasPrefix(filePrefix) }.count
+        return files.filter {
+            $0.hasSuffix(".\(fileExtension)") && !$0.hasSuffix(".bt.wav")
+                && $0.hasPrefix(filePrefix)
+        }.count
     }
 
     /// Total number of recording artifacts on disk (wavs + transcript/meta sidecars) —
@@ -380,14 +423,11 @@ public class RecordingStore {
         }
     }
 
-    /// L2: persist the dual-capture Bluetooth comparison transcript (`<audio>.bt.raw.txt`).
-    /// It is produced by a DETACHED task that runs AFTER the main dictation finished, so it must
-    /// take the same `mutationLock` and honor the same wav-exists guard as `finishRecording` —
-    /// otherwise a "Delete All" that lands during the detached transcription can be raced: the
-    /// files are removed, then this write resurrects an orphaned sidecar with no audio behind it.
-    /// `btAudioURL` is the `<audio>.bt.wav` the sidecar pairs with; `mainAudioURL` is the primary
-    /// wav. If BOTH are already gone the recording set was deleted — skip the write.
-    public static func saveBluetoothRaw(text: String, btAudioURL: URL, mainAudioURL: URL) {
+    /// Persist both source transcripts alongside the merged `.raw.txt`. These are not
+    /// ground-truth labels; they are source evidence for later corpus review.
+    public static func saveDualSourceRaws(
+        primary: String, bluetooth: String, btAudioURL: URL, mainAudioURL: URL
+    ) {
         mutationLock.lock()
         defer { mutationLock.unlock() }
         let fm = FileManager.default
@@ -395,12 +435,34 @@ public class RecordingStore {
             DiagnosticLogger.shared.log("RecordingStore: recording vanished before bt-finish — skipping bt sidecar for \(btAudioURL.lastPathComponent)")
             return
         }
+        let primarySidecar = mainAudioURL.deletingPathExtension()
+            .appendingPathExtension("builtin.raw.txt")
+        try? primary.write(to: primarySidecar, atomically: true, encoding: .utf8)
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: primarySidecar.path)
+        saveRaw(text: bluetooth, for: btAudioURL)
+    }
+
+    /// Compatibility surface for the original comparison-only dual-capture path.
+    public static func saveBluetoothRaw(
+        text: String, btAudioURL: URL, mainAudioURL: URL
+    ) {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: mainAudioURL.path)
+                || fm.fileExists(atPath: btAudioURL.path) else {
+            DiagnosticLogger.shared.log(
+                "RecordingStore: recording vanished before bt-finish — skipping bt sidecar for \(btAudioURL.lastPathComponent)")
+            return
+        }
         saveRaw(text: text, for: btAudioURL)
     }
 
     /// The known recording-artifact extensions, longest-first so a compound suffix
     /// (`.bt.raw.txt`) is matched before its tail (`.raw.txt`, `.txt`).
-    private static let artifactSuffixes = [".bt.raw.txt", ".raw.txt", ".meta.json", ".bt.wav", ".wav", ".txt"]
+    private static let artifactSuffixes = [
+        ".builtin.raw.txt", ".bt.raw.txt", ".raw.txt", ".meta.json", ".bt.wav", ".wav", ".txt",
+    ]
 
     /// True only for a name that is an EXACT recording artifact: `recording-<timestamp>...` with a
     /// parseable embedded timestamp and one of the known artifact extensions. This is the deletion

@@ -77,6 +77,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastInsertionTail: String?
     private var lastInsertionBundleID: String?
     private var lastInsertionAt: Date?
+    private var lastInsertionElement: AXUIElement?
+    private var lastInsertionInteractionGeneration: UInt64?
+    private let userInteractionGeneration = OSAllocatedUnfairLock(initialState: UInt64(0))
     // L1: a config reload that lands while a dictation is in flight (fn held) must NOT mutate live
     // dictation state — it would (a) rebuild the HotkeyManager mid-press (recreating the event tap
     // loses the pending key-release, so the recording never stops and the next utterance merges
@@ -439,12 +442,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
         DiagnosticLogger.shared.log("Model loaded: \(modelID) (engine: \(engineID))")
 
-        // Configure pre-buffer
-        recorder.preBufferEnabled = config.preBuffer?.value ?? true
-
-        // Microphone pin (menu-bar selector) + dual-capture flag
+        // Apply routing BEFORE enabling pre-buffer. Assigning preBufferEnabled=true
+        // starts the engine immediately; doing that first briefly opens the system
+        // default route and then races the route-triggered rebuild at launch.
         recorder.dualCaptureEnabled = config.dualMicCapture?.value ?? false
         recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
+        recorder.preBufferEnabled = config.preBuffer?.value ?? true
 
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
@@ -542,6 +545,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onAbort: { [weak self] in
                 self?.handleRecordingAbort()
+            },
+            onUserInteraction: { [weak self] in
+                self?.noteUserInteraction()
             }
         )
 
@@ -844,12 +850,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
     private func reloadHotkeyAndSettings() {
-        // Configure pre-buffer
-        recorder.preBufferEnabled = config.preBuffer?.value ?? true
-
-        // Microphone pin (menu-bar selector) + dual-capture flag
+        // Routing must be settled before pre-buffer can start an absent engine.
         recorder.dualCaptureEnabled = config.dualMicCapture?.value ?? false
         recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
+        recorder.preBufferEnabled = config.preBuffer?.value ?? true
 
         // Update spoken punctuation on existing transcriber
         transcriber?.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
@@ -876,8 +880,19 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager?.start(
             onKeyDown: { [weak self] in self?.handleKeyDown() },
             onKeyUp: { [weak self] in self?.handleKeyUp() },
-            onAbort: { [weak self] in self?.handleRecordingAbort() }
+            onAbort: { [weak self] in self?.handleRecordingAbort() },
+            onUserInteraction: { [weak self] in self?.noteUserInteraction() }
         )
+    }
+
+    private func noteUserInteraction() {
+        userInteractionGeneration.withLock { generation in
+            generation &+= 1
+        }
+    }
+
+    private func currentUserInteractionGeneration() -> UInt64 {
+        userInteractionGeneration.withLock { $0 }
     }
 
     /// L1: apply a config reload that was deferred because a dictation was in flight when
@@ -1045,6 +1060,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let lastTail = lastInsertionTail
         let lastBundle = lastInsertionBundleID
         let lastAt = lastInsertionAt
+        let lastElement = lastInsertionElement
+        let lastInteractionGeneration = lastInsertionInteractionGeneration
+        let interactionGenerationAtStart = currentUserInteractionGeneration()
         let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
 
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
@@ -1064,16 +1082,33 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // own last insertion when it plausibly still sits before the cursor, so the
             // mid-sentence-lowercase and prepend-space features keep working there.
             if capturedContext == nil {
+                let userInteracted = lastInteractionGeneration.map {
+                    $0 != interactionGenerationAtStart
+                } ?? false
+                let focusedElementMatches: Bool?
+                if let lastElement, let capturedElement {
+                    focusedElementMatches = CFEqual(lastElement, capturedElement)
+                } else {
+                    focusedElementMatches = nil
+                }
                 let fallback = FinalizePipeline.fallbackCursorContext(
                     lastInsertedTail: lastTail,
                     lastInsertedBundleID: lastBundle,
                     lastInsertedAt: lastAt,
                     frontmostBundleID: frontBundle,
-                    now: Date())
+                    now: Date(),
+                    userInteractedSinceInsertion: userInteracted,
+                    focusedElementMatches: focusedElementMatches)
                 if let fallback {
                     capturedContext = fallback
                     DiagnosticLogger.shared.log(
                         "captureFocusedElement: AX gave no context — using tail of last insertion (\(fallback.count) chars)")
+                } else if lastTail != nil, userInteracted {
+                    DiagnosticLogger.shared.log(
+                        "captureFocusedElement: discarded remembered context after user interaction")
+                } else if lastTail != nil, focusedElementMatches == false {
+                    DiagnosticLogger.shared.log(
+                        "captureFocusedElement: discarded remembered context after focus changed")
                 }
             }
 
@@ -1279,6 +1314,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let audioURL = recording.url
+        let secondaryCapture = recording.secondary
 
         // Pre-transcription gates (too-short / silent), with the wav on disk as arbiter:
         // if the in-memory samples fail a gate but the just-written wav passes, transcribe
@@ -1355,8 +1391,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         // Recordings privacy: persisting audio + transcripts is opt-in (2026-07-14).
         let keepRecording = DevMode.effectiveSaveRecordings(config)
-        // Dual-capture comparison track (flag-gated prototype) — snapshot on main.
-        let btSamples = recorder.lastSecondarySamples
         let mode = config.spokenPunctuation ?? .off
         let glossary = Config.loadVocabulary()
         let overrides = Config.loadOverrides()
@@ -1435,15 +1469,74 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         audioDurationSeconds: Double(samples.count) / 16000.0
                     )
                 }
-                // T2.3 — reuse the saved streaming partial when the gate approved, else run the
-                // final inference, via the SHARED FinalizePipeline.resolveRaw (same branch the
-                // test harness exercises, incl. the segment-newline collapse on the reuse path).
-                // Either way the raw text flows through the SAME TextPipeline below.
-                let (raw, reusedPartial) = try await FinalizePipeline.resolveRaw(reuseDecision: reuseDecision) {
-                    try await transcriber.transcribe(audioURL: audioURL, samples: samples, prompt: prompt)
+                // The serial capture queue resolves this only after Bluetooth start and stop
+                // have both completed. Awaiting here keeps CoreAudio work off main and closes
+                // the AirPods mic before inference begins. Bounded: the secondary stop sits
+                // behind Bluetooth HAL calls, and a wedged coreaudiod there must degrade to
+                // primary-only — never hold the user's text hostage to the comparison track.
+                let btSamples = await secondaryCapture.value(
+                    timeout: DualCapture.secondaryResultTimeout)
+                let hasBluetoothTrack = btSamples.count >= FinalizePipeline.minSamples
+                let btURL = audioURL.deletingPathExtension().appendingPathExtension("bt.wav")
+                var btArtifactCommitted = false
+                defer {
+                    // The primary recording's normal finish path enforces the privacy
+                    // setting. The extra Bluetooth artifact must obey it even when
+                    // inference throws before finishRecording is reached — and even with
+                    // saving ON, a bt.wav written before a throw has no sidecars yet and
+                    // would sit as an orphan the recovery path could adopt. Only a fully
+                    // finished dual dictation keeps it.
+                    if !btArtifactCommitted {
+                        try? FileManager.default.removeItem(at: btURL)
+                    }
+                }
+
+                let primaryRaw: String
+                var bluetoothRaw: String?
+                var reusedPartial = false
+                if hasBluetoothTrack {
+                    // Sequential, PRIMARY FIRST — deliberately. Both engine backends
+                    // serialize internally (Whisper's serial engineQueue, Parakeet's
+                    // actor), so async-let gave no real overlap; worse, nondeterministic
+                    // enqueue order could park the user's primary inference behind the
+                    // whole Bluetooth pass. Primary goes first so the comparison track
+                    // can only ever cost its own inference time, never delay-order risk.
+                    try? DualCapture.writeWav(samples: btSamples, to: btURL)
+                    let started = CFAbsoluteTimeGetCurrent()
+                    primaryRaw = try await transcriber.transcribe(
+                        audioURL: audioURL, samples: samples, prompt: prompt)
+                    bluetoothRaw = try? await transcriber.transcribe(
+                        audioURL: btURL, samples: btSamples, prompt: prompt)
+                    DiagnosticLogger.shared.log(String(
+                        format: "DualCapture: dual inference (primary-first) completed in %.3fs",
+                        CFAbsoluteTimeGetCurrent() - started))
+                } else {
+                    // Streaming-partial reuse is primary-only. A dual recording always runs
+                    // both full passes so its alignment compares equivalent inference paths.
+                    (primaryRaw, reusedPartial) = try await FinalizePipeline.resolveRaw(
+                        reuseDecision: reuseDecision
+                    ) {
+                        try await transcriber.transcribe(
+                            audioURL: audioURL, samples: samples, prompt: prompt)
+                    }
                 }
                 if reusedPartial {
                     DiagnosticLogger.shared.log("T2.3: reused last streaming partial (skipped final inference)")
+                }
+                let merge = bluetoothRaw.map {
+                    DualCapture.mergeTranscripts(primary: primaryRaw, bluetooth: $0)
+                } ?? DualCapture.MergeResult(
+                    text: primaryRaw, usedBluetooth: false, confidence: 0,
+                    matchedTokens: 0, reason: .primaryOnly)
+                let raw = merge.text
+                if hasBluetoothTrack {
+                    let agreement = DualCapture.tokenAgreement(primaryRaw, bluetoothRaw ?? "")
+                    DiagnosticLogger.shared.log(String(
+                        format: "DualCapture: merge=%@ confidence=%.1f%% agreement=%.1f%% "
+                            + "(primary %d chars, bt %d chars, bt %.1fs)",
+                        merge.reason.rawValue, merge.confidence * 100, agreement * 100,
+                        primaryRaw.count, bluetoothRaw?.count ?? 0,
+                        Double(btSamples.count) / 16000.0))
                 }
                 let text = TextPipeline.run(makeInput(raw), precomputedPrompt: .some(prompt)).finalText
                 RecordingStore.finishRecording(
@@ -1459,30 +1552,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     ))
 
                 RecordingStore.clearSentinel()
+
+                // Preserve both unmerged raw transcripts for future corpus iteration.
+                // `.raw.txt` above is the merged raw that actually entered TextPipeline.
+                if keepRecording, hasBluetoothTrack {
+                    RecordingStore.saveDualSourceRaws(
+                        primary: primaryRaw, bluetooth: bluetoothRaw ?? "",
+                        btAudioURL: btURL, mainAudioURL: audioURL)
+                    btArtifactCommitted = true
+                }
                 if keepRecording && maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
-                }
-
-                // Dual-capture corpus diagnostics (flag-gated prototype): the built-in
-                // track above is what gets inserted; transcribe the Bluetooth comparison
-                // track too and record how much they agree. Detached task — zero added
-                // dictation latency. Content goes only into 0600 sidecars, never logs.
-                if keepRecording && btSamples.count >= FinalizePipeline.minSamples {
-                    Task {
-                        let btURL = audioURL.deletingPathExtension().appendingPathExtension("bt.wav")
-                        try? DualCapture.writeWav(samples: btSamples, to: btURL)
-                        let btRaw = (try? await transcriber.transcribe(
-                            audioURL: btURL, samples: btSamples, prompt: prompt)) ?? ""
-                        // L2: this detached task can outlive a "Delete All". Route the sidecar write
-                        // through RecordingStore so it takes the mutationLock and re-checks the wav
-                        // still exists — otherwise it resurrects an orphan transcript with no audio.
-                        RecordingStore.saveBluetoothRaw(text: btRaw, btAudioURL: btURL, mainAudioURL: audioURL)
-                        let agreement = DualCapture.tokenAgreement(raw, btRaw)
-                        DiagnosticLogger.shared.log(String(
-                            format: "DualCapture: agreement %.1f%% (primary %d chars, bt %d chars, bt %.1fs)",
-                            agreement * 100, raw.count, btRaw.count,
-                            Double(btSamples.count) / 16000.0))
-                    }
                 }
 
                 DispatchQueue.main.async {
@@ -1528,6 +1608,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             self.lastInsertionBundleID =
                                 NSWorkspace.shared.frontmostApplication?.bundleIdentifier
                             self.lastInsertionAt = Date()
+                            self.lastInsertionElement = capturedElement
+                            self.lastInsertionInteractionGeneration =
+                                self.currentUserInteractionGeneration()
                         }
                         if pasted {
                             let elapsed = CFAbsoluteTimeGetCurrent() - stopTime
@@ -1542,6 +1625,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             } catch {
                 RecordingStore.clearSentinel()
+                // The opt-out must win on the failure path too: finishRecording(keep:false)
+                // — the deletion the user consented to — is never reached when inference
+                // throws, and the wav would silently persist against the setting.
+                if !keepRecording {
+                    try? FileManager.default.removeItem(at: audioURL)
+                }
                 if maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
                 }
@@ -1587,8 +1676,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             NSApp.activate(ignoringOtherApps: true)
                             let alert = NSAlert()
                             alert.messageText = "Transcription Failed"
-                            alert.informativeText = "The engine reported an error. Your recording was kept"
-                                + " and can be transcribed from the recordings folder.\n\n\(error.localizedDescription)"
+                            let recordingNote = keepRecording
+                                ? "Your recording was kept and can be transcribed from the recordings folder."
+                                : "The recording was discarded (saving recordings is off)."
+                            alert.informativeText = "The engine reported an error. \(recordingNote)"
+                                + "\n\n\(error.localizedDescription)"
                             alert.alertStyle = .warning
                             alert.addButton(withTitle: "OK")
                             alert.runModal()

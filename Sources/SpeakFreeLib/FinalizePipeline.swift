@@ -112,9 +112,13 @@ public enum FinalizePipeline {
         lastInsertedAt: Date?,
         frontmostBundleID: String?,
         now: Date,
-        window: TimeInterval = 15
+        window: TimeInterval = 15,
+        userInteractedSinceInsertion: Bool = false,
+        focusedElementMatches: Bool? = nil
     ) -> String? {
-        guard let tail = lastInsertedTail, !tail.isEmpty,
+        guard !userInteractedSinceInsertion,
+              focusedElementMatches != false,
+              let tail = lastInsertedTail, !tail.isEmpty,
               let at = lastInsertedAt,
               now.timeIntervalSince(at) >= 0,
               now.timeIntervalSince(at) <= window,

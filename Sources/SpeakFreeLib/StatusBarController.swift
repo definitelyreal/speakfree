@@ -28,6 +28,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
     // rebuild (which clears `menuItemTargets`) can't invalidate the actions of an open submenu.
     private var recentMenuTargets: [MenuItemTarget] = []
     private var recentMenuDelegate: RecentMenuDelegate?
+    private var recentRecordingsSnapshot: [Recording] = []
+    private var hasLoadedRecentRecordings = false
+    private var recentRefreshInFlight = false
+    private var recentRefreshPending = false
 
     var reprocessHandler: ((URL) -> Void)?
     private var crashRecoveryURL: URL?
@@ -121,6 +125,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         buildMenuItems(into: menu)
         menu.delegate = self
         statusItem.menu = menu
+        requestRecentRecordingsRefresh()
     }
 
     private func buildMenuItems(into menu: NSMenu) {
@@ -309,6 +314,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
     /// sidecars only for the newest 15 recordings — never for the whole corpus, and never on a plain
     /// `buildMenu()`.
     private func populateRecentMenu(_ menu: NSMenu) {
+        let renderStarted = CFAbsoluteTimeGetCurrent()
+        defer {
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - renderStarted) * 1_000
+            DiagnosticLogger.shared.log(String(
+                format: "Recent Dictations: rendered cached menu in %.1f ms", elapsedMs))
+        }
         recentMenuTargets = []
         menu.removeAllItems()
 
@@ -326,7 +337,19 @@ class StatusBarController: NSObject, NSMenuDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        let recordings = RecordingStore.listRecordings(limit: 15)
+        // Never touch the 23k-file corpus from a submenu hover. `buildMenu()` and the
+        // previous hover refresh this snapshot on a utility queue; hover only renders it.
+        let recordings = recentRecordingsSnapshot
+
+        if !hasLoadedRecentRecordings {
+            let loading = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
+            loading.isEnabled = false
+            menu.addItem(loading)
+            requestRecentRecordingsRefresh()
+            return
+        }
+        // Refresh for the next open without delaying this one.
+        requestRecentRecordingsRefresh()
 
         if recordings.isEmpty {
             if crashRecoveryURL == nil {
@@ -370,6 +393,41 @@ class StatusBarController: NSObject, NSMenuDelegate {
         let folderItem = NSMenuItem(title: "Open Recordings Folder…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
         folderItem.target = folderTarget
         menu.addItem(folderItem)
+    }
+
+    /// Main-thread state, background filesystem work. If another state change requests
+    /// a refresh while one is running, perform exactly one follow-up so the newest
+    /// completed dictation cannot be stranded behind a stale in-flight snapshot.
+    private func requestRecentRecordingsRefresh() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.requestRecentRecordingsRefresh()
+            }
+            return
+        }
+        guard !recentRefreshInFlight else {
+            recentRefreshPending = true
+            return
+        }
+        recentRefreshInFlight = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let refreshStarted = CFAbsoluteTimeGetCurrent()
+            let recordings = RecordingStore.listRecordings(limit: 15)
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - refreshStarted) * 1_000
+            DiagnosticLogger.shared.log(String(
+                format: "Recent Dictations: refreshed %d-item cache in %.1f ms",
+                recordings.count, elapsedMs))
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.recentRecordingsSnapshot = recordings
+                self.hasLoadedRecentRecordings = true
+                self.recentRefreshInFlight = false
+                if self.recentRefreshPending {
+                    self.recentRefreshPending = false
+                    self.requestRecentRecordingsRefresh()
+                }
+            }
+        }
     }
 
     @objc private func reloadConfiguration() {
