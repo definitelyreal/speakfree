@@ -8,11 +8,13 @@ class HotkeyManager {
     private var eventTapRunLoop: CFRunLoop?
     private var globalMonitor: Any?
     private var keyDownMonitor: Any?
+    private var interactionMonitor: Any?
     private let keyCode: UInt16
     private let requiredModifiers: UInt64
     private var onKeyDown: (() -> Void)?
     private var onKeyUp: (() -> Void)?
     private var onAbort: (() -> Void)?
+    private var onUserInteraction: (() -> Void)?
     private var modifierPressed = false
     /// When fn was pressed — used to distinguish keyboard shortcuts (key within 300ms) from dictation
     private var modifierPressedAt: UInt64 = 0
@@ -27,10 +29,17 @@ class HotkeyManager {
         self.requiredModifiers = modifiers
     }
 
-    func start(onKeyDown: @escaping () -> Void, onKeyUp: @escaping () -> Void, onAbort: (() -> Void)? = nil) {
+    func start(
+        onKeyDown: @escaping () -> Void,
+        onKeyUp: @escaping () -> Void,
+        onAbort: (() -> Void)? = nil,
+        onUserInteraction: (() -> Void)? = nil
+    ) {
         self.onKeyDown = onKeyDown
         self.onKeyUp = onKeyUp
         self.onAbort = onAbort
+        self.onUserInteraction = onUserInteraction
+        startInteractionMonitor()
 
         // For modifier-only keys (like Fn), use a CGEventTap so we can suppress
         // the default system action (e.g. the emoji drawer that Fn normally opens).
@@ -48,6 +57,10 @@ class HotkeyManager {
             globalMonitor = nil
         }
         stopKeyDownMonitor()
+        if let monitor = interactionMonitor {
+            NSEvent.removeMonitor(monitor)
+            interactionMonitor = nil
+        }
     }
 
     /// Verify the event tap is alive. If it died, recreate it.
@@ -255,6 +268,88 @@ class HotkeyManager {
             NSEvent.removeMonitor(monitor)
             keyDownMonitor = nil
         }
+    }
+
+    // MARK: - Cursor-context invalidation monitor
+
+    /// Observe only interactions that can move the cursor/focus between two
+    /// dictations. This is a passive global monitor: it never suppresses events.
+    /// The configured hotkey and SpeakFree's own synthetic insertion events are
+    /// excluded, so a genuine back-to-back continuation keeps its remembered tail.
+    private func startInteractionMonitor() {
+        guard interactionMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [
+            .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+        ]
+        interactionMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            guard let self else { return }
+            let sourcePID = event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID)
+            guard Self.shouldCountAsUserInteraction(
+                eventType: event.type,
+                // NSEvent.keyCode is only defined for key events; reading it on a
+                // mouse-down can raise on some AppKit versions — and this closure runs
+                // for every click anywhere in the OS.
+                eventKeyCode: event.type == .keyDown ? event.keyCode : 0,
+                eventModifiers: UInt64(event.modifierFlags.rawValue),
+                sourcePID: sourcePID,
+                currentPID: Int64(ProcessInfo.processInfo.processIdentifier),
+                hotkeyKeyCode: self.keyCode,
+                requiredModifiers: self.requiredModifiers,
+                automationPID: Self.systemEventsPID()
+            ) else { return }
+            self.onUserInteraction?()
+        }
+        if interactionMonitor == nil {
+            DiagnosticLogger.shared.log(
+                "HotkeyManager: cursor-context interaction monitor unavailable")
+        }
+    }
+
+    static func shouldCountAsUserInteraction(
+        eventType: NSEvent.EventType,
+        eventKeyCode: UInt16,
+        eventModifiers: UInt64,
+        sourcePID: Int64?,
+        currentPID: Int64,
+        hotkeyKeyCode: UInt16,
+        requiredModifiers: UInt64,
+        automationPID: Int64? = nil
+    ) -> Bool {
+        let relevantTypes: Set<NSEvent.EventType> = [
+            .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+        ]
+        guard relevantTypes.contains(eventType) else { return false }
+        if sourcePID == currentPID { return false }
+        // The remote-desktop insertion path pastes via System Events ("keystroke v"
+        // at +0.4s), so that synthetic Cmd-V carries System Events' PID, not ours —
+        // without this exclusion it lands after the insertion generation is captured
+        // and self-invalidates the remembered context that remote-desktop apps
+        // (AX-opaque) depend on. Real typing never originates from System Events.
+        if let automationPID, sourcePID == automationPID { return false }
+        if eventType == .keyDown, eventKeyCode == hotkeyKeyCode {
+            let modifiers = eventModifiers & 0x00FF0000
+            if requiredModifiers == 0 || modifiers & requiredModifiers == requiredModifiers {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// PID of System Events, cached briefly — the interaction monitor consults this on
+    /// every global keystroke/click and must not run a launch-services query each time.
+    private static var systemEventsPIDCache: (pid: Int64?, at: Date) = (nil, .distantPast)
+    private static let systemEventsPIDCacheLock = NSLock()
+    private static func systemEventsPID() -> Int64? {
+        systemEventsPIDCacheLock.lock()
+        defer { systemEventsPIDCacheLock.unlock() }
+        let now = Date()
+        if now.timeIntervalSince(systemEventsPIDCache.at) > 30 {
+            let pid = NSRunningApplication
+                .runningApplications(withBundleIdentifier: "com.apple.systemevents")
+                .first.map { Int64($0.processIdentifier) }
+            systemEventsPIDCache = (pid, now)
+        }
+        return systemEventsPIDCache.pid
     }
 
     // MARK: - NSEvent global monitor (non-modifier keys)

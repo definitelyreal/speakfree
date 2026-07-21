@@ -115,15 +115,17 @@ class AudioRecorder {
     /// device is missing at engine build time, capture falls back to the default (logged).
     private(set) var pinnedInputDeviceUID: String?
 
-    // MARK: - Dual-mic capture (2026-07-14, flag-gated prototype)
+    // MARK: - Dual-mic capture
 
-    /// When on AND the default input is Bluetooth AND no explicit pin is set, the
-    /// always-on engine is pinned to the built-in mic and a second stream captures
-    /// the Bluetooth mic during each recording for comparison. See DualCapture.swift.
+    /// When on and no explicit pin is set, the always-on engine is pinned to the
+    /// built-in mic. Any available Bluetooth mic opens only during a recording.
     var dualCaptureEnabled = false {
         didSet {
             guard dualCaptureEnabled != oldValue else { return }
             DiagnosticLogger.shared.log("AudioRecorder: dual-mic capture → \(dualCaptureEnabled)")
+            // Setup applies routing before warmUp. Starting a delayed rebuild with no
+            // engine yet races warmUp's immediate start and can stop the new engine.
+            guard audioEngine != nil else { return }
             reinstallTap()
         }
     }
@@ -132,17 +134,27 @@ class AudioRecorder {
     /// start/teardown. Keeps HAL calls off the main thread (2026-07-15 wedge): a stuck
     /// coreaudiod must never block a menu-bar click while speakfree holds the event tap.
     private let secondaryQueue = DispatchQueue(label: "com.speakfree.secondarycapture", qos: .utility)
-    /// The Bluetooth comparison track from the most recent recording (empty when dual
-    /// capture didn't engage). Consumed by finalize for the corpus diagnostics.
-    private(set) var lastSecondarySamples: [Float] = []
-
     private func dualEngagedNow() -> Bool {
         // Cache-only: this runs inside startEngine (main thread via the rebuild path);
         // live HAL reads here contributed to the 2026-07-15 main-thread wedge.
         DualCapture.shouldEngage(
             flagOn: dualCaptureEnabled,
             pinnedUID: pinnedInputDeviceUID,
-            defaultIsBluetooth: AudioDeviceCatalog.cachedDefaultIsBluetooth(),
+            hasBuiltIn: AudioDeviceCatalog.cachedBuiltInInput != nil,
+            hasBluetooth: AudioDeviceCatalog.cachedBluetoothInput != nil)
+    }
+
+    private func usesBuiltInPrimaryNow() -> Bool {
+        DualCapture.shouldUseBuiltInPrimary(
+            flagOn: dualCaptureEnabled,
+            pinnedUID: pinnedInputDeviceUID,
+            hasBuiltIn: AudioDeviceCatalog.cachedBuiltInInput != nil)
+    }
+
+    private func primaryFollowsSystemDefaultNow() -> Bool {
+        DualCapture.primaryFollowsSystemDefault(
+            flagOn: dualCaptureEnabled,
+            pinnedUID: pinnedInputDeviceUID,
             hasBuiltIn: AudioDeviceCatalog.cachedBuiltInInput != nil)
     }
 
@@ -152,6 +164,7 @@ class AudioRecorder {
         pinnedInputDeviceUID = uid
         DiagnosticLogger.shared.log(
             "AudioRecorder: microphone pin → \(uid ?? "system default") — rebuilding engine")
+        guard audioEngine != nil else { return }
         reinstallTap()
     }
 
@@ -160,6 +173,9 @@ class AudioRecorder {
     func currentCaptureDeviceName() -> String? {
         if let uid = pinnedInputDeviceUID, let dev = AudioDeviceCatalog.cachedDevice(withUID: uid) {
             return dev.name
+        }
+        if usesBuiltInPrimaryNow() {
+            return AudioDeviceCatalog.cachedBuiltInInput?.name
         }
         return AudioDeviceCatalog.cachedDefaultInput?.name
     }
@@ -178,8 +194,20 @@ class AudioRecorder {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let self = self else { return }
-            DiagnosticLogger.shared.log("AudioRecorder: audio configuration changed — scheduling tap reinstall")
+            guard let self = self, let changedEngine = notification.object as? AVAudioEngine,
+                  changedEngine === self.audioEngine else {
+                return
+            }
+
+            // Device binding itself emits this notification. A pinned primary does not
+            // follow route/default changes, and rebuilding it would emit another event.
+            guard self.primaryFollowsSystemDefaultNow() else {
+                DiagnosticLogger.shared.log(
+                    "AudioRecorder: primary configuration changed while pinned — keeping engine")
+                return
+            }
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: primary audio configuration changed — scheduling tap reinstall")
 
             // Don't touch the engine during active recording — defer until recording stops
             if self.isRecording {
@@ -214,6 +242,11 @@ class AudioRecorder {
             DispatchQueue.main.async {
                 DiagnosticLogger.shared.log("AudioRecorder: device change — bounced to main, isRebuilding=\(self.isRebuilding)")
                 self.noteDisruption()
+                guard self.primaryFollowsSystemDefaultNow() else {
+                    DiagnosticLogger.shared.log(
+                        "AudioRecorder: default input changed but primary is pinned — no rebuild")
+                    return
+                }
                 if self.isRecording {
                     self.needsTapReinstall = true
                 } else {
@@ -255,7 +288,8 @@ class AudioRecorder {
 
     // MARK: - Multi-device contention detection (2026-07-14)
 
-    /// Sliding-window detector for the AirPods multi-device fight. Fed from every
+    /// Storm detector for the AirPods multi-device fight (chained rapid events, so
+    /// deliberate connect/disconnect pocket cycles don't false-positive). Fed from every
     /// route-disruption site below; fires `onContention` (throttled inside the
     /// detector) so AppDelegate can tell the user what is actually happening.
     private var contention = ContentionDetector()
@@ -264,7 +298,7 @@ class AudioRecorder {
     /// Call from any disruption site (device change, engine death, buffer stall).
     /// Only counts while the capture path is Bluetooth — built-in mics don't fight.
     private func noteDisruption() {
-        guard AudioDeviceCatalog.cachedDefaultIsBluetooth() else { return }
+        guard AudioDeviceCatalog.cachedBluetoothInput != nil else { return }
         if contention.recordDisruption(at: Date()) {
             DiagnosticLogger.shared.log("Contention detected: \(ContentionDetector.noticeText)")
             onContention?(ContentionDetector.noticeText)
@@ -366,7 +400,7 @@ class AudioRecorder {
         // always-on engine to the built-in mic implicitly (Bluetooth stays released
         // until a recording actually starts).
         let effectivePin = pinnedInputDeviceUID
-            ?? (dualEngagedNow() ? AudioDeviceCatalog.cachedBuiltInInput?.uid : nil)
+            ?? (usesBuiltInPrimaryNow() ? AudioDeviceCatalog.cachedBuiltInInput?.uid : nil)
         if let uid = effectivePin {
             if let dev = AudioDeviceCatalog.cachedDevice(withUID: uid), let unit = inputNode.audioUnit {
                 var deviceID = dev.id
@@ -594,8 +628,7 @@ class AudioRecorder {
 
         // Dual capture: open the Bluetooth comparison stream for this recording only.
         // CoreAudio start runs on the dedicated secondary queue, never main (AU-D).
-        lastSecondarySamples = []
-        if dualEngagedNow(), let bt = AudioDeviceCatalog.cachedDefaultInput, !bt.isBuiltIn {
+        if dualEngagedNow(), let bt = AudioDeviceCatalog.cachedBluetoothInput {
             secondaryQueue.async { _ = self.secondaryRecorder.start(device: bt) }
         }
     }
@@ -618,7 +651,7 @@ class AudioRecorder {
         }
     }
 
-    func stopRecording() -> (url: URL, samples: [Float])? {
+    func stopRecording() -> (url: URL, samples: [Float], secondary: SecondaryCaptureResult)? {
         // Atomically flip back to pre-roll mode
         stateLock.lock()
         guard _isRecording else { stateLock.unlock(); return nil }
@@ -636,17 +669,18 @@ class AudioRecorder {
         print("AudioRecorder: recording stopped, \(samples.count) total samples (\(duration)s)")
         DiagnosticLogger.shared.log("AudioRecorder: recording stopped, \(samples.count) samples (\(duration)s)")
 
-        // Close the Bluetooth comparison stream (no-op when dual capture didn't engage).
-        // Read the captured samples synchronously — collectSamples() is a cheap lock-guarded
-        // buffer read, NO CoreAudio — so the caller has the comparison track the moment
-        // stopRecording() returns. The actual HAL teardown (removeTap/stop) runs off main on
-        // the secondary queue so a stuck coreaudiod can't wedge the main thread (AU-D).
-        lastSecondarySamples = secondaryRecorder.collectSamples()
-        secondaryQueue.async { self.secondaryRecorder.teardown() }
-        if !lastSecondarySamples.isEmpty {
-            DiagnosticLogger.shared.log(
-                "AudioRecorder: dual capture collected \(lastSecondarySamples.count) BT samples "
-                + "(\(String(format: "%.1f", Double(lastSecondarySamples.count) / 16000.0))s)")
+        // Queue stop behind start on the SAME serial queue. The old main-thread buffer
+        // snapshot could beat a slow Bluetooth start and return an empty track for short
+        // dictations. Finalization awaits this result off-main.
+        let secondary = SecondaryCaptureResult()
+        secondaryQueue.async {
+            let btSamples = self.secondaryRecorder.stop()
+            if !btSamples.isEmpty {
+                DiagnosticLogger.shared.log(
+                    "AudioRecorder: dual capture collected \(btSamples.count) BT samples "
+                    + "(\(String(format: "%.1f", Double(btSamples.count) / 16000.0))s)")
+            }
+            secondary.resolve(btSamples)
         }
 
         // If pre-buffer is off, stop the engine until next recording
@@ -662,7 +696,7 @@ class AudioRecorder {
         }
 
         guard let url = currentOutputURL else { return nil }
-        return (url: url, samples: samples)
+        return (url: url, samples: samples, secondary: secondary)
     }
 }
 

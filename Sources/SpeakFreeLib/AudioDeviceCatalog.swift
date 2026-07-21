@@ -3,7 +3,7 @@ import CoreAudio
 import Foundation
 
 /// A capture-capable audio device as shown in the menu-bar microphone selector.
-public struct AudioInputDevice: Equatable {
+public struct AudioInputDevice: Equatable, Sendable {
     public let id: AudioDeviceID
     public let uid: String
     public let name: String
@@ -48,6 +48,14 @@ public enum AudioDeviceCatalog {
 
     public static var cachedBuiltInInput: AudioInputDevice? {
         cachedInputDevices.first { $0.isBuiltIn }
+    }
+
+    /// Prefer the system default when it is Bluetooth, but do not require Bluetooth
+    /// to be the default. Dual capture deliberately leaves the default on the built-in
+    /// mic so AirPods remain in stereo playback mode while speakfree is idle.
+    public static var cachedBluetoothInput: AudioInputDevice? {
+        if let device = cachedDefaultInput, device.isBluetooth { return device }
+        return cachedInputDevices.first { $0.isBluetooth }
     }
 
     public static func cachedDefaultIsBluetooth() -> Bool {

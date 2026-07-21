@@ -19,6 +19,7 @@ final class PerfBatchMTests: XCTestCase {
         testDir = RecordingStore.recordingsDir
         try? FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
         RecordingStore.sidecarReadsForTesting = 0
+        RecordingStore.dateParsesForTesting = 0
     }
 
     override func tearDown() {
@@ -79,6 +80,8 @@ final class PerfBatchMTests: XCTestCase {
 
         // The cap selection is filename-only: only the 15 chosen sidecars are opened, not all 300.
         XCTAssertEqual(RecordingStore.sidecarReadsForTesting, 15)
+        XCTAssertEqual(RecordingStore.dateParsesForTesting, 15,
+                       "timestamp parsing must also be capped, not scale with the corpus")
     }
 
     func testLimitSelectionIgnoresSidecars() {

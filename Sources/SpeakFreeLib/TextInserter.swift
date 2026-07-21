@@ -448,19 +448,33 @@ class TextInserter {
         "com.microsoft.teams2",                // Teams
         "us.zoom.xos",                         // Zoom (chat)
         "com.loom.desktop",                    // Loom
+        "com.openai.codex",                    // Codex/ChatGPT desktop contenteditable
+        "com.openai.chat",                     // ChatGPT Classic
     ]
+
+    /// Large image clipboards are common while dictating into creative/chat apps. A
+    /// 512 KB ceiling forced a 4.6 MB clipboard in Codex back to synthetic Unicode
+    /// events, the exact path that intermittently dropped the user's insertion. Keep a
+    /// finite cap, but allow ordinary images to be saved and restored around Cmd+V.
+    static let maxRestorableClipboardBytes = 16 * 1_024 * 1_024
+
+    static func prefersClipboardPaste(bundleID: String) -> Bool {
+        if clipboardPasteApps.contains(bundleID) { return true }
+        return bundleID.lowercased().contains("superhuman")
+    }
+
+    static func canSafelySaveClipboard(byteSize: Int) -> Bool {
+        byteSize <= maxRestorableClipboardBytes
+    }
 
     private func shouldUseClipboardPaste() -> Bool {
         guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return false }
 
         // Exact match against known Electron / clipboard-paste apps
-        if Self.clipboardPasteApps.contains(bundleID) { return true }
-
-        // Fuzzy match for variants (e.g. "superhuman.superhuman.staging")
-        let lower = bundleID.lowercased()
-        if lower.contains("superhuman") { return true }
+        if Self.prefersClipboardPaste(bundleID: bundleID) { return true }
 
         // Browser-agnostic check: Google Docs/Sheets/Slides in any browser
+        let lower = bundleID.lowercased()
         if isBrowser(bundleID: lower), let title = frontWindowTitle() {
             let t = title.lowercased()
             if t.contains("google docs") || t.contains("google sheets") || t.contains("google slides") {
@@ -608,11 +622,15 @@ class TextInserter {
     private func pasteViaClipboard(_ text: String) {
         let pasteboard = self.pasteboard
 
-        // Safety check: measure existing clipboard binary footprint
-        let clipboardByteSize = pasteboard.pasteboardItems?.reduce(0) { total, item in
-            total + item.types.reduce(0) { $0 + (item.data(forType: $1)?.count ?? 0) }
-        } ?? 0
-        if clipboardByteSize > 512_000 {
+        // Save FIRST: one materialization serves both the size check and the restore
+        // snapshot. Measuring separately via item.data(forType:) read every payload
+        // twice — with the 16 MB cap that's up to ~32 MB of main-thread copying at
+        // insert time for a large image clipboard.
+        let savedItems = savePasteboard(pasteboard)
+        let clipboardByteSize = savedItems.reduce(0) { total, item in
+            total + item.reduce(0) { $0 + $1.1.count }
+        }
+        if !Self.canSafelySaveClipboard(byteSize: clipboardByteSize) {
             DiagnosticLogger.shared.log(
                 "TextInserter: clipboard has \(clipboardByteSize / 1024)KB of data — "
                 + "falling back to CGEvent to avoid clobbering it"
@@ -620,8 +638,6 @@ class TextInserter {
             _ = typeViaKeyEvents(text)
             return
         }
-
-        let savedItems = savePasteboard(pasteboard)
 
         // Write the dictated text (transient/concealed-marked) and snapshot changeCount AFTER the
         // write. A `clearContents()` + `writeObjects()` sequence advances `changeCount` by exactly

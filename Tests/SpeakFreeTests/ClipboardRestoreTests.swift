@@ -23,6 +23,16 @@ final class ClipboardRestoreTests: XCTestCase {
 
     // MARK: - The bug: changeCount delta is +1, not +2
 
+    func test_codexAndChatGPTUseClipboardPastePath() {
+        XCTAssertTrue(TextInserter.prefersClipboardPaste(bundleID: "com.openai.codex"))
+        XCTAssertTrue(TextInserter.prefersClipboardPaste(bundleID: "com.openai.chat"))
+    }
+
+    func test_ordinaryImageClipboardCanBeSavedButCapRemainsFinite() {
+        XCTAssertTrue(TextInserter.canSafelySaveClipboard(byteSize: 4_610 * 1_024))
+        XCTAssertFalse(TextInserter.canSafelySaveClipboard(byteSize: 32 * 1_024 * 1_024))
+    }
+
     /// THE root-cause assertion. `clearContents()` + transient `writeObjects()` advances the
     /// pasteboard's changeCount by exactly ONE generation. The old guard expected +2, so it could
     /// never fire. This locks the real OS behavior the fix relies on.
