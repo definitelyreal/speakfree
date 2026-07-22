@@ -37,14 +37,16 @@ public final class ParakeetEngine: TranscriptionEngine {
         /// FluidAudio's loaded ASR manager (actor). `nil` until `load` succeeds.
         private var manager: AsrManager?
 
-        /// Ingredients for the custom-vocabulary sliding-window path. Populated in the background by
-        /// `setupVocabBoosting` when a `custom-vocabulary.json` is present and the CTC keyword-spotter
-        /// loads; all nil otherwise (→ `transcribe` uses the plain batch path). A FRESH
-        /// `SlidingWindowAsrManager` is built per utterance from these — the manager's input stream is
-        /// single-use (finish() terminates it permanently), so it cannot be reused across dictations.
-        /// The heavy models here ARE reused, so per-utterance setup is cheap.
-        private var vocabModels: AsrModels?
-        private var vocabCtc: CtcModels?
+        /// Ingredients for the custom-vocabulary BATCH-ANCHORED boost path (VocabularyBoost).
+        /// Populated in the background by `setupVocabBoosting` when a `custom-vocabulary.json`
+        /// gate file is present and the CTC keyword-spotter loads; all nil otherwise (→
+        /// `transcribe` returns the plain batch result). The sliding-window design this
+        /// replaces was retired 2026-07-22: its base decode diverges from batch at window
+        /// seams (~2.5% of words, including dropped spoken-punctuation), so it could never
+        /// guarantee production parity. The boost now runs ON TOP of the batch result and
+        /// can only change explicitly-accepted vocab spans.
+        private var vocabSpotter: CtcKeywordSpotter?
+        private var vocabRescorer: VocabularyRescorer?
         private var vocabContext: CustomVocabularyContext?
         private var vocabTermCount = 0
         /// Handle on the background vocab setup, for the SPEAKFREE_WAIT_VOCAB test seam only.
@@ -151,7 +153,7 @@ public final class ParakeetEngine: TranscriptionEngine {
                 while active > 0 { await Task.yield() }
                 manager = nil
                 loadedModelID = nil
-                vocabModels = nil; vocabCtc = nil; vocabContext = nil; vocabTermCount = 0
+                vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
                 await old.cleanup()
                 tearingDown = false
             }
@@ -170,18 +172,20 @@ public final class ParakeetEngine: TranscriptionEngine {
             vocabSetupTask = Task { await self.setupVocabBoosting(models: models, forModelID: modelForVocab) }
         }
 
-        /// Try to configure decode-time custom-vocabulary biasing. Gated on a
+        /// Try to configure batch-anchored custom-vocabulary boosting. Gated on a
         /// `custom-vocabulary.json` (FluidAudio `CustomVocabularyConfig` format) existing in the
         /// active config dir — so the streaming build opts in and production stays batch-only.
-        /// Downloads the ~110MB CTC keyword-spotter model on first use. Any failure logs and leaves
-        /// `slidingManager` nil, so `transcribe` silently uses the batch path.
+        /// Terms come from `vocabulary.txt` (the user's curated list; punctuation command words
+        /// excluded); the gate file contributes curated garble ALIASES (e.g. "xander" → Zander),
+        /// which are the only channel through which a real English word may be rescored.
+        /// Downloads the ~110MB CTC keyword-spotter model on first use. Any failure logs and
+        /// leaves the ingredients nil, so `transcribe` returns the plain batch result.
         private func setupVocabBoosting(models: AsrModels, forModelID: String) async {
-            vocabModels = nil; vocabCtc = nil; vocabContext = nil; vocabTermCount = 0
+            vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
 
             let dictURL = Config.configDir.appendingPathComponent("custom-vocabulary.json")
             guard FileManager.default.fileExists(atPath: dictURL.path) else { return }
             do {
-                let vocab = try CustomVocabularyContext.load(from: dictURL)
                 DiagnosticLogger.shared.log("ParakeetEngine: loading CTC keyword-spotter for vocab boosting")
                 // FluidAudio is pinned offline (speakfree owns all downloads). Lift it JUST around
                 // this one deliberate CTC fetch, then restore — same pattern ParakeetModelManager
@@ -196,113 +200,33 @@ public final class ParakeetEngine: TranscriptionEngine {
                     DownloadUtils.enforceOffline = priorOffline
                     throw error
                 }
-                // CRITICAL: tokenize each term for the CTC keyword spotter. The spotter matches on
-                // `term.ctcTokenIds` (CtcKeywordSpotter: `ctcTokenIds ?? tokenIds`); `.load()` leaves
-                // both nil, so nothing is ever spotted and Replacements is always 0 (dogfood
-                // 2026-07-02: the boost silently did nothing). Encode `text` with the CTC tokenizer,
-                // matching FluidAudio's own `loadWithCtcTokens`.
+                // Tokenize each term for the CTC keyword spotter (`.load()` leaves ctcTokenIds
+                // nil and nothing is ever spotted — dogfood 2026-07-02).
                 let tokenizer = try await CtcTokenizer.load(from: CtcModels.defaultCacheDirectory(for: .ctc110m))
-                let tokenizedTerms = vocab.terms.compactMap { term -> CustomVocabularyTerm? in
-                    let ids = tokenizer.encode(term.text)
-                    guard !ids.isEmpty else { return nil }
-                    return CustomVocabularyTerm(text: term.text, weight: term.weight,
-                                                aliases: term.aliases, tokenIds: nil, ctcTokenIds: ids)
+                let aliases = VocabularyBoost.loadCuratedAliases(from: dictURL)
+                let specs = VocabularyBoost.loadTermSpecs(
+                    vocabularyFile: Config.vocabularyFile, curatedAliases: aliases)
+                let context = VocabularyBoost.makeContext(specs: specs, tokenizer: tokenizer)
+                guard !context.terms.isEmpty else {
+                    DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting idle — no usable terms")
+                    return
                 }
-                let tokenizedVocab = CustomVocabularyContext(
-                    terms: tokenizedTerms, alpha: vocab.alpha, minCtcScore: vocab.minCtcScore,
-                    minSimilarity: vocab.minSimilarity, minCombinedConfidence: vocab.minCombinedConfidence,
-                    minTermLength: vocab.minTermLength)
+                let spotter = CtcKeywordSpotter(models: ctc)
+                let rescorer = try await VocabularyRescorer.create(
+                    spotter: spotter, vocabulary: context,
+                    ctcModelDirectory: CtcModels.defaultCacheDirectory(for: .ctc110m))
 
                 // Commit only if this model is still the loaded one (a reload may have raced).
                 guard loadedModelID == forModelID, manager != nil else { return }
-                vocabModels = models
-                vocabCtc = ctc
-                vocabContext = tokenizedVocab
-                vocabTermCount = tokenizedVocab.terms.count
-                DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting ready (\(tokenizedVocab.terms.count) CTC-tokenized terms)")
+                vocabSpotter = spotter
+                vocabRescorer = rescorer
+                vocabContext = context
+                vocabTermCount = context.terms.count
+                DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting ready (\(context.terms.count) CTC-tokenized terms, batch-anchored)")
             } catch {
                 DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting unavailable — \(error.localizedDescription); using batch path")
-                vocabModels = nil; vocabCtc = nil; vocabContext = nil; vocabTermCount = 0
+                vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
             }
-        }
-
-        /// Feed already-recorded 16kHz mono samples through a FRESH sliding-window manager to get a
-        /// vocab-boosted transcript. A new manager per call is required: its input stream is
-        /// single-use (finish() terminates it), so a reused manager hangs every dictation after the
-        /// first. The heavy models are passed in (already loaded), so this only builds the light
-        /// wrapper + rescorer. `streamAudio` takes explicit buffers (it does not tap the mic).
-        private func transcribeSliding(models: AsrModels, ctc: CtcModels,
-                                       vocab: CustomVocabularyContext, audio: [Float]) async throws -> String {
-            // `.streaming` (11-2-2), NOT `.default` (15-10-2): the default assembles 17s windows
-            // (chunk 15s + right 2s) that exceed the TDT model's 240000-sample (15s) input cap, so
-            // every window on a >15s clip errors out and the transcript comes back empty (dogfood
-            // 2026-07-02). The 11-2-2 window is 13s, within the cap, and FluidAudio's own docs call
-            // 10-11s the right chunk size.
-            // Trim trailing near-silence before feeding the sliding window. Its per-window decoder
-            // hallucinates plausible words for long silent tails (dogfood 2026-07-02: "Yeah, it
-            // would be nice if" + a long pause → "…you're not sure if you're gonna"). The batch path
-            // tolerates silence/the flush pad; the sliding path treats it as "transcribe this". Keep
-            // a short margin so real trailing speech isn't clipped.
-            let fedAudio = ParakeetEngine.trimTrailingSilence(audio)
-
-            let sw = SlidingWindowAsrManager(config: .streaming)
-            try await sw.loadModels(models)
-            try await sw.configureVocabularyBoosting(vocabulary: vocab, ctcModels: ctc)
-
-            // Capture the transcript from the update stream as a safety net. finish() returns the
-            // manager's internal confirmed+volatile, but a single-window clip (~11-13s) keeps its
-            // text in VOLATILE (never promoted, since there's no following window) and a trailing
-            // empty flush chunk overwrites it — so finish() comes back empty even though the clip
-            // transcribed fine (dogfood 2026-07-02: 11.1s "Hey Kama…" recognized, then wiped).
-            // Tracking the richest non-empty text seen survives that. The stream is finished by
-            // finish()/cancel(), so this collector task always terminates — no hang.
-            let updates = await sw.transcriptionUpdates
-            let collector = Task { () -> String in
-                var confirmed: [String] = []
-                var bestVolatile = ""
-                var bestVolatileConfidence: Float = -1
-                for await u in updates {
-                    let t = u.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !t.isEmpty else { continue }
-                    if u.isConfirmed {
-                        confirmed.append(t)
-                    } else if u.confidence > bestVolatileConfidence {
-                        // Keep the HIGHEST-confidence volatile, not the last. When a clip ends
-                        // mid-window the final flush emits a spurious low-confidence fragment
-                        // ("s." @0.37, or "" ) that must not overwrite the real transcript from
-                        // the preceding high-confidence window ("I know you're super…" @0.99).
-                        bestVolatileConfidence = u.confidence
-                        bestVolatile = t
-                    }
-                }
-                var parts = confirmed
-                if !bestVolatile.isEmpty { parts.append(bestVolatile) }
-                return parts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-
-            try await sw.startStreaming(source: .microphone)
-            // Feed the recording in small chunks the way live audio arrives, NOT as one giant
-            // buffer. The sliding window advances per fed chunk; a single multi-window buffer
-            // (>~15s) never got processed past the first window and hung (dogfood 2026-07-02:
-            // 24s clip produced nothing). ~1s chunks let the window loop process incrementally.
-            let chunk = 16_000   // 1s at 16kHz
-            var i = 0
-            while i < fedAudio.count {
-                let end = min(i + chunk, fedAudio.count)
-                if let buf = ParakeetEngine.makeBuffer(from: Array(fedAudio[i..<end])) {
-                    await sw.streamAudio(buf)
-                }
-                i = end
-            }
-            let finishText = (try await sw.finish()).trimmingCharacters(in: .whitespacesAndNewlines)
-            await sw.cancel()   // stop the recognizer task; NOT cleanup() (that frees the shared models)
-            // Use the richer of the two reconstructions. finish()'s internal volatile can be
-            // clobbered by a spurious low-confidence flush chunk (returning "s." or ""), while the
-            // confidence-filtered collector keeps the real high-confidence window. For multi-window
-            // clips finish() is complete and wins; for the single-window-clobber case the collector
-            // wins. Taking the longer is correct in both.
-            let collected = await collector.value
-            return collected.count > finishText.count ? collected : finishText
         }
 
         // MARK: Transcribe
@@ -345,29 +269,6 @@ public final class ParakeetEngine: TranscriptionEngine {
                 FileHandle.standardError.write(Data("SPEAKFREE_WAIT_VOCAB: vocab terms ready = \(vocabTermCount)\n".utf8))
             }
 
-            // Custom-vocabulary path first, once its background setup has populated the ingredients.
-            // The vocab/sliding path is an ENHANCEMENT over the reliable batch path, and the
-            // sliding-window manager (a real-time API driven in batch here) is fragile at edges:
-            // dogfood surfaced hangs, blanks, and fragments ("s." for a 10s clip). So we only
-            // TRUST its output when it's plausibly complete for the audio length; otherwise, and
-            // on any error, we fall through to the batch path. This guarantees vocab boosting can
-            // never make a dictation worse than production — worst case it's the plain batch result.
-            if let m = vocabModels, let ctc = vocabCtc, let ctx = vocabContext {
-                do {
-                    let vocabText = try await transcribeSliding(models: m, ctc: ctc, vocab: ctx, audio: audio)
-                    let seconds = Double(samples.count) / 16000.0
-                    // ~1.5 chars/s is a very low bar (normal speech is ~12+), so this only rejects
-                    // clear failures, not terse-but-valid utterances — and if it ever rejects a
-                    // sparse real clip, the batch fallback transcribes it just as well.
-                    if !vocabText.isEmpty, Double(vocabText.count) >= max(3.0, seconds * 1.5) {
-                        return vocabText
-                    }
-                    DiagnosticLogger.shared.log("ParakeetEngine: vocab result implausibly short (\(vocabText.count) chars / \(String(format: "%.1f", seconds))s) — using batch")
-                } catch {
-                    DiagnosticLogger.shared.log("ParakeetEngine: vocab-boosted transcribe failed (\(error.localizedDescription)) — using batch")
-                }
-            }
-
             // Build a fresh decoder state sized to the loaded model's LSTM layer count.
             var decoderState = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
 
@@ -380,7 +281,34 @@ public final class ParakeetEngine: TranscriptionEngine {
                 throw TranscriptionEngineError.transcriptionFailed
             }
 
-            return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let batchText = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Batch-anchored vocab boost, once its background setup has populated the
+            // ingredients. Runs the CTC rescorer over the FINISHED batch result and splices
+            // in only guard-accepted vocabulary spans, so worst case (veto everything,
+            // rescorer error, prefilter skip) is exactly the production batch text. This is
+            // structurally incapable of the 2026-07-03 sliding-path failures (real words /
+            // spoken punctuation replaced): those spans are vetoed by construction.
+            if let spotter = vocabSpotter, let rescorer = vocabRescorer, let ctx = vocabContext {
+                do {
+                    let boosted = try await VocabularyBoost.boost(
+                        batchText: batchText,
+                        tokenTimings: result.tokenTimings ?? [],
+                        audio: audio,
+                        spotter: spotter, rescorer: rescorer, vocabulary: ctx)
+                    let applied = boosted.decisions.filter { $0.accepted }
+                    if !applied.isEmpty {
+                        DiagnosticLogger.shared.log(
+                            "ParakeetEngine: vocab boost applied \(applied.count) replacement(s): "
+                                + applied.map { "'\($0.original)'→'\($0.replacement)'" }.joined(separator: ", "))
+                    }
+                    return boosted.text
+                } catch {
+                    DiagnosticLogger.shared.log("ParakeetEngine: vocab boost failed (\(error.localizedDescription)) — using batch text")
+                }
+            }
+
+            return batchText
         }
 
         // MARK: Unload
@@ -396,7 +324,7 @@ public final class ParakeetEngine: TranscriptionEngine {
             let m = manager
             manager = nil
             loadedModelID = nil
-            vocabModels = nil; vocabCtc = nil; vocabContext = nil; vocabTermCount = 0
+            vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
             await m?.cleanup()
             tearingDown = false
             DiagnosticLogger.shared.log("ParakeetEngine: model unloaded")
@@ -514,40 +442,6 @@ public final class ParakeetEngine: TranscriptionEngine {
         guard !code.isEmpty, code != "auto" else { return nil }
         let primary = stripRegionSubtag(code)
         return Language(rawValue: primary)
-    }
-
-    /// Trim trailing near-silence: scan 100ms frames from the end, drop everything after the last
-    /// frame whose RMS exceeds a small threshold, keeping a ~200ms margin so real trailing speech
-    /// (and the TDT flush tail) survives. Used only for the sliding-window path, which hallucinates
-    /// words for long silent tails; the batch path keeps its full padded audio.
-    fileprivate static func trimTrailingSilence(_ s: [Float]) -> [Float] {
-        let frame = 1600            // 100ms @ 16kHz
-        let margin = 3200           // keep 200ms after the last voiced frame
-        let threshold: Float = 0.006
-        guard s.count > frame else { return s }
-        var i = s.count - frame
-        while i >= 0 {
-            var sum: Float = 0
-            for j in i..<(i + frame) { sum += s[j] * s[j] }
-            if (sum / Float(frame)).squareRoot() > threshold {
-                return Array(s.prefix(min(s.count, i + frame + margin)))
-            }
-            i -= frame
-        }
-        return s   // all silence — leave as-is, the plausibility/backstop handles it
-    }
-
-    /// Wrap 16kHz mono Float32 samples in an `AVAudioPCMBuffer` for the sliding-window manager's
-    /// `streamAudio`. Same target format `AudioRecorder` produces, so no resampling is needed.
-    fileprivate static func makeBuffer(from samples: [Float]) -> AVAudioPCMBuffer? {
-        guard !samples.isEmpty,
-              let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000,
-                                      channels: 1, interleaved: false),
-              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(samples.count)),
-              let ch = buf.floatChannelData?[0] else { return nil }
-        buf.frameLength = AVAudioFrameCount(samples.count)
-        samples.withUnsafeBufferPointer { ch.update(from: $0.baseAddress!, count: samples.count) }
-        return buf
     }
 
     /// Strip an IETF region subtag: "en-US"/"en_US" → "en".
