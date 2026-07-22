@@ -195,10 +195,16 @@ public class RecordingStore {
         public let date: String  // ISO 8601
         public let durationSeconds: Double
         public let transcriptChars: Int
+        /// Bundle id of the app the dictation was inserted into (2026-07-22).
+        /// Optional: absent in pre-existing sidecars and file-transcription metas.
+        /// The edit-feedback batch (tune-corpus) uses it to find the final artifact
+        /// (sent message, saved doc) to diff against what was inserted.
+        public let targetApp: String?
 
         public init(appVersion: String, engine: String, model: String,
                     inputDevice: String?, date: String,
-                    durationSeconds: Double, transcriptChars: Int) {
+                    durationSeconds: Double, transcriptChars: Int,
+                    targetApp: String? = nil) {
             self.appVersion = appVersion
             self.engine = engine
             self.model = model
@@ -206,6 +212,7 @@ public class RecordingStore {
             self.date = date
             self.durationSeconds = durationSeconds
             self.transcriptChars = transcriptChars
+            self.targetApp = targetApp
         }
     }
 

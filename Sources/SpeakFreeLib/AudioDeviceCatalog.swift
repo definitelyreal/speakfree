@@ -83,10 +83,38 @@ public enum AudioDeviceCatalog {
         let devices = inputDevices()
         let def = defaultInputDevice()
         cacheLock.lock()
+        let previous = _cachedDevices
         _cachedDevices = devices
         _cachedDefault = def
         cacheLock.unlock()
+        logDeviceListChanges(from: previous, to: devices)
         DispatchQueue.main.async { onCacheRefreshed?() }
+    }
+
+    /// Bluetooth/device event log (2026-07-22, multi-Mac AirPods experiment): every
+    /// input device joining or leaving THIS Mac is logged with a transport tag, so
+    /// per-machine logs can be correlated to see which computer held the AirPods
+    /// when. Piggybacks on the existing catalog refresh — no IOBluetooth, no new
+    /// TCC permission. Names only, never audio content.
+    private static func logDeviceListChanges(
+        from previous: [AudioInputDevice], to current: [AudioInputDevice]
+    ) {
+        let oldUIDs = Set(previous.map(\.uid))
+        let newUIDs = Set(current.map(\.uid))
+        for dev in current where !oldUIDs.contains(dev.uid) {
+            DiagnosticLogger.shared.log(
+                "AudioDeviceCatalog: +\(dev.name) [\(transportLabel(dev))] joined")
+        }
+        for dev in previous where !newUIDs.contains(dev.uid) {
+            DiagnosticLogger.shared.log(
+                "AudioDeviceCatalog: -\(dev.name) [\(transportLabel(dev))] left")
+        }
+    }
+
+    private static func transportLabel(_ dev: AudioInputDevice) -> String {
+        if dev.isBluetooth { return "bluetooth" }
+        if dev.isBuiltIn { return "built-in" }
+        return "other"
     }
 
     // MARK: - Live enumeration (background/refresh use only — blocks on coreaudiod)
