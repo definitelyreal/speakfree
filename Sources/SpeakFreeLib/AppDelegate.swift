@@ -22,6 +22,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsViewModel: SettingsViewModel?
     private var localAPIServer: LocalAPIServer?
     private var recordingStyleMode: TextPostProcessor.StyleMode = .none
+    /// Frontmost app at record start — where the dictation will land. Persisted in
+    /// .meta.json so the edit-feedback batch can find the final artifact to diff.
+    private var recordingTargetBundleID: String?
 
     // Clean up whisper model before exit to prevent ggml Metal assertion crash.
     // The crash happens in __cxa_finalize_ranges when ggml tries to free Metal
@@ -1154,10 +1157,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Verify all subsystems before every recording
         verifySubsystems(context: "pre-recording")
 
-        // Detect style mode from frontmost app before menu bar steals focus
-        recordingStyleMode = TextPostProcessor.detectStyleMode(
-            bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        )
+        // Detect style mode from frontmost app before menu bar steals focus. The
+        // bundle id is also kept for the .meta.json sidecar — the edit-feedback batch
+        // (tune-corpus) correlates dictations with where the text landed.
+        let frontBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        recordingTargetBundleID = frontBundleID
+        recordingStyleMode = TextPostProcessor.detectStyleMode(bundleID: frontBundleID)
 
         // Capture focused element before anything else changes.
         // Skip for remote desktop — AX reads the Splashtop UI, not the remote text field.
@@ -1399,6 +1404,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // transcriber (not config, which can disagree after a model fallback).
         let metaEngine = activeEngineID
         let metaDevice = recorder.currentCaptureDeviceName()
+        let metaTargetApp = recordingTargetBundleID
 
         // Snapshot the transcriber on main BEFORE crossing into the async Task. A settings
         // change mid-finalize (reloadConfig) can swap self.transcriber out from under us; the
@@ -1563,7 +1569,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         inputDevice: metaDevice,
                         date: ISO8601DateFormatter().string(from: Date()),
                         durationSeconds: Double(samples.count) / 16000.0,
-                        transcriptChars: text.count
+                        transcriptChars: text.count,
+                        targetApp: metaTargetApp
                     ))
 
                 RecordingStore.clearSentinel()
