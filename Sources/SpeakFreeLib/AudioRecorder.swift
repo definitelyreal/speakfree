@@ -457,6 +457,12 @@ class AudioRecorder {
         do {
             try engine.start()
             audioEngine = engine
+            // Restart the no-buffers health clock. It was initialized at recorder
+            // INIT, so at launch the "no audio buffers for 3s" check fired against an
+            // engine that had only just started (2026-07-22 log: spurious teardown +
+            // rebuild on main 3s after startup). Buffers get their grace period from
+            // engine start, not object creation.
+            lastBufferTime = Date()
             print("AudioRecorder: audio engine started")
         } catch {
             print("AudioRecorder: engine start failed: \(error.localizedDescription)")
