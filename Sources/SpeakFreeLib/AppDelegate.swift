@@ -1347,7 +1347,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             default:
                 break
             }
-            if AudioDeviceCatalog.cachedBluetoothInput != nil {
+            // Rescue only on DEAD-ENGINE signatures (0 samples / silence). A tooShort
+            // with real samples is a genuine accidental tap — the BT track covers the
+            // same instant and has nothing more to say; routing taps through the
+            // rescue would only widen the hallucination surface (verifier R2).
+            let deadEngineSignature: Bool
+            switch failure {
+            case .tooShort(let count): deadEngineSignature = count == 0
+            case .silent: deadEngineSignature = true
+            default: deadEngineSignature = false
+            }
+            if deadEngineSignature, AudioDeviceCatalog.cachedBluetoothInput != nil {
                 DiagnosticLogger.shared.log(
                     "Primary gate failed (\(failure)) — attempting Bluetooth-track rescue")
                 primaryGateFailure = failure
@@ -1484,6 +1494,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     glossaryWords: glossary
                 )
                 let prompt = TextPipeline.assemblePromptHints(input: pipelineContext)
+                // Duration bookkeeping follows whichever track actually carried the
+                // audio: in a dead-primary rescue `samples` is the dead track (~0),
+                // and a ~0 duration would skip the >14s seam-dup collapse and lie in
+                // the meta/stats (verifier R2). Updated in the rescue block below.
+                var effectiveSampleCount = samples.count
                 let makeInput: (String) -> TextPipeline.Input = { raw in
                     TextPipeline.Input(
                         raw: raw,
@@ -1493,7 +1508,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         styleMode: capturedStyleMode,
                         glossaryWords: glossary,
                         overrides: overrides,
-                        audioDurationSeconds: Double(samples.count) / 16000.0
+                        audioDurationSeconds: Double(effectiveSampleCount) / 16000.0
                     )
                 }
                 // The serial capture queue resolves this only after Bluetooth start and stop
@@ -1506,9 +1521,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 let hasBluetoothTrack = btSamples.count >= FinalizePipeline.minSamples
 
                 // Dead-primary rescue resolution: the primary failed its gate up on
-                // main; the dictation lives or dies on the Bluetooth track now.
+                // main; the dictation lives or dies on the Bluetooth track now. The BT
+                // track must pass the SAME gates as a primary would (length AND RMS) —
+                // a silent-but-connected AirPods stream must not resurrect the
+                // "silence hallucination gets inserted" failure on the BT side.
                 if primaryGateFailure != nil {
-                    guard hasBluetoothTrack else {
+                    guard hasBluetoothTrack, FinalizePipeline.passesGates(btSamples) else {
                         DiagnosticLogger.shared.log(
                             "Recording failed both tracks (primary \(samples.count) samples, "
                             + "bt \(btSamples.count)) — skipping")
@@ -1526,6 +1544,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         format: "Dead-primary rescue: dictating from the Bluetooth track "
                             + "(%.1fs) — primary had %d samples",
                         Double(btSamples.count) / 16000.0, samples.count))
+                    effectiveSampleCount = btSamples.count
                 }
                 let btURL = audioURL.deletingPathExtension().appendingPathExtension("bt.wav")
                 var btArtifactCommitted = false
@@ -1620,7 +1639,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         model: transcriber.modelID,
                         inputDevice: metaDevice,
                         date: ISO8601DateFormatter().string(from: Date()),
-                        durationSeconds: Double(samples.count) / 16000.0,
+                        durationSeconds: Double(effectiveSampleCount) / 16000.0,
                         transcriptChars: text.count,
                         targetApp: metaTargetApp
                     ))
@@ -1647,7 +1666,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         let insertText = FinalizePipeline.composeInsertText(text, prependSpace: capturedPrependSpace)
                         self.lastTranscription = text
                         // Record usage stats
-                        let audioSeconds = Double(samples.count) / 16000.0
+                        let audioSeconds = Double(effectiveSampleCount) / 16000.0
                         UsageStats.shared.recordDictation(characters: text.count, audioSeconds: audioSeconds)
                         // Secure-Input fallback notification (audit M2): if the insertion falls back
                         // because Secure Input is active (e.g. a password field), show a distinct
