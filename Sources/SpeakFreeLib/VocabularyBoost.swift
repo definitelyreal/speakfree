@@ -143,6 +143,8 @@ public enum VocabularyBoost {
         public let decisions: [Decision]
         /// The rescorer's raw (unguarded) reconstruction, for diagnostics only.
         public let rescoredRaw: String
+        /// True when the eligibility prefilter proved the CTC pass unnecessary.
+        public var prefilterSkipped: Bool = false
     }
 
     // MARK: - The guard + selective application
@@ -241,6 +243,34 @@ public enum VocabularyBoost {
         return nil
     }
 
+    /// Cheap prefilter: can the guard chain possibly ACCEPT anything in this transcript?
+    ///
+    /// The guard only ever accepts a span that (a) contains a non-real-English word
+    /// (a garble like "rorlik") or (b) matches a curated alias phrase. If the batch
+    /// text contains neither, the CTC forward pass (~hundreds of ms) cannot change the
+    /// output — skip it. Provably output-preserving: accept requires ¬allReal(span) ∨
+    /// alias(span); ¬allReal(span) ⇒ some token is non-real; alias(span) ⇒ the alias
+    /// phrase occurs in the text. Both are exactly what this checks.
+    public static func hasEligibleToken(
+        batchText: String, vocabulary: CustomVocabularyContext
+    ) -> Bool {
+        let tokens = batchText.split(separator: " ").map { normalize(String($0)) }
+            .filter { !$0.isEmpty }
+        guard !tokens.isEmpty else { return false }
+        for t in tokens where !punctuationCommandWords.contains(t) {
+            if !isRealEnglishWord(t) { return true }
+        }
+        // All tokens are real words — only a curated alias phrase can still be accepted.
+        let joined = " " + tokens.joined(separator: " ") + " "
+        for term in vocabulary.terms {
+            for alias in term.aliases ?? [] {
+                let a = normalizePhrase(alias)
+                if !a.isEmpty, joined.contains(" " + a + " ") { return true }
+            }
+        }
+        return false
+    }
+
     /// Run the CTC rescorer over a finished batch transcription, then veto/apply.
     ///
     /// - Parameters:
@@ -254,10 +284,18 @@ public enum VocabularyBoost {
         audio: [Float],
         spotter: CtcKeywordSpotter,
         rescorer: VocabularyRescorer,
-        vocabulary: CustomVocabularyContext
+        vocabulary: CustomVocabularyContext,
+        usePrefilter: Bool = true
     ) async throws -> Output {
         guard !batchText.isEmpty, !tokenTimings.isEmpty, !vocabulary.terms.isEmpty else {
             return Output(text: batchText, decisions: [], rescoredRaw: batchText)
+        }
+
+        // Skip the CTC forward pass entirely when nothing in the transcript could be
+        // accepted anyway (most dictations contain no garbled names).
+        if usePrefilter, !hasEligibleToken(batchText: batchText, vocabulary: vocabulary) {
+            return Output(text: batchText, decisions: [], rescoredRaw: batchText,
+                          prefilterSkipped: true)
         }
 
         // CTC forward pass (chunked internally for >15s audio).

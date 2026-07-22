@@ -106,6 +106,7 @@ struct Row: Encodable {
     var batchboost: String?
     var batchboostRaw: String?  // rescorer output before the guard
     var batchboostMs: Int?
+    var prefilterSkipped: Bool?
     var decisions: [VocabularyBoost.Decision]?
     var error: String?
 }
@@ -175,6 +176,7 @@ let vocabFile = flagValue("--vocab-file", &args)
     ?? home.appendingPathComponent(".config/speakfree/vocabulary.txt").path
 let aliasFile = flagValue("--alias-file", &args)
 let unguarded = boolFlag("--unguarded", &args)
+let noPrefilter = boolFlag("--no-prefilter", &args)
 let wavListFile = flagValue("--wav-list", &args)
 
 var wavs = args.filter { !$0.hasPrefix("--") }
@@ -288,9 +290,11 @@ let runner = Task { () -> Int32 in
                         batchText: batchText,
                         tokenTimings: batchResult.tokenTimings ?? [],
                         audio: padded,
-                        spotter: spotter, rescorer: rescorer, vocabulary: vocabContext)
+                        spotter: spotter, rescorer: rescorer, vocabulary: vocabContext,
+                        usePrefilter: !noPrefilter)
                     row.batchboost = unguarded ? boosted.rescoredRaw : boosted.text
                     row.batchboostRaw = boosted.rescoredRaw
+                    row.prefilterSkipped = boosted.prefilterSkipped
                     row.decisions = boosted.decisions
                     row.batchboostMs = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
                 }

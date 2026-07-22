@@ -110,6 +110,30 @@ final class VocabularyBoostTests: XCTestCase {
         XCTAssertEqual(decisions[0].reason, "unmatched-diff-region")
     }
 
+    // MARK: - Prefilter
+
+    private func context(_ terms: [CustomVocabularyTerm]) -> CustomVocabularyContext {
+        CustomVocabularyContext(terms: terms)
+    }
+
+    func testPrefilterSkipsAllRealWordText() {
+        let ctx = context([term("Rohrlich"), term("Zander")])
+        XCTAssertFalse(VocabularyBoost.hasEligibleToken(
+            batchText: "See what you think makes the most sense to render.", vocabulary: ctx))
+    }
+
+    func testPrefilterCatchesGarbleToken() {
+        let ctx = context([term("Rohrlich")])
+        XCTAssertTrue(VocabularyBoost.hasEligibleToken(
+            batchText: "Please ping rorlik about the screener.", vocabulary: ctx))
+    }
+
+    func testPrefilterCatchesAliasPhraseOfRealWords() {
+        let ctx = context([term("Maryna", aliases: ["marina"])])
+        XCTAssertTrue(VocabularyBoost.hasEligibleToken(
+            batchText: "I talked to marina about the boat.", vocabulary: ctx))
+    }
+
     func testTermLoadingSkipsPunctuationAndComments() {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("vocab-boost-tests-\(UUID().uuidString)")
