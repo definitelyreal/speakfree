@@ -70,8 +70,12 @@ public enum VocabularyBoost {
         var seen = Set<String>()
         var specs: [TermSpec] = []
         for line in raw.split(separator: "\n") {
-            // Strip inline comments ("Gaubert # brain") and whitespace.
-            let body = line.split(separator: "#").first.map(String.init) ?? ""
+            // Strip inline comments ("Gaubert # brain") and whitespace. NOTE: must cut at
+            // the first '#' (not split-and-take-first — Swift's split drops LEADING
+            // separators, which turned full-line comments into multi-word vocab terms;
+            // caught by testTermLoadingSkipsPunctuationAndComments).
+            let body = line.firstIndex(of: "#").map { String(line[line.startIndex..<$0]) }
+                ?? String(line)
             let term = body.trimmingCharacters(in: .whitespaces)
             guard !term.isEmpty else { continue }
             let key = term.lowercased()
@@ -201,13 +205,33 @@ public enum VocabularyBoost {
             return "punctuation-command-word '\(w)'"
         }
 
-        // 2. Curated-alias override — Michael explicitly listed this garble for this term
-        //    (e.g. "marina" → Maryna), so the real-word guard steps aside.
+        // 2. Acronym guard — a span the batch decoder emitted in ALL-CAPS (AAF, ADR, LLM)
+        //    is a recognized acronym, not a garble; never rescore it into a name unless
+        //    the term itself is that acronym ("EC2" garbles are handled via aliases).
+        //    (it2 false positive: 'AAF' → 'Naam' while dictating about AAF audio files.)
+        let strippedWords = originalSpan.map { w in
+            String(w.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+        }.filter { !$0.isEmpty }
+        if strippedWords.contains(where: { $0.count >= 2 && $0 == $0.uppercased() && $0 != $0.lowercased() }),
+            normalizePhrase(term.text) != normWords.joined(separator: " ") {
+            return "all-caps acronym span '\(originalSpan.joined(separator: " "))'"
+        }
+
+        // 3. Curated-alias override — Michael explicitly listed this garble for this term
+        //    (e.g. "marina" → Maryna), so the remaining guards step aside.
         let phrase = normWords.joined(separator: " ")
         let aliasSet = Set((term.aliases ?? []).map { normalizePhrase($0) })
         if aliasSet.contains(phrase) { return nil }
 
-        // 3. Real-word guard — never rescore a span of common English words into a vocab
+        // 4. Length-loss guard — the replacement must not swallow a substantially longer
+        //    spoken span. (it2 false positive: 'Xanderbot' → 'Zander' dropped "bot".)
+        let compactOriginal = normWords.joined()
+        let compactTerm = normalize(term.text)
+        if compactOriginal.count - compactTerm.count >= 3 {
+            return "length-loss '\(originalSpan.joined(separator: " "))' → '\(term.text)'"
+        }
+
+        // 5. Real-word guard — never rescore a span of common English words into a vocab
         //    term on acoustic evidence alone ("Viktor" failure of 2026-07-03: a real word
         //    was replaced by a name). Non-word garbles (e.g. "rorlik", "pebblebed") pass.
         if normWords.allSatisfy({ isRealEnglishWord($0) }) {
@@ -258,16 +282,32 @@ public enum VocabularyBoost {
         let termByText = Dictionary(uniqueKeysWithValues:
             vocabulary.terms.map { ($0.textLowercased, $0) }
         )
+        let proposals = rescored.replacements.compactMap { r -> ProposedReplacement? in
+            guard let rep = r.replacementWord else { return nil }
+            return ProposedReplacement(
+                original: r.originalWord, replacement: rep,
+                score: r.replacementScore, reason: r.reason)
+        }
         let (finalText, decisions) = spliceAcceptedReplacements(
             batchText: batchText,
             rescoredText: rescored.text,
-            replacements: rescored.replacements,
+            replacements: proposals,
             termByText: termByText)
 
         return Output(text: finalText, decisions: decisions, rescoredRaw: rescored.text)
     }
 
     // MARK: - Alignment + splicing
+
+    /// Rescorer-agnostic view of one applied replacement (decoupled from
+    /// VocabularyRescorer.RescoringResult, whose memberwise init is internal to
+    /// FluidAudio — this keeps the splicer unit-testable).
+    struct ProposedReplacement {
+        let original: String
+        let replacement: String
+        let score: Float?
+        let reason: String
+    }
 
     struct DiffRegion {
         let originalRange: Range<Int>
@@ -325,7 +365,7 @@ public enum VocabularyBoost {
     static func spliceAcceptedReplacements(
         batchText: String,
         rescoredText: String,
-        replacements: [VocabularyRescorer.RescoringResult],
+        replacements: [ProposedReplacement],
         termByText: [String: CustomVocabularyTerm]
     ) -> (String, [Decision]) {
         let originalWords = batchText.split(separator: " ").map(String.init)
@@ -333,10 +373,9 @@ public enum VocabularyBoost {
         let regions = diffRegions(originalWords, rescoredWords)
 
         // Index the rescorer's applied replacements by (normalized original, normalized new).
-        var replacementPool: [(key: String, r: VocabularyRescorer.RescoringResult)] =
-            replacements.compactMap { r in
-                guard let rep = r.replacementWord else { return nil }
-                return ("\(normalizePhrase(r.originalWord))→\(normalizePhrase(rep))", r)
+        var replacementPool: [(key: String, r: ProposedReplacement)] =
+            replacements.map { r in
+                ("\(normalizePhrase(r.original))→\(normalizePhrase(r.replacement))", r)
             }
 
         var decisions: [Decision] = []
@@ -368,8 +407,8 @@ public enum VocabularyBoost {
                 continue
             }
             let replacement = replacementPool.remove(at: poolIdx).r
-            let termKey = normalizePhrase(replacement.replacementWord ?? "")
-            let term = termByText[replacement.replacementWord?.lowercased() ?? ""]
+            let termKey = normalizePhrase(replacement.replacement)
+            let term = termByText[replacement.replacement.lowercased()]
                 ?? termByText.values.first { normalizePhrase($0.text) == termKey }
 
             let veto: String?
@@ -383,11 +422,11 @@ public enum VocabularyBoost {
                 out.append(contentsOf: origSpan)
                 decisions.append(Decision(
                     original: origSpan.joined(separator: " "),
-                    replacement: replacement.replacementWord ?? "",
-                    similarity: replacement.replacementScore, accepted: false, reason: veto))
+                    replacement: replacement.replacement,
+                    similarity: replacement.score, accepted: false, reason: veto))
             } else {
                 // Accept: canonical term casing, re-attach trailing punctuation of the span.
-                var text = replacement.replacementWord ?? newSpan.joined(separator: " ")
+                var text = replacement.replacement
                 if let last = origSpan.last {
                     let punct = trailingPunctuation(of: last)
                     if !punct.isEmpty, !text.hasSuffix(punct) { text += punct }
@@ -395,8 +434,8 @@ public enum VocabularyBoost {
                 out.append(text)
                 decisions.append(Decision(
                     original: origSpan.joined(separator: " "),
-                    replacement: replacement.replacementWord ?? "",
-                    similarity: replacement.replacementScore, accepted: true,
+                    replacement: replacement.replacement,
+                    similarity: replacement.score, accepted: true,
                     reason: replacement.reason))
             }
         }

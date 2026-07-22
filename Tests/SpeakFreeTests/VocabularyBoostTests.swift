@@ -1,0 +1,130 @@
+// Claude · 2026-07-22 · Session: vocab-boost-eval worktree loop
+//
+// Unit tests for the VocabularyBoost guard chain and splicing — the pure pieces
+// (no models, no audio). The end-to-end behavior is covered by the offline
+// vocab-eval harness against the real corpus; these tests pin the invariants the
+// 2026-07-03 failure taught us:
+//   1. spans containing spoken-punctuation command words are NEVER rescored;
+//   2. real-English-word spans are NEVER rescored (unless curated-aliased);
+//   3. non-word garbles ARE eligible;
+//   4. splicing only changes regions the rescorer explicitly claimed, and
+//      reattaches trailing punctuation.
+
+import XCTest
+import FluidAudio
+@testable import SpeakFreeLib
+
+final class VocabularyBoostTests: XCTestCase {
+
+    private func term(_ text: String, aliases: [String] = []) -> CustomVocabularyTerm {
+        CustomVocabularyTerm(text: text, weight: 1.5,
+                             aliases: aliases.isEmpty ? nil : aliases,
+                             tokenIds: nil, ctcTokenIds: [1, 2, 3])
+    }
+
+    // MARK: - Guard chain
+
+    func testPunctuationCommandSpanIsVetoed() {
+        // "colon" garbled and matched toward a name must never be rescored.
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["colon"], term: term("Rohrlich")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["new", "line"], term: term("Maryna")))
+        // …even when a curated alias claims the words (punctuation veto outranks aliases).
+        XCTAssertNotNil(VocabularyBoost.vetoReason(
+            originalSpan: ["new", "line"], term: term("Newline Inc", aliases: ["new line"])))
+    }
+
+    func testRealWordSpanIsVetoed() {
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["makes"], term: term("Mareesa")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["render."], term: term("Zander")))
+        // Modern compound missing from web2 — caught by NSSpellChecker (iteration-2 fix).
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["timeline"], term: term("Trimble")))
+    }
+
+    func testCuratedAliasOverridesRealWordVeto() {
+        XCTAssertNil(VocabularyBoost.vetoReason(
+            originalSpan: ["marina"], term: term("Maryna", aliases: ["marina", "marin"])))
+    }
+
+    func testGarbleIsEligible() {
+        XCTAssertNil(VocabularyBoost.vetoReason(originalSpan: ["rorlik"], term: term("Rohrlich")))
+        XCTAssertNil(VocabularyBoost.vetoReason(originalSpan: ["pebblebet"], term: term("Pebblebed")))
+        // Possessives and trailing punctuation still eligible.
+        XCTAssertNil(VocabularyBoost.vetoReason(originalSpan: ["Xeander's"], term: term("Zander's")))
+    }
+
+    func testAcronymSpanIsVetoed() {
+        // it2 false positive: TDT emitted the acronym 'AAF' (audio format), rescorer
+        // proposed the name 'Naam'. ALL-CAPS spans are recognized acronyms — keep them.
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["AAF"], term: term("Naam")))
+        // …but a term that IS that acronym may still claim it (EC2 case-fix path).
+        XCTAssertNil(VocabularyBoost.vetoReason(originalSpan: ["EC-2"], term: term("EC2")))
+    }
+
+    func testLengthLossSpanIsVetoed() {
+        // it2 false positive: 'Xanderbot' → 'Zander' swallowed the spoken "bot".
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["Xanderbot"], term: term("Zander")))
+    }
+
+    // MARK: - Splicing
+
+    private func rescoring(_ original: String, _ replacement: String)
+        -> VocabularyBoost.ProposedReplacement {
+        VocabularyBoost.ProposedReplacement(
+            original: original, replacement: replacement, score: -9.0, reason: "test")
+    }
+
+    func testSpliceAppliesAcceptedAndPreservesPunctuation() {
+        let terms = ["rohrlich": term("Rohrlich")]
+        let (text, decisions) = VocabularyBoost.spliceAcceptedReplacements(
+            batchText: "Talk to rorlik, tomorrow.",
+            rescoredText: "Talk to Rohrlich, tomorrow.",
+            replacements: [rescoring("rorlik,", "Rohrlich")],
+            termByText: terms)
+        XCTAssertEqual(text, "Talk to Rohrlich, tomorrow.")
+        XCTAssertEqual(decisions.count, 1)
+        XCTAssertTrue(decisions[0].accepted)
+    }
+
+    func testSpliceVetoesRealWordAndKeepsBatchText() {
+        let terms = ["zander": term("Zander")]
+        let (text, decisions) = VocabularyBoost.spliceAcceptedReplacements(
+            batchText: "the most sense to render.",
+            rescoredText: "the most sense to Zander",
+            replacements: [rescoring("render.", "Zander")],
+            termByText: terms)
+        XCTAssertEqual(text, "the most sense to render.")
+        XCTAssertEqual(decisions.count, 1)
+        XCTAssertFalse(decisions[0].accepted)
+    }
+
+    func testSpliceIgnoresUnclaimedDiffRegions() {
+        // Rescored text differs somewhere the rescorer did NOT claim → batch text wins.
+        let (text, decisions) = VocabularyBoost.spliceAcceptedReplacements(
+            batchText: "it still is paralleling physics",
+            rescoredText: "it still is parallel. ing physics",
+            replacements: [],
+            termByText: [:])
+        XCTAssertEqual(text, "it still is paralleling physics")
+        XCTAssertEqual(decisions.count, 1)
+        XCTAssertFalse(decisions[0].accepted)
+        XCTAssertEqual(decisions[0].reason, "unmatched-diff-region")
+    }
+
+    func testTermLoadingSkipsPunctuationAndComments() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vocab-boost-tests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let f = dir.appendingPathComponent("vocabulary.txt")
+        try? """
+        # comment
+        Rohrlich
+        comma
+        Gaubert # brain
+        CLAUDE.md
+        EC2 # manual
+        """.write(to: f, atomically: true, encoding: .utf8)
+        let specs = VocabularyBoost.loadTermSpecs(vocabularyFile: f)
+        XCTAssertEqual(specs.map { $0.text }, ["Rohrlich", "Gaubert", "EC2"])
+    }
+}
