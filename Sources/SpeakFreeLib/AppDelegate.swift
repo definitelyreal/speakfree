@@ -1330,33 +1330,54 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             memorySamples: recording.samples,
             readWav: { try? ProcessCommand.loadSamples(from: audioURL) }
         )
+        // Dead-primary rescue (2026-07-22 outage): the built-in engine went dead-air
+        // (stale-scope tap) and every dictation was dropped as too-short/silent while
+        // the Bluetooth track had captured Michael's actual voice — and was discarded.
+        // When a Bluetooth input is present, a failed primary gate defers the skip
+        // decision into the finalize Task, which checks the BT track first.
+        var primaryGateFailure: FinalizePipeline.Outcome?
         if let failure = gate.failure {
+            // A 0-sample or silent primary means a dead engine, not an accidental tap —
+            // kick a rebuild now regardless of how the dictation resolves.
             switch failure {
-            case .tooShort(let count):
-                // Likely an accidental tap — skip quietly.
-                DiagnosticLogger.shared.log(
-                    "Recording too short (\(count) samples / \(Int(Double(count) / 16000.0 * 1000))ms) — skipping")
-            default:
-                // NOTE: the wav either agreed or could not be read — resolveGateSamples does
-                // not distinguish; do not claim agreement in the log.
-                DiagnosticLogger.shared.log(
-                    "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples))) and the wav did not rescue it — audio engine may be dead, rebuilding")
+            case .tooShort(let count) where count == 0:
                 recorder.ensureAudioHealthy()
+            case .silent:
+                recorder.ensureAudioHealthy()
+            default:
+                break
             }
-            if !DevMode.effectiveSaveRecordings(config) {
-                // Saving is opt-out: a gate-failed capture must not linger on disk.
-                try? FileManager.default.removeItem(at: audioURL)
+            if AudioDeviceCatalog.cachedBluetoothInput != nil {
+                DiagnosticLogger.shared.log(
+                    "Primary gate failed (\(failure)) — attempting Bluetooth-track rescue")
+                primaryGateFailure = failure
+            } else {
+                switch failure {
+                case .tooShort(let count):
+                    // Likely an accidental tap — skip quietly.
+                    DiagnosticLogger.shared.log(
+                        "Recording too short (\(count) samples / \(Int(Double(count) / 16000.0 * 1000))ms) — skipping")
+                default:
+                    // NOTE: the wav either agreed or could not be read — resolveGateSamples does
+                    // not distinguish; do not claim agreement in the log.
+                    DiagnosticLogger.shared.log(
+                        "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples))) and the wav did not rescue it — audio engine may be dead, rebuilding")
+                }
+                if !DevMode.effectiveSaveRecordings(config) {
+                    // Saving is opt-out: a gate-failed capture must not linger on disk.
+                    try? FileManager.default.removeItem(at: audioURL)
+                }
+                RecordingStore.clearSentinel()
+                focusCapture.reset()
+                // I4: a gate-failed dictation never consumes its OCR, so clear it and invalidate any
+                // in-flight capture — otherwise this recording's screenContextText survives and biases
+                // the NEXT dictation's prompt with stale on-screen text.
+                screenContextText = nil
+                screenCaptureGeneration = UUID()
+                statusBar.state = .idle
+                recordingOverlay.hide()
+                return
             }
-            RecordingStore.clearSentinel()
-            focusCapture.reset()
-            // I4: a gate-failed dictation never consumes its OCR, so clear it and invalidate any
-            // in-flight capture — otherwise this recording's screenContextText survives and biases
-            // the NEXT dictation's prompt with stale on-screen text.
-            screenContextText = nil
-            screenCaptureGeneration = UUID()
-            statusBar.state = .idle
-            recordingOverlay.hide()
-            return
         }
         if gate.usedWavFallback {
             // Divergence between the tap's in-memory copy and the wav is an upstream bug —
@@ -1483,6 +1504,29 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 let btSamples = await secondaryCapture.value(
                     timeout: DualCapture.secondaryResultTimeout)
                 let hasBluetoothTrack = btSamples.count >= FinalizePipeline.minSamples
+
+                // Dead-primary rescue resolution: the primary failed its gate up on
+                // main; the dictation lives or dies on the Bluetooth track now.
+                if primaryGateFailure != nil {
+                    guard hasBluetoothTrack else {
+                        DiagnosticLogger.shared.log(
+                            "Recording failed both tracks (primary \(samples.count) samples, "
+                            + "bt \(btSamples.count)) — skipping")
+                        if !keepRecording {
+                            try? FileManager.default.removeItem(at: audioURL)
+                        }
+                        RecordingStore.clearSentinel()
+                        DispatchQueue.main.async {
+                            self.recordingOverlay.hide()
+                            self.statusBar.state = .idle
+                        }
+                        return
+                    }
+                    DiagnosticLogger.shared.log(String(
+                        format: "Dead-primary rescue: dictating from the Bluetooth track "
+                            + "(%.1fs) — primary had %d samples",
+                        Double(btSamples.count) / 16000.0, samples.count))
+                }
                 let btURL = audioURL.deletingPathExtension().appendingPathExtension("bt.wav")
                 var btArtifactCommitted = false
                 defer {
@@ -1522,8 +1566,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     // can only ever cost its own inference time, never delay-order risk.
                     try? DualCapture.writeWav(samples: btSamples, to: btURL)
                     let started = CFAbsoluteTimeGetCurrent()
-                    primaryRaw = try await transcriber.transcribe(
-                        audioURL: audioURL, samples: samples, prompt: prompt)
+                    if primaryGateFailure == nil {
+                        primaryRaw = try await transcriber.transcribe(
+                            audioURL: audioURL, samples: samples, prompt: prompt)
+                    } else {
+                        // Dead-primary rescue: transcribing an empty/silent primary
+                        // invites a silence hallucination ("Thank you.") that would
+                        // then WIN the merge's conservative fallback over the real
+                        // Bluetooth text. The primary contributes nothing here.
+                        primaryRaw = ""
+                    }
                     bluetoothRaw = try? await transcriber.transcribe(
                         audioURL: btURL, samples: btSamples, prompt: prompt)
                     DiagnosticLogger.shared.log(String(

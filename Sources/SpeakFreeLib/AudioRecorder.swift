@@ -199,15 +199,25 @@ class AudioRecorder {
                 return
             }
 
-            // Device binding itself emits this notification. A pinned primary does not
-            // follow route/default changes, and rebuilding it would emit another event.
-            guard self.primaryFollowsSystemDefaultNow() else {
+            // Device binding itself emits this notification within moments of the
+            // engine build — reacting to it caused the 2026-07-20 self-induced rebuild
+            // loop. But a LATER config change on a pinned engine is genuine (format
+            // renegotiation): its tap is dead until rebuilt. The 2026-07-22 outage was
+            // this exact blanket-ignore — every recording captured 0 samples and
+            // "recovery" rebuilds died the same way. Ignore only the self-induced
+            // window; rebuild on anything after it.
+            if !self.primaryFollowsSystemDefaultNow() {
+                if Date().timeIntervalSince(self.engineBuiltAt) < Self.selfInducedConfigWindowSeconds {
+                    DiagnosticLogger.shared.log(
+                        "AudioRecorder: primary configuration changed just after build — self-induced, keeping engine")
+                    return
+                }
                 DiagnosticLogger.shared.log(
-                    "AudioRecorder: primary configuration changed while pinned — keeping engine")
-                return
+                    "AudioRecorder: pinned primary configuration changed after settle — rebuilding (stale-tap risk)")
+            } else {
+                DiagnosticLogger.shared.log(
+                    "AudioRecorder: primary audio configuration changed — scheduling tap reinstall")
             }
-            DiagnosticLogger.shared.log(
-                "AudioRecorder: primary audio configuration changed — scheduling tap reinstall")
 
             // Don't touch the engine during active recording — defer until recording stops
             if self.isRecording {
@@ -258,6 +268,13 @@ class AudioRecorder {
 
     private var needsTapReinstall = false
     private var isRebuilding = false
+
+    /// When the current engine was built. Config-change notifications inside this
+    /// window after a build are the engine's own bind settling (ignoring them
+    /// prevents the 2026-07-20 rebuild loop); ones after it are genuine and MUST
+    /// rebuild even when pinned (the 2026-07-22 dead-tap outage).
+    private var engineBuiltAt: Date = .distantPast
+    static let selfInducedConfigWindowSeconds: TimeInterval = 2.0
 
     /// Trailing-edge coalescing for device-change events. A Bluetooth handoff storm
     /// (AirPods flapping, degraded coreaudiod) delivers dozens of configuration-change
@@ -416,7 +433,13 @@ class AudioRecorder {
             }
         }
 
-        let inputFormat = inputNode.outputFormat(forBus: 0)
+        // DEVICE/input scope, not client/output scope (2026-07-22 dead-air outage):
+        // after re-binding the input unit (pin to built-in while the system default
+        // is AirPods), the client scope keeps reporting the OLD device's format
+        // (24 kHz SCO) — a tap installed with it never receives a frame, and every
+        // rebuild died the same way (0-sample recordings, all dropped). The
+        // SecondaryRecorder learned this on 2026-07-20; the primary now matches.
+        let inputFormat = inputNode.inputFormat(forBus: 0)
 
         // Guard against the AirPods/Bluetooth-handoff race: during SCO negotiation the
         // input node briefly reports a 0-channel / 0-rate format. Calling installTap
@@ -463,6 +486,7 @@ class AudioRecorder {
             // rebuild on main 3s after startup). Buffers get their grace period from
             // engine start, not object creation.
             lastBufferTime = Date()
+            engineBuiltAt = Date()
             print("AudioRecorder: audio engine started")
         } catch {
             print("AudioRecorder: engine start failed: \(error.localizedDescription)")
