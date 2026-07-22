@@ -1491,6 +1491,19 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
 
+                // Cold start: the first load after boot compiles ~470MB of CoreML onto
+                // the ANE (~15-20s). A dictation made during that window WAITS for the
+                // load and then succeeds — but with no cue it reads as a hang
+                // (2026-07-22: fn pressed 4s after launch "held the app for 10s").
+                // Say so in the overlay pill.
+                if !transcriber.isLoaded {
+                    DiagnosticLogger.shared.log(
+                        "Finalize: dictation waiting on model load (cold start)")
+                    DispatchQueue.main.async {
+                        self.recordingOverlay.updateStreamingText("Loading speech model…")
+                    }
+                }
+
                 let primaryRaw: String
                 var bluetoothRaw: String?
                 var reusedPartial = false
