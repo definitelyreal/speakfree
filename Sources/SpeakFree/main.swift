@@ -5,6 +5,13 @@ import SpeakFreeLib
 setvbuf(stdout, nil, _IOLBF, 0)
 setvbuf(stderr, nil, _IOLBF, 0)
 
+// Test seam: SPEAKFREE_CONFIG_DIR points every config/vocabulary/recordings path at an
+// isolated directory, so offline benchmarking (e.g. the vocab-boost eval) can exercise
+// the full CLI without ever touching the live ~/.config/speakfree.
+if let dir = ProcessInfo.processInfo.environment["SPEAKFREE_CONFIG_DIR"], !dir.isEmpty {
+    Config.configDirOverride = URL(fileURLWithPath: (dir as NSString).expandingTildeInPath)
+}
+
 let version = SpeakFree.version
 
 func printUsage() {

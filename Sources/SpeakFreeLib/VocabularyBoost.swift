@@ -92,7 +92,16 @@ public enum VocabularyBoost {
             // strips the dot, and "claudemd" is not a spoken token worth biasing toward.
             guard !key.contains(".") else { continue }
             seen.insert(normKey)
-            specs.append(TermSpec(text: term, weight: 1.5, aliases: curatedAliases[key] ?? []))
+            var aliases = curatedAliases[key] ?? []
+            // Possessive terms ("Zander's") inherit the base term's curated aliases in
+            // possessive form ("xander" → "xander's"), so possessive garbles stay
+            // alias-covered — NSSpellChecker knows many first names, and without the
+            // alias the real-word guard vetoes "Xander's" → "Zander's".
+            if key.hasSuffix("'s") || key.hasSuffix("\u{2019}s") {
+                let base = String(key.dropLast(2))
+                for a in curatedAliases[base] ?? [] { aliases.append(a + "'s") }
+            }
+            specs.append(TermSpec(text: term, weight: 1.5, aliases: aliases))
         }
         return specs
     }
@@ -280,9 +289,14 @@ public enum VocabularyBoost {
             return "digit span '\(originalSpan.joined(separator: " "))'"
         }
 
-        // 4. Curated-alias override — Michael explicitly listed this garble for this term
-        //    (e.g. "marina" → Maryna), so the remaining guards step aside.
-        let aliasSet = Set((term.aliases ?? []).map { normalizePhrase($0) })
+        // 5. Curated-alias override — Michael explicitly listed this garble for this term
+        //    (e.g. "marina" → Maryna), so the remaining guards step aside. Aliases also
+        //    match their possessive/plural form ("xander" covers "Xander's" → "xanders"
+        //    after normalization): NSSpellChecker knows many first names, so the
+        //    real-word guard below would otherwise veto possessive garbles the alias
+        //    was explicitly curated to fix.
+        var aliasSet = Set((term.aliases ?? []).map { normalizePhrase($0) })
+        for a in aliasSet where !a.hasSuffix("s") { aliasSet.insert(a + "s") }
         if aliasSet.contains(phrase) { return nil }
 
         // 5. Length bounds — the replacement must not swallow a substantially longer

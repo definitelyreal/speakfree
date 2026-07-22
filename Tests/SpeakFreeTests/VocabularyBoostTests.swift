@@ -229,6 +229,23 @@ final class VocabularyBoostTests: XCTestCase {
             batchText: "The AAF spec and v2 build ship in 2026.", vocabulary: ctx))
     }
 
+    func testPossessiveTermInheritsBaseAliases() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vocab-boost-tests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let f = dir.appendingPathComponent("vocabulary.txt")
+        try? "Zander\nZander's\n".write(to: f, atomically: true, encoding: .utf8)
+        let specs = VocabularyBoost.loadTermSpecs(
+            vocabularyFile: f, curatedAliases: ["zander": ["xander"]])
+        let possessive = specs.first { $0.text == "Zander's" }
+        XCTAssertEqual(possessive?.aliases, ["xander's"])
+        // And the guard accepts the possessive garble through that alias despite
+        // NSSpellChecker knowing "Xander's".
+        XCTAssertNil(VocabularyBoost.vetoReason(
+            originalSpan: ["Xander's"], term: term("Zander's", aliases: ["xander's"])))
+    }
+
     func testTermLoadingSkipsPunctuationAndComments() {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("vocab-boost-tests-\(UUID().uuidString)")
