@@ -159,6 +159,11 @@ public enum VocabularyBoost {
     static func isRealEnglishWord(_ word: String) -> Bool {
         let w = word.lowercased()
         guard !w.isEmpty else { return false }
+        // Primary: the system spell checker — the same guard production's
+        // GlossaryCorrector uses (proven off-main in FinalizePipeline). It knows
+        // modern compounds web2 lacks: iteration 1 let 'timeline' → 'Trimble'
+        // through because /usr/share/dict/words (1934 web2) has no 'timeline'.
+        if GlossaryCorrector.systemIsRealWord(w) { return true }
         if englishWords.contains(w) { return true }
         // Trailing-s plurals/possessive-stripped forms (web2 lists lemmas, not inflections).
         if w.hasSuffix("s"), englishWords.contains(String(w.dropLast())) { return true }
