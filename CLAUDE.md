@@ -13,8 +13,9 @@ Correct sequence when installing a fresh build to `/Applications` (or `~/Applica
 
 ## Build / install for local testing
 
+- **Fleet rule (Michael, 2026-07-22): every dev redeploy goes to ALL THREE Macs** — M3 (this machine), M5 (`movie@100.82.136.101`), M1 (`ark` in ~/.ssh/config). Use `bash scripts/dev-deploy-fleet.sh` (builds, bundles, installs locally, ships vendored bundles to the remotes with the trash-then-copy sequence).
 - Release build: `swift build -c release` (or `xcrun swift build -c release`).
-- Bundle: `bash scripts/bundle-app.sh .build/release/speakfree speakfree.app dev` — this is the dev bundle; it links `libwhisper` from Homebrew (`/opt/homebrew/opt/whisper-cpp`), so it only runs on a machine with `whisper-cpp` installed. The signed release `.dmg` (via `scripts/build.sh`) bundles the dylib for distribution.
+- Bundle: `bash scripts/bundle-app.sh .build/release/speakfree speakfree.app dev` — this dev bundle links `libwhisper` from Homebrew (`/opt/homebrew/opt/whisper-cpp`), so alone it only runs on a machine with `whisper-cpp` installed (the M3). For the M5/M1, which have no Homebrew whisper-cpp, `dev-deploy-fleet.sh` vendors `scripts/vendor/dylibs` into the bundle (soname symlinks + `@rpath` install-name fix, re-signed). The signed release `.dmg` (via `scripts/build.sh`) bundles the dylib the same way.
 - The dev bundle is ad-hoc signed (version "dev"): first launch needs **right-click → Open**, and TCC permissions (Mic/Accessibility) may need re-granting after each rebuild.
 - To run the CLI build directly: `export DYLD_FALLBACK_LIBRARY_PATH=$PWD/scripts/vendor/dylibs` then `./.build/debug/speakfree <cmd>`.
 
