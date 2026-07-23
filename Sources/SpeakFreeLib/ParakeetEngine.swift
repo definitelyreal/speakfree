@@ -225,7 +225,10 @@ public final class ParakeetEngine: TranscriptionEngine {
 
             // Custom-vocabulary setup runs in the BACKGROUND so it never delays model-ready (loading
             // the CTC keyword-spotter takes ~15s). Dictation works immediately via the batch path and
-            // upgrades to vocab-boosted automatically once ready. Never fatal.
+            // upgrades to vocab-boosted automatically once ready. Never fatal. Cancel any prior
+            // setup first — an orphan from a model-replacing load would waste a download slot
+            // (its commit guard already prevents a stale commit).
+            vocabSetupTask?.cancel()
             let modelForVocab = modelID
             vocabSetupTask = Task { await self.setupVocabBoosting(models: models, forModelID: modelForVocab) }
         }
@@ -245,18 +248,15 @@ public final class ParakeetEngine: TranscriptionEngine {
             guard FileManager.default.fileExists(atPath: dictURL.path) else { return }
             do {
                 DiagnosticLogger.shared.log("ParakeetEngine: loading CTC keyword-spotter for vocab boosting")
-                // FluidAudio is pinned offline (speakfree owns all downloads). Lift it JUST around
-                // this one deliberate CTC fetch, then restore — same pattern ParakeetModelManager
-                // uses for the Parakeet weights. Cached after first fetch (~110MB, one-time).
-                let priorOffline = DownloadUtils.enforceOffline
-                DownloadUtils.enforceOffline = false
-                let ctc: CtcModels
-                do {
-                    ctc = try await CtcModels.downloadAndLoad(variant: .ctc110m)
-                    DownloadUtils.enforceOffline = priorOffline
-                } catch {
-                    DownloadUtils.enforceOffline = priorOffline
-                    throw error
+                // FluidAudio is pinned offline (speakfree owns all downloads). The CTC
+                // fetch goes through the SAME serialized gate as the Parakeet weights:
+                // the save/restore-to-captured-prior it replaced could latch
+                // enforceOffline=false forever under overlapping setups, and two
+                // concurrent 110MB fetches could corrupt the shared cache dir
+                // (verifier, 2026-07-22). Cached after first fetch; offline failure is
+                // non-fatal (outer catch → plain batch path).
+                let ctc = try await ParakeetModelManager.shared.withSanctionedDownload {
+                    try await CtcModels.downloadAndLoad(variant: .ctc110m)
                 }
                 // Tokenize each term for the CTC keyword spotter (`.load()` leaves ctcTokenIds
                 // nil and nothing is ever spotted — dogfood 2026-07-02).
