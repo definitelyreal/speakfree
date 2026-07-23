@@ -81,6 +81,20 @@ public final class ParakeetModelManager {
 
     private let downloadGate = DownloadGate()
 
+    /// Run a sanctioned FluidAudio network fetch under the global download gate:
+    /// serialized against every other download, with `enforceOffline` lifted for the
+    /// duration and restored to the pinned resting value `true` — NEVER to a captured
+    /// prior, which under overlapping windows can restore a transient `false` and
+    /// permanently unlatch the offline pin (verifier finding, 2026-07-22). The CTC
+    /// keyword-spotter fetch (VocabularyBoost setup) routes through here.
+    func withSanctionedDownload<T>(_ op: () async throws -> T) async rethrows -> T {
+        try await downloadGate.run {
+            DownloadUtils.enforceOffline = false
+            defer { DownloadUtils.enforceOffline = true }
+            return try await op()
+        }
+    }
+
     // MARK: - Registry host pinning (security)
 
     /// Guards `pinRegistryHostIfNeeded()` so the host is pinned exactly once.
