@@ -58,6 +58,17 @@ let package = Package(
             dependencies: ["SpeakFreeLib"],
             path: "Sources/PerfHarness"
         ),
+        // Offline A/B harness for Parakeet vocabulary boosting (vocab-boost-eval loop).
+        // Compares batch TDT, sliding-window, sliding+vocab, and batch+CTC-rescore+guard
+        // on corpus wavs. Not shipped; local eval only.
+        .executableTarget(
+            name: "vocab-eval",
+            dependencies: [
+                "SpeakFreeLib",
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
+            path: "Sources/VocabEval"
+        ),
         .testTarget(
             name: "SpeakFreeTests",
             dependencies: ["SpeakFreeLib"],

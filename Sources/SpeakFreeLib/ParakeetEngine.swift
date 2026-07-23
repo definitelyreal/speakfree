@@ -95,6 +95,21 @@ public final class ParakeetEngine: TranscriptionEngine {
         /// FluidAudio's loaded ASR manager (actor). `nil` until `load` succeeds.
         private var manager: AsrManager?
 
+        /// Ingredients for the custom-vocabulary BATCH-ANCHORED boost path (VocabularyBoost).
+        /// Populated in the background by `setupVocabBoosting` when a `custom-vocabulary.json`
+        /// gate file is present and the CTC keyword-spotter loads; all nil otherwise (→
+        /// `transcribe` returns the plain batch result). Ported from vocab-boost-eval
+        /// (2026-07-22): the sliding-window design was retired — its base decode diverges
+        /// from batch at window seams (~2.5% of words), so it could never guarantee
+        /// production parity. The boost runs ON TOP of the batch result and can only
+        /// change explicitly-accepted vocab spans.
+        private var vocabSpotter: CtcKeywordSpotter?
+        private var vocabRescorer: VocabularyRescorer?
+        private var vocabContext: CustomVocabularyContext?
+        private var vocabTermCount = 0
+        /// Handle on the background vocab setup, for the SPEAKFREE_WAIT_VOCAB test seam only.
+        private var vocabSetupTask: Task<Void, Never>?
+
         /// The model identifier currently loaded, e.g. "parakeet-tdt-0.6b-v3". `nil` when unloaded.
         private var loadedModelID: String?
 
@@ -196,6 +211,7 @@ public final class ParakeetEngine: TranscriptionEngine {
                 while active > 0 { await Task.yield() }
                 manager = nil
                 loadedModelID = nil
+                vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
                 await old.cleanup()
                 tearingDown = false
             }
@@ -206,6 +222,69 @@ public final class ParakeetEngine: TranscriptionEngine {
             let loadTime = CFAbsoluteTimeGetCurrent() - loadStart
             DiagnosticLogger.shared.log("ParakeetEngine: model loaded in \(String(format: "%.2f", loadTime))s")
             onLoadedChange(true)
+
+            // Custom-vocabulary setup runs in the BACKGROUND so it never delays model-ready (loading
+            // the CTC keyword-spotter takes ~15s). Dictation works immediately via the batch path and
+            // upgrades to vocab-boosted automatically once ready. Never fatal.
+            let modelForVocab = modelID
+            vocabSetupTask = Task { await self.setupVocabBoosting(models: models, forModelID: modelForVocab) }
+        }
+
+        /// Try to configure batch-anchored custom-vocabulary boosting. Gated on a
+        /// `custom-vocabulary.json` (FluidAudio `CustomVocabularyConfig` format) existing in the
+        /// active config dir — machines opt in by creating it; everything else stays batch-only.
+        /// Terms come from `vocabulary.txt` (the user's curated list; punctuation command words
+        /// excluded); the gate file contributes curated garble ALIASES (e.g. "xander" → Zander),
+        /// which are the only channel through which a real English word may be rescored.
+        /// Downloads the ~110MB CTC keyword-spotter model on first use. Any failure logs and
+        /// leaves the ingredients nil, so `transcribe` returns the plain batch result.
+        private func setupVocabBoosting(models: AsrModels, forModelID: String) async {
+            vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
+
+            let dictURL = Config.configDir.appendingPathComponent("custom-vocabulary.json")
+            guard FileManager.default.fileExists(atPath: dictURL.path) else { return }
+            do {
+                DiagnosticLogger.shared.log("ParakeetEngine: loading CTC keyword-spotter for vocab boosting")
+                // FluidAudio is pinned offline (speakfree owns all downloads). Lift it JUST around
+                // this one deliberate CTC fetch, then restore — same pattern ParakeetModelManager
+                // uses for the Parakeet weights. Cached after first fetch (~110MB, one-time).
+                let priorOffline = DownloadUtils.enforceOffline
+                DownloadUtils.enforceOffline = false
+                let ctc: CtcModels
+                do {
+                    ctc = try await CtcModels.downloadAndLoad(variant: .ctc110m)
+                    DownloadUtils.enforceOffline = priorOffline
+                } catch {
+                    DownloadUtils.enforceOffline = priorOffline
+                    throw error
+                }
+                // Tokenize each term for the CTC keyword spotter (`.load()` leaves ctcTokenIds
+                // nil and nothing is ever spotted — dogfood 2026-07-02).
+                let tokenizer = try await CtcTokenizer.load(from: CtcModels.defaultCacheDirectory(for: .ctc110m))
+                let aliases = VocabularyBoost.loadCuratedAliases(from: dictURL)
+                let specs = VocabularyBoost.loadTermSpecs(
+                    vocabularyFile: Config.vocabularyFile, curatedAliases: aliases)
+                let context = VocabularyBoost.makeContext(specs: specs, tokenizer: tokenizer)
+                guard !context.terms.isEmpty else {
+                    DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting idle — no usable terms")
+                    return
+                }
+                let spotter = CtcKeywordSpotter(models: ctc)
+                let rescorer = try await VocabularyRescorer.create(
+                    spotter: spotter, vocabulary: context,
+                    ctcModelDirectory: CtcModels.defaultCacheDirectory(for: .ctc110m))
+
+                // Commit only if this model is still the loaded one (a reload may have raced).
+                guard loadedModelID == forModelID, manager != nil else { return }
+                vocabSpotter = spotter
+                vocabRescorer = rescorer
+                vocabContext = context
+                vocabTermCount = context.terms.count
+                DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting ready (\(context.terms.count) CTC-tokenized terms, batch-anchored)")
+            } catch {
+                DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting unavailable — \(error.localizedDescription); using batch path")
+                vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
+            }
         }
 
         // MARK: Transcribe
@@ -238,6 +317,16 @@ public final class ParakeetEngine: TranscriptionEngine {
             let isV3 = EngineCatalog.versionString(forParakeetModelID: modelID) != "v2"
             let hint = ParakeetEngine.languageHint(for: language, isV3: isV3)
 
+            // Test seam (A/B benchmarking): a short-lived CLI `process` run normally races the
+            // background vocab setup and silently benchmarks the batch path instead.
+            // SPEAKFREE_WAIT_VOCAB=1 awaits setup and reports the engaged path on stderr so every
+            // benchmark run self-verifies which decode path produced its output. No-op in the app.
+            if ProcessInfo.processInfo.environment["SPEAKFREE_WAIT_VOCAB"] == "1" {
+                await vocabSetupTask?.value
+                FileHandle.standardError.write(
+                    Data("SPEAKFREE_WAIT_VOCAB: vocab terms ready = \(vocabTermCount)\n".utf8))
+            }
+
             // Build a fresh decoder state sized to the loaded model's LSTM layer count.
             var decoderState = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
 
@@ -250,16 +339,46 @@ public final class ParakeetEngine: TranscriptionEngine {
                 throw TranscriptionEngineError.transcriptionFailed
             }
 
+            var text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Batch-anchored vocab boost, once its background setup has populated the
+            // ingredients. Runs the CTC rescorer over the FINISHED batch result and splices
+            // in only guard-accepted vocabulary spans, so worst case (veto everything,
+            // rescorer error, prefilter skip) is exactly the production batch text.
+            // Ordering: boost BEFORE the pad strip — the boost was validated with
+            // batchText exactly matching the token timings; the strip below only peels
+            // tail words and refuses on any mismatch, so a boosted tail word merely
+            // declines the strip (conservative keep).
+            if let spotter = vocabSpotter, let rescorer = vocabRescorer, let ctx = vocabContext {
+                do {
+                    let boosted = try await VocabularyBoost.boost(
+                        batchText: text,
+                        tokenTimings: result.tokenTimings ?? [],
+                        audio: audio,
+                        spotter: spotter, rescorer: rescorer, vocabulary: ctx)
+                    let applied = boosted.decisions.filter { $0.accepted }
+                    if !applied.isEmpty {
+                        DiagnosticLogger.shared.log(
+                            "ParakeetEngine: vocab boost applied \(applied.count) replacement(s): "
+                                + applied.map { "'\($0.original)'→'\($0.replacement)'" }
+                                    .joined(separator: ", "))
+                    }
+                    text = boosted.text
+                } catch {
+                    DiagnosticLogger.shared.log(
+                        "ParakeetEngine: vocab boost failed (\(error.localizedDescription)) — using batch text")
+                }
+            }
+
             // Strip words the decoder hallucinated over the silence pad we appended
             // (counts only in the log — never transcript content).
-            let raw = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
             let stripped = ParakeetEngine.strippingPadHallucination(
-                text: result.text, timings: result.tokenTimings,
+                text: text, timings: result.tokenTimings,
                 realAudioSeconds: Double(samples.count) / 16_000.0)
-            if stripped.count != raw.count {
+            if stripped.count != text.count {
                 DiagnosticLogger.shared.log(String(
                     format: "ParakeetEngine: stripped pad hallucination (%d chars past %.2fs)",
-                    raw.count - stripped.count, Double(samples.count) / 16_000.0))
+                    text.count - stripped.count, Double(samples.count) / 16_000.0))
             }
             return stripped
         }
@@ -277,6 +396,7 @@ public final class ParakeetEngine: TranscriptionEngine {
             let m = manager
             manager = nil
             loadedModelID = nil
+            vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
             await m?.cleanup()
             tearingDown = false
             DiagnosticLogger.shared.log("ParakeetEngine: model unloaded")
