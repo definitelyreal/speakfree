@@ -60,7 +60,25 @@ public class RecordingStore {
         return f
     }
 
-    static let dateFormatter = makeDateFormatter()
+    private static let dateFormatter = makeDateFormatter()
+
+    /// DateFormatter is not thread-safe, and the shared instance is reached from main
+    /// (`newRecordingURL` at record-start) and background finalize paths concurrently.
+    /// A race doesn't crash — it silently CORRUPTS the formatter's internal state for
+    /// the process lifetime, after which every recording filename is garbage and every
+    /// AVAudioFile create throws: the 2026-07-23 "fn does nothing until relaunch"
+    /// outage signature. All shared-formatter access now goes through this lock.
+    private static let dateFormatterLock = NSLock()
+    static func formatTimestamp(_ date: Date) -> String {
+        dateFormatterLock.lock()
+        defer { dateFormatterLock.unlock() }
+        return dateFormatter.string(from: date)
+    }
+    static func parseTimestamp(_ s: String) -> Date? {
+        dateFormatterLock.lock()
+        defer { dateFormatterLock.unlock() }
+        return dateFormatter.date(from: s)
+    }
 
     public static func ensureDirectory() {
         ensureLock.lock()
@@ -113,7 +131,7 @@ public class RecordingStore {
     // Always write to recordings dir, never temp — enables crash recovery regardless of maxRecordings setting
     public static func newRecordingURL() -> URL {
         ensureDirectory()
-        let timestamp = dateFormatter.string(from: Date())
+        let timestamp = formatTimestamp(Date())
         let unique = String(UUID().uuidString.prefix(8))
         let filename = "\(filePrefix)\(timestamp)-\(unique).\(fileExtension)"
         return recordingsDir.appendingPathComponent(filename)
@@ -249,7 +267,7 @@ public class RecordingStore {
                 let name = url.deletingPathExtension().lastPathComponent
                 let dateString = String(name.dropFirst(filePrefix.count))
                 let datePart = String(dateString.prefix(17))
-                guard let date = dateFormatter.date(from: datePart) else { return nil }
+                guard let date = parseTimestamp(datePart) else { return nil }
                 let text = try? String(contentsOf: sidecarURL(for: url), encoding: .utf8)
                 return Recording(url: url, date: date, text: text)
             }
@@ -482,7 +500,7 @@ public class RecordingStore {
         let stem = String(name.dropLast(suffix.count))
         let dateString = String(stem.dropFirst(filePrefix.count))
         let datePart = String(dateString.prefix(17))
-        return dateFormatter.date(from: datePart) != nil
+        return parseTimestamp(datePart) != nil
     }
 
     public static func deleteAllRecordings() {
