@@ -17,8 +17,17 @@ xcrun swift build -c release
 bash scripts/bundle-app.sh .build/release/speakfree speakfree.app dev
 
 echo "== M3 (local) =="
+# The app exits GRACEFULLY on SIGTERM (waits up to ~10s for quiet). Wait for the
+# process to actually die before reinstalling/relaunching — a fixed sleep raced it:
+# `open` then activates the DYING old instance instead of launching the new one,
+# the pgrep health check passes against that dying process, and minutes later the
+# machine has no speakfree at all (M5, 2026-07-23).
 pkill -f "speakfree.app/Contents/MacOS/speakfree" || true
-sleep 2
+for _ in $(seq 1 30); do
+    pgrep -f "speakfree.app/Contents/MacOS/speakfree" >/dev/null || break
+    sleep 0.5
+done
+pkill -9 -f "speakfree.app/Contents/MacOS/speakfree" 2>/dev/null || true
 /usr/bin/trash /Applications/speakfree.app 2>/dev/null || true
 cp -R speakfree.app /Applications/speakfree.app
 open /Applications/speakfree.app
@@ -55,7 +64,12 @@ for REMOTE in "${REMOTES[@]}"; do
     scp -o BatchMode=yes /tmp/speakfree-fleet.tgz "$REMOTE":/tmp/speakfree-new.tgz
     # shellcheck disable=SC2029
     ssh -o BatchMode=yes "$REMOTE" '
-        pkill -f "speakfree.app/Contents/MacOS/speakfree" || true; sleep 2
+        pkill -f "speakfree.app/Contents/MacOS/speakfree" || true
+        for _ in $(seq 1 30); do
+            pgrep -f "speakfree.app/Contents/MacOS/speakfree" >/dev/null || break
+            sleep 0.5
+        done
+        pkill -9 -f "speakfree.app/Contents/MacOS/speakfree" 2>/dev/null || true
         mv /Applications/speakfree.app ~/.Trash/speakfree-old-$(date +%H%M%S).app 2>/dev/null || true
         cd /Applications && tar xzf /tmp/speakfree-new.tgz
         mv speakfree-fleet.app speakfree.app
