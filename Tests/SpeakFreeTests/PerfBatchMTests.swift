@@ -37,7 +37,7 @@ final class PerfBatchMTests: XCTestCase {
 
     @discardableResult
     private func writeRecording(index: Int, sidecar: Bool) -> URL {
-        let ts = RecordingStore.dateFormatter.string(from: Self.base.addingTimeInterval(TimeInterval(index)))
+        let ts = RecordingStore.formatTimestamp(Self.base.addingTimeInterval(TimeInterval(index)))
         let name = "recording-\(ts)-\(String(format: "%08X", index)).wav"
         let url = testDir.appendingPathComponent(name)
         try! Data("x".utf8).write(to: url)
@@ -203,7 +203,7 @@ final class PerfBatchMTests: XCTestCase {
         for i in 0..<3 { writeRecording(index: i, sidecar: false) }
         XCTAssertEqual(RecordingStore.cachedRecordingCount(), 3)  // warm the cache
 
-        let ts = RecordingStore.dateFormatter.string(from: Self.base.addingTimeInterval(1))
+        let ts = RecordingStore.formatTimestamp(Self.base.addingTimeInterval(1))
         let stuck = testDir.appendingPathComponent("recording-\(ts)-00000001.wav")
         // User-immutable flag makes unlink() fail — a real un-removable file.
         try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: stuck.path)

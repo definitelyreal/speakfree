@@ -1206,6 +1206,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // Start streaming transcription timer — processes audio every 2s for live preview
             startStreamingTimer()
         } catch {
+            // MUST be visible in the diagnostic log: this branch used to print only to
+            // stdout, so the 2026-07-23 every-press-fails outage looked like a silent
+            // no-op ("Health check: all OK" then nothing) and took a live stdout
+            // capture to see. Error description only — never transcript content.
+            DiagnosticLogger.shared.log("Recording start FAILED: \(error)")
             print("Error: \(error.localizedDescription)")
             RecordingStore.clearSentinel()
             isPressed = false
