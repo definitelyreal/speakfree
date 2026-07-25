@@ -696,8 +696,20 @@ class AudioRecorder {
         }
 
         let duration = String(format: "%.1f", Double(samples.count) / 16000.0)
-        print("AudioRecorder: recording stopped, \(samples.count) total samples (\(duration)s)")
-        DiagnosticLogger.shared.log("AudioRecorder: recording stopped, \(samples.count) samples (\(duration)s)")
+        // Level forensics: a "successful" capture of dead air (muted mic, stale input
+        // route) is indistinguishable from real speech in every other log line — the
+        // 2026-07-25 lost dictation took a python RMS pass over the wav to diagnose.
+        // Speech RMS is typically >1% FS; silent captures sit near 0.1%.
+        var sumSquares: Float = 0
+        var peak: Float = 0
+        for s in samples {
+            sumSquares += s * s
+            peak = max(peak, abs(s))
+        }
+        let rmsPctFS = samples.isEmpty ? 0 : sqrt(sumSquares / Float(samples.count)) * 100
+        let levelNote = String(format: "rms %.2f%%FS peak %.1f%%FS", rmsPctFS, peak * 100)
+        print("AudioRecorder: recording stopped, \(samples.count) total samples (\(duration)s, \(levelNote))")
+        DiagnosticLogger.shared.log("AudioRecorder: recording stopped, \(samples.count) samples (\(duration)s, \(levelNote))")
 
         // Queue stop behind start on the SAME serial queue. The old main-thread buffer
         // snapshot could beat a slow Bluetooth start and return an empty track for short
