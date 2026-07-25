@@ -75,6 +75,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // Graceful SIGTERM (2026-07-14): a reinstall/kill must never eat an in-flight
     // dictation. The source is retained for process lifetime.
     private var sigtermSource: DispatchSourceSignal?
+    // Draining after SIGTERM (2026-07-25): new recordings are refused while waiting to
+    // exit — one started post-SIGTERM races the exit and its audio dies in memory.
+    private var isTerminating = false
     // Tail of the last successful insertion (2026-07-15): feeds the cursor-context
     // fallback for AX-opaque editors. Main-only.
     private var lastInsertionTail: String?
@@ -807,6 +810,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             DiagnosticLogger.shared.log("SIGTERM: dictation in flight — waiting to exit")
+            // Refuse NEW recordings while draining: a dictation started after SIGTERM
+            // races the exit and its audio dies in memory (2026-07-25: recording began
+            // 2s after the prior one finished, deploy force-killed it mid-capture, wav
+            // on disk had 0 samples). Finishing the in-flight one, then going dark for
+            // ~10s until the new instance arrives, is strictly better than eating audio.
+            self.isTerminating = true
             self.terminateAfterQuiet(consecutiveIdle: 0,
                                      deadline: Date().addingTimeInterval(5 * 60))
         }
@@ -1008,7 +1017,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleKeyDown() {
-        guard isReady else { return }
+        guard isReady, !isTerminating else { return }
 
         let isToggle = config.toggleMode?.value ?? false
 
@@ -1278,7 +1287,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// policy; this only feeds it the live trailing samples.
     private func runAdaptivePostBuffer(samplesAtRelease: Int, finalize: @escaping () -> Void) {
         let windowMs = postBufferWindowMs
-        let capMs = PostBufferPolicy.defaultCapMs
+        // Hard deadline = the EXTENDED cap (2026-07-25): the policy's decided wait stays ≤220ms
+        // for quiet releases and only exceeds it when trailing speech energy shows the speaker
+        // finishing a word across the release — the deadline must not amputate that extension
+        // (a word spoken across release died at the old 220ms ceiling: "…the last word, ⟨release⟩
+        // selectors" → transcript ended at "word."). Latency for quiet releases is unchanged;
+        // the deadline is the runaway guard only.
+        let capMs = PostBufferPolicy.defaultExtendedCapMs
         // Perf adjudication dispute #1: bound the total wait by a MONOTONIC deadline. DispatchTime
         // is a monotonic clock (unlike wall-clock CFAbsoluteTimeGetCurrent, which NTP/clock-set can
         // jump), so a congested runloop firing a late tick still stops at the first tick past the

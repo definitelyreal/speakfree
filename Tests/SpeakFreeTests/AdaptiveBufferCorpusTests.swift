@@ -66,11 +66,23 @@ final class AdaptiveBufferCorpusTests: XCTestCase {
             "fixture-2-spoken-comma.wav",
             "fixture-3-spoken-period-end.wav",
         ]
-        for name in speechTailFixtures {
+        // Speech-extension (2026-07-25) three-band reality, MEASURED on the fixtures:
+        //   * tail RMS ≥ 0.02 (real speech)      → extended cap (speaker mid-word: keep recording;
+        //     the old 220ms ceiling amputated a word spoken across the key release — "selectors")
+        //   * 0.01 < tail RMS < 0.02 (soft tail) → base cap (fixture-3's soft spoken 'period':
+        //     the old conservative wait, unchanged — the deliberate no-extension band that keeps
+        //     breath/room tone from paying the extended wait)
+        //   * tail ≤ 0.01 (silence)              → 90ms early stop (fixture-4, the latency win)
+        let expected: [(String, Double)] = [
+            ("fixture-1-clean.wav", PostBufferPolicy.defaultExtendedCapMs),
+            ("fixture-2-spoken-comma.wav", PostBufferPolicy.defaultExtendedCapMs),
+            ("fixture-3-spoken-period-end.wav", cap),
+        ]
+        for (name, want) in expected {
             let wait = adaptiveWaitMs(forSamples: try samples(name))
-            XCTAssertEqual(wait, cap, accuracy: 0.001,
-                "[\(name)] a recorded-speech tail must pay the full \(cap)ms cap — the adaptive win " +
-                "does NOT generalise to real recordings (AR-2 #1). Got \(wait)ms.")
+            XCTAssertEqual(wait, want, accuracy: 0.001,
+                "[\(name)] expected \(want)ms under the speech-extension bands (2026-07-25). " +
+                "Got \(wait)ms.")
         }
 
         // fixture-4 = fixture-3 + 400ms appended digital silence → the ONLY fixture that early-stops.
@@ -95,14 +107,19 @@ final class AdaptiveBufferCorpusTests: XCTestCase {
         ]
         var waits = try names.map { adaptiveWaitMs(forSamples: try samples($0)) }
         waits.sort()
-        // 4 values → median = mean of the two middle. With [90, 220, 220, 220] → 220.
+        // 4 values → median = mean of the two middle. Post speech-extension (2026-07-25), measured:
+        // [90 (f4 silence win), 220 (f3 soft tail, base cap), 1200, 1200 (f1/f2 speech tails,
+        // extended)] → median (220 + 1200) / 2 = 710. The tripwire's truth is unchanged in spirit:
+        // the latency WIN is still confined to the one trailing-silence fixture; speech tails now
+        // wait LONGER by design (capturing the word beats shaving milliseconds mid-word).
         let median = (waits[1] + waits[2]) / 2.0
-        XCTAssertEqual(median, cap, accuracy: 0.001,
-            "median adaptive post-buffer across the corpus must equal the flat cap (\(cap)ms): only " +
-            "fixture-4 early-stops, so the corpus-aggregate win is ~0. Per-fixture waits: \(waits)")
-        // Exactly ONE fixture beats the cap.
+        let expectedMedian = (cap + PostBufferPolicy.defaultExtendedCapMs) / 2.0
+        XCTAssertEqual(median, expectedMedian, accuracy: 0.001,
+            "median adaptive post-buffer across the corpus must be \(expectedMedian)ms " +
+            "(soft-tail base cap + speech-tail extended cap averaged). Per-fixture waits: \(waits)")
+        // Exactly ONE fixture beats the base cap (the trailing-silence canary — the latency win).
         XCTAssertEqual(waits.filter { $0 < cap }.count, 1,
-            "exactly one fixture (the trailing-silence canary) should beat the cap; got waits \(waits)")
+            "exactly one fixture (the trailing-silence canary) should beat the base cap; got waits \(waits)")
     }
 
     // MARK: - #2a: the adaptive buffer never clips (transcribe the ACTUAL truncated tail)

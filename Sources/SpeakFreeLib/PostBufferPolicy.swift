@@ -54,6 +54,16 @@ public enum PostBufferPolicy {
     public static let defaultSilenceNeededMs: Double = 90.0
     public static let defaultCapMs: Double = 220.0
 
+    /// Speech-extension (2026-07-25): a dictation whose LAST WORD is spoken across the key
+    /// release ("…missed the last word, ⟨release⟩ selectors") dies at the 220 ms cap — the
+    /// word needs ~600–1000 ms. When any trailing window shows actual SPEECH energy (not
+    /// breath/room tone), the cap extends to `defaultExtendedCapMs`; the 90 ms silence run
+    /// still finalizes the moment the speaker stops, so quiet releases keep today's latency.
+    /// 0.02 RMS sits above breath/room tone (~0.01) and below even soft trailing syllables
+    /// (the clipped "selectors" onset measured 0.027–0.030).
+    public static let defaultSpeechThreshold: Float = 0.02
+    public static let defaultExtendedCapMs: Double = 1_200.0
+
     /// Default poll/window cadence (ms). The live runtime polls the recorder at this grain.
     public static let defaultWindowMs: Double = 30.0
 
@@ -79,12 +89,20 @@ public enum PostBufferPolicy {
         windowMs: Double,
         silenceThreshold: Float = defaultSilenceThreshold,
         silenceNeededMs: Double = defaultSilenceNeededMs,
-        capMs: Double = defaultCapMs
+        capMs: Double = defaultCapMs,
+        speechThreshold: Float = defaultSpeechThreshold,
+        extendedCapMs: Double = defaultExtendedCapMs
     ) -> Double {
         precondition(windowMs > 0, "windowMs must be positive")
 
-        // No trailing audio observed → fall back to the cap (never clip unseen tail).
+        // No trailing audio observed → fall back to the base cap (never clip unseen tail).
         guard !windowRMS.isEmpty else { return capMs }
+
+        // Speech-extension: real speech energy in the trailing audio means the speaker is
+        // still finishing a word — raise the ceiling so the silence run, not the cap, ends
+        // the wait. Breath/room tone (≤ speechThreshold) never extends.
+        let effectiveCapMs = windowRMS.contains(where: { $0 >= speechThreshold })
+            ? max(extendedCapMs, capMs) : capMs
 
         // Windows needed to constitute `silenceNeededMs` of contiguous silence.
         let windowsNeeded = Int((silenceNeededMs / windowMs).rounded(.up))
@@ -96,14 +114,14 @@ public enum PostBufferPolicy {
 
         for rms in windowRMS {
             elapsedMs += windowMs
-            // Reached the cap mid-walk: stop now, clamped to the cap.
-            if elapsedMs >= capMs { return capMs }
+            // Reached the (possibly speech-extended) cap mid-walk: stop now, clamped.
+            if elapsedMs >= effectiveCapMs { return effectiveCapMs }
 
             if rms <= silenceThreshold {
                 contiguousSilent += 1
                 if contiguousSilent >= needed {
                     // Enough trailing silence: stop early (clamped, defensively, to the cap).
-                    return min(elapsedMs, capMs)
+                    return min(elapsedMs, effectiveCapMs)
                 }
             } else {
                 // Speech (above threshold) resets the silence run.
@@ -112,9 +130,9 @@ public enum PostBufferPolicy {
         }
 
         // Ran out of observed windows before a full contiguous-silence run or the cap — fall back to
-        // the cap (last-word-clipping guard: when in doubt, wait the full old amount). In live use
+        // the cap (last-word-clipping guard: when in doubt, wait the full amount). In live use
         // the caller keeps polling as more windows arrive until silence is met or the cap is hit.
-        return capMs
+        return effectiveCapMs
     }
 
     /// Monotonic-deadline stop guard for the LIVE post-buffer poll loop (perf adjudication
