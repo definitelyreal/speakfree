@@ -1717,8 +1717,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             self.statusBar.buildMenu()
                         }
                     } else {
-                        self.statusBar.state = .idle
+                        // Held key + captured audio + empty transcript = almost always a
+                        // near-silent capture (muted mic, stale input route), not intent.
+                        // Surface it — a lost dictation must never be a silent no-op
+                        // (2026-07-25: 4.6s into VS Code, RMS ~0.15% FS, zero feedback).
+                        let audioSecs = Double(effectiveSampleCount) / 16000.0
+                        DiagnosticLogger.shared.log(String(
+                            format: "Transcription EMPTY — nothing inserted (%.1fs of audio)", audioSecs))
+                        self.statusBar.state = .noSpeech
                         self.statusBar.buildMenu()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                            if self.statusBar.state == .noSpeech {
+                                self.statusBar.state = .idle
+                                self.statusBar.buildMenu()
+                            }
+                        }
                     }
                 }
             } catch {
@@ -1922,19 +1935,33 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Copy to clipboard — the menu stole focus from the user's app,
-        // so direct insertion via AX won't work reliably. Clipboard is the safest path.
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-
         lastTranscription = text
 
-        statusBar.state = .copiedToClipboard
-        statusBar.buildMenu()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            self?.statusBar.state = .idle
-            self?.statusBar.buildMenu()
+        // Insert into the frontmost window (Michael, 2026-07-25 — was clipboard-only).
+        // The status-bar menu has just closed; give macOS a beat to return key focus
+        // to the user's app before the AX read / synthetic paste, or the insert
+        // targets the dying menu session. Clipboard remains the fallback whenever
+        // insertion can't land (no focused element, focus lost, secure input).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self = self else { return }
+            let copyFallback = {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+                self.statusBar.state = .copiedToClipboard
+                self.statusBar.buildMenu()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    self.statusBar.state = .idle
+                    self.statusBar.buildMenu()
+                }
+            }
+            let inserted = self.inserter.insert(text: text, onFocusLost: copyFallback)
+            if inserted {
+                DiagnosticLogger.shared.log(
+                    "Reprocess: inserted \(text.count) chars from recent dictation")
+            } else if self.statusBar.state != .copiedToClipboard {
+                copyFallback()
+            }
         }
     }
 

@@ -54,6 +54,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
         case ready
         case waitingForPermission
         case copiedToClipboard
+        /// Recording transcribed to NOTHING (near-silent capture: mic muted or a stale
+        /// input route). Shown briefly so a lost dictation is never a silent no-op —
+        /// the user spoke, held the key, and deserves to know nothing was heard.
+        case noSpeech
         /// Secure-Input fallback: dictated text was copied with concealment markers and will
         /// auto-clear after the configured delay. Shows a distinct notification so the user
         /// knows the clipboard will self-clean (audit M2).
@@ -204,6 +208,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
             case .downloading: stateText = "Downloading model..."
             case .waitingForPermission: stateText = "⚠️ Grant Accessibility Permission →"
             case .copiedToClipboard: stateText = "Copied to clipboard"
+            case .noSpeech: stateText = "⚠️ No speech detected — check your mic"
             case .secureInputCopied: stateText = "Copied — auto-clears in 15s (Secure Input)"
             case .noModel: stateText = "⚠️ No model — open Settings to download"
             case .setupFailed(let message): stateText = "⛔ Setup failed: \(message)"
@@ -453,6 +458,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
             setIcon(StatusBarController.drawLockIcon())
         case .copiedToClipboard, .secureInputCopied:
             setIcon(StatusBarController.drawCheckmarkIcon())
+        case .noSpeech:
+            setIcon(StatusBarController.drawErrorIcon())
         case .noModel:
             setIcon(StatusBarController.drawNoModelIcon())
         case .setupFailed:
