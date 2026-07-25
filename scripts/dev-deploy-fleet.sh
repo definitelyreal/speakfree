@@ -22,8 +22,12 @@ echo "== M3 (local) =="
 # `open` then activates the DYING old instance instead of launching the new one,
 # the pgrep health check passes against that dying process, and minutes later the
 # machine has no speakfree at all (M5, 2026-07-23).
+# Wait out the app's OWN graceful window (in-flight dictation + 10s quiet; the app
+# refuses new recordings once signaled). 15s + pkill -9 SIGKILLed a live dictation
+# on 2026-07-25 — audio still in memory, wav had 0 samples. 3min covers any real
+# dictation; -9 only past that (matches the app's stuck-state escape hatch).
 pkill -f "speakfree.app/Contents/MacOS/speakfree" || true
-for _ in $(seq 1 30); do
+for _ in $(seq 1 360); do
     pgrep -f "speakfree.app/Contents/MacOS/speakfree" >/dev/null || break
     sleep 0.5
 done
@@ -65,7 +69,7 @@ for REMOTE in "${REMOTES[@]}"; do
     # shellcheck disable=SC2029
     ssh -o BatchMode=yes "$REMOTE" '
         pkill -f "speakfree.app/Contents/MacOS/speakfree" || true
-        for _ in $(seq 1 30); do
+        for _ in $(seq 1 360); do
             pgrep -f "speakfree.app/Contents/MacOS/speakfree" >/dev/null || break
             sleep 0.5
         done

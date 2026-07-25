@@ -19,6 +19,7 @@ final class PostBufferTests: XCTestCase {
 
     private let windowMs = 30.0
     private let cap = PostBufferPolicy.defaultCapMs              // 220 (retuned 2026-07-19)
+    private let extendedCap = PostBufferPolicy.defaultExtendedCapMs // 1200 (speech-extension 2026-07-25)
     private let needMs = PostBufferPolicy.defaultSilenceNeededMs // 90 (retuned 2026-07-19)
     private let speech: Float = 0.2   // well above the 0.01 threshold
     private let silent: Float = 0.0   // well below threshold
@@ -58,32 +59,53 @@ final class PostBufferTests: XCTestCase {
     // MARK: - Case 3: speech continuing past release (clipping guard)
 
     /// Speaker is mid-word and keeps producing energy through the whole observation — we never
-    /// accumulate 90ms of contiguous silence, so we fall back to the hard cap (220ms). This is the
-    /// last-word-clipping guard: when in doubt, wait the full amount.
-    func test_speechPastRelease_neverSilent_fallsBackToCap() {
+    /// accumulate 90ms of contiguous silence. Real speech energy EXTENDS the cap (2026-07-25:
+    /// a word spoken across the release died at the old 220ms ceiling), so the fallback is the
+    /// extended cap, not the base one.
+    func test_speechPastRelease_neverSilent_fallsBackToExtendedCap() {
         let w = windows([(speech, 40)])  // 1200ms of continuous speech
         let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
-        XCTAssertEqual(wait, cap, accuracy: 0.001)
+        XCTAssertEqual(wait, extendedCap, accuracy: 0.001)
     }
 
-    /// Speech with brief dips that never reach 90ms contiguous silence before the cap → cap.
-    func test_speechWithShortGaps_underTarget_fallsBackToCap() {
-        // speech, 60ms gap (<90), speech, 60ms gap … never 90 contiguous, runs past the cap.
+    /// Speech with brief dips that never reach 90ms contiguous silence → speech was observed, so
+    /// the wait falls back to the extended cap (live: polling continues until silence or deadline).
+    func test_speechWithShortGaps_underTarget_fallsBackToExtendedCap() {
+        // speech, 60ms gap (<90), speech, 60ms gap … never 90 contiguous.
         let w = windows([(speech, 2), (silent, 2), (speech, 2), (silent, 2),
                          (speech, 2), (silent, 2), (speech, 2), (silent, 2)])
         let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
+        XCTAssertEqual(wait, extendedCap, accuracy: 0.001)
+    }
+
+    // MARK: - Cap boundary / speech extension
+
+    /// THE "selectors" case (2026-07-25): the last word is spoken ACROSS the key release — 270ms
+    /// of trailing speech, then silence. The old 220ms cap amputated the word mid-syllable; with
+    /// the speech-extended cap the silence run completes at 270 + 90 = 360ms and the whole word
+    /// is captured. Latency is paid only when the speaker is demonstrably still talking.
+    func test_speechAcrossRelease_extendsPastBaseCap_stopsAtTrailingSilence() {
+        let w = windows([(speech, 9), (silent, 20)])
+        let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
+        XCTAssertEqual(wait, 360.0, accuracy: 0.001)
+        XCTAssertGreaterThan(wait, cap)
+        XCTAssertLessThan(wait, extendedCap)
+    }
+
+    /// Breath / room tone above the silence floor but below the SPEECH threshold must NOT extend
+    /// the cap — otherwise a noisy room pays the extended wait on every dictation. 0.015 sits
+    /// between the 0.01 silence threshold and the 0.02 speech threshold.
+    func test_breathAtRelease_neverSilentButNotSpeech_staysAtBaseCap() {
+        let w = windows([(0.015, 40)])
+        let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
         XCTAssertEqual(wait, cap, accuracy: 0.001)
     }
 
-    // MARK: - Cap boundary
-
-    /// Silence whose run only completes AFTER the cap → the cap wins. 9 speech windows (270ms)
-    /// already exceed the 220ms cap outright, so the trailing silence never gets scored — we hit
-    /// the cap mid-walk (would-be completion 270 + 90 = 360ms is moot).
-    func test_lateSilence_capWinsOverTarget() {
-        let w = windows([(speech, 9), (silent, 20)])
+    /// The extension is bounded: even endless speech stops at the extended cap.
+    func test_endlessSpeech_boundedByExtendedCap() {
+        let w = windows([(speech, 100)])  // 3s of continuous speech
         let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
-        XCTAssertEqual(wait, cap, accuracy: 0.001)
+        XCTAssertEqual(wait, extendedCap, accuracy: 0.001)
     }
 
     /// Empty window stream → no trailing audio observed → fall back to cap (never clip unseen tail).
@@ -110,9 +132,9 @@ final class PostBufferTests: XCTestCase {
         let quiet = windows([(0.001, 20)])   // ≪ 0.01 → silence
         XCTAssertEqual(PostBufferPolicy.decideWaitMs(windowRMS: quiet, windowMs: windowMs),
                        needMs, accuracy: 0.001)
-        let loud = windows([(0.2, 40)])      // ≫ 0.01 → speech → cap
+        let loud = windows([(0.2, 40)])      // ≫ 0.01 → speech → extended cap
         XCTAssertEqual(PostBufferPolicy.decideWaitMs(windowRMS: loud, windowMs: windowMs),
-                       cap, accuracy: 0.001)
+                       extendedCap, accuracy: 0.001)
     }
 
     // MARK: - rms helper
@@ -162,10 +184,10 @@ final class PostBufferTests: XCTestCase {
     }
 
     /// All-speech samples (no trailing silence) → cap (clipping guard at the sample level).
-    func test_trailingSamples_allSpeech_fallsBackToCap() {
+    func test_trailingSamples_allSpeech_fallsBackToExtendedCap() {
         let speechSamples = Array(repeating: Float(0.25), count: 16_000)  // 1s speech
         let wait = PostBufferPolicy.decideWaitMs(trailingSamples: speechSamples, windowMs: windowMs)
-        XCTAssertEqual(wait, cap, accuracy: 0.001)
+        XCTAssertEqual(wait, extendedCap, accuracy: 0.001)
     }
 
     // MARK: - Retuned defaults tripwire (2026-07-19 A/B: 150→90 / 300→220)
@@ -178,6 +200,12 @@ final class PostBufferTests: XCTestCase {
                        "silenceNeeded default must stay 90ms (retuned 2026-07-19); a revert to 150 is a regression")
         XCTAssertEqual(PostBufferPolicy.defaultCapMs, 220.0, accuracy: 0.0,
                        "cap default must stay 220ms (retuned 2026-07-19); a revert to 300 is a regression")
+        XCTAssertEqual(PostBufferPolicy.defaultSpeechThreshold, 0.02, accuracy: 0.0,
+                       "speech threshold must stay 0.02 (speech-extension 2026-07-25): lower extends on "
+                       + "breath/room tone, higher misses soft trailing syllables (measured 0.027)")
+        XCTAssertEqual(PostBufferPolicy.defaultExtendedCapMs, 1_200.0, accuracy: 0.0,
+                       "extended cap must stay 1200ms (speech-extension 2026-07-25); it bounds the wait "
+                       + "when the speaker talks across the key release")
     }
 
     // MARK: - Monotonic-deadline stop guard (perf adjudication dispute #1)
