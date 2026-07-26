@@ -221,6 +221,25 @@ public struct TextPostProcessor {
         result = ensureSpaceAfterPunctuation(result)
 
         // 8. Capitalize first letter after sentence-ending punctuation (. ! ?)
+        // Corpus H3/H9 (2026-07-25, 7 instances): Parakeet splits/mangles spoken
+        // "exclamation mark" into "Exclamation. Mark." / "exclamation marker" /
+        // "Exclamation Market". Collapse the variants to "!" attached to the
+        // preceding word, mirroring the single-token spoken-punctuation handling.
+        // Guard shape: the mark-word is REQUIRED mid-text ("what an exclamation
+        // that was" must survive); a bare "Exclamation." converts only when it is
+        // the dictation's final token (the observed split-mangle position).
+        if let re = try? NSRegularExpression(
+            pattern: "[ ,.]*\\bexclamation[ .]+mark(?:er|et)?\\b[.!]*|[ ,.]*\\bexclamation\\.?\\s*$",
+            options: [.caseInsensitive]) {
+            let ns = NSMutableString(string: result)
+            let matches = re.matches(in: result, range: NSRange(location: 0, length: ns.length))
+            for m in matches.reversed() {
+                ns.replaceCharacters(in: m.range, with: "! ")
+            }
+            result = (ns as String).replacingOccurrences(of: "! $", with: "!",
+                                                         options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+        }
         result = capitalizeAfterSentenceEnd(result)
 
         return result
