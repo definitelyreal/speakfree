@@ -1640,6 +1640,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         // Recordings privacy: persisting audio + transcripts is opt-in (2026-07-14).
         let keepRecording = DevMode.effectiveSaveRecordings(config)
+        // LEFT AS `.off` DELIBERATELY, and it disagrees with every other site on purpose until
+        // Michael picks a direction (open item in the canonical decisions doc under build/CURRENT).
+        //
+        // `Config.defaultConfig`, `SettingsViewModel` and `ProcessCommand` all resolve a missing
+        // `spokenPunctuation` to `.hybrid`, so a legacy config predating the key shows
+        // "Automatic & Spoken" in Settings while dictation runs Automatic Only. That mismatch is
+        // real. Changing THIS site to `.hybrid` was tried on 2026-07-26 and reverted: `.off`
+        // skips `TextPostProcessor.process` entirely, so switching is not "spoken words now
+        // convert" — it turns on the whole ambiguous-word pass, which measurably corrupts text
+        // `.off` left alone ("During that period we grew a lot" -> "During that. We grew a lot";
+        // "I met Bob, Alice, and Carol" -> "I met Bob. Alice, and Carol"). The equally valid fix
+        // is the reverse: resolve nil to `.off` in the view model so the UI reports what
+        // dictation actually does and nobody's output changes. That is a product call about
+        // people's real dictation, not a cleanup, so it is not being made inside a help-text
+        // change.
         let mode = config.spokenPunctuation ?? .off
         let glossary = Config.loadVocabulary()
         let overrides = Config.loadOverrides()
