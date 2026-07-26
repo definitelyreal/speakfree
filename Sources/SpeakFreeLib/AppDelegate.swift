@@ -1215,8 +1215,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // No cursor info — use the last 500 chars of the whole field
-        return String(fullText.suffix(500))
+        // No cursor info: DO NOT guess from the whole field's tail (2026-07-25:
+        // the AXManualAccessibility unlock opened Electron fields whose tail is
+        // arbitrary document text — it rarely ends in a space, so the prepend-space
+        // logic added phantom leading spaces to every dictation). nil lets the
+        // last-insertion fallback chain decide, which carries real cursor knowledge.
+        return nil
     }
 
     private func handleRecordingStart() {
