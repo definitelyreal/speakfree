@@ -65,6 +65,32 @@ class HotkeyManager {
         }
     }
 
+    /// End a take whose release was never observed.
+    ///
+    /// 2026-07-26 (Codex round 2, BLOCKER — pre-existing, not introduced by the sided-modifier
+    /// work, and it hits fn too): while the tap is disabled it sees no events, and nothing
+    /// replays them when it comes back. macOS gives no such guarantee. So a release during a
+    /// tap outage — most reachably the deliberate 2s pause before a rebuild after 5 disables —
+    /// was simply lost: `modifierPressed` stayed true, `onKeyUp` never fired, and the recording
+    /// ran until the user pressed and released the key again.
+    ///
+    /// Every path that loses or replaces the tap now asks the hardware whether the key is still
+    /// held, and ends the take if it is not. The read can only be wrong in the direction of
+    /// ending a take slightly early, and only inside an outage window that is already an error
+    /// path — which is the right way round: a truncated take is recoverable, a stranded one
+    /// silently eats a dictation.
+    private func reconcilePressedState(_ reason: String) {
+        guard modifierPressed, !Self.hotkeyIsPhysicallyDown(keyCode: keyCode) else { return }
+        modifierPressed = false
+        phantomUpStreak = 0
+        DiagnosticLogger.shared.log(
+            "HotkeyManager: release missed during \(reason) — key is physically up, ending take")
+        DispatchQueue.main.async {
+            self.stopKeyDownMonitor()
+            self.onKeyUp?()
+        }
+    }
+
     /// Verify the event tap is alive. If it died, recreate it.
     func ensureTapHealthy() {
         guard isModifierOnlyKey(keyCode) else { return } // only event tap keys need this
@@ -131,6 +157,9 @@ class HotkeyManager {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                             manager.tearDownEventTap()
                             manager.startEventTap()
+                            // The tap was blind for those 2 seconds — a release in that window
+                            // reached nobody.
+                            manager.reconcilePressedState("tap rebuild")
                         }
                         return Unmanaged.passUnretained(event)
                     }
@@ -138,6 +167,7 @@ class HotkeyManager {
                     if let tap = manager.eventTap {
                         CGEvent.tapEnable(tap: tap, enable: true)
                     }
+                    manager.reconcilePressedState("tap disable")
                     return Unmanaged.passUnretained(event)
                 }
                 return manager.handleCGEvent(proxy: proxy, type: type, event: event)
@@ -217,9 +247,11 @@ class HotkeyManager {
         }
 
         let flags = event.flags
-        let fnDown = flags.contains(.maskSecondaryFn)
+        let fnDown = Self.hotkeyIsDown(flags, keyCode: keyCode)
 
-        if fnDown && !modifierPressed {
+        // Same reducer the global-monitor fallback uses, so the two paths cannot drift.
+        switch Self.fnTransition(fnDown: fnDown, modifierPressed: modifierPressed) {
+        case .keyDown:
             // Check required modifiers if any
             if requiredModifiers != 0 {
                 let currentMods = UInt64(flags.rawValue) & 0x00FF0000
@@ -234,18 +266,19 @@ class HotkeyManager {
                 self.onKeyDown?()
             }
             return nil  // consume fn press — suppresses emoji drawer
-        } else if !fnDown && modifierPressed {
+
+        case .keyUp:
             // Phantom-release guard (2026-07-26): mid-hold, the tap can deliver a
             // spurious fn-up + fn-down flap (two dictations truncated mid-clause at
             // 00:33 while the key never moved). Ask the HID HARDWARE state whether
-            // fn is really still down — .hidSystemState, NOT .combinedSessionState:
-            // this tap CONSUMES fn events, so the session state never sees releases
+            // the key is really still down — .hidSystemState, NOT .combinedSessionState:
+            // this tap CONSUMES the events, so the session state never sees releases
             // and reported "still down" for every genuine up, stranding a recording
             // that could never stop (Michael, 00:52). Failsafe: never swallow more
             // than 4 consecutive ups — if the HID read is ever wrong on some
             // keyboard, the release goes through rather than recording forever.
-            let physicalFlags = CGEventSource.flagsState(.hidSystemState)
-            if physicalFlags.contains(.maskSecondaryFn) && phantomUpStreak < 4 {
+            if Self.releaseIsPhantom(physicallyDown: Self.hotkeyIsPhysicallyDown(keyCode: keyCode),
+                                     phantomUpStreak: phantomUpStreak) {
                 phantomUpStreak += 1
                 DiagnosticLogger.shared.log(
                     "HotkeyManager: phantom fn-up swallowed (HID reports key still down, streak \(phantomUpStreak))")
@@ -258,9 +291,31 @@ class HotkeyManager {
                 self.onKeyUp?()
             }
             return nil  // consume — suppresses emoji drawer / system dictation on fn release
+
+        case .none:
+            break
         }
 
+        // FALL-THROUGH: a transition that does not change our state — a down while we already
+        // consider the key pressed, or an up while we do not. Letting these reach the OS is
+        // what leaks the globe action in TOGGLE mode: the phantom-up guard above can leave
+        // `modifierPressed` true after swallowing a release, so the user's NEXT genuine press
+        // lands here, macOS sees a bare fn tap, and the emoji drawer opens over their work
+        // (2026-07-26). Hold mode never exposed it because macOS fires the globe action on a
+        // quick tap, not a hold.
+        //
+        // Swallowed for fn ONLY. While fn is the hotkey speakfree owns it outright, and the
+        // fn+arrow / fn+F-key remappings are applied below this tap, so nothing else is lost.
+        // Every other modifier keeps passing through: those keys carry meaning for other apps
+        // and must not have stray transitions eaten.
+        if Self.swallowsRedundantTransition(keyCode: keyCode) { return nil }
+
         return Unmanaged.passUnretained(event)
+    }
+
+    /// Policy for the fall-through above, as a pure predicate so it can be pinned by tests.
+    static func swallowsRedundantTransition(keyCode: UInt16) -> Bool {
+        keyCode == KeyCodes.fnKeyCode
     }
 
     // MARK: - KeyDown monitor (only active while fn is held)
@@ -385,6 +440,9 @@ class HotkeyManager {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             self?.handleNSEvent(event)
         }
+        // Reaching here after a tap failure means events were unobserved for however long the
+        // ten retries took. A release in that window is gone; don't leave a take running.
+        reconcilePressedState("tap→global-monitor fallback")
     }
 
     /// The fn transition implied by a flagsChanged event in the global-monitor fallback, given the
@@ -397,6 +455,16 @@ class HotkeyManager {
         if fnDown && !modifierPressed { return .keyDown }
         if !fnDown && modifierPressed { return .keyUp }
         return .none
+    }
+
+    /// Should this key-up be swallowed as a phantom rather than ending the take?
+    ///
+    /// Pulled out as a pure function (Codex round 2, MAJOR: the guard was untestable inline).
+    /// Two conditions, and the second is the one that matters: the streak cap means a run of
+    /// swallowed ups always ends, so a wrong hardware read degrades into a late release rather
+    /// than a permanent one.
+    static func releaseIsPhantom(physicallyDown: Bool, phantomUpStreak: Int) -> Bool {
+        physicallyDown && phantomUpStreak < 4
     }
 
     private func handleNSEvent(_ event: NSEvent) {
@@ -418,9 +486,16 @@ class HotkeyManager {
 
     /// Fallback fn handling for the global monitor (I5). Only relevant for modifier-only hotkeys —
     /// non-modifier keys already come through as keyDown/keyUp and ignore flagsChanged.
+    ///
+    /// 2026-07-26 (Codex round 1): this path had the SAME fn-only bug as `handleCGEvent`
+    /// — it tested `.function` for every hotkey, so whenever tap creation failed and the
+    /// app fell back here, all eight sided modifiers were silently dead. Fixed by routing
+    /// through the same keycode→device-bit decision. `NSEvent.modifierFlags` carries the
+    /// NX device bits in the same layout as `CGEventFlags`.
     private func handleModifierFlagsChanged(_ event: NSEvent) {
         guard isModifierOnlyKey(keyCode), event.keyCode == keyCode else { return }
-        let fnDown = event.modifierFlags.contains(.function)
+        let fnDown = Self.hotkeyIsDown(CGEventFlags(rawValue: UInt64(event.modifierFlags.rawValue)),
+                                       keyCode: keyCode)
         switch Self.fnTransition(fnDown: fnDown, modifierPressed: modifierPressed) {
         case .keyDown:
             // Gate required modifiers only on the down transition (mirrors handleCGEvent); on
@@ -430,9 +505,17 @@ class HotkeyManager {
                 guard currentMods & requiredModifiers == requiredModifiers else { return }
             }
             modifierPressed = true
+            // Parity with the tap path (Codex round 2, MAJOR). Without these the fallback
+            // starts a take but installs no shortcut-abort, so on a Command hotkey the C of
+            // Command-C never calls onAbort and the whole shortcut is transcribed as a
+            // dictation. The gap already existed for fn; the sided modifiers this change
+            // revives would have inherited it.
+            modifierPressedAt = mach_absolute_time()
+            startKeyDownMonitor()
             onKeyDown?()
         case .keyUp:
             modifierPressed = false
+            stopKeyDownMonitor()
             onKeyUp?()
         case .none:
             break
@@ -441,5 +524,86 @@ class HotkeyManager {
 
     private func isModifierOnlyKey(_ code: UInt16) -> Bool {
         return [54, 55, 56, 58, 59, 60, 61, 62, 63].contains(code)
+    }
+
+    /// The flag bit a given modifier keycode raises in its own `flagsChanged` event.
+    ///
+    /// 2026-07-26 — `handleCGEvent` tested `.maskSecondaryFn` for EVERY modifier
+    /// hotkey, so only fn (63) ever worked. Right Command raises `.maskCommand`, never
+    /// the fn bit, so the press branch could not fire and selecting it silently did
+    /// nothing (Michael: "i set it to right command and it didn't work"). Same for
+    /// Option, Shift and Control — 8 of the 9 selectable modifier hotkeys were dead.
+    ///
+    /// These are the DEVICE-dependent bits, not the aggregate ones, so left and right
+    /// are told apart: with left Command already held, a tap of right Command still
+    /// shows the aggregate `.maskCommand` on release, and an aggregate test would miss
+    /// the key-up entirely and strand a recording.
+    static func modifierFlagBit(for keyCode: UInt16) -> UInt64 {
+        switch keyCode {
+        case 54: return 0x0000_0010          // NX_DEVICERCMDKEYMASK
+        case 55: return 0x0000_0008          // NX_DEVICELCMDKEYMASK
+        case 56: return 0x0000_0002          // NX_DEVICELSHIFTKEYMASK
+        case 60: return 0x0000_0004          // NX_DEVICERSHIFTKEYMASK
+        case 58: return 0x0000_0020          // NX_DEVICELALTKEYMASK
+        case 61: return 0x0000_0040          // NX_DEVICERALTKEYMASK
+        case 59: return 0x0000_0001          // NX_DEVICELCTLKEYMASK
+        case 62: return 0x0000_2000          // NX_DEVICERCTLKEYMASK
+        case 63: return UInt64(CGEventFlags.maskSecondaryFn.rawValue)   // fn has no sides
+        default: return 0                    // unknown keycode owns no bit
+        }
+    }
+
+    /// The opposite-side keycode for a sided modifier; nil for fn and unknown keys.
+    /// Exists so the tests can assert left and right are never conflated.
+    static func oppositeSide(of keyCode: UInt16) -> UInt16? {
+        switch keyCode {
+        case 54: return 55
+        case 55: return 54
+        case 56: return 60
+        case 60: return 56
+        case 58: return 61
+        case 61: return 58
+        case 59: return 62
+        case 62: return 59
+        default: return nil
+        }
+    }
+
+    /// True when this hotkey's physical key is down in `flags`.
+    ///
+    /// Sided modifiers are decided by the DEVICE bit ALONE. There is deliberately no
+    /// aggregate-bit fallback (Codex round 1, 2026-07-26, two BLOCKERs): the aggregate
+    /// class bit stays set while the OPPOSITE side is held, so trusting it meant a
+    /// right-Command release read as "still down" whenever left Command was down —
+    /// `modifierPressed` never cleared and the recording could never be stopped. A key
+    /// that never starts a take is visible and harmless; a take that never ends is the
+    /// worst failure this app has. So this fails SAFE: an aggregate-only event stream
+    /// (an exotic remapper) leaves a sided hotkey inert rather than stuck, which is
+    /// exactly the pre-fix behavior, not a regression.
+    ///
+    /// fn (63) is unchanged and keeps the aggregate test: it has no left/right sides,
+    /// and that path is the one already proven in production.
+    static func hotkeyIsDown(_ flags: CGEventFlags, keyCode: UInt16) -> Bool {
+        let bit = modifierFlagBit(for: keyCode)
+        guard bit != 0 else { return false }        // unknown keycode owns no key
+        return UInt64(flags.rawValue) & bit != 0
+    }
+
+    /// True when the hotkey's physical key is really held, per the HID hardware state.
+    ///
+    /// Used ONLY by the phantom-release guard, which needs hardware truth rather than
+    /// what the event claimed. `CGEventSource.flagsState` returns `CGEventFlags`, whose
+    /// public contract covers only the device-INDEPENDENT bits, so side-specific device
+    /// bits are not guaranteed to be present there. `keyState(_:key:)` is the primitive
+    /// that is side-specific by construction, so sided modifiers ask it directly. If it
+    /// ever answers false on some keyboard, the guard simply declines to swallow and the
+    /// release goes through — fail safe again.
+    static func hotkeyIsPhysicallyDown(keyCode: UInt16) -> Bool {
+        if keyCode == 63 {
+            // Unchanged, proven path: fn is not exposed as a normal key state.
+            return CGEventSource.flagsState(.hidSystemState).contains(.maskSecondaryFn)
+        }
+        guard modifierFlagBit(for: keyCode) != 0 else { return false }
+        return CGEventSource.keyState(.hidSystemState, key: CGKeyCode(keyCode))
     }
 }
