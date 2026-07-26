@@ -43,6 +43,14 @@ class StatusBarController: NSObject, NSMenuDelegate {
         buildMenu()
     }
 
+    /// Called by AppDelegate when a recovery SUCCEEDS (transcript saved). Until then
+    /// the menu entry persists so failures and busy-state rejections can be retried.
+    func clearCrashRecovery() {
+        crashRecoveryURL = nil
+        crashRecoveryHandler = nil
+        buildMenu()
+    }
+
     enum State: Equatable {
         case idle
         case recording
@@ -328,11 +336,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
         recentMenuTargets = []
         menu.removeAllItems()
 
-        // Crash recovery at top if pending
+        // Crash recovery at top if pending. The entry SURVIVES the click (codex review
+        // #7): it clears only when recovery succeeds (AppDelegate calls
+        // clearCrashRecovery) — a busy-state rejection or a transcription failure
+        // must leave a retry path, not a one-shot pointer.
         if let recoveryURL = crashRecoveryURL, let recoveryHandler = crashRecoveryHandler {
-            let target = MenuItemTarget { [weak self] in
-                self?.crashRecoveryURL = nil
-                self?.crashRecoveryHandler = nil
+            let target = MenuItemTarget {
                 recoveryHandler(recoveryURL)
             }
             recentMenuTargets.append(target)

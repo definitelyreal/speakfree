@@ -103,10 +103,16 @@ public enum ProcessCommand {
 
     /// Maximum decodable input duration (seconds). Rejects oversized WAVs before
     /// allocating buffers, bounding memory use and guarding the UInt32 frame casts.
-    private static let maxInputDurationSeconds: Double = 30 * 60
+    /// 60 min (was 30): the 30-min ceiling silently killed the wav-rescue arbiter and
+    /// recovery of long sessions (2026-07-25 audit A2/H7). Not higher: the decode path
+    /// briefly holds TWO copies of the float samples (inBuf + Array), so 60 min peaks
+    /// ~440 MB (codex review #5); 90 would flirt with memory pressure under a loaded
+    /// model. Empirical: 29 min transcribes in 4.1s at 368 MB peak. Beyond 60 min use
+    /// Transcriber.transcribeFile (chunked, uncapped).
+    private static let maxInputDurationSeconds: Double = 60 * 60
 
     /// Maximum bytes for any single Float32 PCM allocation (input buffer or
-    /// resampled output). The duration cap alone is insufficient: a 30-min WAV at
+    /// resampled output). The duration cap alone is insufficient: a within-cap WAV at
     /// a high sample rate with many channels still over-allocates. ~512 MB.
     private static let maxDecodedBytes: Double = 512 * 1024 * 1024
 

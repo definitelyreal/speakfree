@@ -7,7 +7,7 @@ import Foundation
 class AudioRecorder {
     private var audioEngine: AVAudioEngine?
     private var audioConverter: AVAudioConverter?
-    private var audioFile: AVAudioFile?
+    private var audioFile: WavWriter?
     private var currentOutputURL: URL?
     private let writeQueue = DispatchQueue(label: "com.definitelyreal.speakfree.audiowrite")
     private var pcmSamples: [Float] = []
@@ -16,7 +16,17 @@ class AudioRecorder {
     private(set) var currentLevel: Float = 0
 
     /// Timestamp of last audio buffer received — used by health check to detect dead engines.
-    private var lastBufferTime: Date = Date()
+    /// Buffer-health state, guarded by its own lock (codex review #8: the bare `Date`
+    /// was written on the audio thread and read from main — a real data race once the
+    /// watchdog made it load-bearing). Monotonic uptime, not wall clock. `peakSinceCheck`
+    /// accumulates the max |sample| between watchdog reads so the watchdog can tell a
+    /// LIVE-BUT-SILENT capture (muted mic delivering zero-filled buffers — codex #4)
+    /// from real speech; callbacks alone can't.
+    /// Latch: log the first wav write failure per recording to DiagnosticLogger (review #13).
+    private var wavWriteFailureLogged = false
+    private let bufferHealthLock = NSLock()
+    private var lastBufferUptime: Double = ProcessInfo.processInfo.systemUptime
+    private var peakSinceCheck: Float = 0
 
     /// Whether the pre-buffer engine should run. When false, engine only starts on startRecording.
     var preBufferEnabled: Bool = true {
@@ -100,7 +110,9 @@ class AudioRecorder {
         }
 
         // Engine running but no buffers flowing (silent death)
-        let elapsed = Date().timeIntervalSince(lastBufferTime)
+        bufferHealthLock.lock()
+        let elapsed = ProcessInfo.processInfo.systemUptime - lastBufferUptime
+        bufferHealthLock.unlock()
         if elapsed > 3.0 {
             DiagnosticLogger.shared.log("AudioRecorder: no audio buffers for \(Int(elapsed))s — rebuilding engine")
             noteDisruption()
@@ -485,7 +497,9 @@ class AudioRecorder {
             // engine that had only just started (2026-07-22 log: spurious teardown +
             // rebuild on main 3s after startup). Buffers get their grace period from
             // engine start, not object creation.
-            lastBufferTime = Date()
+            bufferHealthLock.lock()
+            lastBufferUptime = ProcessInfo.processInfo.systemUptime
+            bufferHealthLock.unlock()
             engineBuiltAt = Date()
             print("AudioRecorder: audio engine started")
         } catch {
@@ -507,16 +521,24 @@ class AudioRecorder {
         guard error == nil, convertedBuffer.frameLength > 0,
               let channelData = convertedBuffer.floatChannelData?[0] else { return }
 
-        // Track last buffer time for health check
-        self.lastBufferTime = Date()
-
         let count = Int(convertedBuffer.frameLength)
 
-        // RMS level for visualizer
+        // RMS level for visualizer + peak for the silence watchdog
         var sum: Float = 0
-        for i in 0..<count { sum += channelData[i] * channelData[i] }
+        var bufPeak: Float = 0
+        for i in 0..<count {
+            let v = channelData[i]
+            sum += v * v
+            bufPeak = max(bufPeak, abs(v))
+        }
         let rms = sqrtf(sum / Float(max(count, 1)))
         self.currentLevel = min(rms / 0.15, 1.0)
+
+        // Track buffer arrival + level for the health checks (locked: read from main)
+        bufferHealthLock.lock()
+        lastBufferUptime = ProcessInfo.processInfo.systemUptime
+        peakSinceCheck = max(peakSinceCheck, bufPeak)
+        bufferHealthLock.unlock()
 
         let samples = Array(UnsafeBufferPointer(start: channelData, count: count))
 
@@ -540,13 +562,42 @@ class AudioRecorder {
             writeQueue.async {
                 self.pcmSamples.append(contentsOf: samples)
                 do {
-                    try self.audioFile?.write(from: convertedBuffer)
+                    try self.audioFile?.append(samples)
                 } catch {
                     fputs("AudioRecorder write error: \(error.localizedDescription)\n", stderr)
+                    // Once per recording (review #13): the crash-safety wav silently
+                    // dying (disk full) must reach the diagnostic log — dictation
+                    // still completes from memory, but recovery protection is gone.
+                    if !self.wavWriteFailureLogged {
+                        self.wavWriteFailureLogged = true
+                        DiagnosticLogger.shared.log(
+                            "AudioRecorder: wav write FAILING (\(error.localizedDescription)) — crash recovery unavailable for this recording")
+                    }
                 }
             }
             stateLock.unlock()
         }
+    }
+
+    /// Seconds since the last audio buffer arrived from the tap. Feeds the in-recording
+    /// dead-audio watchdog (2026-07-25): a 60-minute hold previously had ZERO health
+    /// checks between record-start and stop. Benign torn-read tolerated (Date is a
+    /// single Double internally; a rare stale value only delays detection one tick).
+    func secondsSinceLastBuffer() -> Double {
+        bufferHealthLock.lock()
+        defer { bufferHealthLock.unlock() }
+        return ProcessInfo.processInfo.systemUptime - lastBufferUptime
+    }
+
+    /// Max |sample| observed since the previous call (then resets). The watchdog uses
+    /// this to catch a mic that keeps DELIVERING buffers but only silence (codex #4) —
+    /// buffer arrival alone cannot distinguish that from real capture.
+    func peakSinceLastCheck() -> Float {
+        bufferHealthLock.lock()
+        defer { bufferHealthLock.unlock() }
+        let p = peakSinceCheck
+        peakSinceCheck = 0
+        return p
     }
 
     // MARK: - Streaming Access
@@ -594,22 +645,13 @@ class AudioRecorder {
     // MARK: - Recording
 
     func startRecording(to outputURL: URL) throws {
-        // Set up the file BEFORE flipping the flag, so the audio thread
-        // doesn't try to write to a nil audioFile
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 16000,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-        ]
-
-        let file = try AVAudioFile(forWriting: outputURL, settings: settings)
-        // Lock the recording down to owner-only before any audio lands in it (mirrors
-        // DualCapture's comparison-track wav). AVAudioFile creates with the default umask,
-        // so without this the capture is group/other-readable.
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: outputURL.path)
+        // Set up the file BEFORE flipping the flag, so the audio thread doesn't try to
+        // write to a nil audioFile. WavWriter (not AVAudioFile): it re-patches the RIFF
+        // header every ~5s, so a killed process loses seconds, not the whole recording —
+        // AVAudioFile committed sizes only at close, and the 2026-07-25 recovery audit
+        // found 94 corpus orphans (one 37 min long) unreadable for exactly that reason.
+        // WavWriter creates the file 0o600 itself (no world-readable window).
+        let file = try WavWriter(url: outputURL)
         currentOutputURL = outputURL
 
         // Atomically: drain pre-roll, set up file, flip to recording mode
@@ -623,6 +665,7 @@ class AudioRecorder {
         audioFile = file
         _isRecording = true
         stateLock.unlock()
+        writeQueue.async { self.wavWriteFailureLogged = false }
 
         print("AudioRecorder: recording started, pre-roll: \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms)")
         let device = currentCaptureDeviceName() ?? "unknown"
@@ -646,7 +689,15 @@ class AudioRecorder {
                     "AudioRecorder: engine failed to start with pre-buffer off — aborting recording")
                 stateLock.lock()
                 _isRecording = false
-                audioFile = nil
+                stateLock.unlock()
+                // Close on the WRITE QUEUE (review #9): a writePrerollToFile append may
+                // be in flight there, and WavWriter is single-queue by contract — a
+                // caller-thread close can interleave header seeks with an append.
+                writeQueue.sync {
+                    self.audioFile?.close()
+                    self.audioFile = nil
+                }
+                stateLock.lock()
                 prerollBuffer = preroll  // coherent: pre-buffer off means preroll is empty
                 pcmSamples = []
                 stateLock.unlock()
@@ -665,16 +716,9 @@ class AudioRecorder {
 
     /// Write pre-roll Float32 samples to the WAV file.
     private func writePrerollToFile(_ samples: [Float]) {
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: AVAudioFrameCount(samples.count)) else { return }
-        buffer.frameLength = AVAudioFrameCount(samples.count)
-        if let channelData = buffer.floatChannelData?[0] {
-            for i in 0..<samples.count {
-                channelData[i] = samples[i]
-            }
-        }
         writeQueue.async {
             do {
-                try self.audioFile?.write(from: buffer)
+                try self.audioFile?.append(samples)
             } catch {
                 fputs("AudioRecorder pre-roll write error: \(error.localizedDescription)\n", stderr)
             }
@@ -690,6 +734,7 @@ class AudioRecorder {
 
         var samples: [Float] = []
         writeQueue.sync {
+            self.audioFile?.close()   // final header patch — the wav is valid from here
             self.audioFile = nil
             samples = self.pcmSamples
             self.pcmSamples = []
