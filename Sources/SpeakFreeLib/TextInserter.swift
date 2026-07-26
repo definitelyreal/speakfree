@@ -105,6 +105,16 @@ class TextInserter {
     var axWaitWillBlock: (() -> Void)?
 
     func shouldPrependSpace(before element: AXUIElement?) -> Bool {
+        // Electron-class apps: never trust a live AX prepend probe (2026-07-26,
+        // fourth phantom-space report — this path runs whenever the precomputed
+        // decision is unavailable, e.g. streaming reuse, and carried NONE of the
+        // capture-side gates; VS Code's terminal-document tail always reads
+        // non-space). The capture-side context, when trusted, already answered.
+        if let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           Self.prefersClipboardPaste(bundleID: bundleID) {
+            DiagnosticLogger.shared.log("TextInserter: prepend probe skipped (Electron-class)")
+            return false
+        }
         let semaphore = DispatchSemaphore(value: 0)
         var result = false
 

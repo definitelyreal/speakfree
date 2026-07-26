@@ -233,6 +233,9 @@ public enum FinalizePipeline {
         // record-start, off the main thread — no AX query, no semaphore). Fall back to the
         // AX-backed shouldPrependSpace only when no precomputed value is available.
         let wantSpace = precomputedPrependSpace ?? inserter.shouldPrependSpace(before: element)
+        // One grep answers "where did the leading space come from" (2026-07-26).
+        DiagnosticLogger.shared.log(
+            "Insertion: prependSpace=\(wantSpace) source=\(precomputedPrependSpace != nil ? "precomputed" : "liveAX")")
         let insertText = composeInsertText(text, prependSpace: wantSpace)
         let pasted = inserter.insert(text: insertText, refocusing: element, onFocusLost: onFocusLost)
         return (insertText, pasted)
