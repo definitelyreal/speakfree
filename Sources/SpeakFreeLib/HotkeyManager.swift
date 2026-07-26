@@ -233,6 +233,18 @@ class HotkeyManager {
             }
             return nil  // consume fn press — suppresses emoji drawer
         } else if !fnDown && modifierPressed {
+            // Phantom-release guard (2026-07-26): mid-hold, the tap can deliver a
+            // spurious fn-up + fn-down flap (observed live at 00:33 — two dictations
+            // truncated mid-clause while the key never moved; the flap's "down"
+            // even ran a fresh pre-recording health check in the same second).
+            // Before honoring an up, ask the HID system for the PHYSICAL state: if
+            // fn is still actually depressed, this event is a lie — swallow it.
+            let physicalFlags = CGEventSource.flagsState(.combinedSessionState)
+            if physicalFlags.contains(.maskSecondaryFn) {
+                DiagnosticLogger.shared.log(
+                    "HotkeyManager: phantom fn-up swallowed (physical key still down)")
+                return nil
+            }
             modifierPressed = false
             DispatchQueue.main.async {
                 self.stopKeyDownMonitor()
