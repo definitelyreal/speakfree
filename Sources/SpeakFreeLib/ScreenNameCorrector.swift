@@ -87,13 +87,28 @@ public enum ScreenNameCorrector {
         let keyed = Dictionary(grouping: names, by: phoneticKey)
 
         var out: [String] = []
+        var sentenceInitial = true
         for chunk in text.split(separator: " ", omittingEmptySubsequences: false) {
             let word = String(chunk)
             // Split trailing punctuation off the token.
             let core = word.prefix(while: { $0.isLetter || $0 == "'" })
             let tail = word.dropFirst(core.count)
             let token = String(core)
+            let wasSentenceInitial = sentenceInitial
+            if let lastMeaningful = word.last(where: { !$0.isWhitespace }) {
+                sentenceInitial = ".!?…".contains(lastMeaningful) || lastMeaningful.isNewline
+            }
             guard token.count >= 3, token.first?.isUppercase == true else {
+                out.append(word); continue
+            }
+            // Sentence-position guard (2026-07-25 regression: sentence-initial
+            // "Color" was rewritten to on-screen "Colour"). A capitalized token at
+            // sentence start is capitalized BECAUSE of position, not because it's a
+            // name — so there it must also fail the dictionary ("Xander" qualifies,
+            // "Color" doesn't). Mid-sentence capitals are name-shaped on their own
+            // ("I told Chris…"), where a dictionary veto would wrongly kill real
+            // names the system happens to know ("Chris").
+            if wasSentenceInitial && isRealWord(token.lowercased()) {
                 out.append(word); continue
             }
             if let matches = keyed[phoneticKey(token)],

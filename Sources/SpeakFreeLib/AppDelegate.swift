@@ -1217,8 +1217,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
             // range.location is a UTF-16 offset — convert via the utf16 view (AX-E).
             let cursorIndex = max(0, range.location)
-            if requireCursorAtEnd, cursorIndex < fullText.utf16.count {
-                return nil  // cursor not at field end — Electron offset untrusted
+            if requireCursorAtEnd {
+                // Electron trust gates (2026-07-25): offset must be at field end, AND
+                // the field must be input-sized — VS Code hands us the TERMINAL
+                // SCROLLBACK document as the "focused element", whose tail never ends
+                // in whitespace (phantom leading spaces + wrongful lowercase). Real
+                // inputs (search boxes, chat prompts) are short; documents are not.
+                if cursorIndex < fullText.utf16.count { return nil }
+                if fullText.utf16.count > 4000 { return nil }
             }
             if cursorIndex > 0, let before = TextInserter.textBeforeUTF16Offset(fullText, cursorIndex) {
                 // Take last 500 chars to stay within whisper's prompt limits
