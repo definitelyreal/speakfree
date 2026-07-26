@@ -221,6 +221,16 @@ public struct TextPostProcessor {
         result = ensureSpaceAfterPunctuation(result)
 
         // 8. Capitalize first letter after sentence-ending punctuation (. ! ?)
+        // Double-punctuation collapse (2026-07-25, live report): Parakeet often
+        // auto-punctuates the pause AND transcribes the spoken word — "declares it
+        // dead, comma things" — leaving the literal word after its own mark. When a
+        // spoken-punctuation word directly follows the SAME mark, drop the word.
+        result = result.replacingOccurrences(
+            of: ",\\s+comma\\b\\s*", with: ", ",
+            options: [.regularExpression, .caseInsensitive])
+        result = result.replacingOccurrences(
+            of: "\\.\\s+period\\b\\s*", with: ". ",
+            options: [.regularExpression, .caseInsensitive])
         // Corpus H3/H9 (2026-07-25, 7 instances): Parakeet splits/mangles spoken
         // "exclamation mark" into "Exclamation. Mark." / "exclamation marker" /
         // "Exclamation Market". Collapse the variants to "!" attached to the

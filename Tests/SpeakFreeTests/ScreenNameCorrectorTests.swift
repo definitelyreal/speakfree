@@ -82,6 +82,25 @@ final class ScreenNameCorrectorTests: XCTestCase {
         XCTAssertEqual(out, "Kris has the ticket.")
     }
 
+    /// The Colour regression (2026-07-25): sentence-initial capitalized REAL words
+    /// must never be rewritten to an on-screen spelling variant.
+    func test_sentenceInitialRealWord_neverRewritten() {
+        let screen = "Colour palette v2. Colour tokens updated."
+        let real: (String) -> Bool = { !["kris", "zander"].contains($0) }
+        let out = ScreenNameCorrector.correct(
+            "Color is the main theme. Color everywhere.", screenText: screen, isRealWord: real)
+        XCTAssertEqual(out, "Color is the main theme. Color everywhere.")
+    }
+
+    /// Mid-sentence capitalized names still fire even when dictionaries know them.
+    func test_midSentenceName_firesDespiteDictionary() {
+        let screen = "Kris here. Kris again."
+        let real: (String) -> Bool = { $0 != "kris" }
+        let out = ScreenNameCorrector.correct(
+            "I told Chris about it.", screenText: screen, isRealWord: real)
+        XCTAssertEqual(out, "I told Kris about it.")
+    }
+
     func test_phoneticKeys() {
         XCTAssertEqual(ScreenNameCorrector.phoneticKey("Chris"),
                        ScreenNameCorrector.phoneticKey("Kris"))
