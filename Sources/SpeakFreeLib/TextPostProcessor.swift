@@ -109,6 +109,18 @@ public struct TextPostProcessor {
     ///                     false for spoken mode (always replace everything).
     public static func process(_ text: String, hybrid: Bool = false) -> String {
         var result = text
+        // Spurious pause-split softener (2026-07-25, corpus 0.3% of raws): the
+        // engine sometimes splits at a spoken pause — "computer. as it goes" — and
+        // the LOWERCASE continuation is its own tell that it didn't believe the
+        // sentence ended. Soften to a comma. Runs FIRST, on pure engine output —
+        // later passes intentionally create lowercase-after-period intermediates
+        // that must not be touched. Exclusions: spoken-punctuation words after the
+        // period are the garble family other rules own; ≥3 letters before the
+        // period protects abbreviations (e.g., vs.).
+        var softened = text.replacingOccurrences(
+            of: "([A-Za-z]{3,})\\. (?!(?:period|comma|kama|coma|kamala|karma|dot|question|exclamation|new|newline)\\b)([a-z])",
+            with: "$1, $2",
+            options: .regularExpression)
 
         // 0.4. Strip surrounding quotes around spoken-command words. Whisper sometimes
         // wraps emphasized speech in quotes — `publish "Question mark"?` or `etc. "period."`
@@ -145,7 +157,7 @@ public struct TextPostProcessor {
 
         // 2b. Collapse the engine's HALF-converted "question mark": Parakeet sometimes
         // converts the spoken word "mark" into "?" itself, leaving "question?" in the
-        // text (2026-07-14: "…as they get shot at question?"). Guarded by the same
+        // softened (2026-07-14: "…as they get shot at question?"). Guarded by the same
         // noun-context rule as the standalone converter ("What is the question?" stays).
         result = collapseHalfConvertedQuestionMark(result)
 
