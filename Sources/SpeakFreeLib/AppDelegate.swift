@@ -1147,10 +1147,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     // swiftlint:disable:next force_cast
                     let axElement = element as! AXUIElement
                     capturedElement = axElement
-                    capturedContext = self?.readTextBeforeCursor(in: axElement)
+                    capturedContext = self?.readTextBeforeCursor(in: axElement,
+                                                                 requireCursorAtEnd: true)
                     if capturedContext != nil {
                         DiagnosticLogger.shared.log(
-                            "captureFocusedElement: AXManualAccessibility unlock succeeded")
+                            "captureFocusedElement: AXManualAccessibility unlock succeeded (cursor at end)")
                     }
                 }
             }
@@ -1195,7 +1196,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Reads up to 500 characters before the cursor without changing selection or focus.
-    private func readTextBeforeCursor(in element: AXUIElement) -> String? {
+    /// `requireCursorAtEnd`: trust gate for the AXManualAccessibility-unlocked
+    /// Electron read (2026-07-25: VS Code's reported cursor offset can be stale/
+    /// wrong, yielding context that "ends mid-sentence" and wrongly lowercasing a
+    /// fresh paragraph — the engine had capitalized "As usual" correctly). When
+    /// set, context is only returned if the cursor is verifiably at the END of
+    /// the field — the appending flow dictation actually uses.
+    private func readTextBeforeCursor(in element: AXUIElement,
+                                      requireCursorAtEnd: Bool = false) -> String? {
         var valueRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
               let fullText = valueRef as? String, !fullText.isEmpty else { return nil }
@@ -1209,6 +1217,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
             // range.location is a UTF-16 offset — convert via the utf16 view (AX-E).
             let cursorIndex = max(0, range.location)
+            if requireCursorAtEnd, cursorIndex < fullText.utf16.count {
+                return nil  // cursor not at field end — Electron offset untrusted
+            }
             if cursorIndex > 0, let before = TextInserter.textBeforeUTF16Offset(fullText, cursorIndex) {
                 // Take last 500 chars to stay within whisper's prompt limits
                 return String(before.suffix(500))
