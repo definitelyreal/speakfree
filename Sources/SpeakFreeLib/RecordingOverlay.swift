@@ -178,6 +178,8 @@ class RecordingOverlay {
     // re-resolves onto the newly-active screen.
     private var cachedScreen: NSScreen?
     private var screenResolved = false
+    /// Bumped on every show()/hide(); stale banner timers check it before acting.
+    private var showGeneration: UInt64 = 0
 
     private func resolvedTargetScreen() -> NSScreen? {
         if screenResolved { return cachedScreen }
@@ -186,8 +188,9 @@ class RecordingOverlay {
         return cachedScreen
     }
 
-    func show(state: OverlayState, recorder: AudioRecorder? = nil) {
+    func show(state: OverlayState, recorder: AudioRecorder? = nil, autoHideError: Bool = true) {
         // Hard kill any existing window (no animation)
+        showGeneration &+= 1
         animationTimer?.invalidate()
         animationTimer = nil
         window?.orderOut(nil)
@@ -200,11 +203,27 @@ class RecordingOverlay {
         cachedScreen = nil
         guard let screen = resolvedTargetScreen() else { return }
 
-        let pillSize = OverlayContentView.pillSize(for: state)
+        // Record-start and errors open as a LARGE CENTER-SCREEN banner (Michael
+        // 2026-07-25): unmissable positive feedback, so NOT seeing it after a keypress
+        // reliably means the press didn't land (dead tap / dead app / refused start).
+        // Recording glides down to the familiar bottom pill after a beat; errors
+        // auto-hide in place.
+        let isError = { if case .error = state { return true }; return false }()
+        let prominent = state == .recording || isError
+        let pillSize: NSSize
+        let frame: NSRect
         let bottomMargin: CGFloat = 48
-        let x = screen.frame.midX - pillSize.width / 2
-        let y = screen.visibleFrame.origin.y + bottomMargin
-        let frame = NSRect(x: x, y: y, width: pillSize.width, height: pillSize.height)
+        if prominent {
+            pillSize = isError ? OverlayContentView.errorSize : OverlayContentView.prominentSize
+            frame = NSRect(x: screen.frame.midX - pillSize.width / 2,
+                           y: screen.frame.midY - pillSize.height / 2,
+                           width: pillSize.width, height: pillSize.height)
+        } else {
+            pillSize = OverlayContentView.pillSize(for: state)
+            frame = NSRect(x: screen.frame.midX - pillSize.width / 2,
+                           y: screen.visibleFrame.origin.y + bottomMargin,
+                           width: pillSize.width, height: pillSize.height)
+        }
 
         let win = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
         win.level = .floating
@@ -212,10 +231,13 @@ class RecordingOverlay {
         win.backgroundColor = .clear
         win.hasShadow = true
         win.ignoresMouseEvents = true
-        win.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        // .fullScreenAuxiliary: without it the overlay is invisible over full-screen
+        // apps (2026-07-25 UX audit #11) — exactly where a user can't see the menu bar.
+        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
         let view = OverlayContentView(frame: NSRect(origin: .zero, size: frame.size))
         view.overlayState = state
+        view.prominent = prominent && !isError
         win.contentView = view
 
         // Start fully transparent for fade-in
@@ -238,6 +260,48 @@ class RecordingOverlay {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.15
                 view.animator().borderWidth = 1.0
+            }
+        }
+
+        if isError {
+            // Error banner: hold, then fade out — UNLESS the caller needs it to persist
+            // (review #3: the mid-recording dead-audio warning must stay up for as long
+            // as the mic is dead; auto-hiding it left the user dictating into a dead
+            // mic with no indicator at all, the exact failure the watchdog exists for).
+            if autoHideError {
+                let generation = showGeneration
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    guard let self = self, self.showGeneration == generation else { return }
+                    // codex review #6: update() reuses the window without bumping the
+                    // generation — if the state moved on (e.g. .transcribing after the
+                    // user released), this stale timer must not hide it.
+                    if case .error = self.contentView?.overlayState { self.hide() }
+                }
+            }
+        } else if prominent {
+            // Recording banner: glide down to the familiar bottom pill after a beat.
+            let generation = showGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
+                guard let self = self, self.showGeneration == generation,
+                      let win = self.window, let view = self.contentView,
+                      let screen = self.resolvedTargetScreen(),
+                      view.overlayState == .recording else { return }
+                view.prominent = false
+                let pill = OverlayContentView.pillSize(for: .recording,
+                                                      streamingText: view.streamingText)
+                let target = NSRect(x: screen.frame.midX - pill.width / 2,
+                                    y: screen.visibleFrame.origin.y + bottomMargin,
+                                    width: pill.width, height: pill.height)
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.25
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    win.animator().setFrame(target, display: true)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
+                    guard self.showGeneration == generation else { return }
+                    view.frame = NSRect(origin: .zero, size: target.size)
+                    view.needsDisplay = true
+                }
             }
         }
     }
@@ -302,6 +366,8 @@ class RecordingOverlay {
     }
 
     func hide() {
+        // Invalidate any pending banner glide/auto-hide timers from the current show().
+        showGeneration &+= 1
         // Drop the cached screen so the next recording re-resolves (display may have
         // changed while the overlay was hidden).
         screenResolved = false
@@ -355,14 +421,19 @@ class RecordingOverlay {
         }
     }
 
-    enum OverlayState {
+    enum OverlayState: Equatable {
         case recording
         case transcribing
+        /// Loud failure banner (red, center-screen, auto-hides): recording failed to
+        /// start, or audio died mid-recording. Message is short and user-facing.
+        case error(String)
     }
 }
 
 private class OverlayContentView: NSView {
     var overlayState: RecordingOverlay.OverlayState = .recording
+    /// Center-screen banner phase: big title + large bars for the first ~1.1s.
+    var prominent = false
     var audioLevel: CGFloat = 0
     var tick: Int = 0
     @objc dynamic var borderWidth: CGFloat = 0
@@ -408,7 +479,14 @@ private class OverlayContentView: NSView {
     private static let compressedMaxBarHeight: CGFloat = 10
     private static let compressedBarsAreaHeight: CGFloat = 24
 
+    /// Large center-screen banner shown for the first moments of every recording
+    /// (Michael 2026-07-25: record-start must be UNMISSABLE — its absence after a
+    /// keypress is the only reliable signal for a dead tap or dead app).
+    static let prominentSize = NSSize(width: 340, height: 110)
+    static let errorSize = NSSize(width: 400, height: 96)
+
     static func pillSize(for state: RecordingOverlay.OverlayState, streamingText: String = "") -> NSSize {
+        if case .error = state { return errorSize }
         let barsWidth = CGFloat(barCount) * dotSize + CGFloat(barCount - 1) * barGap
         let baseWidth = hPadding * 2 + barsWidth
         let baseHeight = vPadding * 2 + dotSize
@@ -469,6 +547,83 @@ private class OverlayContentView: NSView {
 
         let rect = bounds
         let pillPath = CGPath(roundedRect: rect, cornerWidth: Self.cornerRadius, cornerHeight: Self.cornerRadius, transform: nil)
+
+        // Error banner: red gradient, warning glyph, message. Center-screen, loud.
+        if case .error(let message) = overlayState {
+            ctx.saveGState()
+            ctx.addPath(pillPath)
+            ctx.clip()
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let colors = [
+                NSColor(red: 0.45, green: 0.05, blue: 0.08, alpha: 0.92).cgColor,
+                NSColor(red: 0.65, green: 0.10, blue: 0.12, alpha: 0.92).cgColor,
+            ] as CFArray
+            if let g = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0.0, 1.0]) {
+                ctx.drawLinearGradient(g,
+                    start: CGPoint(x: rect.minX, y: rect.midY),
+                    end: CGPoint(x: rect.maxX, y: rect.midY), options: [])
+            }
+            ctx.restoreGState()
+
+            let title = NSAttributedString(string: "⚠️ \(message)", attributes: [
+                .font: NSFont.systemFont(ofSize: 17, weight: .semibold),
+                .foregroundColor: NSColor.white,
+            ])
+            let size = title.boundingRect(
+                with: NSSize(width: rect.width - 40, height: rect.height),
+                options: [.usesLineFragmentOrigin]).size
+            title.draw(in: NSRect(x: rect.midX - size.width / 2,
+                                  y: rect.midY - size.height / 2,
+                                  width: size.width, height: size.height))
+            return
+        }
+
+        // Prominent record-start banner: big title above large bars, screen center.
+        if prominent && overlayState == .recording {
+            ctx.saveGState()
+            ctx.addPath(pillPath)
+            ctx.clip()
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let colors = [
+                NSColor(red: 0.25, green: 0.05, blue: 0.35, alpha: 0.85).cgColor,
+                NSColor(red: 0.40, green: 0.10, blue: 0.55, alpha: 0.85).cgColor,
+            ] as CFArray
+            if let g = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0.0, 1.0]) {
+                ctx.drawLinearGradient(g,
+                    start: CGPoint(x: rect.minX, y: rect.midY),
+                    end: CGPoint(x: rect.maxX, y: rect.midY), options: [])
+            }
+            ctx.restoreGState()
+
+            let dotColor = NSColor(red: 1.0, green: 0.3, blue: 0.3, alpha: 1.0)
+            let title = NSMutableAttributedString(string: "● ", attributes: [
+                .font: NSFont.systemFont(ofSize: 22, weight: .bold),
+                .foregroundColor: dotColor,
+            ])
+            title.append(NSAttributedString(string: "Recording", attributes: [
+                .font: NSFont.systemFont(ofSize: 22, weight: .bold),
+                .foregroundColor: NSColor.white,
+            ]))
+            let tSize = title.size()
+            title.draw(at: NSPoint(x: rect.midX - tSize.width / 2,
+                                   y: rect.maxY - tSize.height - 16))
+
+            // Large level bars in the lower half — live proof audio is flowing.
+            let barsRect = NSRect(x: rect.minX, y: rect.minY + 8,
+                                  width: rect.width, height: rect.height * 0.45)
+            drawBars(ctx: ctx, rect: barsRect, color: .white, compressed: false)
+            if borderWidth > 0 {
+                let inset = borderWidth / 2
+                let borderRect = rect.insetBy(dx: inset, dy: inset)
+                let bp = CGPath(roundedRect: borderRect, cornerWidth: Self.cornerRadius,
+                                cornerHeight: Self.cornerRadius, transform: nil)
+                ctx.addPath(bp)
+                ctx.setStrokeColor(NSColor(red: 0.6, green: 0.25, blue: 0.8, alpha: 0.9).cgColor)
+                ctx.setLineWidth(borderWidth)
+                ctx.strokePath()
+            }
+            return
+        }
 
         // Purple gradient background for recording and transcribing states
         if overlayState == .recording || overlayState == .transcribing {

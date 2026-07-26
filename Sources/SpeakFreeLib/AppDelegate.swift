@@ -30,6 +30,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // The crash happens in __cxa_finalize_ranges when ggml tries to free Metal
     // residency sets that are still active during static destructor cleanup.
     public func applicationWillTerminate(_ notification: Notification) {
+        // Close an in-flight recording FIRST (2026-07-25 audit F7): a clean quit
+        // (Cmd-Q, logout, Sparkle relaunch) previously left the wav header uncommitted —
+        // total loss, same as a crash. stopRecording() drains the write queue and
+        // patches the header; the wav then survives for the launch orphan sweep.
+        if recorder?.stopRecording() != nil {
+            DiagnosticLogger.shared.log("Terminate: closed in-flight recording for recovery")
+        }
         // applicationWillTerminate cannot await — bridge the async unload to sync via the
         // transcriber's synchronous passthrough (semaphore-backed inside Transcriber).
         transcriber?.unloadModelSync()
@@ -78,6 +85,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // Draining after SIGTERM (2026-07-25): new recordings are refused while waiting to
     // exit — one started post-SIGTERM races the exit and its audio dies in memory.
     private var isTerminating = false
+    // In-recording dead-audio watchdog + idle tap-health poll (2026-07-25). Main-only.
+    private var recordingWatchdogTimer: Timer?
+    private var watchdogWarnedDeadAudio = false
+    private var watchdogSilentTicks = 0
+    private var tapHealthTimer: Timer?
     // Tail of the last successful insertion (2026-07-15): feeds the cursor-context
     // fallback for AX-opaque editors. Main-only.
     private var lastInsertionTail: String?
@@ -314,20 +326,33 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Check for crash recovery before touching recordings
-        if let orphanedURL = RecordingStore.checkCrashRecovery() {
-            print("Crash recovery: found orphaned recording at \(orphanedURL.path)")
-            RecordingStore.clearSentinel()
-            DispatchQueue.main.async {
-                self.statusBar.showCrashRecovery(url: orphanedURL, handler: { [weak self] url in
-                    self?.reprocess(audioURL: url)
-                })
-            }
-        }
-
+        // Recovery (rebuilt 2026-07-25): the sentinel is one pointer, but the real
+        // inventory is the ORPHAN SWEEP — any recent wav without a transcript sidecar,
+        // headers repaired in place. The old handler (`reprocess`) only re-read a .txt
+        // that a crashed recording never has; recovery now actually TRANSCRIBES.
         let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         if maxRecordings > 0 {
             RecordingStore.prune(maxCount: maxRecordings)
         }
+
+        // (Prune runs FIRST — codex review #2: pruning after the sweep could delete
+        // the very orphan the menu is about to offer.)
+        let sentinelURL = RecordingStore.checkCrashRecovery()
+        RecordingStore.clearSentinel()
+        let orphans = RecordingStore.sweepRecoverableOrphans()
+        if let newest = orphans.first?.url ?? sentinelURL {
+            let count = max(orphans.count, 1)
+            let seconds = orphans.first?.seconds ?? 0
+            DiagnosticLogger.shared.log(String(
+                format: "Recovery: %d recoverable orphan(s), newest %@ (%.0fs)",
+                count, newest.lastPathComponent, seconds))
+            DispatchQueue.main.async {
+                self.statusBar.showCrashRecovery(url: newest, handler: { [weak self] url in
+                    self?.recoverOrphan(audioURL: url)
+                })
+            }
+        }
+
 
         // Recordings apology notice (2026-07-14): saving shipped on-by-default through
         // v1.7.1; the notice lets users keep or delete what accumulated. Returns every
@@ -558,6 +583,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         isReady = true
+        // Idle tap-health poll (2026-07-25 audit: a dead event tap was UNDETECTABLE —
+        // the only health check was gated behind a successful keypress). Every 30s
+        // while idle, verify and re-arm the tap so "press fn, nothing happens" gets
+        // fixed before the user hits it.
+        DispatchQueue.main.async { [weak self] in
+            self?.tapHealthTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+                guard let self = self, !self.isPressed, !self.isTerminating else { return }
+                self.hotkeyManager?.ensureTapHealthy()
+            }
+        }
         // After a fresh model download, show the green "ready" icon as a "you're all set" cue until
         // the first dictation clears it (handleKeyDown → .recording). Normal launches stay idle.
         if justDownloadedModel {
@@ -1206,6 +1241,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusBar.state = .recording
         recordingOverlay.show(state: .recording, recorder: recorder)
+        startRecordingWatchdog()
         do {
             // Always write to recordings dir — crash recovery works regardless of maxRecordings
             let outputURL = RecordingStore.newRecordingURL()
@@ -1220,6 +1256,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // no-op ("Health check: all OK" then nothing) and took a live stdout
             // capture to see. Error description only — never transcript content.
             DiagnosticLogger.shared.log("Recording start FAILED: \(error)")
+            stopRecordingWatchdog()
             print("Error: \(error.localizedDescription)")
             RecordingStore.clearSentinel()
             isPressed = false
@@ -1230,7 +1267,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             screenContextText = nil
             screenCaptureGeneration = UUID()
             statusBar.state = .idle
-            recordingOverlay.hide()
+            // LOUD failure (2026-07-25): the overlay used to flash for one frame and
+            // hide — the user pressed the key, spoke, and got nothing. Now a red
+            // center-screen banner says so (auto-hides).
+            recordingOverlay.show(state: .error("Recording failed: check your microphone"))
         }
     }
 
@@ -1240,6 +1280,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         guard isPressed else { return }
         isPressed = false
 
+        stopRecordingWatchdog()
         stopStreamingTimer()
 
         if let result = recorder.stopRecording() {
@@ -1257,9 +1298,63 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         performPendingConfigReloadIfNeeded()
     }
 
+    /// In-recording dead-audio watchdog (2026-07-25 audit C3/C5): the ONLY health
+    /// checks used to run before recording started — a 60-minute hold had none. Every
+    /// 5s this compares the last-buffer timestamp; >3s of no audio mid-recording means
+    /// the tap/route died (AirPods handoff, config change) and the user must know NOW,
+    /// not after dictating 40 minutes into a dead mic. The overlay flips to a red
+    /// banner while audio is dead and back to the recording pill if it recovers.
+    private func startRecordingWatchdog() {
+        recordingWatchdogTimer?.invalidate()
+        watchdogWarnedDeadAudio = false
+        recordingWatchdogTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            guard let self = self, self.isPressed else { return }
+            let deadFor = self.recorder.secondsSinceLastBuffer()
+            let peak = self.recorder.peakSinceLastCheck()
+            // Two dead shapes (codex review #4): NO buffers (tap/route died), and
+            // buffers of pure digital silence (muted mic / stale route still
+            // delivering zeros — the 2026-07-25 lost VS Code dictation). A live mic's
+            // noise floor peaks well above 0.001; zeros don't. Two consecutive silent
+            // ticks (10s) before warning so a quiet pause can't false-positive.
+            let buffersDead = deadFor > 3.0
+            if buffersDead {
+                self.watchdogSilentTicks = 0
+            } else if peak < 0.001 {
+                self.watchdogSilentTicks += 1
+            } else {
+                self.watchdogSilentTicks = 0
+            }
+            let silentMic = self.watchdogSilentTicks >= 2
+            if buffersDead || silentMic {
+                if !self.watchdogWarnedDeadAudio {
+                    self.watchdogWarnedDeadAudio = true
+                    DiagnosticLogger.shared.log(String(
+                        format: "WATCHDOG: %@ mid-recording (no-buffers %.1fs, peak %.4f)",
+                        buffersDead ? "capture dead" : "mic delivering silence", deadFor, peak))
+                    self.recordingOverlay.show(
+                        state: .error("Mic went silent: audio is not being captured"),
+                        autoHideError: false)
+                }
+            } else if self.watchdogWarnedDeadAudio {
+                self.watchdogWarnedDeadAudio = false
+                DiagnosticLogger.shared.log("WATCHDOG: audio resumed")
+                self.recordingOverlay.show(state: .recording, recorder: self.recorder)
+            }
+        }
+    }
+
+    private func stopRecordingWatchdog() {
+        recordingWatchdogTimer?.invalidate()
+        recordingWatchdogTimer = nil
+        watchdogWarnedDeadAudio = false
+        watchdogSilentTicks = 0
+    }
+
     private func handleRecordingStop() {
         guard isPressed else { return }
         isPressed = false
+
+        stopRecordingWatchdog()
 
         // Stop streaming timer and clear streaming state
         stopStreamingTimer()
@@ -1393,9 +1488,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     DiagnosticLogger.shared.log(
                         "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples))) and the wav did not rescue it — audio engine may be dead, rebuilding")
                 }
-                if !DevMode.effectiveSaveRecordings(config) {
-                    // Saving is opt-out: a gate-failed capture must not linger on disk.
+                // Keep the wav on a SILENT failure even when saving is off (2026-07-25
+                // audit F11): a silent capture means the mic/route is broken, and the
+                // audio is the diagnostic evidence. Only genuine accidental taps
+                // (.tooShort with real samples) honor the opt-out deletion.
+                let isSilentFailure: Bool
+                if case .silent = failure { isSilentFailure = true } else { isSilentFailure = false }
+                if !DevMode.effectiveSaveRecordings(config) && !isSilentFailure {
                     try? FileManager.default.removeItem(at: audioURL)
+                }
+                if isSilentFailure {
+                    // Empty sidecar (review #6): the kept wav is diagnostic evidence,
+                    // NOT a recoverable dictation — without this the launch sweep
+                    // re-offers known-silent audio every launch and masks real orphans.
+                    RecordingStore.saveTranscription(text: "", for: audioURL)
                 }
                 RecordingStore.clearSentinel()
                 focusCapture.reset()
@@ -1404,8 +1510,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 // the NEXT dictation's prompt with stale on-screen text.
                 screenContextText = nil
                 screenCaptureGeneration = UUID()
-                statusBar.state = .idle
-                recordingOverlay.hide()
+                if isSilentFailure {
+                    // The user held the key and spoke into a dead mic — say so (F12:
+                    // gate failures were a silent no-op; the empty-transcript fix
+                    // didn't cover this path).
+                    statusBar.state = .noSpeech
+                    statusBar.buildMenu()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                        if self.statusBar.state == .noSpeech {
+                            self.statusBar.state = .idle
+                            self.statusBar.buildMenu()
+                        }
+                    }
+                    recordingOverlay.show(state: .error("No speech captured: check your mic"))
+                } else {
+                    statusBar.state = .idle
+                    recordingOverlay.hide()
+                }
                 return
             }
         }
@@ -1937,6 +2058,85 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         lastStreamingRawPartial = ""
         lastStreamingSampleCount = 0
         lastStreamingCompletedAt = 0
+    }
+
+    /// REAL crash recovery (2026-07-25): transcribe the orphaned wav through the chunked
+    /// file path (no 30-min cap), save the transcript sidecar (so the orphan leaves the
+    /// sweep and appears in Recent Dictations), and copy the text to the clipboard. The
+    /// old handler only re-read a sidecar that a crashed recording never has.
+    public func recoverOrphan(audioURL: URL) {
+        guard statusBar.state == .idle || statusBar.state == .ready else {
+            // Busy (recording/transcribing). The menu entry persists — retry later.
+            DiagnosticLogger.shared.log("Recovery: busy (\(statusBar.state)) — try again when idle")
+            return
+        }
+        guard let transcriber = transcriber else {
+            DiagnosticLogger.shared.log("Recovery: no transcriber loaded — cannot recover")
+            return
+        }
+        statusBar.state = .transcribing
+        statusBar.buildMenu()
+        Task.detached { [weak self] in
+            do {
+                let text = try await transcriber.transcribeFile(
+                    url: audioURL, progressHandler: { _, _, _ in }, isCancelled: { false })
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                await MainActor.run {
+                    guard let self = self else { return }
+                    // A dictation may have started during a long recovery (review #7):
+                    // only touch shared UI state and the clipboard if the status is
+                    // still OUR .transcribing; the transcript sidecar is saved either
+                    // way and reachable via Recent Dictations.
+                    let stillOurs = self.statusBar.state == .transcribing
+                    if trimmed.isEmpty {
+                        DiagnosticLogger.shared.log(
+                            "Recovery: \(audioURL.lastPathComponent) transcribed EMPTY (silent capture)")
+                        // Sidecar the emptiness too, so the sweep stops re-offering it.
+                        RecordingStore.saveTranscription(text: "", for: audioURL)
+                        self.statusBar.clearCrashRecovery()
+                        guard stillOurs else { return }
+                        self.statusBar.state = .noSpeech
+                        self.statusBar.buildMenu()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                            if self.statusBar.state == .noSpeech {
+                                self.statusBar.state = .idle
+                                self.statusBar.buildMenu()
+                            }
+                        }
+                        return
+                    }
+                    RecordingStore.saveTranscription(text: trimmed, for: audioURL)
+                    self.statusBar.clearCrashRecovery()
+                    guard stillOurs else {
+                        DiagnosticLogger.shared.log(
+                            "Recovery: transcribed \(audioURL.lastPathComponent) (\(trimmed.count) chars) while a dictation was active; text is in Recent Dictations")
+                        return
+                    }
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(trimmed, forType: .string)
+                    self.lastTranscription = trimmed
+                    DiagnosticLogger.shared.log(
+                        "Recovery: transcribed \(audioURL.lastPathComponent) — \(trimmed.count) chars, copied to clipboard")
+                    self.statusBar.state = .copiedToClipboard
+                    self.statusBar.buildMenu()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        if self.statusBar.state == .copiedToClipboard {
+                            self.statusBar.state = .idle
+                            self.statusBar.buildMenu()
+                        }
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self = self else { return }
+                    DiagnosticLogger.shared.log(
+                        "Recovery FAILED for \(audioURL.lastPathComponent): \(error.localizedDescription)")
+                    self.statusBar.state = .idle
+                    self.statusBar.buildMenu()
+                }
+            }
+        }
     }
 
     public func reprocess(audioURL: URL) {

@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import AVFoundation
 
 public struct Recording: Sendable {
     public let url: URL
@@ -170,6 +171,46 @@ public class RecordingStore {
             return nil
         }
         return url
+    }
+
+    /// Launch sweep for RECOVERABLE ORPHANS: primary wavs with no transcript sidecar,
+    /// recent enough to matter. Repairs stale/zero RIFF headers in place (the AVAudioFile
+    /// crash signature — 94 such orphans existed in the live corpus on 2026-07-25, one
+    /// holding 37 minutes of audio) and probes real duration. Returns newest-first.
+    /// Cheap: one directory scan + per-candidate header reads; only orphans pay more.
+    public static func sweepRecoverableOrphans(
+        maxAgeDays: Int = 14, minSeconds: Double = 3.0, limit: Int = 5
+    ) -> [(url: URL, seconds: Double)] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: recordingsDir.path) else { return [] }
+        let cutoff = Date().addingTimeInterval(-Double(maxAgeDays) * 86_400)
+        let wavs = names.filter {
+            $0.hasPrefix(filePrefix) && $0.hasSuffix(".wav") && !$0.hasSuffix(".bt.wav")
+        }
+        let txts = Set(names.filter { $0.hasSuffix(".txt") })
+        var found: [(URL, Double, Date)] = []
+        for name in wavs {
+            let stem = String(name.dropLast(4))
+            guard !txts.contains(stem + ".txt") else { continue }
+            let url = recordingsDir.appendingPathComponent(name)
+            guard let attrs = try? fm.attributesOfItem(atPath: url.path),
+                  let mtime = attrs[.modificationDate] as? Date, mtime > cutoff,
+                  (attrs[.size] as? Int ?? 0) > 44 else { continue }
+            // Skip files still being WRITTEN (codex review #1): another instance
+            // (prod + the STREAMING variant share configDir; only beta is isolated),
+            // or this launch racing its own first recording, must never
+            // repair/transcribe a live capture. 120s of quiet is far beyond
+            // WavWriter's 5s patch cadence.
+            guard mtime.timeIntervalSinceNow < -120 else { continue }
+            // Repair a truncated header if needed (no-op returns nil when already valid),
+            // then trust the (possibly just-fixed) header for duration.
+            WavWriter.repairHeader(at: url)
+            guard let f = try? AVAudioFile(forReading: url) else { continue }
+            let seconds = Double(f.length) / f.processingFormat.sampleRate
+            guard seconds >= minSeconds else { continue }
+            found.append((url, seconds, mtime))
+        }
+        return found.sorted { $0.2 > $1.2 }.prefix(limit).map { ($0.0, $0.1) }
     }
 
     // MARK: - Transcription sidecar
