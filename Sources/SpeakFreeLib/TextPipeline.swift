@@ -182,9 +182,19 @@ public enum TextPipeline {
         // proper noun ("Kris" in the chat being replied to), its spelling beats the
         // ASR's homophone default ("Chris"). Conservative guards live in the
         // corrector; with no screen text this is a no-op.
+        let preScreen = corrected
         corrected = ScreenNameCorrector.correct(corrected,
                                                 screenText: input.screenContextText,
                                                 isRealWord: isRealWord)
+        if corrected != preScreen {
+            // Every screen-driven rewrite is LOGGED (Michael 2026-07-25: "are we
+            // propagating slop based on what's on the screen?") — changed token
+            // pairs only, never full transcript content.
+            let a = preScreen.split(separator: " "), b = corrected.split(separator: " ")
+            let changes = zip(a, b).filter { $0 != $1 }
+                .map { "\($0)→\($1)" }.joined(separator: ", ")
+            DiagnosticLogger.shared.log("ScreenNameCorrector: rewrote [\(changes)]")
+        }
         // Mid-sentence insertion must not start with a capital (Michael 2026-06-11:
         // "I really want it to be lowercase if I'm in the middle of the sentence").
         // Whisper sentence-cases every utterance; when the cursor context shows we're
