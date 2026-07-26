@@ -16,6 +16,8 @@ class HotkeyManager {
     private var onAbort: (() -> Void)?
     private var onUserInteraction: (() -> Void)?
     private var modifierPressed = false
+    /// Consecutive swallowed phantom fn-ups (failsafe cap 4; reset on honored release).
+    private var phantomUpStreak = 0
     /// When fn was pressed — used to distinguish keyboard shortcuts (key within 300ms) from dictation
     private var modifierPressedAt: UInt64 = 0
     /// Track tap re-enables to detect runaway loops
@@ -234,17 +236,22 @@ class HotkeyManager {
             return nil  // consume fn press — suppresses emoji drawer
         } else if !fnDown && modifierPressed {
             // Phantom-release guard (2026-07-26): mid-hold, the tap can deliver a
-            // spurious fn-up + fn-down flap (observed live at 00:33 — two dictations
-            // truncated mid-clause while the key never moved; the flap's "down"
-            // even ran a fresh pre-recording health check in the same second).
-            // Before honoring an up, ask the HID system for the PHYSICAL state: if
-            // fn is still actually depressed, this event is a lie — swallow it.
-            let physicalFlags = CGEventSource.flagsState(.combinedSessionState)
-            if physicalFlags.contains(.maskSecondaryFn) {
+            // spurious fn-up + fn-down flap (two dictations truncated mid-clause at
+            // 00:33 while the key never moved). Ask the HID HARDWARE state whether
+            // fn is really still down — .hidSystemState, NOT .combinedSessionState:
+            // this tap CONSUMES fn events, so the session state never sees releases
+            // and reported "still down" for every genuine up, stranding a recording
+            // that could never stop (Michael, 00:52). Failsafe: never swallow more
+            // than 4 consecutive ups — if the HID read is ever wrong on some
+            // keyboard, the release goes through rather than recording forever.
+            let physicalFlags = CGEventSource.flagsState(.hidSystemState)
+            if physicalFlags.contains(.maskSecondaryFn) && phantomUpStreak < 4 {
+                phantomUpStreak += 1
                 DiagnosticLogger.shared.log(
-                    "HotkeyManager: phantom fn-up swallowed (physical key still down)")
+                    "HotkeyManager: phantom fn-up swallowed (HID reports key still down, streak \(phantomUpStreak))")
                 return nil
             }
+            phantomUpStreak = 0
             modifierPressed = false
             DispatchQueue.main.async {
                 self.stopKeyDownMonitor()
