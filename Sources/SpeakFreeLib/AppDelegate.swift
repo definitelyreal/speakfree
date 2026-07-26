@@ -1165,6 +1165,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // Electron editors (VS Code) expose no AXValue — fall back to the tail of our
             // own last insertion when it plausibly still sits before the cursor, so the
             // mid-sentence-lowercase and prepend-space features keep working there.
+            var contextSource = capturedContext != nil ? "liveAX" : "none"
             if capturedContext == nil {
                 let userInteracted = lastInteractionGeneration.map {
                     $0 != interactionGenerationAtStart
@@ -1185,6 +1186,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     focusedElementMatches: focusedElementMatches)
                 if let fallback {
                     capturedContext = fallback
+                contextSource = "fallbackTail"
                     DiagnosticLogger.shared.log(
                         "captureFocusedElement: AX gave no context — using tail of last insertion (\(fallback.count) chars)")
                 } else if lastTail != nil, userInteracted {
@@ -1197,6 +1199,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             // Generation-guarded: a stale capture from a previous recording is dropped.
+            DiagnosticLogger.shared.log("captureFocusedElement: context source=\(contextSource) len=\(capturedContext?.count ?? 0)")
             self?.focusCapture.publish((capturedElement, capturedContext), token: token)
         }
     }
@@ -1628,6 +1631,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // mid-dictation the answer may be stale — but we refocus that same element anyway, so
         // the element and the precomputed context always agree.
         let capturedPrependSpace = TextInserter.shouldPrependSpace(contextBefore: capturedInputText)
+        DiagnosticLogger.shared.log(
+            "Finalize: prependSpace=\(capturedPrependSpace) midSentence=\(TextPipeline.isMidSentence(contextBefore: capturedInputText)) ctxLen=\(capturedInputText?.count ?? 0)")
 
         // Snapshot ALL config-derived state on main before crossing into the async Task.
         // Accessing self.config.* from a background queue is a torn-read race — Config is a
