@@ -17,6 +17,8 @@ public struct Config: Codable {
     public var maxRecordingsUserConfirmed: Bool?
     public var toggleMode: FlexBool?
     public var screenContext: FlexBool?
+    /// Recording banner visual variant 1-5 (2026-07-25 design shotgun); nil = 1.
+    public var overlayStyle: Int?
     // Deprecated 2026-06-11: the correction learner was removed (it polluted the
     // glossary with truncations and quote-style noise). Key is kept so old configs
     // decode and the value round-trips, but nothing reads it.

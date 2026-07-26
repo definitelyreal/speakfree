@@ -174,10 +174,17 @@ public enum TextPipeline {
         // Glossary correction: fix near-miss misspellings of curated proper nouns
         // (makes custom names work on Parakeet, which ignores the glossary prompt).
         // Runs before case-adjust so corrected names feed the keep-capitalized logic.
-        let corrected = GlossaryCorrector.correct(styled,
+        var corrected = GlossaryCorrector.correct(styled,
                                                   glossary: glossaryTerms(input.glossaryWords),
                                                   overrides: input.overrides,
                                                   isRealWord: isRealWord)
+        // Screen-aware name correction (2026-07-25): when the screen visibly shows a
+        // proper noun ("Kris" in the chat being replied to), its spelling beats the
+        // ASR's homophone default ("Chris"). Conservative guards live in the
+        // corrector; with no screen text this is a no-op.
+        corrected = ScreenNameCorrector.correct(corrected,
+                                                screenText: input.screenContextText,
+                                                isRealWord: isRealWord)
         // Mid-sentence insertion must not start with a capital (Michael 2026-06-11:
         // "I really want it to be lowercase if I'm in the middle of the sentence").
         // Whisper sentence-cases every utterance; when the cursor context shows we're

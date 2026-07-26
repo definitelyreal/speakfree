@@ -151,27 +151,36 @@ final class PerfBatchRTests: XCTestCase {
 
     // MARK: - R2: RecordingOverlay resolves its screen once per recording
 
-    func test_R2_frameProviderResolvedOncePerRecording() throws {
+    func test_R2_showNeverBlocksOnFrameProvider() throws {
         try XCTSkipIf(NSScreen.screens.isEmpty, "needs a display to build the overlay window")
         let overlay = RecordingOverlay()
-        var frameProviderCalls = 0
+        // 2026-07-25 fade fix: the AX read moved OFF the show path entirely (async
+        // refinement repositions only on disagreement). The regression this test
+        // pins: an unresponsive frontmost app (slow AX) must not delay the banner.
+        // The provider simulates a wedged app with a 300ms stall; show() must
+        // return without paying it. (Call COUNTS are unassertable now — the async
+        // refine may legitimately consult the provider at any time.)
         overlay.windowFrameProvider = {
-            frameProviderCalls += 1
+            Thread.sleep(forTimeInterval: 0.3)
             return NSRect(x: 0, y: 0, width: 400, height: 300)
         }
 
+        let start = Date()
         overlay.show(state: .recording)
         overlay.update(state: .transcribing)
-        overlay.updateStreamingText("hello world")
-        XCTAssertEqual(frameProviderCalls, 1,
-                       "AX frame provider must be resolved once per recording, not per state change")
-
-        // A new recording must re-resolve (multi-display move between dictations still works).
-        overlay.hide()
-        overlay.show(state: .recording)
-        XCTAssertEqual(frameProviderCalls, 2, "each new show() re-resolves the screen")
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 0.15,
+                          "show()/update() must not block on the AX frame provider "
+                          + "(took \(elapsed)s against a 0.3s-slow provider)")
 
         overlay.hide()
+        // Drain the async refinement so its main-queue hop can't fire into a later test.
+        let drained = expectation(description: "async refine drained")
+        DispatchQueue.global().async {
+            Thread.sleep(forTimeInterval: 0.35)
+            DispatchQueue.main.async { drained.fulfill() }
+        }
+        wait(for: [drained], timeout: 2.0)
     }
 
     // MARK: - R3: trailing-samples accessor preserves the exact PostBufferPolicy slice

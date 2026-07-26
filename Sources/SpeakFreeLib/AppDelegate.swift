@@ -336,21 +336,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // (Prune runs FIRST — codex review #2: pruning after the sweep could delete
-        // the very orphan the menu is about to offer.)
-        let sentinelURL = RecordingStore.checkCrashRecovery()
+        // an orphan mid-recovery.)
+        // AUTO-recovery (Michael, 2026-07-25: "why should I have to click?"): orphans
+        // are transcribed in the background at launch — no menu click, no clipboard
+        // side effects. Results land as transcript sidecars, so recovered dictations
+        // appear in Recent Dictations (where a click inserts them). Each orphan waits
+        // for an idle moment so a live dictation's inference never queues behind a
+        // recovery chunk. Empty transcripts (room tone) get an empty sidecar so
+        // they're never re-swept. Failures stay orphaned and retry next launch.
         RecordingStore.clearSentinel()
         let orphans = RecordingStore.sweepRecoverableOrphans()
-        if let newest = orphans.first?.url ?? sentinelURL {
-            let count = max(orphans.count, 1)
-            let seconds = orphans.first?.seconds ?? 0
+        if !orphans.isEmpty {
             DiagnosticLogger.shared.log(String(
-                format: "Recovery: %d recoverable orphan(s), newest %@ (%.0fs)",
-                count, newest.lastPathComponent, seconds))
-            DispatchQueue.main.async {
-                self.statusBar.showCrashRecovery(url: newest, handler: { [weak self] url in
-                    self?.recoverOrphan(audioURL: url)
-                })
-            }
+                format: "Recovery: %d orphan(s) queued for background transcription (newest %@, %.0fs)",
+                orphans.count, orphans[0].url.lastPathComponent, orphans[0].seconds))
+            autoRecoverOrphans(orphans.map(\.url))
         }
 
 
@@ -1125,6 +1125,36 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 capturedContext = self?.readTextBeforeCursor(in: axElement)
             }
 
+            // Electron AX unlock (2026-07-25): Electron apps ship with their AX tree
+            // DISABLED and expose the app-level `AXManualAccessibility` switch to turn
+            // it on without VoiceOver. Without it, typed-then-dictate in Superhuman/
+            // VS Code has no cursor context, so the mid-sentence-lowercase feature
+            // can't fire ("Search for X " + dictation came out capitalized). Flip the
+            // switch on first failure, give the tree a beat to build, retry once.
+            // We're on a background queue — the wait never touches main; pre-roll
+            // covers the audio. Idempotent and harmless on non-Electron apps.
+            if capturedContext == nil,
+               let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                let appEl = AXUIElementCreateApplication(pid)
+                AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString,
+                                             kCFBooleanTrue)
+                Thread.sleep(forTimeInterval: 0.25)
+                var retryRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(systemWide,
+                                                 kAXFocusedUIElementAttribute as CFString,
+                                                 &retryRef) == .success,
+                   let element = retryRef {
+                    // swiftlint:disable:next force_cast
+                    let axElement = element as! AXUIElement
+                    capturedElement = axElement
+                    capturedContext = self?.readTextBeforeCursor(in: axElement)
+                    if capturedContext != nil {
+                        DiagnosticLogger.shared.log(
+                            "captureFocusedElement: AXManualAccessibility unlock succeeded")
+                    }
+                }
+            }
+
             // Electron editors (VS Code) expose no AXValue — fall back to the tail of our
             // own last insertion when it plausibly still sits before the cursor, so the
             // mid-sentence-lowercase and prepend-space features keep working there.
@@ -1225,8 +1255,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // only ever feeds the inference prompt, so capturing the full screen for it is
         // wasted work AND a needless read of everything visible.
         let isRemoteDesktop = inserter.isRemoteDesktopFrontmost()
-        let engineUsesPrompt = transcriber?.supportsPrompt ?? false
-        if config.screenContext?.value == true && !isRemoteDesktop && engineUsesPrompt {
+        // engineUsesPrompt no longer gates the capture (2026-07-25): OCR now also
+        // feeds the screen-aware NAME corrector, which works on every engine —
+        // Parakeet users get on-screen spellings (Kris vs Chris) even though the
+        // engine ignores prompts.
+        if config.screenContext?.value == true && !isRemoteDesktop {
             // Bump generation so any in-flight OCR from a previous recording is discarded.
             let capturedGeneration = UUID()
             screenCaptureGeneration = capturedGeneration
@@ -1240,6 +1273,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusBar.state = .recording
+        recordingOverlay.style = min(5, max(1, config.overlayStyle ?? 5))
         recordingOverlay.show(state: .recording, recorder: recorder)
         startRecordingWatchdog()
         do {
@@ -2060,10 +2094,46 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         lastStreamingCompletedAt = 0
     }
 
-    /// REAL crash recovery (2026-07-25): transcribe the orphaned wav through the chunked
+    /// Background auto-recovery: transcribe each orphan serially, but only START one
+    /// while the app is idle — the engines serialize inference, so a recovery chunk in
+    /// flight would queue a live dictation behind it. Busy → poll again in 30s.
+    private func autoRecoverOrphans(_ urls: [URL]) {
+        var queue = urls
+        func next() {
+            guard let url = queue.first else { return }
+            let busy = isPressed || statusBar.state == .recording || statusBar.state == .transcribing
+            if busy {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 30) { next() }
+                return
+            }
+            queue.removeFirst()
+            guard let transcriber = self.transcriber else { return }
+            Task.detached(priority: .utility) { [weak self] in
+                do {
+                    let text = try await transcriber.transcribeFile(
+                        url: url, progressHandler: { _, _, _ in }, isCancelled: { false })
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    RecordingStore.saveTranscription(text: trimmed, for: url)
+                    DiagnosticLogger.shared.log(
+                        "Recovery: auto-transcribed \(url.lastPathComponent) (\(trimmed.count) chars)"
+                        + (trimmed.isEmpty ? " — silent/room tone" : " — in Recent Dictations"))
+                } catch {
+                    DiagnosticLogger.shared.log(
+                        "Recovery: auto-transcribe FAILED for \(url.lastPathComponent): \(error.localizedDescription) — will retry next launch")
+                }
+                await MainActor.run { [weak self] in
+                    guard self != nil else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { next() }
+                }
+            }
+        }
+        DispatchQueue.main.async { next() }
+    }
+
+    /// MANUAL crash recovery (2026-07-25): transcribe the orphaned wav through the chunked
     /// file path (no 30-min cap), save the transcript sidecar (so the orphan leaves the
-    /// sweep and appears in Recent Dictations), and copy the text to the clipboard. The
-    /// old handler only re-read a sidecar that a crashed recording never has.
+    /// sweep and appears in Recent Dictations), and copy the text to the clipboard.
+    /// Superseded by autoRecoverOrphans for the launch path; kept for explicit invocations.
     public func recoverOrphan(audioURL: URL) {
         guard statusBar.state == .idle || statusBar.state == .ready else {
             // Busy (recording/transcribing). The menu entry persists — retry later.
