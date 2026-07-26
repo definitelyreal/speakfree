@@ -1267,6 +1267,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // (tune-corpus) correlates dictations with where the text landed.
         let frontBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         recordingTargetBundleID = frontBundleID
+        inserter.livePrependProbeSuppressed =
+            TextInserter.prefersClipboardPaste(bundleID: frontBundleID ?? "")
         recordingStyleMode = TextPostProcessor.detectStyleMode(bundleID: frontBundleID)
 
         // Capture focused element before anything else changes.
