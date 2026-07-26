@@ -57,7 +57,12 @@ public class SettingsViewModel: ObservableObject {
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
-        self.streamingEnabled = c.streamingEnabled?.value ?? false
+        // Must match AppDelegate's runtime gate (`?? true`) and Config's documented
+        // "nil = default (true)". It read `?? false`, so on any config that never set the
+        // key — every fresh install — Live Preview was RUNNING while this checkbox showed
+        // unchecked (2026-07-26 adversarial review). Same dishonesty as the dev-mode
+        // recordings checkbox: show the state the app is actually in.
+        self.streamingEnabled = c.streamingEnabled?.value ?? true
         self.languageModels = c.languageModels ?? [:]
         self.engine = c.engine ?? "whisper"
         self.parakeetModel = c.parakeetModel ?? "parakeet-tdt-0.6b-v3"
@@ -86,7 +91,12 @@ public class SettingsViewModel: ObservableObject {
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
-        self.streamingEnabled = c.streamingEnabled?.value ?? false
+        // Must match AppDelegate's runtime gate (`?? true`) and Config's documented
+        // "nil = default (true)". It read `?? false`, so on any config that never set the
+        // key — every fresh install — Live Preview was RUNNING while this checkbox showed
+        // unchecked (2026-07-26 adversarial review). Same dishonesty as the dev-mode
+        // recordings checkbox: show the state the app is actually in.
+        self.streamingEnabled = c.streamingEnabled?.value ?? true
         self.languageModels = c.languageModels ?? [:]
         self.engine = c.engine ?? "whisper"
         self.parakeetModel = c.parakeetModel ?? "parakeet-tdt-0.6b-v3"
@@ -135,18 +145,14 @@ public class SettingsViewModel: ObservableObject {
 
     // MARK: - Model description helpers
 
-    /// Returns an estimated RAM usage string for the given Whisper model size.
-    /// Benchmarked on M3 Max.
+    /// Estimated RAM usage for a Whisper model, read from the same table the model picker uses.
+    ///
+    /// 2026-07-26: this held its own copy of the figures and disagreed with the picker on
+    /// large-v3-turbo — "~1.2 GB" here against "~1.6 GB" there, both rendered in the SAME
+    /// Settings window (the picker row, and the Performance footnote one scroll below). Reads
+    /// EngineCatalog now, so there is one number.
     public static func modelMemoryDescription(_ model: String) -> String {
-        if model == "large-v3-turbo" { return "~1.2 GB" }
-        switch normalizedModelBase(model) {
-        case "tiny":   return "~230 MB"
-        case "base":   return "~330 MB"
-        case "small":  return "~800 MB"
-        case "medium": return "~2.1 GB"
-        case "large":  return "~3.9 GB"
-        default:       return "Unknown"
-        }
+        EngineCatalog.whisperModel(forID: model)?.memoryDescription ?? "Unknown"
     }
 
     /// Returns an estimated transcription speed string for the given Whisper model size.
@@ -163,17 +169,11 @@ public class SettingsViewModel: ObservableObject {
         }
     }
 
-    /// Returns an estimated model load time string for the given Whisper model size.
+    /// Estimated model load time, from the same table the picker uses. See
+    /// `modelMemoryDescription` for why this no longer keeps its own copy (it said "~0.8s" for
+    /// large-v3-turbo while the picker said "~1.1s").
     public static func modelLoadTimeDescription(_ model: String) -> String {
-        if model == "large-v3-turbo" { return "~0.8s" }
-        switch normalizedModelBase(model) {
-        case "tiny":   return "~0.2s"
-        case "base":   return "~0.3s"
-        case "small":  return "~0.5s"
-        case "medium": return "~1.0s"
-        case "large":  return "~2.0s"
-        default:       return "unknown"
-        }
+        EngineCatalog.whisperModel(forID: model)?.loadTimeDescription ?? "unknown"
     }
 
     /// Returns the download size string for the given Whisper model size.
@@ -189,9 +189,12 @@ public class SettingsViewModel: ObservableObject {
         }
     }
 
-    /// Returns true if this model is the recommended choice for new users.
+    /// Whether this model is the recommendation for THIS Mac. Was unconditionally
+    /// `model == "large-v3-turbo"`, which contradicted the picker's RAM-dependent choice on any
+    /// Mac under 16GB (2026-07-26).
     public static func isRecommendedModel(_ model: String) -> Bool {
-        return model == "large-v3-turbo"
+        guard let info = EngineCatalog.whisperModel(forID: model) else { return false }
+        return info.base == EngineCatalog.recommendedWhisperBase()
     }
 
     /// Check if a model file exists on disk.

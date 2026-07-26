@@ -306,20 +306,19 @@ class WelcomeController: NSObject, NSWindowDelegate {
         let id: String; let label: String; let isRecommended: Bool
     }
 
+    /// 2026-07-26: this held a THIRD hand-typed copy of the Whisper model table plus its own
+    /// re-implementation of the RAM rule — and it is the first screen a new user ever sees. The
+    /// help audit found the Settings copy and the Help copy had drifted apart; this one happened
+    /// to still agree, with nothing pinning it. All three now read `EngineCatalog.whisperModels`.
     private func whisperModelOptions() -> [WhisperModelOption] {
-        let ram = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
-        let rec = ram >= 16 ? "turbo" : ram > 8 ? "small" : "base"
-        let raw: [(id: String, mem: String, spd: String, base: String)] = [
-            ("tiny.en",        "~230 MB", "~0.2s", "tiny"),
-            ("base.en",        "~330 MB", "~0.3s", "base"),
-            ("small.en",       "~800 MB", "~0.5s", "small"),
-            ("medium.en",      "~2.1 GB", "~1.0s", "medium"),
-            ("large-v3-turbo", "~1.6 GB", "~1.1s", "turbo"),
-            ("large-v3",       "~3.9 GB", "~2.0s", "large"),
-        ]
-        return raw.map { m in
-            let label = "\(m.id) (\(m.mem), \(m.spd) load)" + (m.base == rec ? " — Recommended" : "")
-            return WhisperModelOption(id: m.id, label: label, isRecommended: m.base == rec)
+        let rec = EngineCatalog.recommendedWhisperBase()
+        return EngineCatalog.whisperModels.map { model in
+            let isRecommended = model.base == rec
+            let label = "\(model.englishID) (\(model.memoryDescription), "
+                + "\(model.loadTimeDescription) load)"
+                + (isRecommended ? " \u{2014} Recommended" : "")
+            return WhisperModelOption(id: model.englishID, label: label,
+                                      isRecommended: isRecommended)
         }
     }
 

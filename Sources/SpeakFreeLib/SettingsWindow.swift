@@ -87,13 +87,16 @@ class SettingsWindowController: NSWindowController {
 
 // MARK: - Hotkey Options
 
-private struct HotkeyOption: Hashable, Identifiable {
+struct HotkeyOption: Hashable, Identifiable {
     let label: String
     let keyCode: UInt16
     var id: UInt16 { keyCode }
 }
 
-private let standardHotkeyOptions: [HotkeyOption] = [
+/// Internal, not private: HotkeyAdviceTests asserts the Globe-key banner's fix target is
+/// actually one of these. Removing Right Option here would leave that link setting a
+/// selection with no matching tag (a blank picker) with a fully green suite.
+let standardHotkeyOptions: [HotkeyOption] = [
     HotkeyOption(label: "\u{1F310}  Globe / fn",       keyCode: 63),
     HotkeyOption(label: "\u{2318}  Left Command",      keyCode: 55),
     HotkeyOption(label: "\u{2318}  Right Command",     keyCode: 54),
@@ -119,39 +122,16 @@ private struct ModelInfo: Identifiable, Hashable {
     }
 }
 
+/// Thin adapter over EngineCatalog.whisperModels — the table itself moved there so the Help
+/// window reads the same source instead of a hand-typed copy that drifted (2026-07-26).
 private func availableModels(language: String) -> [ModelInfo] {
-    let isEnglish = (language == "en")
-    let ramGB = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
-
-    let recommendedBase: String
-    if ramGB >= 16 { recommendedBase = "turbo" }
-    else if ramGB > 8 { recommendedBase = "small" }
-    else { recommendedBase = "base" }
-
-    struct RawModel {
-        let enId: String
-        let multiId: String
-        let base: String
-        let memory: String
-        let speed: String
-    }
-
-    let raw: [RawModel] = [
-        RawModel(enId: "tiny.en",   multiId: "tiny",   base: "tiny",   memory: "~230 MB", speed: "~0.2s"),
-        RawModel(enId: "base.en",   multiId: "base",   base: "base",   memory: "~330 MB", speed: "~0.3s"),
-        RawModel(enId: "small.en",  multiId: "small",  base: "small",  memory: "~800 MB", speed: "~0.5s"),
-        RawModel(enId: "medium.en", multiId: "medium",  base: "medium", memory: "~2.1 GB", speed: "~1.0s"),
-        RawModel(enId: "large-v3-turbo", multiId: "large-v3-turbo", base: "turbo", memory: "~1.6 GB", speed: "~1.1s"),
-        RawModel(enId: "large-v3",  multiId: "large-v3", base: "large", memory: "~3.9 GB", speed: "~2.0s"),
-    ]
-
-    return raw.map { r in
-        let modelId = (isEnglish && r.base != "large") ? r.enId : r.multiId
-        return ModelInfo(
-            id: modelId,
-            memory: r.memory,
-            speed: r.speed,
-            isRecommended: r.base == recommendedBase
+    let recommendedBase = EngineCatalog.recommendedWhisperBase()
+    return EngineCatalog.whisperModels.map { model in
+        ModelInfo(
+            id: model.id(forLanguage: language),
+            memory: model.memoryDescription,
+            speed: model.loadTimeDescription,
+            isRecommended: model.base == recommendedBase
         )
     }
 }
@@ -451,6 +431,55 @@ struct SettingsView: View {
         KeyCodes.describe(keyCode: viewModel.hotkeyKeyCode, modifiers: viewModel.hotkeyModifiers)
     }
 
+    /// Are recordings actually being written right now? On a developer machine
+    /// (~/.speakfree-dev) they are, whatever the checkbox says — see the checkbox comment
+    /// below. Anything that reveals or manages stored recordings must key off this, not the
+    /// raw config value, or the UI describes a state the app is not in.
+    private var recordingsEffectivelySaving: Bool {
+        DevMode.isActive || viewModel.saveRecordings
+    }
+
+    /// Shown when the chosen hotkey costs the user the macOS Globe-key action. One click
+    /// moves the hotkey to Right Option, which has no system action of its own.
+    private var globeKeyBanner: some View {
+        HStack(alignment: .top, spacing: 8) {
+            // No leading glyph: the notice text already carries a 🌐 where it names the key,
+            // and two globes in one banner read as a rendering bug.
+            VStack(alignment: .leading, spacing: 1) {
+                Text(HotkeyAdvice.globeKeyNotice)
+                    .font(.footnote)
+                    .foregroundColor(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(HotkeyAdvice.globeKeyFixLabel) {
+                    // Write the view model DIRECTLY rather than relying on the picker-selection
+                    // delta. Persistence hangs off `.onChange(of: hotkeyPickerSelection)`, which
+                    // is equality-gated, and nothing re-syncs that @State when the view model
+                    // changes underneath it (refreshFromDisk does not touch it). So if the
+                    // picker already held Right Option — config changed by the CLI, or a
+                    // refreshFromDisk while the window stayed open — the click was a silent
+                    // no-op with the banner still showing (2026-07-26 adversarial review).
+                    viewModel.hotkeyKeyCode = HotkeyAdvice.globeKeyFixKeyCode
+                    viewModel.hotkeyModifiers = []
+                    viewModel.save()
+                    hotkeyPickerSelection = HotkeyAdvice.globeKeyFixKeyCode
+                }
+                .buttonStyle(.link)
+                .font(.footnote)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.yellow.opacity(0.14))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.yellow.opacity(0.45), lineWidth: 1)
+        )
+    }
+
     var body: some View {
         ZStack {
             ScrollView {
@@ -463,6 +492,11 @@ struct SettingsView: View {
                 // -- GENERAL -----------------------------------------------
                 GroupBox("General") {
                     VStack(alignment: .leading, spacing: 14) {
+                        if HotkeyAdvice.suppressesGlobeKeyAction(keyCode: viewModel.hotkeyKeyCode,
+                                                                 toggleMode: viewModel.toggleMode) {
+                            globeKeyBanner
+                        }
+
                         Toggle("Launch at Login", isOn: $launchAtLogin)
                             .toggleStyle(.checkbox)
                             .onChange(of: launchAtLogin) { newValue in
@@ -503,14 +537,35 @@ struct SettingsView: View {
 
                             GridRow {
                                 Text("Recordings")
-                                Toggle("Save recordings and transcripts", isOn: $viewModel.saveRecordings)
-                                    .onChange(of: viewModel.saveRecordings) { _ in
-                                        viewModel.save()
-                                        refreshRecordingsFolderState()
+                                // The checkbox used to bind the RAW config value while
+                                // DevMode.effectiveSaveRecordings forced saving ON, so on a
+                                // developer machine it read "off" while recordings were in fact
+                                // being written (2026-07-26 — Michael ticked it and nothing
+                                // changed, because nothing needed to). Same class of dishonesty
+                                // as an untagged test build: show the state the app is actually
+                                // in, and say who is holding it there.
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Toggle("Save recordings and transcripts",
+                                           isOn: DevMode.isActive
+                                               ? .constant(true)
+                                               : $viewModel.saveRecordings)
+                                        .disabled(DevMode.isActive)
+                                        .onChange(of: viewModel.saveRecordings) { _ in
+                                            viewModel.save()
+                                            refreshRecordingsFolderState()
+                                        }
+                                    if DevMode.isActive {
+                                        Text("Forced on by developer mode "
+                                             + "(~/\(DevMode.markerName) exists). Delete that "
+                                             + "file to control this yourself.")
+                                            .font(.footnote)
+                                            .foregroundColor(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
                                     }
+                                }
                             }
 
-                            if viewModel.saveRecordings {
+                            if recordingsEffectivelySaving {
                                 GridRow {
                                     Text("Past Recordings")
                                     Picker("", selection: $viewModel.maxRecordings) {

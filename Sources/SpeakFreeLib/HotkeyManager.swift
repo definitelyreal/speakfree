@@ -250,22 +250,35 @@ class HotkeyManager {
         let fnDown = Self.hotkeyIsDown(flags, keyCode: keyCode)
 
         // Same reducer the global-monitor fallback uses, so the two paths cannot drift.
-        switch Self.fnTransition(fnDown: fnDown, modifierPressed: modifierPressed) {
+        let transition = Self.fnTransition(fnDown: fnDown, modifierPressed: modifierPressed)
+        let modifiersSatisfied: Bool = {
+            guard requiredModifiers != 0 else { return true }
+            let currentMods = UInt64(flags.rawValue) & 0x00FF0000
+            return currentMods & requiredModifiers == requiredModifiers
+        }()
+
+        // ONE decision function owns consume-vs-pass, and every exit below routes through it.
+        // 2026-07-26 round-3 review proved this necessary by mutation: with the disposition
+        // inlined as four separate `return`s, deleting the redundant-transition swallow entirely
+        // — the whole globe-key fix — still left 30 tests green, because `handleCGEvent` is
+        // private and nothing could observe a return value.
+        let disposition = Self.tapDisposition(transition: transition,
+                                              keyCode: keyCode,
+                                              requiredModifiersSatisfied: modifiersSatisfied)
+        func result() -> Unmanaged<CGEvent>? {
+            disposition == .consume ? nil : Unmanaged.passUnretained(event)
+        }
+
+        switch transition {
         case .keyDown:
-            // Check required modifiers if any
-            if requiredModifiers != 0 {
-                let currentMods = UInt64(flags.rawValue) & 0x00FF0000
-                guard currentMods & requiredModifiers == requiredModifiers else {
-                    return Unmanaged.passUnretained(event)
-                }
-            }
+            guard modifiersSatisfied else { return result() }
             modifierPressed = true
             modifierPressedAt = mach_absolute_time()
             DispatchQueue.main.async {
                 self.startKeyDownMonitor()
                 self.onKeyDown?()
             }
-            return nil  // consume fn press — suppresses emoji drawer
+            return result()  // consume fn press — suppresses emoji drawer
 
         case .keyUp:
             // Phantom-release guard (2026-07-26): mid-hold, the tap can deliver a
@@ -282,7 +295,7 @@ class HotkeyManager {
                 phantomUpStreak += 1
                 DiagnosticLogger.shared.log(
                     "HotkeyManager: phantom fn-up swallowed (HID reports key still down, streak \(phantomUpStreak))")
-                return nil
+                return result()
             }
             phantomUpStreak = 0
             modifierPressed = false
@@ -290,7 +303,7 @@ class HotkeyManager {
                 self.stopKeyDownMonitor()
                 self.onKeyUp?()
             }
-            return nil  // consume — suppresses emoji drawer / system dictation on fn release
+            return result()  // consume — suppresses emoji drawer / system dictation on fn release
 
         case .none:
             break
@@ -308,14 +321,68 @@ class HotkeyManager {
         // fn+arrow / fn+F-key remappings are applied below this tap, so nothing else is lost.
         // Every other modifier keeps passing through: those keys carry meaning for other apps
         // and must not have stray transitions eaten.
-        if Self.swallowsRedundantTransition(keyCode: keyCode) { return nil }
-
-        return Unmanaged.passUnretained(event)
+        //
+        // A redundant DOWN is deliberately absorbed here rather than treated as evidence of a
+        // release we missed. Two rounds of adversarial review on 2026-07-26 settled this, and
+        // both halves cost a rewrite to learn:
+        //
+        //   - It is NOT proof of a missed release. A version of this code assumed it was, on the
+        //     grounds that hardware cannot repeat a down without an up between. Commit d2f47dd
+        //     disproves that: a spurious fn-up followed by an fn-down IN THE SAME SECOND, while
+        //     the key was held continuously, truncating two dictations mid-clause. The guard
+        //     above swallows that up, so the flap's down lands right here. Ending the take on it
+        //     re-creates precisely the bug d2f47dd fixed, and
+        //     `testPhantomUpIsSwallowedButTheRealReleaseStillEndsTheTake` pins against it. The
+        //     hardware read cannot separate the two cases: the key is physically down in both,
+        //     still held during a flap and freshly pressed after an outage. (`phantomUpStreak`
+        //     plus `modifierPressedAt` could separate them by timing. That was tried and is not
+        //     worth it — see the cost asymmetry at the bottom of this comment. The point is that
+        //     acting on this event buys little and risks a truncated dictation.)
+        //   - The case that reasoning was reaching for, a release lost while the tap was blind,
+        //     mostly belongs to `reconcilePressedState`, which asks the HARDWARE whether the key
+        //     is still held and so can only ever end a take that is genuinely over. It is called
+        //     from the 5-in-10s rebuild, the tap-disable re-enable, and the global-monitor
+        //     fallback. It is NOT called from `ensureTapHealthy`'s re-enable or recreate branches,
+        //     from `startEventTap`'s retry ladder (up to 55s with no tap), or from `stop()`, and
+        //     there is no sleep/wake or fast-user-switch handler at all. The 30s health poll that
+        //     would reach the first two is itself gated on `!isPressed`, which is false for the
+        //     whole duration of a stranded take. So the coverage is partial, by inspection
+        //     (2026-07-26 round-3 review) — do not read it as a guarantee.
+        //
+        // Worst case if a release is missed and no reconcile path fires, walked in both modes:
+        // in HOLD mode the next release is honored normally and the take ends one tap later. In
+        // TOGGLE mode it costs TWO taps, and the first one is silent: the down is absorbed here,
+        // the up hits `handleKeyUp` which returns early in toggle mode, and only the SECOND down
+        // reaches `handleKeyDown` to stop the take. A stuck hardware read stretches that to five
+        // taps before the streak cap forces the release through. Bounded either way — a take
+        // cannot run indefinitely — and the alternative is a dictation cut off mid-sentence.
+        return result()
     }
 
     /// Policy for the fall-through above, as a pure predicate so it can be pinned by tests.
     static func swallowsRedundantTransition(keyCode: UInt16) -> Bool {
         keyCode == KeyCodes.fnKeyCode
+    }
+
+    /// Whether the tap eats an event or lets it reach the OS. Pure, so the emoji-drawer
+    /// suppression is actually testable — see the mutation note in `handleCGEvent`.
+    enum TapDisposition: Equatable { case consume, passThrough }
+
+    static func tapDisposition(transition: FnTransition,
+                               keyCode: UInt16,
+                               requiredModifiersSatisfied: Bool) -> TapDisposition {
+        switch transition {
+        case .keyDown:
+            // An unsatisfied required modifier means this press is not the user's hotkey, so it
+            // belongs to the OS. Note the asymmetry this creates for a hand-edited
+            // `fn + modifiers` config: the down passes through while the matching up is eaten by
+            // the `.none` arm below. Not reachable from the picker, which always clears modifiers.
+            return requiredModifiersSatisfied ? .consume : .passThrough
+        case .keyUp:
+            return .consume
+        case .none:
+            return swallowsRedundantTransition(keyCode: keyCode) ? .consume : .passThrough
+        }
     }
 
     // MARK: - KeyDown monitor (only active while fn is held)
