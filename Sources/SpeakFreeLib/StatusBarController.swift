@@ -130,7 +130,32 @@ class StatusBarController: NSObject, NSMenuDelegate {
         buildMenuItems(into: menu)
     }
 
+    /// True while the status menu is on screen. `buildMenu()` must never mutate an
+    /// OPEN menu (2026-07-25: recovery's state flips rebuilt it under the cursor,
+    /// closing it mid-hover) — rebuilds are deferred to `menuDidClose`, and
+    /// `menuNeedsUpdate` already refreshes contents at the next open.
+    private var menuIsOpen = false
+    private var pendingMenuRebuild = false
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === statusItem.menu else { return }
+        menuIsOpen = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === statusItem.menu else { return }
+        menuIsOpen = false
+        if pendingMenuRebuild {
+            pendingMenuRebuild = false
+            buildMenu()
+        }
+    }
+
     func buildMenu() {
+        if menuIsOpen {
+            pendingMenuRebuild = true
+            return
+        }
         let menu = statusItem.menu ?? NSMenu()
         menuItemTargets = []
         menu.removeAllItems()

@@ -147,6 +147,8 @@ class RecordingOverlay {
     private var contentView: OverlayContentView?
     private weak var recorder: AudioRecorder?
 
+    /// Visual variant for the prominent banner (config overlayStyle 1-5).
+    var style: Int = 1
     // Seam for unit tests: override to inject a known window frame without real AX.
     var windowFrameProvider: (() -> NSRect?)? = nil
     // Seam for unit tests: override to inject a known cursor location.
@@ -188,6 +190,51 @@ class RecordingOverlay {
         return cachedScreen
     }
 
+    /// INSTANT screen pick for show(): mouse-cursor screen → main — no AX IPC.
+    /// The precise focused-window resolution (an IPC to the frontmost app that
+    /// can take up to 0.5s when it's cold) happens ASYNC right after; if it picks
+    /// a different display the window is repositioned within ~100ms — far better
+    /// than making every record-start pay the IPC before anything appears
+    /// (2026-07-25: "the fade feels a little slow or stuttery").
+    private func instantScreen() -> NSScreen? {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return nil }
+        let mouse = mouseLocationProvider()
+        if let underMouse = screens.first(where: { $0.frame.contains(mouse) }) {
+            return underMouse
+        }
+        return NSScreen.main ?? screens[0]
+    }
+
+    /// Kick the AX-precise resolution off-main; reposition if it disagrees.
+    private func refineScreenAsync(for expectedGeneration: UInt64) {
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            let frame = self?.activeWindowFrame()
+            DispatchQueue.main.async {
+                guard let self = self, self.showGeneration == expectedGeneration,
+                      let win = self.window else { return }
+                let screens = NSScreen.screens
+                guard !screens.isEmpty else { return }
+                let mainIndex = NSScreen.main.flatMap { main in
+                    screens.firstIndex(where: { $0 === main }) }
+                guard let idx = overlayScreenIndex(
+                    windowFrame: frame,
+                    mouseLocation: self.mouseLocationProvider(),
+                    screenFrames: screens.map { $0.frame },
+                    mainIndex: mainIndex) else { return }
+                let resolved = screens[idx]
+                if resolved !== self.cachedScreen {
+                    self.cachedScreen = resolved
+                    let size = win.frame.size
+                    win.setFrame(NSRect(x: resolved.frame.midX - size.width / 2,
+                                        y: resolved.frame.midY - size.height / 2,
+                                        width: size.width, height: size.height),
+                                 display: true)
+                }
+            }
+        }
+    }
+
     func show(state: OverlayState, recorder: AudioRecorder? = nil, autoHideError: Bool = true) {
         // Hard kill any existing window (no animation)
         showGeneration &+= 1
@@ -198,10 +245,12 @@ class RecordingOverlay {
         contentView = nil
         self.recorder = recorder
 
-        // Fresh screen resolution for this recording (multi-display move since last time).
-        screenResolved = false
-        cachedScreen = nil
-        guard let screen = resolvedTargetScreen() else { return }
+        // Instant screen pick (no AX IPC on the show path); precise resolution
+        // refines async and repositions in the rare multi-display disagreement.
+        screenResolved = true
+        cachedScreen = instantScreen()
+        guard let screen = cachedScreen else { screenResolved = false; return }
+        refineScreenAsync(for: showGeneration)
 
         // Record-start and errors open as a LARGE CENTER-SCREEN banner (Michael
         // 2026-07-25): unmissable positive feedback, so NOT seeing it after a keypress
@@ -238,6 +287,8 @@ class RecordingOverlay {
         let view = OverlayContentView(frame: NSRect(origin: .zero, size: frame.size))
         view.overlayState = state
         view.prominent = prominent && !isError
+        view.style = style
+        view.recordingStartedAt = Date()
         win.contentView = view
 
         // Start fully transparent for fade-in
@@ -250,18 +301,13 @@ class RecordingOverlay {
 
         startAnimation()
 
-        // Fade in over 200ms
+        // Snappy entrance (2026-07-25): 80ms fade — the 200ms fade + 100ms border
+        // delay read as sluggishness at the moment that most needs to feel instant.
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.2
+            ctx.duration = 0.08
             win.animator().alphaValue = 1.0
         }
-        // Border grows to 1px after 100ms delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.15
-                view.animator().borderWidth = 1.0
-            }
-        }
+        view.borderWidth = 1.0
 
         if isError {
             // Error banner: hold, then fade out — UNLESS the caller needs it to persist
@@ -278,32 +324,9 @@ class RecordingOverlay {
                     if case .error = self.contentView?.overlayState { self.hide() }
                 }
             }
-        } else if prominent {
-            // Recording banner: glide down to the familiar bottom pill after a beat.
-            let generation = showGeneration
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
-                guard let self = self, self.showGeneration == generation,
-                      let win = self.window, let view = self.contentView,
-                      let screen = self.resolvedTargetScreen(),
-                      view.overlayState == .recording else { return }
-                view.prominent = false
-                let pill = OverlayContentView.pillSize(for: .recording,
-                                                      streamingText: view.streamingText)
-                let target = NSRect(x: screen.frame.midX - pill.width / 2,
-                                    y: screen.visibleFrame.origin.y + bottomMargin,
-                                    width: pill.width, height: pill.height)
-                NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.25
-                    ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                    win.animator().setFrame(target, display: true)
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
-                    guard self.showGeneration == generation else { return }
-                    view.frame = NSRect(origin: .zero, size: target.size)
-                    view.needsDisplay = true
-                }
-            }
         }
+        // (No glide-to-pill: Michael 2026-07-25 — the banner stays large and centered
+        // for the whole recording; the movement was distracting.)
     }
 
     func update(state: OverlayState) {
@@ -365,6 +388,37 @@ class RecordingOverlay {
         contentView?.needsDisplay = true
     }
 
+    /// Compact size for the settled steady state (same center as the banner).
+    static let settledSize = NSSize(width: 240, height: 56)
+
+    /// ~2.4s after the explosion completes, compact the banner IN PLACE (same
+    /// center, no travel — the shrink-and-move was rejected as distracting; an
+    /// in-place decay was the reviewers' livability centerpiece).
+    private func scheduleSettle() {
+        let generation = showGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+            guard let self = self, self.showGeneration == generation,
+                  let win = self.window, let view = self.contentView,
+                  view.overlayState == .recording, view.settleProgress < 1 else { return }
+            view.settleProgress = 1
+            let center = CGPoint(x: win.frame.midX, y: win.frame.midY)
+            let size = Self.settledSize
+            let target = NSRect(x: center.x - size.width / 2,
+                                y: center.y - size.height / 2,
+                                width: size.width, height: size.height)
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.30
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                win.animator().setFrame(target, display: true)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
+                guard self.showGeneration == generation else { return }
+                view.frame = NSRect(origin: .zero, size: target.size)
+                view.needsDisplay = true
+            }
+        }
+    }
+
     func hide() {
         // Invalidate any pending banner glide/auto-hide timers from the current show().
         showGeneration &+= 1
@@ -416,6 +470,18 @@ class RecordingOverlay {
                 // Noise gate: suppress ambient noise, rescale speech range
                 let gated = max(raw - 0.08, 0) / 0.92
                 view.audioLevel = min(pow(gated, 0.5) * 1.4, 1.0)
+                // First real speech triggers the record-icon -> waveform explosion
+                // (Michael 2026-07-25). Gate well above room tone so breath alone
+                // doesn't trigger it.
+                if !view.heardSpeech && view.audioLevel > 0.25 {
+                    view.heardSpeech = true
+                }
+            }
+            if view.heardSpeech && view.explodeProgress < 1 {
+                view.explodeProgress = min(1, view.explodeProgress + 0.09)
+                if view.explodeProgress >= 1 {
+                    self.scheduleSettle()
+                }
             }
             view.needsDisplay = true
         }
@@ -430,10 +496,22 @@ class RecordingOverlay {
     }
 }
 
-private class OverlayContentView: NSView {
+class OverlayContentView: NSView {
     var overlayState: RecordingOverlay.OverlayState = .recording
     /// Center-screen banner phase: big title + large bars for the first ~1.1s.
     var prominent = false
+    /// Explosion sequence (Michael 2026-07-25): the banner opens with a record icon
+    /// only; the FIRST real speech "explodes" it into the live waveform. These are
+    /// driven from the 30fps animation tick.
+    var heardSpeech = false
+    var explodeProgress: CGFloat = 0
+    /// In-place decay to the compact steady state (0 = full banner, 1 = compact).
+    var settleProgress: CGFloat = 0
+    var recordingStartedAt = Date()
+    /// Render-harness override for the elapsed timer (deterministic stills).
+    var renderElapsedOverride: TimeInterval?
+    /// Visual variant (config `overlayStyle` 1–5); drawing dispatches on it.
+    var style: Int = 1
     var audioLevel: CGFloat = 0
     var tick: Int = 0
     @objc dynamic var borderWidth: CGFloat = 0
@@ -578,50 +656,13 @@ private class OverlayContentView: NSView {
             return
         }
 
-        // Prominent record-start banner: big title above large bars, screen center.
+        // Prominent record-start banner (stays for the whole recording — no glide).
+        // Opens as a record ICON; the first real speech explodes it into the live
+        // waveform. Five visual variants dispatched on `style` (config overlayStyle),
+        // built 2026-07-25 for adversarial design review. All are near-opaque
+        // (Michael: "less transparency, like 1/3 of the transparency").
         if prominent && overlayState == .recording {
-            ctx.saveGState()
-            ctx.addPath(pillPath)
-            ctx.clip()
-            let colorSpace = CGColorSpaceCreateDeviceRGB()
-            let colors = [
-                NSColor(red: 0.25, green: 0.05, blue: 0.35, alpha: 0.85).cgColor,
-                NSColor(red: 0.40, green: 0.10, blue: 0.55, alpha: 0.85).cgColor,
-            ] as CFArray
-            if let g = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0.0, 1.0]) {
-                ctx.drawLinearGradient(g,
-                    start: CGPoint(x: rect.minX, y: rect.midY),
-                    end: CGPoint(x: rect.maxX, y: rect.midY), options: [])
-            }
-            ctx.restoreGState()
-
-            let dotColor = NSColor(red: 1.0, green: 0.3, blue: 0.3, alpha: 1.0)
-            let title = NSMutableAttributedString(string: "● ", attributes: [
-                .font: NSFont.systemFont(ofSize: 22, weight: .bold),
-                .foregroundColor: dotColor,
-            ])
-            title.append(NSAttributedString(string: "Recording", attributes: [
-                .font: NSFont.systemFont(ofSize: 22, weight: .bold),
-                .foregroundColor: NSColor.white,
-            ]))
-            let tSize = title.size()
-            title.draw(at: NSPoint(x: rect.midX - tSize.width / 2,
-                                   y: rect.maxY - tSize.height - 16))
-
-            // Large level bars in the lower half — live proof audio is flowing.
-            let barsRect = NSRect(x: rect.minX, y: rect.minY + 8,
-                                  width: rect.width, height: rect.height * 0.45)
-            drawBars(ctx: ctx, rect: barsRect, color: .white, compressed: false)
-            if borderWidth > 0 {
-                let inset = borderWidth / 2
-                let borderRect = rect.insetBy(dx: inset, dy: inset)
-                let bp = CGPath(roundedRect: borderRect, cornerWidth: Self.cornerRadius,
-                                cornerHeight: Self.cornerRadius, transform: nil)
-                ctx.addPath(bp)
-                ctx.setStrokeColor(NSColor(red: 0.6, green: 0.25, blue: 0.8, alpha: 0.9).cgColor)
-                ctx.setLineWidth(borderWidth)
-                ctx.strokePath()
-            }
+            drawProminentBanner(ctx: ctx, rect: rect, pillPath: pillPath)
             return
         }
 
@@ -682,6 +723,387 @@ private class OverlayContentView: NSView {
         } else {
             // Normal centered bars, no text
             drawBars(ctx: ctx, rect: rect, color: NSColor.white.withAlphaComponent(0.75), compressed: false)
+        }
+    }
+
+    // MARK: - Prominent banner variants (2026-07-25)
+
+    private func cardGradient(_ ctx: CGContext, _ rect: NSRect, _ path: CGPath,
+                              from c1: NSColor, to c2: NSColor) {
+        ctx.saveGState()
+        ctx.addPath(path)
+        ctx.clip()
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colors = [c1.cgColor, c2.cgColor] as CFArray
+        if let g = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0.0, 1.0]) {
+            ctx.drawLinearGradient(g,
+                start: CGPoint(x: rect.minX, y: rect.midY),
+                end: CGPoint(x: rect.maxX, y: rect.midY), options: [])
+        }
+        ctx.restoreGState()
+    }
+
+    private func pulse(_ base: CGFloat) -> CGFloat {
+        base * (1 + 0.06 * sin(CGFloat(tick) * 0.12))
+    }
+
+    private func drawTitle(_ text: String, in rect: NSRect, y: CGFloat, size: CGFloat, dot: Bool) {
+        let title = NSMutableAttributedString()
+        if dot {
+            title.append(NSAttributedString(string: "\u{25CF} ", attributes: [
+                .font: NSFont.systemFont(ofSize: size, weight: .bold),
+                .foregroundColor: NSColor(red: 1.0, green: 0.3, blue: 0.3, alpha: 1.0),
+            ]))
+        }
+        title.append(NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: size, weight: .bold),
+            .foregroundColor: NSColor.white,
+        ]))
+        let tSize = title.size()
+        title.draw(at: NSPoint(x: rect.midX - tSize.width / 2, y: y))
+    }
+
+    private func drawRecordCircle(_ ctx: CGContext, center: CGPoint, radius: CGFloat,
+                                  alpha: CGFloat) {
+        ctx.setFillColor(NSColor(red: 0.95, green: 0.23, blue: 0.25, alpha: alpha).cgColor)
+        ctx.fillEllipse(in: CGRect(x: center.x - radius, y: center.y - radius,
+                                   width: radius * 2, height: radius * 2))
+    }
+
+    /// Banner-scale live bars (round-1 adversarial synthesis, 2026-07-25):
+    ///   * 12 narrow bars (17 read as an equalizer icon; narrow bars read as data)
+    ///   * spatial smoothing so neighbors correlate like real speech energy
+    ///   * amplitude floor: near-silence collapses bars to DOTS, so pauses look calm
+    ///     and speech visibly meters (the palindromic full-height sawtooth was the
+    ///     set's strongest clip-art tell)
+    ///   * during the explosion, bars EMERGE from the center as the energy front
+    ///     reaches them — outer bars stay collapsed until progress passes them —
+    ///     and are born red, cooling to the settle color as they rise (continuity
+    ///     with the record icon's mass; previously the finished waveform crossfaded
+    ///     in and nothing "exploded")
+    private static let bannerBarCount = 12
+
+    private func bannerLevels() -> [CGFloat] {
+        let n = Self.bannerBarCount
+        var raw = [CGFloat](repeating: 0, count: n)
+        for i in 0..<n {
+            raw[i] = displayLevels[(i * Self.barCount) / n]
+        }
+        // Two smoothing passes (R2 craft: one pass landed at the 12th percentile of
+        // plausible neighbor correlation — speech energy is smoother than that).
+        for _ in 0..<2 {
+            var out = raw
+            for i in 1..<(n - 1) {
+                out[i] = raw[i] * 0.55 + (raw[i - 1] + raw[i + 1]) * 0.225
+            }
+            raw = out
+        }
+        return raw
+    }
+
+    /// R2-fixed banner bars:
+    ///  * fully opaque fill (translucent bars over the fading disc created the
+    ///    off-palette pink/maroon blends of round 2)
+    ///  * `origin` = relative x (0..1) the explosion radiates from — 0.5 for the
+    ///    centered styles, the badge dock for style 5's left cascade
+    ///  * bars GROW as they are revealed (round 2: inner bars were at ~100% height
+    ///    at p=0.5 — a mask wipe, not an emergence)
+    ///  * heat anchored at the ORIGIN: bars nearest the red mass are born reddest,
+    ///    everything cools to the settle color as emergence completes
+    ///  * floor: minimum height == bar width, so silence renders as round DOTS
+    private func drawBannerBars(ctx: CGContext, rect: NSRect, emergence: CGFloat,
+                                settleColor: NSColor, origin: CGFloat = 0.5,
+                                span: CGFloat = 0.72, badgeNorm: CGFloat? = nil) {
+        let n = Self.bannerBarCount
+        let levels = bannerLevels()
+        let gap: CGFloat = rect.width * 0.030
+        let barW = (rect.width * span - gap * CGFloat(n - 1)) / CGFloat(n)
+        let startX = rect.midX - (barW * CGFloat(n) + gap * CGFloat(n - 1)) / 2
+        let maxH = rect.height
+        let red = Self.bannerRed
+        for i in 0..<n {
+            let xNorm = CGFloat(i) / CGFloat(n - 1)
+            let front: CGFloat
+            let redness: CGFloat
+            if let badge = badgeNorm {
+                // Comet mode (style 5, R3 codex fix): bars exist only BEHIND the
+                // traveling badge (to its right), shed as it passes — heat clings
+                // to the badge's trailing edge and cools with distance and time.
+                front = max(0, min(1, (xNorm - badge) / 0.10)) * (0.35 + 0.65 * emergence)
+                redness = max(0, 1 - (xNorm - badge) * 3) * (1 - emergence * 0.7)
+            } else {
+                let dist = min(1, abs(xNorm - origin) / max(origin, 1 - origin))
+                front = max(0, min(1, (emergence * 1.25 - dist) / 0.25))
+                redness = (1 - dist) * (1 - emergence)
+            }
+            guard front > 0 else { continue }
+            let grow = front * (0.55 + 0.45 * emergence)
+            let h = max(barW, maxH * levels[i] * grow)
+            let color = settleColor.blended(withFraction: redness, of: red) ?? settleColor
+            ctx.setFillColor(color.cgColor)
+            let x = startX + CGFloat(i) * (barW + gap)
+            let bar = CGRect(x: x, y: rect.midY - h / 2, width: barW, height: h)
+            let path = CGPath(roundedRect: bar, cornerWidth: barW / 2,
+                              cornerHeight: barW / 2, transform: nil)
+            ctx.addPath(path)
+            ctx.fillPath()
+        }
+    }
+
+    // Round-1 fixes baked in (2026-07-25, four-lens adversarial review):
+    //  * bars EMERGE center-out, born red, cooling to white (X1/X3)
+    //  * expanding shapes are clipped to the zone BELOW the title — nothing ever
+    //    strikes through the label (X5) and nothing clips the card edge
+    //  * icon and bars share one vertical axis (no inter-phase jump)
+    //  * one red family (#ED2231); no naive sRGB morphs through mud
+    //  * S3's linear stretch (read as strikethrough) replaced with a radial burst
+    //  * S4's duplicate indicators removed; S5 gets a container + conserves its red
+    //    mass into the persistent dot
+    //  * SETTLED phase: after the explosion the card compacts IN PLACE to a calm
+    //    timer + dot + small bars (livability: the 28pt title is a 30-min nag)
+    private static let bannerRed = NSColor(red: 0.93, green: 0.13, blue: 0.19, alpha: 1.0)
+
+    /// Card fill per style — one source of truth so the settled card inherits its
+    /// style's material instead of swapping to a foreign flat fill (R2 N4/N6).
+    /// Opacity 0.97: at 0.90, document text read straight through the card — "too
+    /// opaque to be glass, too transparent to be clean" (R2 livability #1 finding).
+    private func cardColors() -> (from: NSColor, to: NSColor) {
+        switch style {
+        case 2: return (NSColor(red: 0.16, green: 0.04, blue: 0.24, alpha: 0.97),
+                        NSColor(red: 0.30, green: 0.08, blue: 0.42, alpha: 0.97))
+        case 3: return (NSColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 0.97),
+                        NSColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 0.97))
+        case 4: return (NSColor(red: 0.22, green: 0.07, blue: 0.34, alpha: 0.97),
+                        NSColor(red: 0.34, green: 0.11, blue: 0.48, alpha: 0.97))
+        case 5: return (NSColor(red: 0.15, green: 0.03, blue: 0.24, alpha: 0.97),
+                        NSColor(red: 0.15, green: 0.03, blue: 0.24, alpha: 0.97))
+        default: return (NSColor(red: 0.20, green: 0.05, blue: 0.30, alpha: 0.97),
+                         NSColor(red: 0.33, green: 0.09, blue: 0.46, alpha: 0.97))
+        }
+    }
+
+    private func titleZoneHeight(_ rect: NSRect) -> CGFloat { rect.height * 0.28 }
+
+    private func bodyRect(_ rect: NSRect) -> NSRect {
+        // 4pt symmetric breathing room top and bottom of the band (R2: expanding
+        // circles were sheared flat against the card's bottom edge).
+        NSRect(x: rect.minX, y: rect.minY + 4,
+               width: rect.width, height: rect.height - titleZoneHeight(rect) - 8)
+    }
+
+    private func drawBannerTitle(_ rect: NSRect, text: String = "Recording") {
+        let title = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 16, weight: .semibold),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.94),
+        ])
+        let tSize = title.size()
+        title.draw(at: NSPoint(x: rect.midX - tSize.width / 2,
+                               y: rect.maxY - titleZoneHeight(rect) / 2 - tSize.height / 2))
+    }
+
+    private func drawProminentBanner(ctx: CGContext, rect: NSRect, pillPath: CGPath) {
+        if settleProgress >= 1 {
+            drawSettledCard(ctx: ctx, rect: rect, pillPath: pillPath)
+            return
+        }
+        let p = explodeProgress
+        let body = bodyRect(rect)
+        let axis = CGPoint(x: body.midX, y: body.midY)
+        let barsRect = NSRect(x: body.minX, y: axis.y - body.height * 0.30,
+                              width: body.width, height: body.height * 0.60)
+        let colors = cardColors()
+        cardGradient(ctx, rect, pillPath, from: colors.from, to: colors.to)
+        // Ring/disc growth is capped INSIDE the band (R2: rings that outgrew the
+        // card survived only as clipped corner arcs — an accidental "( )" glyph).
+        let maxR = body.height * 0.48
+
+        func clippedToBody(_ draw: () -> Void) {
+            ctx.saveGState()
+            ctx.addPath(pillPath)
+            ctx.clip()
+            ctx.clip(to: body)
+            draw()
+            ctx.restoreGState()
+        }
+
+        switch style {
+        case 2: // Ring Burst — front radius COUPLED to the bar emergence
+            drawBannerTitle(rect)
+            clippedToBody {
+                if p < 1 {
+                    let ringR = min(maxR, pulse(26) + p * maxR)
+                    ctx.setStrokeColor(NSColor.white.withAlphaComponent((1 - p) * 0.9).cgColor)
+                    ctx.setLineWidth(4)
+                    ctx.strokeEllipse(in: CGRect(x: axis.x - ringR, y: axis.y - ringR,
+                                                 width: ringR * 2, height: ringR * 2))
+                    if p < 0.5 {
+                        drawRecordCircle(ctx, center: axis, radius: 15 * (1 - p * 2), alpha: 1 - p * 2)
+                    }
+                }
+            }
+            if heardSpeech {
+                drawBannerBars(ctx: ctx, rect: barsRect, emergence: p, settleColor: .white)
+            }
+
+        case 3: // Minimal — radial burst with fast falloff (no maroon slab)
+            let tag = NSAttributedString(string: "speakfree", attributes: [
+                .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+                // 4.8:1 on the black card (R2: 3.31:1 read as an accidental watermark)
+                .foregroundColor: NSColor(white: 0.56, alpha: 1.0),
+            ])
+            tag.draw(at: NSPoint(x: rect.maxX - tag.size().width - 14, y: rect.minY + 9))
+            let c = CGPoint(x: rect.midX, y: rect.midY)
+            if p < 1 {
+                // (1-p)^2: the disc must be GONE before the bars own the frame —
+                // a half-faded disc behind bars was round 2's "planet/grille" read.
+                drawRecordCircle(ctx, center: c, radius: pulse(13) * (1 + p * 2.4),
+                                 alpha: (1 - p) * (1 - p))
+            }
+            if heardSpeech {
+                let mid = NSRect(x: rect.minX, y: rect.midY - rect.height * 0.27,
+                                 width: rect.width, height: rect.height * 0.54)
+                drawBannerBars(ctx: ctx, rect: mid, emergence: p, settleColor: .white)
+            }
+
+        case 4: // Glass Title — single ring, no residual core (R2 N3: the orphaned
+                // half-occluded remnant read as a bruise)
+            drawBannerTitle(rect)
+            clippedToBody {
+                if p < 1 {
+                    let ringR = min(maxR, pulse(22) * (1 + p * 1.8))
+                    ctx.setStrokeColor(NSColor.white.withAlphaComponent((1 - p) * 0.9).cgColor)
+                    ctx.setLineWidth(3)
+                    ctx.strokeEllipse(in: CGRect(x: axis.x - ringR, y: axis.y - ringR,
+                                                 width: ringR * 2, height: ringR * 2))
+                    if p < 0.5 {
+                        drawRecordCircle(ctx, center: axis, radius: 13 * (1 - p * 2), alpha: 1 - p * 2)
+                    }
+                }
+            }
+            if heardSpeech {
+                drawBannerBars(ctx: ctx, rect: barsRect, emergence: p, settleColor: .white)
+            }
+
+        case 5: // WINNER (R2 three-of-four lenses; R3 codex geometry fixes):
+            // record mark travels left to a REAL dock at the bar field's edge,
+            // shedding bars behind it — comet, one continuous red mass.
+            let dotInset: CGFloat = 34
+            let dockX = rect.minX + dotInset
+            let field = NSRect(x: dockX + 18, y: rect.midY - rect.height * 0.27,
+                               width: rect.maxX - 28 - (dockX + 18),
+                               height: rect.height * 0.54)
+            let bc = CGPoint(x: rect.midX + (dockX - rect.midX) * p, y: rect.midY)
+            let br = 20 - (20 - 6) * p
+            if heardSpeech {
+                // Badge position normalized into field space for the comet front.
+                let badgeNorm = (bc.x - field.minX) / field.width
+                drawBannerBars(ctx: ctx, rect: field, emergence: p,
+                               settleColor: .white, span: 0.94, badgeNorm: badgeNorm)
+            }
+            // Badge rides OVER the bars it sheds — it is the traveling object.
+            drawRecordCircle(ctx, center: bc, radius: p < 1 ? pulse(br) : br, alpha: 1)
+            if p < 0.15 {
+                // Record-mark ring fades over the first beat of speech (a pop-off
+                // read as a glitch; a long fade over emerging bars read as ghost
+                // arcs — 150ms is the window that avoids both).
+                ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.9 * (1 - p / 0.15)).cgColor)
+                ctx.setLineWidth(2.5)
+                let rr = br + 5
+                ctx.strokeEllipse(in: CGRect(x: bc.x - rr, y: bc.y - rr,
+                                             width: rr * 2, height: rr * 2))
+            }
+
+        default: // S1 Solid Card — expanding RING (R2: the scaling disc was "the
+                 // single ugliest artifact in the set"; a slab can't burst)
+            drawBannerTitle(rect)
+            clippedToBody {
+                if p < 1 {
+                    let r = min(maxR, pulse(20) * (1 + p * 1.6))
+                    drawRecordCircle(ctx, center: axis, radius: r * (1 - p),
+                                     alpha: (1 - p) * (1 - p))
+                    ctx.setStrokeColor(NSColor.white.withAlphaComponent((1 - p) * 0.85).cgColor)
+                    ctx.setLineWidth(2)
+                    ctx.strokeEllipse(in: CGRect(x: axis.x - r - 5, y: axis.y - r - 5,
+                                                 width: (r + 5) * 2, height: (r + 5) * 2))
+                }
+            }
+            if heardSpeech {
+                drawBannerBars(ctx: ctx, rect: barsRect, emergence: p, settleColor: .white)
+            }
+        }
+
+        if borderWidth > 0 {
+            let inset = borderWidth / 2
+            let borderRect = rect.insetBy(dx: inset, dy: inset)
+            let bp = CGPath(roundedRect: borderRect, cornerWidth: Self.cornerRadius,
+                            cornerHeight: Self.cornerRadius, transform: nil)
+            ctx.addPath(bp)
+            ctx.setStrokeColor(NSColor(red: 0.6, green: 0.25, blue: 0.8, alpha: 0.9).cgColor)
+            ctx.setLineWidth(borderWidth)
+            ctx.strokePath()
+        }
+    }
+
+    /// SETTLED steady state (R2-fixed): inherits its style's card material and the
+    /// hairline border (was a byte-identical foreign card for 4 of 5 styles); 97%
+    /// opaque (at 90% document text bled straight through); adds the word REC (the
+    /// card must read cold at minute 30 — dot+digits+bars alone is a media-player
+    /// idiom); timer field reserved for "1:00:00" so the layout NEVER reflows; bar
+    /// field fills to a symmetric right inset (the 43.5pt dead gutter is gone).
+    private func drawSettledCard(ctx: CGContext, rect: NSRect, pillPath: CGPath) {
+        let colors = cardColors()
+        cardGradient(ctx, rect, pillPath, from: colors.from, to: colors.to)
+
+        let dot = CGPoint(x: rect.minX + 17, y: rect.midY)
+        drawRecordCircle(ctx, center: dot, radius: 5.5, alpha: 0.95)
+
+        let rec = NSAttributedString(string: "REC", attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.68),
+        ])
+        rec.draw(at: NSPoint(x: rect.minX + 28, y: rect.midY - rec.size().height / 2))
+
+        let secs = Int(renderElapsedOverride ?? -recordingStartedAt.timeIntervalSinceNow)
+        let stamp = secs >= 3600
+            ? String(format: "%d:%02d:%02d", secs / 3600, (secs % 3600) / 60, secs % 60)
+            : String(format: "%d:%02d", secs / 60, secs % 60)
+        let t = NSAttributedString(string: stamp, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.60),
+        ])
+        // Right-aligned in a field wide enough for "1:00:00" — no reflow, ever.
+        let timerFieldRight = rect.minX + 104
+        t.draw(at: NSPoint(x: timerFieldRight - t.size().width,
+                           y: rect.midY - t.size().height / 2))
+
+        // Bars fill the remainder to a symmetric right inset; calmer amplitude
+        // (40% of card height — motion, not strobe, is the 30-minute fatigue risk).
+        // Right edge tuned so the last bar's ink sits ~11.5pt from the card edge,
+        // matching the dot's left inset (R3: 20pt vs 11.5pt read as a dead gutter).
+        let barsRect = NSRect(x: timerFieldRight + 10, y: rect.midY - rect.height * 0.20,
+                              width: rect.maxX - 9 - (timerFieldRight + 10),
+                              height: rect.height * 0.40)
+        drawBannerBars(ctx: ctx, rect: barsRect, emergence: 1,
+                       settleColor: NSColor(red: 0.85, green: 0.80, blue: 0.90, alpha: 1.0),
+                       span: 0.97)
+
+        if borderWidth > 0 {
+            let inset = borderWidth / 2
+            let borderRect = rect.insetBy(dx: inset, dy: inset)
+            let bp = CGPath(roundedRect: borderRect, cornerWidth: Self.cornerRadius,
+                            cornerHeight: Self.cornerRadius, transform: nil)
+            ctx.addPath(bp)
+            ctx.setStrokeColor(NSColor(red: 0.6, green: 0.25, blue: 0.8, alpha: 0.9).cgColor)
+            ctx.setLineWidth(borderWidth)
+            ctx.strokePath()
+        }
+    }
+
+    /// Design-review seam: seed deterministic bar levels so offscreen renders are
+    /// reproducible (the live path animates them from mic level).
+    internal func seedLevelsForRender(_ levels: [CGFloat]) {
+        for (i, v) in levels.enumerated() where i < displayLevels.count {
+            displayLevels[i] = v
         }
     }
 
