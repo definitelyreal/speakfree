@@ -1117,12 +1117,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             var capturedContext: String?
             let systemWide = AXUIElementCreateSystemWide()
             var elementRef: CFTypeRef?
+            // Electron-class apps get the trust gates on EVERY read (2026-07-25:
+            // AXManualAccessibility persists per-app once flipped, so subsequent
+            // reads succeed on this FIRST attempt — the gates must not live only
+            // on the unlock-retry path). Native apps keep full-fidelity context.
+            let electronClass = TextInserter.prefersClipboardPaste(bundleID: frontBundle ?? "")
             let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef)
             if result == .success, let element = elementRef {
                 // swiftlint:disable:next force_cast
                 let axElement = element as! AXUIElement
                 capturedElement = axElement
-                capturedContext = self?.readTextBeforeCursor(in: axElement)
+                capturedContext = self?.readTextBeforeCursor(in: axElement,
+                                                             requireCursorAtEnd: electronClass)
             }
 
             // Electron AX unlock (2026-07-25): Electron apps ship with their AX tree
@@ -1224,7 +1230,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 // in whitespace (phantom leading spaces + wrongful lowercase). Real
                 // inputs (search boxes, chat prompts) are short; documents are not.
                 if cursorIndex < fullText.utf16.count { return nil }
-                if fullText.utf16.count > 4000 { return nil }
+                // Input-shaped only: a VS Code TUI screen can be under 4000 chars,
+                // but no search box or chat prompt is 5+ lines of text ending in a
+                // shell prompt. (2026-07-25, third phantom-space report.)
+                if fullText.utf16.count > 1200 { return nil }
+                if fullText.filter({ $0.isNewline }).count > 4 { return nil }
             }
             if cursorIndex > 0, let before = TextInserter.textBeforeUTF16Offset(fullText, cursorIndex) {
                 // Take last 500 chars to stay within whisper's prompt limits
