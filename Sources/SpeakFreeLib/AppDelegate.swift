@@ -1094,6 +1094,42 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Guards `lastLiveAXContextByApp`, written from the background capture queue.
+    private static let liveAXContextLock = NSLock()
+    /// bundleID -> the last live-AX cursor context we accepted for that app.
+    private static var lastLiveAXContextByApp: [String: String] = [:]
+
+    /// Record this live-AX context and report whether it is a REPEAT for the same app.
+    ///
+    /// 2026-07-26 — the three Electron trust gates in `readTextBeforeCursor` all reject things
+    /// that are too BIG (cursor not at end, >1200 chars, >4 newlines). They were built to keep
+    /// out the VS Code terminal scrollback. What actually got through was too SMALL: on 07-26,
+    /// 83 of the day's reads in VS Code returned one of exactly two constant strings (22 and 32
+    /// chars), while every genuine context length appeared once or twice. speakfree read that
+    /// fixed UI string as "the text before your cursor" and therefore prepended a space and
+    /// lowercased the first word — 57 wrongly-lowercased dictations that day, 63 the day before,
+    /// and 0 on the two days before the Electron AX unlock shipped.
+    ///
+    /// A real cursor context changes: he types, or our own insertion lands in the field. A value
+    /// byte-identical to the previous one for the same app is chrome, not his text. Rejecting it
+    /// falls back to no-context, which disables exactly the two features that were misfiring,
+    /// and only for the reads that were wrong.
+    static func liveAXContextIsRepeat(_ context: String, bundleID: String?) -> Bool {
+        let key = bundleID ?? "?"
+        liveAXContextLock.lock()
+        defer { liveAXContextLock.unlock() }
+        let isRepeat = lastLiveAXContextByApp[key] == context
+        lastLiveAXContextByApp[key] = context
+        return isRepeat
+    }
+
+    /// Test seam — the table is process-global, so tests must be able to clear it.
+    static func resetLiveAXContextMemory() {
+        liveAXContextLock.lock()
+        lastLiveAXContextByApp.removeAll()
+        liveAXContextLock.unlock()
+    }
+
     private func captureFocusedElement() {
         // R1: fire-and-commit. The AX read used to block the main thread up to 0.5s at
         // record-START — and an unresponsive frontmost app would stall it long enough for
@@ -1160,6 +1196,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             "captureFocusedElement: AXManualAccessibility unlock succeeded (cursor at end)")
                     }
                 }
+            }
+
+            // Repeat-value gate (2026-07-26). A live-AX context identical to the previous read
+            // for this app is fixed UI chrome, not his cursor — see liveAXContextIsRepeat.
+            if let live = capturedContext,
+               AppDelegate.liveAXContextIsRepeat(live, bundleID: frontBundle) {
+                DiagnosticLogger.shared.log(
+                    "captureFocusedElement: discarded repeated live-AX context (\(live.count) chars, "
+                    + "identical to the previous read for \(frontBundle ?? "?")) — treating as no context")
+                capturedContext = nil
             }
 
             // Electron editors (VS Code) expose no AXValue — fall back to the tail of our
