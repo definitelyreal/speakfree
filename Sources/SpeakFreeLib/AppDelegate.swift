@@ -1257,8 +1257,38 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// fresh paragraph — the engine had capitalized "As usual" correctly). When
     /// set, context is only returned if the cursor is verifiably at the END of
     /// the field — the appending flow dictation actually uses.
+    /// AX roles that can actually hold a text cursor. Everything else is chrome.
+    ///
+    /// 2026-07-26 — walking VS Code's full AX tree (14 windows, 20k+ nodes) found the string
+    /// behind 45 of the day's bad reads: `⌘ Esc to focus or unfocus Claude`, exactly 32
+    /// characters, the Claude Code panel's hint label. It carries no terminal punctuation and no
+    /// trailing space, which is precisely the `prependSpace=true midSentence=true` signature the
+    /// log recorded 45 times. It is a LABEL. speakfree read it as "the text before your cursor"
+    /// and lowercased the first word of the dictation that followed.
+    ///
+    /// The size gates could never have caught this (a 32-char label is small), and the
+    /// repeat-value gate only half-catches it (reads alternate between two chrome strings, so
+    /// only 40 of 150 were identical to their predecessor). Asking what KIND of element it is
+    /// separates a label from an input in one attribute.
+    static let cursorBearingRoles: Set<String> = [
+        kAXTextAreaRole as String, kAXTextFieldRole as String,
+        kAXComboBoxRole as String, "AXSearchField",
+    ]
+
     private func readTextBeforeCursor(in element: AXUIElement,
                                       requireCursorAtEnd: Bool = false) -> String? {
+        // Role gate, before anything else: a label, button or static text never holds a cursor,
+        // so its text is never "what he typed before dictating".
+        var roleRef: CFTypeRef?
+        let role = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString,
+                                                 &roleRef) == .success
+            ? (roleRef as? String ?? "?") : "?"
+        guard Self.cursorBearingRoles.contains(role) else {
+            DiagnosticLogger.shared.log(
+                "readTextBeforeCursor: ignoring focused element of role \(role) — not a text input")
+            return nil
+        }
+
         var valueRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
               let fullText = valueRef as? String, !fullText.isEmpty else { return nil }
