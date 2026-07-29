@@ -389,25 +389,116 @@ class TextInserter {
         }
     }
 
+    /// Did an AX set that REPORTED success actually put the text on screen?
+    enum AXVerification: Equatable {
+        /// The field grew — the text landed.
+        case landed
+        /// The field is readable, held no selection, and did not change. Nothing landed.
+        case didNotLand
+        /// Not answerable: unreadable field, or a selection whose replacement makes the
+        /// character-count delta ambiguous. Must be treated as success (never retried).
+        case inconclusive
+    }
+
+    /// Pure verification verdict, split out from the AX calls so the decision table is testable
+    /// without a live text field.
+    ///
+    /// The conservative bias is deliberate: a false `didNotLand` costs the user a spurious
+    /// "may not have landed" notice, while a false `landed` costs them silent data loss — but a
+    /// verdict used to RETYPE would risk double insertion, which is why callers route this to the
+    /// conceal-clipboard path instead of a retype.
+    static func verifyInsertion(charsBefore: Int?,
+                                charsAfter: Int?,
+                                selectionLengthBefore: Int?,
+                                insertedCount: Int) -> AXVerification {
+        // Nothing was asked for, so nothing can be missing.
+        guard insertedCount > 0 else { return .inconclusive }
+        // Blind field (no AXNumberOfCharacters) — this is the honest "can't see" case.
+        guard let before = charsBefore, let after = charsAfter else { return .inconclusive }
+        // A replaced selection can leave the count unchanged (select 5, insert 5) even though
+        // the insertion worked. Only a zero-length selection makes the delta meaningful.
+        guard let selectionLength = selectionLengthBefore, selectionLength == 0 else {
+            return .inconclusive
+        }
+        return after == before ? .didNotLand : .landed
+    }
+
+    /// `(characterCount, selectionLength)` for an element, either component nil when unreadable.
+    private func textMetrics(of element: AXUIElement) -> (chars: Int?, selectionLength: Int?) {
+        var charsRef: CFTypeRef?
+        let chars = AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString,
+                                                  &charsRef) == .success ? charsRef as? Int : nil
+
+        var selectionLength: Int?
+        var rangeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString,
+                                         &rangeRef) == .success,
+           let rangeValue = rangeRef, CFGetTypeID(rangeValue) == AXValueGetTypeID() {
+            var range = CFRange()
+            // swiftlint:disable:next force_cast
+            AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
+            selectionLength = range.length
+        }
+        return (chars, selectionLength)
+    }
+
+    /// How long to wait before re-reading a field that looked unchanged. Only the SUSPICIOUS
+    /// path pays this — a normal insertion is confirmed on the first read and adds no latency.
+    /// Contenteditables commit through a JS event loop, so an immediate read can legitimately
+    /// still show the old count. Seam so tests don't sleep.
+    var axVerifySettleDelay: TimeInterval = 0.05
+
     /// Insert text directly via the Accessibility API. Returns the three-way `AXSetOutcome` so the
     /// caller can distinguish a clean rejection (safe to retype) from a timeout that may have
     /// committed (must NOT retype — conceal instead). See `axSetOutcome`.
     private func insertViaAccessibility(_ text: String) -> AXSetOutcome {
         guard let element = currentFocusedElement() else { return .fallbackToKeystrokes }
 
-        // Check if the element supports setting the SelectedText attribute
+        // Check if the element supports setting the SelectedText attribute.
+        //
+        // 2026-07-28: this gate is NOT evidence the write will work. Claude for Desktop, Signal
+        // and VS Code all report `settable == true`, yet all three drop AX writes on the floor —
+        // which is why a reported success is now verified below rather than trusted.
         var settable: DarwinBoolean = false
         guard AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success,
               settable.boolValue else {
             return .fallbackToKeystrokes
         }
 
+        let before = textMetrics(of: element)
+
         // Set the selected text — this replaces current selection or inserts at cursor. No
         // per-element messaging timeout (L4): keep the process-wide 0.5s cap so a stuck target
         // can't hang the main thread; a `.cannotComplete` under that cap routes to conceal, not
         // a duplicating retype.
         let result = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
-        return Self.axSetOutcome(result)
+        let outcome = Self.axSetOutcome(result)
+        guard outcome == .inserted else { return outcome }
+
+        // The set claimed success. Confirm the field actually grew.
+        var verdict = Self.verifyInsertion(charsBefore: before.chars,
+                                           charsAfter: textMetrics(of: element).chars,
+                                           selectionLengthBefore: before.selectionLength,
+                                           insertedCount: text.count)
+        if verdict == .didNotLand {
+            // Re-read once after a settle beat before accusing the app — a contenteditable that
+            // commits asynchronously would otherwise trigger a false alarm on every insertion.
+            Thread.sleep(forTimeInterval: axVerifySettleDelay)
+            verdict = Self.verifyInsertion(charsBefore: before.chars,
+                                           charsAfter: textMetrics(of: element).chars,
+                                           selectionLengthBefore: before.selectionLength,
+                                           insertedCount: text.count)
+        }
+
+        guard verdict == .didNotLand else { return .inserted }
+
+        // Confirmed silent drop. Do NOT retype — we cannot rule out a delayed commit, and a
+        // duplicate insertion is worse than a paste prompt. Hand it to the conceal-clipboard
+        // path, the same recovery Secure Input uses.
+        DiagnosticLogger.shared.log(
+            "TextInserter: AX set reported success but field did not grow (\(before.chars.map(String.init) ?? "?") chars, "
+            + "inserting \(text.count)) — treating as dropped, concealing to clipboard")
+        return .concealClipboard
     }
 
     /// Remote desktop apps that don't properly forward CGEvent unicode key events.
@@ -462,6 +553,12 @@ class TextInserter {
         "com.loom.desktop",                    // Loom
         "com.openai.codex",                    // Codex/ChatGPT desktop contenteditable
         "com.openai.chat",                     // ChatGPT Classic
+        // Claude for Desktop (2026-07-28). Electron, and its composer accepts
+        // kAXSelectedText as SETTABLE — so insertViaAccessibility returned .inserted
+        // and the text never appeared. Proven from the 2026-07-26 log: the same
+        // 188-char dictation failed three times into Claude via AX, then landed
+        // first try in Signal via clipboard paste.
+        "com.anthropic.claudefordesktop",      // Claude
     ]
 
     /// Large image clipboards are common while dictating into creative/chat apps. A
@@ -475,15 +572,76 @@ class TextInserter {
         return bundleID.lowercased().contains("superhuman")
     }
 
+    /// Chromium-embedding frameworks. An app shipping one of these renders its text fields
+    /// as web contenteditables, which is what makes both synthetic typing and AX writes
+    /// unreliable — the exact class the hand-maintained list above was approximating.
+    private static let embeddedChromiumFrameworks = [
+        "Electron Framework.framework",
+        "Chromium Embedded Framework.framework",
+    ]
+
+    /// Does this app bundle ship an embedded Chromium runtime? Pure over the filesystem so
+    /// tests can point it at a synthetic bundle rather than a real installed app.
+    static func bundleEmbedsChromium(at bundleURL: URL) -> Bool {
+        let frameworks = bundleURL.appendingPathComponent("Contents/Frameworks")
+        return embeddedChromiumFrameworks.contains { name in
+            FileManager.default.fileExists(atPath: frameworks.appendingPathComponent(name).path)
+        }
+    }
+
+    /// Bundle-ID-keyed memo for `bundleEmbedsChromium`. The probe is two `fileExists` calls,
+    /// but `prefersClipboardPaste` is consulted on the main thread at record-start, so the
+    /// result is cached rather than re-stat'd on every dictation.
+    private static var chromiumProbeCache: [String: Bool] = [:]
+    private static let chromiumProbeLock = NSLock()
+
+    /// Reset hook for tests — the cache is process-global and would otherwise leak between cases.
+    static func resetChromiumProbeCache() {
+        chromiumProbeLock.lock()
+        chromiumProbeCache.removeAll()
+        chromiumProbeLock.unlock()
+    }
+
+    static func isChromiumEmbedded(bundleID: String, bundleURL: URL?) -> Bool {
+        chromiumProbeLock.lock()
+        if let cached = chromiumProbeCache[bundleID] {
+            chromiumProbeLock.unlock()
+            return cached
+        }
+        chromiumProbeLock.unlock()
+
+        guard let bundleURL else { return false }
+        let result = bundleEmbedsChromium(at: bundleURL)
+
+        chromiumProbeLock.lock()
+        chromiumProbeCache[bundleID] = result
+        chromiumProbeLock.unlock()
+        if result {
+            DiagnosticLogger.shared.log("TextInserter: detected embedded Chromium in \(bundleID) — routing to clipboard paste")
+        }
+        return result
+    }
+
+    /// The clipboard-paste decision for a live app. Prefers the explicit list (which also
+    /// covers non-Chromium special cases like Superhuman), then falls back to probing the
+    /// bundle. Added 2026-07-28: Claude for Desktop broke because it was Electron but
+    /// unlisted, and every future Electron app would have broken the same silent way.
+    static func prefersClipboardPaste(app: NSRunningApplication?) -> Bool {
+        guard let app, let bundleID = app.bundleIdentifier else { return false }
+        if prefersClipboardPaste(bundleID: bundleID) { return true }
+        return isChromiumEmbedded(bundleID: bundleID, bundleURL: app.bundleURL)
+    }
+
     static func canSafelySaveClipboard(byteSize: Int) -> Bool {
         byteSize <= maxRestorableClipboardBytes
     }
 
     private func shouldUseClipboardPaste() -> Bool {
-        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return false }
+        guard let frontApp = NSWorkspace.shared.frontmostApplication,
+              let bundleID = frontApp.bundleIdentifier else { return false }
 
-        // Exact match against known Electron / clipboard-paste apps
-        if Self.prefersClipboardPaste(bundleID: bundleID) { return true }
+        // Known list, then a generic embedded-Chromium probe of the live bundle.
+        if Self.prefersClipboardPaste(app: frontApp) { return true }
 
         // Browser-agnostic check: Google Docs/Sheets/Slides in any browser
         let lower = bundleID.lowercased()

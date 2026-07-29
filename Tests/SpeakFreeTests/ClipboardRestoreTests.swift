@@ -28,6 +28,15 @@ final class ClipboardRestoreTests: XCTestCase {
         XCTAssertTrue(TextInserter.prefersClipboardPaste(bundleID: "com.openai.chat"))
     }
 
+    /// 2026-07-28: dictation silently vanished in Claude for Desktop. It is Electron, but was
+    /// absent from the clipboard-paste set, so insertion fell through to `insertViaAccessibility`
+    /// — whose `AXUIElementSetAttributeValue` returned success into a contenteditable that never
+    /// rendered the text. Routing it to clipboard paste also gives it the Electron AX-context
+    /// unlock and the prepend-probe suppression, both keyed off this same predicate.
+    func test_claudeDesktopUsesClipboardPastePath() {
+        XCTAssertTrue(TextInserter.prefersClipboardPaste(bundleID: "com.anthropic.claudefordesktop"))
+    }
+
     func test_ordinaryImageClipboardCanBeSavedButCapRemainsFinite() {
         XCTAssertTrue(TextInserter.canSafelySaveClipboard(byteSize: 4_610 * 1_024))
         XCTAssertFalse(TextInserter.canSafelySaveClipboard(byteSize: 32 * 1_024 * 1_024))
