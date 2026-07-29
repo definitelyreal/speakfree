@@ -1146,7 +1146,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let lastElement = lastInsertionElement
         let lastInteractionGeneration = lastInsertionInteractionGeneration
         let interactionGenerationAtStart = currentUserInteractionGeneration()
-        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        let frontBundle = frontApp?.bundleIdentifier
+        // Resolve the Electron classification on main, where `frontmostApplication` is
+        // authoritative, rather than re-reading it from the background reader below.
+        let electronClass = TextInserter.prefersClipboardPaste(app: frontApp)
 
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             var capturedElement: AXUIElement?
@@ -1157,7 +1161,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // AXManualAccessibility persists per-app once flipped, so subsequent
             // reads succeed on this FIRST attempt — the gates must not live only
             // on the unlock-retry path). Native apps keep full-fidelity context.
-            let electronClass = TextInserter.prefersClipboardPaste(bundleID: frontBundle ?? "")
             let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef)
             if result == .success, let element = elementRef {
                 // swiftlint:disable:next force_cast
@@ -1344,10 +1347,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Detect style mode from frontmost app before menu bar steals focus. The
         // bundle id is also kept for the .meta.json sidecar — the edit-feedback batch
         // (tune-corpus) correlates dictations with where the text landed.
-        let frontBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        let frontBundleID = frontApp?.bundleIdentifier
         recordingTargetBundleID = frontBundleID
         inserter.livePrependProbeSuppressed =
-            TextInserter.prefersClipboardPaste(bundleID: frontBundleID ?? "")
+            TextInserter.prefersClipboardPaste(app: frontApp)
         recordingStyleMode = TextPostProcessor.detectStyleMode(bundleID: frontBundleID)
 
         // Capture focused element before anything else changes.
