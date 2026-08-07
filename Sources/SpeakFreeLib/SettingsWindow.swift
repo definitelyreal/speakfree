@@ -155,8 +155,41 @@ private let maxRecordingsOptions: [(label: String, value: Int)] = [
 private class KeyMonitorHolder: ObservableObject {
     var monitor: Any?
 
+    /// Which `modifierFlags` bit a modifier-only keyCode raises, so a `.flagsChanged` event can be
+    /// told apart as a PRESS (bit now set) from a RELEASE (bit now clear). Left/right variants of
+    /// one modifier share a bit; the keyCode is what distinguishes them, and it is the keyCode we
+    /// record.
+    private static let modifierFlagForKeyCode: [UInt16: NSEvent.ModifierFlags] = [
+        54: .command, 55: .command,      // right / left ⌘
+        56: .shift, 60: .shift,          // left / right ⇧
+        58: .option, 61: .option,        // left / right ⌥
+        59: .control, 62: .control,      // left / right ⌃
+        63: .function,                   // fn
+    ]
+
     func install(onCapture: @escaping (UInt16, [String]) -> Void, onCancel: @escaping () -> Void) {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        // `.flagsChanged` as well as `.keyDown` (2026-08-05). A bare modifier never produces a
+        // keyDown, so listening only for keyDown made Shift and Right Control selectable from the
+        // config file and CLI but IMPOSSIBLE to pick in Settings — two of the nine supported
+        // hotkeys, unreachable through the only UI most people have. `HotkeyValidator.validate`
+        // already returns `.allowed` for a lone modifier, so the monitor was the whole gap.
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+            if event.type == .flagsChanged {
+                guard let flag = Self.modifierFlagForKeyCode[event.keyCode] else { return nil }
+                // Capture on press only. Without this the release event immediately re-fires and
+                // the recorder would resolve twice for one physical tap.
+                guard event.modifierFlags.contains(flag) else { return nil }
+                // A modifier pressed while ANOTHER modifier is already held is a chord in
+                // progress, not a lone-modifier choice — let it settle rather than capturing ⌘
+                // the instant the user starts pressing ⌘⇧.
+                let others = Self.modifierFlagForKeyCode
+                    .filter { $0.key != event.keyCode && $0.value != flag }
+                    .values
+                if others.contains(where: { event.modifierFlags.contains($0) }) { return nil }
+                onCapture(event.keyCode, [])
+                return nil
+            }
+
             if event.keyCode == 53 { // Escape
                 onCancel()
                 return nil
@@ -484,7 +517,11 @@ struct SettingsView: View {
         ZStack {
             ScrollView {
                 VStack(spacing: 20) {
-                Text("\(UsageStats.shared.totalDictations) dictations, saving \(UsageStats.shared.timeSavedDescription) and \(UsageStats.shared.keystrokesDescription) keystrokes")
+                // Keystrokes lead — they are COUNTED, not modelled (Michael 2026-07-26: report
+                // hands saved as the headline, time honest-ranged). Saved time is an estimate
+                // bracketed across typing speeds and now reads as a range so it stops implying
+                // a precision it never had.
+                Text("\(UsageStats.shared.totalDictations) dictations, \(UsageStats.shared.keystrokesDescription) keystrokes avoided (roughly \(UsageStats.shared.timeSavedDescription) of typing)")
                     .font(.callout)
                     .foregroundColor(.primary)
                     .frame(maxWidth: .infinity)

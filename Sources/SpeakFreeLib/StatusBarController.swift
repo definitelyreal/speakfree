@@ -449,7 +449,13 @@ class StatusBarController: NSObject, NSMenuDelegate {
             return
         }
         recentRefreshInFlight = true
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        // `.userInitiated`, not `.utility` (2026-08-05). The work itself is 33 ms measured on the
+        // real 47,187-entry corpus — names-only readdir, filename sort, then ≤15 sidecar reads —
+        // yet this refresh logged 10-35 s on 112 occasions in a single day, worst 34.8 s. A 700x
+        // gap is scheduler starvation, not work: `.utility` is aggressively deprioritized under
+        // load and on battery. This backs a menu the user is about to open, so it belongs in the
+        // user-initiated band.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let refreshStarted = CFAbsoluteTimeGetCurrent()
             let recordings = RecordingStore.listRecordings(limit: 15)
             let elapsedMs = (CFAbsoluteTimeGetCurrent() - refreshStarted) * 1_000
