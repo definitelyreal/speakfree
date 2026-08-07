@@ -72,9 +72,17 @@ public struct TextPostProcessor {
         ("[.;]\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("[.;]\\s*(?:komma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("[.;]\\s*(?:kamala|karma)[.,!?;:]", ","),
+        // comment/common joined the family 2026-07-29 (Michael: "bad commas"). Parakeet hears
+        // spoken "comma" as these two often enough to show up 6 times in one day. They are REAL
+        // words, so they take the kamala/karma treatment — punctuation required on BOTH sides —
+        // never the loose non-word tail. Verified against the same day's corpus: ". Comment,"
+        // converts, while "the right comment bar", "in off-handed comments I", "bad comments and"
+        // and "should be common in" all correctly do NOT (no trailing punctuation, or plural).
+        ("[.;]\\s*(?:comment|common)[.,!?;:]", ","),
         ("(?<=[,!?:])\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:kamala|karma)[.,!?;:]", ","),
+        ("(?<=[,!?:])\\s*(?:comment|common)[.,!?;:]", ","),
         ("(?<=[.,!?;:])\\s*period(?!\\s+(?:of|piece)\\b)(?:[.,!?;:]|(?=\\s|$))", "."),
         ("(?<=[.,!?;:])\\s*colon(?!\\s+(?:cancer|surgery|cleanse|polyps?)\\b)(?:[.,!?;:]|(?=\\s|$))", ":"),
         ("(?<=[.,!?;:])\\s*dash(?!\\s+(?:of|board|cam)\\b)(?:[.,!?;:]|(?=\\s|$))", " —"),
@@ -117,7 +125,12 @@ public struct TextPostProcessor {
         // that must not be touched. Exclusions: spoken-punctuation words after the
         // period are the garble family other rules own; ≥3 letters before the
         // period protects abbreviations (e.g., vs.).
-        var softened = text.replacingOccurrences(
+        // LIVE as of 2026-08-02. This was written to a `var softened` that nothing read, so the
+        // rule documented as "runs FIRST, on pure engine output" never actually ran. Wiring it in
+        // changes one corpus expectation — "…or at least. Every six months" becomes
+        // "…or at least, every six months" — which Michael approved ("Yes I want it on"), since
+        // the engine's pause-split was never a real sentence boundary.
+        result = text.replacingOccurrences(
             of: "([A-Za-z]{3,})\\. (?!(?:period|comma|kama|coma|kamala|karma|dot|question|exclamation|new|newline)\\b)([a-z])",
             with: "$1, $2",
             options: .regularExpression)

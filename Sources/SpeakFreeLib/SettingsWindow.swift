@@ -849,7 +849,16 @@ struct SettingsView: View {
         .onChange(of: hotkeyPickerSelection) { newValue in
             if newValue == otherHotkeyTag {
                 isRecordingHotkey = true
-            } else {
+            } else if newValue != viewModel.hotkeyKeyCode {
+                // Clearing the modifiers is correct ONLY for a real user pick of a different key.
+                // The equality guard distinguishes that from the two SYNC writes that also land
+                // here, both of which used to destroy a modifier-bearing hotkey (2026-08-01):
+                //   1. `.onAppear` assigns `hotkeyPickerSelection = viewModel.hotkeyKeyCode`,
+                //      which counts as a change — so merely OPENING Settings wiped modifiers.
+                //   2. `KeyRecorderOverlay.onCapture` sets keyCode + modifiers and then syncs the
+                //      picker, so capturing e.g. Shift+F13 immediately cleared the Shift again.
+                // Modifier-bearing hotkeys are reachable only via config file / CLI / the "Other…"
+                // recorder, which is why this survived: the GUI picker itself never sets one.
                 viewModel.hotkeyKeyCode = newValue
                 viewModel.hotkeyModifiers = []
                 viewModel.save()

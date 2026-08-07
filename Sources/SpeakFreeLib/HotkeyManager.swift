@@ -93,7 +93,17 @@ class HotkeyManager {
 
     /// Verify the event tap is alive. If it died, recreate it.
     func ensureTapHealthy() {
-        guard isModifierOnlyKey(keyCode) else { return } // only event tap keys need this
+        // Modifier-only keys run on a CGEventTap; everything else ("Other…" keys) runs on an
+        // NSEvent global monitor. Both can die, but only the tap was ever healed — so an
+        // "Other…" hotkey whose monitor was torn down stayed silently dead until relaunch
+        // (2026-08-01). `start()` picks the mechanism the same way; this mirrors it.
+        guard isModifierOnlyKey(keyCode) else {
+            if globalMonitor == nil {
+                DiagnosticLogger.shared.log("HotkeyManager: global monitor missing — recreating")
+                startGlobalMonitor()
+            }
+            return
+        }
         if let tap = eventTap {
             if !CGEvent.tapIsEnabled(tap: tap) {
                 DiagnosticLogger.shared.log("HotkeyManager: event tap disabled — re-enabling")
