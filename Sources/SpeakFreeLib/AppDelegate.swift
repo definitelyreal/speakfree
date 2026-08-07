@@ -1972,6 +1972,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         // T2.2: use the prepend-space decision precomputed at record-start (off
                         // main). No AX query, no semaphore.wait — zero main-thread stall here.
                         let insertText = FinalizePipeline.composeInsertText(text, prependSpace: capturedPrependSpace)
+                        // Track the SEAM, not just the decision (2026-07-29, Michael: "additional
+                        // spaces should be tracked so that you are able to see them"). The join
+                        // exists only in the target app — the recordings corpus cannot show it,
+                        // which is why a run of spurious leading spaces went uncounted. Character
+                        // classes only; the diagnostic log stays free of message content.
+                        let spacing = TextInserter.spacingDiagnosis(contextBefore: capturedInputText,
+                                                                    insertText: insertText)
+                        DiagnosticLogger.shared.log(
+                            "Insertion boundary: prev=\(TextInserter.charClass(capturedInputText?.last)) "
+                            + "first=\(TextInserter.charClass(insertText.first)) → \(spacing.rawValue)")
                         self.lastTranscription = text
                         // Record usage stats
                         let audioSeconds = Double(effectiveSampleCount) / 16000.0
@@ -2343,7 +2353,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func reprocess(audioURL: URL) {
-        guard statusBar.state == .idle else { return }
+        // `.ready` is the state before the first dictation of a session, so gating on `.idle`
+        // alone made every Recent Dictations click a silent no-op until you had dictated once
+        // (2026-08-01). Both states mean "not busy"; the busy ones below are the real exclusion.
+        guard statusBar.state == .idle || statusBar.state == .ready else {
+            DiagnosticLogger.shared.log(
+                "Reprocess: ignored — status bar is \(statusBar.state), not idle/ready")
+            return
+        }
 
         // Read saved transcription text — no need to re-transcribe
         let textURL = audioURL.deletingPathExtension().appendingPathExtension("txt")

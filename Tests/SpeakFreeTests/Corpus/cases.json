@@ -195,10 +195,10 @@
  },
  {
   "name": "garbled-login-as-colon-not-converted",
-  "note": "2026-07-03 E9448165: Parakeet garbled 'login' into 'colon'; the standalone rule turned one recognition error into fake punctuation. Article before the word = noun usage, never a command.",
+  "note": "2026-07-03 E9448165: Parakeet garbled 'login' into 'colon'; the standalone rule turned one recognition error into fake punctuation. Article before the word = noun usage, never a command. EXPECTATION UPDATED 2026-08-02 (Michael: 'Yes I want it on'): the pause-split softener now runs, so the engine's spurious 'at least. every' split softens to 'at least, every' instead of being recapitalized into a fake sentence. The colon assertion this case exists for is unchanged.",
   "mode": "hybrid",
   "input": "I want to give authorization that doesn't become still like a colon where shadow has Parakeet access to my calendar, or at least. every six months or something, maybe once every one or two months.",
-  "expected": "I want to give authorization that doesn't become still like a colon where shadow has Parakeet access to my calendar, or at least. Every six months or something, maybe once every one or two months."
+  "expected": "I want to give authorization that doesn't become still like a colon where shadow has Parakeet access to my calendar, or at least, every six months or something, maybe once every one or two months."
  },
  {
   "name": "utterance-opening-colon-not-converted",

@@ -167,6 +167,7 @@ public enum FinalizePipeline {
         inserter: TextInserting,
         element: AXUIElement?,
         precomputedPrependSpace: Bool? = nil,
+        contextBefore: String? = nil,
         onFocusLost: (() -> Void)? = nil,
         reuseDecision: StreamingReuse.Decision? = nil,
         readWav: (() -> [Float]?)? = nil
@@ -204,7 +205,8 @@ public enum FinalizePipeline {
 
             let (insertText, pasted) = insertFinalText(
                 text, inserter: inserter, element: element,
-                precomputedPrependSpace: precomputedPrependSpace, onFocusLost: onFocusLost)
+                precomputedPrependSpace: precomputedPrependSpace,
+                contextBefore: contextBefore, onFocusLost: onFocusLost)
             return reusedPartial
                 ? .reusedPartial(insertedText: insertText, pasted: pasted)
                 : .inserted(insertedText: insertText, pasted: pasted)
@@ -227,6 +229,7 @@ public enum FinalizePipeline {
         inserter: TextInserting,
         element: AXUIElement?,
         precomputedPrependSpace: Bool?,
+        contextBefore: String? = nil,
         onFocusLost: (() -> Void)?
     ) -> (insertText: String, pasted: Bool) {
         // T2.2: use the precomputed answer when available (derived from cursor context captured at
@@ -237,6 +240,12 @@ public enum FinalizePipeline {
         DiagnosticLogger.shared.log(
             "Insertion: prependSpace=\(wantSpace) source=\(precomputedPrependSpace != nil ? "precomputed" : "liveAX")")
         let insertText = composeInsertText(text, prependSpace: wantSpace)
+        // The seam itself, which no other record captures (2026-07-29). Character CLASSES only —
+        // the diagnostic log stays free of message content.
+        let diagnosis = TextInserter.spacingDiagnosis(contextBefore: contextBefore, insertText: insertText)
+        DiagnosticLogger.shared.log(
+            "Insertion boundary: prev=\(TextInserter.charClass(contextBefore?.last)) "
+            + "first=\(TextInserter.charClass(insertText.first)) → \(diagnosis.rawValue)")
         let pasted = inserter.insert(text: insertText, refocusing: element, onFocusLost: onFocusLost)
         return (insertText, pasted)
     }

@@ -71,6 +71,65 @@ class TextInserter {
         return !lastChar.isWhitespace && !lastChar.isNewline
     }
 
+    /// What actually happened at the seam between the text already in the field and the text
+    /// being inserted.
+    ///
+    /// 2026-07-29, Michael: "additional spaces should be tracked so that you are able to see
+    /// them." Spacing damage is invisible in the recordings corpus — the `.txt` sidecar holds
+    /// only the dictation, while the defect lives in the JOIN, which exists solely in the target
+    /// app. Nothing downstream could count these, so a run of spurious leading spaces was only
+    /// ever visible to Michael. This is the missing observation.
+    enum SpacingDiagnosis: String {
+        /// Exactly one space, or a deliberate no-space boundary. Nothing to see.
+        case ok
+        /// The field already ended in whitespace AND a space was prepended → "word  next".
+        case extraSpace = "EXTRA-SPACE"
+        /// Printable character butted straight against printable text → "wordnext".
+        case missingSpace = "MISSING-SPACE"
+        /// No cursor context was captured, so the seam is unknowable. Counting these matters:
+        /// a high blind rate is itself the finding (75-91% of dictations on 2026-07-29).
+        case blind
+    }
+
+    /// Characters after which no space belongs, so an immediately-following word is correct
+    /// rather than a defect. Open brackets and quotes attach to what follows; a hyphen or slash
+    /// is a compound join.
+    private static let noSpaceExpectedAfter: Set<Character> = [
+        "(", "[", "{", "<", "\"", "'", "“", "‘", "-", "–", "—", "/", "\\", "@", "#", "$", "*", "_", "~", "`",
+    ]
+
+    /// Pure seam verdict. `insertText` is the FINAL string handed to the inserter, i.e. the
+    /// prepended space (if any) is already applied — so this reports what the field will really
+    /// contain, not what was intended.
+    static func spacingDiagnosis(contextBefore: String?, insertText: String) -> SpacingDiagnosis {
+        guard let context = contextBefore, !context.isEmpty else { return .blind }
+        guard let prev = context.last, let first = insertText.first else { return .blind }
+
+        let prevIsSpace = prev.isWhitespace || prev.isNewline
+        let firstIsSpace = first.isWhitespace || first.isNewline
+
+        if prevIsSpace && firstIsSpace { return .extraSpace }
+        if !prevIsSpace && !firstIsSpace {
+            // A boundary that legitimately carries no space is not a defect.
+            if noSpaceExpectedAfter.contains(prev) { return .ok }
+            return .missingSpace
+        }
+        return .ok
+    }
+
+    /// Coarse character class for the diagnostic log. Deliberately NOT the character itself:
+    /// the diagnostic log carries no message content today and this feature must not change
+    /// that. A class is enough to count seams and spot the pattern.
+    static func charClass(_ ch: Character?) -> String {
+        guard let ch else { return "none" }
+        if ch.isNewline { return "newline" }
+        if ch.isWhitespace { return "space" }
+        if ch.isLetter { return "letter" }
+        if ch.isNumber { return "digit" }
+        if ch.isPunctuation || ch.isSymbol { return "punct" }
+        return "other"
+    }
+
     /// Slice `fullText` at a cursor position expressed as a UTF-16 offset, returning the text
     /// before the cursor. AX's `kAXSelectedTextRangeAttribute` CFRange.location is ALWAYS a
     /// UTF-16 offset, so it must be converted through the utf16 view — indexing a String directly

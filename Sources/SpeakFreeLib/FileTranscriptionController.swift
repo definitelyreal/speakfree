@@ -283,7 +283,12 @@ public class FileTranscriptionController: NSWindowController {
         sourceURL = url
         fileLabel.stringValue = url.lastPathComponent
         fileLabel.textColor = .labelColor
-        transcribeButton.isEnabled = true
+        // Picking a file must not re-enable the button that `refreshModelPicker` disabled for
+        // having no model on disk — that gave an enabled Transcribe that failed straight into
+        // the error view (2026-08-01). Whisper with zero downloaded models is the only case;
+        // Parakeet always has a model id, so it stays enabled as before.
+        let hasModel = settings.engine == "parakeet" || !downloadedWhisperModels().isEmpty
+        transcribeButton.isEnabled = hasModel
     }
 
     @objc private func chooseFileTapped() {
