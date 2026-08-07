@@ -17,9 +17,16 @@ public struct TextPostProcessor {
     // Unambiguous: these phrases are almost never used as regular words in speech.
     // Always safe to replace regardless of context (except right after a negation).
     private static var alwaysReplace: [(pattern: String, replacement: String)] {[
-        ("\(ws)\(notAfterNegation)question marks?\(we)", "?"),
-        ("\(ws)\(notAfterNegation)exclamation marks?\(we)", "!"),
-        ("\(ws)\(notAfterNegation)exclamation points?\(we)", "!"),
+        // SINGULAR ONLY. The trailing `s?` used to swallow the plural NOUN, and unlike every
+        // other failure in this file that one DESTROYS CONTENT: "the people with question marks"
+        // became "the people with?", deleting the rest of the sentence (speech audit finding 3,
+        // ~5 of 6,571 pairs; Michael approved the fix 2026-08-05). Spoken punctuation is dictated
+        // in the singular, so the plural is essentially always the literal noun. If someone really
+        // does dictate two question marks, the cost is a visible word to delete by hand — which is
+        // the direction this file always errs, per the 2026-07-26 "prefer the loud useless one".
+        ("\(ws)\(notAfterNegation)question mark\(we)", "?"),
+        ("\(ws)\(notAfterNegation)exclamation mark\(we)", "!"),
+        ("\(ws)\(notAfterNegation)exclamation point\(we)", "!"),
         ("\(ws)\(notAfterNegation)semicolon\(we)", ";"),
         ("\(ws)\(notAfterNegation)semi colon\(we)", ";"),
         // Ellipsis removed — whisper generates "..." from pauses causing false positives

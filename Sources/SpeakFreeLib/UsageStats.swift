@@ -69,29 +69,57 @@ class UsageStats {
     var totalDictations: Int { data.totalDictations }
     var totalAudioSeconds: Double { data.totalAudioSeconds }
 
-    /// Estimate time saved: typing_time - speaking_time
-    /// Typing speed: 40 WPM (200 chars/min = 3.3 chars/sec)
-    /// Subtract actual speaking time since the user wasn't idle
-    var estimatedTimeSaved: TimeInterval {
-        let typingTime = Double(data.totalCharacters) / 3.3
-        return max(0, typingTime - data.totalAudioSeconds)
+    /// Typing speeds the saved-time estimate brackets, in characters per second (5 chars/word).
+    ///
+    /// The old estimate hardcoded 40 WPM — 3.3 chars/sec — and reported the result as a single
+    /// precise figure. Michael types 110-165 WPM (speech audit, finding 18), so his "time saved"
+    /// was inflated roughly 3-4x and "saving 4.9 days" was fiction. A single number cannot be
+    /// honest here because the counterfactual depends entirely on who is typing, so the estimate
+    /// is a RANGE and is presented as one.
+    static let fastTypistCharsPerSecond = 10.0   // 120 WPM
+    static let averageTypistCharsPerSecond = 3.3 //  40 WPM
+
+    /// Saved-time bracket: `low` assumes you type fast, `high` assumes average.
+    /// Speaking time is subtracted from both — dictating is not free.
+    var estimatedTimeSavedRange: (low: TimeInterval, high: TimeInterval) {
+        let chars = Double(data.totalCharacters)
+        let fast = chars / Self.fastTypistCharsPerSecond
+        let average = chars / Self.averageTypistCharsPerSecond
+        return (max(0, fast - data.totalAudioSeconds),
+                max(0, average - data.totalAudioSeconds))
     }
 
-    /// Human-readable time saved string
-    var timeSavedDescription: String {
-        let seconds = estimatedTimeSaved
+    /// Kept as the conservative (fast-typist) end so any remaining single-value caller
+    /// under-claims rather than over-claims.
+    var estimatedTimeSaved: TimeInterval { estimatedTimeSavedRange.low }
+
+    static func formatDuration(_ seconds: TimeInterval) -> String {
         if seconds < 60 {
             return "\(Int(seconds)) seconds"
         } else if seconds < 3600 {
             let mins = Int(seconds / 60)
             return "\(mins) minute\(mins == 1 ? "" : "s")"
         } else if seconds < 86400 {
-            let hours = seconds / 3600
-            return String(format: "%.1f hours", hours)
+            return String(format: "%.1f hours", seconds / 3600)
         } else {
-            let days = seconds / 86400
-            return String(format: "%.1f days", days)
+            return String(format: "%.1f days", seconds / 86400)
         }
+    }
+
+    /// Human-readable saved-time RANGE, e.g. "1.4-4.6 hours". Collapses to a single figure only
+    /// when both ends format identically, so the honest uncertainty is never hidden.
+    var timeSavedDescription: String {
+        let range = estimatedTimeSavedRange
+        let low = Self.formatDuration(range.low)
+        let high = Self.formatDuration(range.high)
+        if low == high { return low }
+        // Drop the duplicated unit from the low end when both share it ("1.4-4.6 hours").
+        let lowParts = low.split(separator: " ")
+        let highParts = high.split(separator: " ")
+        if lowParts.count == 2, highParts.count == 2, lowParts[1] == highParts[1] {
+            return "\(lowParts[0])-\(highParts[0]) \(highParts[1])"
+        }
+        return "\(low)-\(high)"
     }
 
     /// Formatted keystroke count
