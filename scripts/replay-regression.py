@@ -58,8 +58,14 @@ def process(binary, wav):
     p = subprocess.run([binary, "process", wav], capture_output=True, text=True, timeout=300)
     if not p.stdout.strip():
         return None
+    # CoreML's E5RT runtime can print exception noise to stdout ahead of the JSON
+    # (seen 2026-08-11: "E5RT encountered an STL exception ... {json}"), so parse
+    # from the first opening brace rather than trusting a clean stream.
+    start = p.stdout.find("{")
+    if start < 0:
+        return None
     try:
-        return json.loads(p.stdout)
+        return json.loads(p.stdout[start:])
     except json.JSONDecodeError:
         return None
 
