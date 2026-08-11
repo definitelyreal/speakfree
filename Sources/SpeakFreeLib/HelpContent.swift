@@ -1,4 +1,4 @@
-// Claude · 2026-07-26 · Session: ec24b5ef-be6a-4c4b-be38-a3b84ca63074
+// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 //
 // Help content as DATA, separate from the window that renders it
 // ([HelpController.swift]). The previous Help was one hardcoded attributed string built
@@ -80,6 +80,7 @@ public struct HelpFacts: Equatable {
     public var whisperModel: String
     public var parakeetModel: String
     public var saveRecordings: Bool
+    public var punctuationMode: PunctuationMode
     public var recordingsPath: String
     public var vocabularyPath: String
     public var logsPath: String
@@ -100,6 +101,14 @@ public struct HelpFacts: Equatable {
         return whisperModel
     }
 
+    public var punctuationDisplayName: String {
+        switch punctuationMode {
+        case .hybrid: return "Automatic & Spoken"
+        case .off: return "Automatic Only"
+        case .spoken: return "Spoken Only"
+        }
+    }
+
     public init(version: String,
                 buildDescription: String,
                 devMode: Bool,
@@ -109,6 +118,7 @@ public struct HelpFacts: Equatable {
                 whisperModel: String,
                 parakeetModel: String,
                 saveRecordings: Bool,
+                punctuationMode: PunctuationMode = .off,
                 recordingsPath: String,
                 vocabularyPath: String,
                 logsPath: String) {
@@ -121,6 +131,7 @@ public struct HelpFacts: Equatable {
         self.whisperModel = whisperModel
         self.parakeetModel = parakeetModel
         self.saveRecordings = saveRecordings
+        self.punctuationMode = punctuationMode
         self.recordingsPath = recordingsPath
         self.vocabularyPath = vocabularyPath
         self.logsPath = logsPath
@@ -147,6 +158,7 @@ public struct HelpFacts: Equatable {
             whisperModel: c.modelSize,
             parakeetModel: c.parakeetModel ?? "parakeet-tdt-0.6b-v3",
             saveRecordings: DevMode.effectiveSaveRecordings(c),
+            punctuationMode: c.spokenPunctuation ?? .off,
             recordingsPath: RecordingStore.recordingsDir.path,
             vocabularyPath: Config.vocabularyFile.path,
             logsPath: Config.configDir.appendingPathComponent("logs").path
@@ -327,7 +339,8 @@ public enum HelpContent {
 
     private static func punctuation(_ f: HelpFacts) -> HelpTopic {
         HelpTopic(id: "punctuation", title: "Punctuation", blocks: [
-            .paragraph("Choose under Settings → Transcription → Punctuation."),
+            .paragraph("Choose under Settings → Transcription → Punctuation. You are using "
+                       + "\(f.punctuationDisplayName)."),
             .row("Automatic & Spoken", "The engine punctuates from your speech patterns, AND you "
                  + "can say \"comma\", \"period\", \"question mark\", \"new line\" and the rest "
                  + "to place punctuation yourself. The default, and the recommendation."),

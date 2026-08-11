@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import XCTest
 @testable import SpeakFreeLib
 
@@ -121,8 +122,8 @@ final class SettingsViewModelTests: XCTestCase {
         let config = try Config.decode(from: json)
         let vm = SettingsViewModel(config: config)
 
-        // nil spokenPunctuation defaults to .hybrid (matching defaultConfig)
-        XCTAssertEqual(vm.punctuationMode, .hybrid)
+        // A missing legacy key displays the runtime's unchanged Automatic Only behavior.
+        XCTAssertEqual(vm.punctuationMode, .off)
         // nil maxRecordings defaults to 0 = keep everything
         XCTAssertEqual(vm.maxRecordings, 0)
         // nil toggleMode defaults to false

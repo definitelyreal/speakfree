@@ -1,7 +1,19 @@
+// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import Foundation
 import AVFoundation
 
 public class Transcriber {
+    struct AudioEvidence: Equatable {
+        let durationSeconds: Double
+        let peakWindowRMS: Float
+        let speechWindowCount: Int
+
+        var hasAnySpeechEnergy: Bool { speechWindowCount > 0 }
+        var hasSustainedSpeechEnergy: Bool {
+            peakWindowRMS >= 0.04 && speechWindowCount >= 3
+        }
+    }
+
     /// Engine-agnostic backend, injected by EngineFactory (whisper or parakeet).
     public let engine: any TranscriptionEngine
     /// Model identifier for the active engine (whisper: a size like "large-v3-turbo";
@@ -59,6 +71,47 @@ public class Transcriber {
         "Um.", "Um,", "Uh.", "Uh,",
         "Hello.", "Hi.",
     ]
+
+    private static let speechSensitiveHallucinations: Set<String> = [
+        "so", "hmm", "yeah", "yes", "no", "okay", "ok", "oh", "um", "uh",
+        "hello", "hi", "thank you",
+    ]
+
+    static func audioEvidence(in samples: [Float]) -> AudioEvidence {
+        let windowSize = 480
+        var peakWindowRMS: Float = 0
+        var speechWindowCount = 0
+        var start = 0
+        while start < samples.count {
+            let end = min(start + windowSize, samples.count)
+            let count = end - start
+            guard count > 0 else { break }
+            var sumSquares: Float = 0
+            for sample in samples[start..<end] {
+                sumSquares += sample * sample
+            }
+            let rms = sqrtf(sumSquares / Float(count))
+            peakWindowRMS = max(peakWindowRMS, rms)
+            if rms >= PostBufferPolicy.defaultSpeechThreshold {
+                speechWindowCount += 1
+            }
+            start = end
+        }
+        return AudioEvidence(
+            durationSeconds: Double(samples.count) / 16_000.0,
+            peakWindowRMS: peakWindowRMS,
+            speechWindowCount: speechWindowCount)
+    }
+
+    private static func shouldSpareHallucination(_ text: String, evidence: AudioEvidence) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .trimmingCharacters(in: .punctuationCharacters)
+            .trimmingCharacters(in: .whitespaces)
+        guard speechSensitiveHallucinations.contains(normalized),
+              evidence.hasAnySpeechEnergy else { return false }
+        return evidence.hasSustainedSpeechEnergy || evidence.durationSeconds >= 2.5
+    }
 
     private func isHallucination(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -138,8 +191,24 @@ public class Transcriber {
         // Strip non-speech characters whisper sometimes outputs (bullets, arrows, etc.)
         let cleaned = result.replacingOccurrences(of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
 
+        let evidence = Self.audioEvidence(in: samples ?? [])
+        if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           evidence.hasSustainedSpeechEnergy {
+            DiagnosticLogger.shared.log(String(
+                format: "Transcriber: speech-energy-present but model-empty "
+                    + "(%.2fs, peak-window-rms %.3f, speech-windows %d)",
+                evidence.durationSeconds, evidence.peakWindowRMS, evidence.speechWindowCount))
+        }
+
         // Filter known hallucinations from all engines + the CLI path
         if isHallucination(cleaned) {
+            if Self.shouldSpareHallucination(cleaned, evidence: evidence) {
+                DiagnosticLogger.shared.log(String(
+                    format: "Transcriber: spared short hallucination candidate with speech energy "
+                        + "(%.2fs, peak-window-rms %.3f)",
+                    evidence.durationSeconds, evidence.peakWindowRMS))
+                return cleaned
+            }
             print("Transcriber: filtered hallucination: \"\(cleaned)\"")
             return ""
         }

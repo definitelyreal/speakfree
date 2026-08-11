@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import Foundation
 import Combine
 
@@ -50,7 +51,7 @@ public class SettingsViewModel: ObservableObject {
         self.toggleMode = c.toggleMode?.value ?? false
         self.modelSize = c.modelSize
         self.language = c.language
-        self.punctuationMode = c.spokenPunctuation ?? .hybrid
+        self.punctuationMode = c.spokenPunctuation ?? .off
         self.maxRecordings = c.maxRecordings ?? 0  // 0 = keep everything (default)
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
@@ -84,7 +85,7 @@ public class SettingsViewModel: ObservableObject {
         self.toggleMode = c.toggleMode?.value ?? false
         self.modelSize = c.modelSize
         self.language = c.language
-        self.punctuationMode = c.spokenPunctuation ?? .hybrid
+        self.punctuationMode = c.spokenPunctuation ?? .off
         self.maxRecordings = c.maxRecordings ?? 0
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true

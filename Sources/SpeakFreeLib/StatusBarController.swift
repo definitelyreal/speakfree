@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import AppKit
 
 class MenuItemTarget: NSObject {
@@ -23,6 +24,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var animationFrames: [NSImage] = []
     private var downloadProgress: String?
     private var copiedFeedback = false
+    private var pendingBetterTranscript: String?
     private var menuItemTargets: [MenuItemTarget] = []
     // M1: the recent-submenu's targets are retained separately from the main menu's so a top-level
     // rebuild (which clears `menuItemTargets`) can't invalidate the actions of an open submenu.
@@ -66,6 +68,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
         /// input route). Shown briefly so a lost dictation is never a silent no-op —
         /// the user spoke, held the key, and deserves to know nothing was heard.
         case noSpeech
+        case captureFailed
+        case betterTranscriptAvailable
         /// Secure-Input fallback: dictated text was copied with concealment markers and will
         /// auto-clear after the configured delay. Shows a distinct notification so the user
         /// knows the clipboard will self-clean (audit M2).
@@ -107,6 +111,27 @@ class StatusBarController: NSObject, NSMenuDelegate {
         buildMenu()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             self?.copiedFeedback = false
+            self?.buildMenu()
+        }
+    }
+
+    func offerBetterTranscript(_ text: String) {
+        pendingBetterTranscript = text
+        state = .betterTranscriptAvailable
+        buildMenu()
+    }
+
+    private func copyBetterTranscript() {
+        guard let text = pendingBetterTranscript else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        pendingBetterTranscript = nil
+        state = .copiedToClipboard
+        buildMenu()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard self?.state == .copiedToClipboard else { return }
+            self?.state = .idle
             self?.buildMenu()
         }
     }
@@ -242,6 +267,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
             case .waitingForPermission: stateText = "⚠️ Grant Accessibility Permission →"
             case .copiedToClipboard: stateText = "Copied to clipboard"
             case .noSpeech: stateText = "⚠️ No speech detected — check your mic"
+            case .captureFailed: stateText = "⚠️ Capture failed - please try again"
+            case .betterTranscriptAvailable: stateText = "Better Bluetooth text available - Copy"
             case .secureInputCopied: stateText = "Copied — auto-clears in 15s (Secure Input)"
             case .noModel: stateText = "⚠️ No model — open Settings to download"
             case .setupFailed(let message): stateText = "⛔ Setup failed: \(message)"
@@ -277,6 +304,13 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 }
                 menuItemTargets.append(target)
                 let stateItem = NSMenuItem(title: stateText, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+                stateItem.target = target
+                menu.addItem(stateItem)
+            } else if case .betterTranscriptAvailable = state {
+                let target = MenuItemTarget { [weak self] in self?.copyBetterTranscript() }
+                menuItemTargets.append(target)
+                let stateItem = NSMenuItem(
+                    title: stateText, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
                 stateItem.target = target
                 menu.addItem(stateItem)
             } else if case .noModel = state {
@@ -498,8 +532,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
             setIcon(StatusBarController.drawLockIcon())
         case .copiedToClipboard, .secureInputCopied:
             setIcon(StatusBarController.drawCheckmarkIcon())
-        case .noSpeech:
+        case .noSpeech, .captureFailed:
             setIcon(StatusBarController.drawErrorIcon())
+        case .betterTranscriptAvailable:
+            setIcon(StatusBarController.drawCheckmarkIcon())
         case .noModel:
             setIcon(StatusBarController.drawNoModelIcon())
         case .setupFailed:
