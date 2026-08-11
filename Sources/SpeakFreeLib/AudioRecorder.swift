@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:019fecb2-8ac5-7423-90a3-d70aac039387 · 2026-08-10
 import AudioToolbox
 import AVFoundation
 import CoreAudio
@@ -231,10 +232,15 @@ class AudioRecorder {
                     "AudioRecorder: primary audio configuration changed — scheduling tap reinstall")
             }
 
-            // Don't touch the engine during active recording — defer until recording stops
+            // A pinned built-in engine can still lose its tap when AirPods join/leave.
+            // Deferring this rebuild until key-up guarantees capture loss: the dead tap
+            // cannot resume on its own. Rebuild in place; `_isRecording`, `pcmSamples`,
+            // and the open WavWriter survive the engine swap, so audio after the short
+            // route-settle gap appends to the same take.
             if self.isRecording {
-                DiagnosticLogger.shared.log("AudioRecorder: deferring tap reinstall until recording stops")
-                self.needsTapReinstall = true
+                DiagnosticLogger.shared.log(
+                    "AudioRecorder: configuration changed during recording — rebuilding tap in place")
+                self.reinstallTap()
                 return
             }
 
@@ -270,7 +276,9 @@ class AudioRecorder {
                     return
                 }
                 if self.isRecording {
-                    self.needsTapReinstall = true
+                    DiagnosticLogger.shared.log(
+                        "AudioRecorder: default input changed during recording — rebuilding tap in place")
+                    self.reinstallTap()
                 } else {
                     self.scheduleReinstallDebounced()
                 }
@@ -415,6 +423,17 @@ class AudioRecorder {
                 DiagnosticLogger.shared.log("AudioRecorder: engine rebuilt for new audio device")
             }
         }
+    }
+
+    /// Last-resort recovery when the in-recording watchdog sees that no buffers are arriving.
+    /// Device notifications are not reliable during every Bluetooth handoff, so the watchdog
+    /// must be able to revive the tap without waiting for key-up. The recording's accumulated
+    /// samples and open WavWriter remain intact across `reinstallTap()`.
+    func recoverDeadCaptureDuringRecording() {
+        guard isRecording else { return }
+        DiagnosticLogger.shared.log(
+            "AudioRecorder: watchdog rebuilding dead tap during active recording")
+        reinstallTap()
     }
 
     /// Internal: create and start the audio engine regardless of preBufferEnabled.

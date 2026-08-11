@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:019fecb2-8ac5-7423-90a3-d70aac039387 · 2026-08-10
 import AppKit
 import ApplicationServices
 import AVFoundation
@@ -577,8 +578,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             onAbort: { [weak self] in
                 self?.handleRecordingAbort()
             },
-            onUserInteraction: { [weak self] in
-                self?.noteUserInteraction()
+            onUserInteraction: { [weak self] interaction in
+                DispatchQueue.main.async { self?.noteUserInteraction(interaction) }
             }
         )
 
@@ -928,14 +929,40 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             onKeyDown: { [weak self] in self?.handleKeyDown() },
             onKeyUp: { [weak self] in self?.handleKeyUp() },
             onAbort: { [weak self] in self?.handleRecordingAbort() },
-            onUserInteraction: { [weak self] in self?.noteUserInteraction() }
+            onUserInteraction: { [weak self] interaction in
+                DispatchQueue.main.async { self?.noteUserInteraction(interaction) }
+            }
         )
     }
 
-    private func noteUserInteraction() {
-        userInteractionGeneration.withLock { generation in
-            generation &+= 1
+    private func noteUserInteraction(_ interaction: HotkeyManager.CursorInteraction) {
+        func invalidate() {
+            userInteractionGeneration.withLock { generation in
+                generation &+= 1
+            }
         }
+
+        guard let bundleID = lastInsertionBundleID,
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID,
+              let tail = lastInsertionTail else {
+            invalidate()
+            return
+        }
+
+        let pastedText = interaction == .paste
+            ? NSPasteboard.general.string(forType: .string) : nil
+        guard let updatedTail = HotkeyManager.updatedCursorTail(
+            tail, after: interaction, pastedText: pastedText) else {
+            invalidate()
+            return
+        }
+
+        // We now know the cursor tail from the actual edits, even if AX cannot expose the
+        // editor. Clear the old AX identity (Electron may vend unstable wrapper objects), keep
+        // only the bounded suffix, and refresh the fallback freshness window.
+        lastInsertionTail = updatedTail
+        lastInsertionAt = Date()
+        lastInsertionElement = nil
     }
 
     private func currentUserInteractionGeneration() -> UInt64 {
@@ -1484,6 +1511,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     self.recordingOverlay.show(
                         state: .error("Mic went silent: audio is not being captured"),
                         autoHideError: false)
+                    if buffersDead {
+                        self.recorder.recoverDeadCaptureDuringRecording()
+                    }
                 }
             } else if self.watchdogWarnedDeadAudio {
                 self.watchdogWarnedDeadAudio = false

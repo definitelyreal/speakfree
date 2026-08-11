@@ -1,4 +1,5 @@
-// Claude · 2026-06-10 · Session: 5b06900b-1498-4764-a786-48f408c36626
+// ai-suggestion:unverified · session:019fecb2-8ac5-7423-90a3-d70aac039387 · 2026-08-10
+// Originally Claude · 2026-06-10 · Session: 5b06900b-1498-4764-a786-48f408c36626
 //
 // AR-2 round-1, finding 4 — clipboard restore guard used the wrong changeCount delta (+2), so the
 // user's clipboard was NEVER restored after a paste insertion.
@@ -15,6 +16,14 @@ import AppKit
 @testable import SpeakFreeLib
 
 final class ClipboardRestoreTests: XCTestCase {
+
+    func test_localRestoreFinishesBeforeFollowUpPasteAtHalfSecond() {
+        XCTAssertLessThan(TextInserter.localClipboardRestoreDelay, 0.5)
+        XCTAssertGreaterThanOrEqual(TextInserter.localClipboardRestoreDelay, 0.2,
+                                    "Electron/contenteditable targets need a settle beat")
+        XCTAssertGreaterThan(TextInserter.remoteClipboardRestoreDelay,
+                             TextInserter.localClipboardRestoreDelay)
+    }
 
     /// A private, uniquely-named pasteboard so tests never touch `NSPasteboard.general`.
     private func makeScratchPasteboard() -> NSPasteboard {
