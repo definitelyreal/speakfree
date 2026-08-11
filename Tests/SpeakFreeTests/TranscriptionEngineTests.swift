@@ -1,4 +1,4 @@
-// Claude · 2026-06-07 · Session: 335a0545-b347-40c8-adbc-c0364e1a9aa4
+// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import XCTest
 @testable import SpeakFreeLib
 
@@ -151,7 +151,8 @@ final class TranscriberDelegationTests: XCTestCase {
         let fake = FakeEngine(engineID: "parakeet", cannedTranscript: "delegated text")
         let transcriber = Transcriber(engine: fake, modelID: "parakeet-tdt-0.6b-v3", language: "en")
 
-        let result = try await transcriber.transcribe(audioURL: dummyURL, samples: samples, prompt: nil)
+        let result = try await transcriber.transcribe(
+            audioURL: dummyURL, samples: samples, prompt: nil)
 
         XCTAssertEqual(result, "delegated text")
         XCTAssertEqual(fake.transcribeCalls.count, 1)
@@ -175,7 +176,9 @@ final class TranscriberDelegationTests: XCTestCase {
         let fake = FakeEngine(engineID: "parakeet", cannedTranscript: "Thank you.")
         let transcriber = Transcriber(engine: fake, modelID: "m", language: "en")
 
-        let result = try await transcriber.transcribe(audioURL: dummyURL, samples: samples, prompt: nil)
+        let silence = [Float](repeating: 0.001, count: 16_000)
+        let result = try await transcriber.transcribe(
+            audioURL: dummyURL, samples: silence, prompt: nil)
         XCTAssertEqual(result, "", "Known hallucination must be filtered to empty string")
     }
 

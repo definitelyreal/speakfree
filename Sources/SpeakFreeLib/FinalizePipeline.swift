@@ -1,4 +1,4 @@
-// Claude · 2026-06-10 · Session: 5b06900b-1498-4764-a786-48f408c36626
+// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import ApplicationServices
 import Foundation
 
@@ -24,6 +24,8 @@ public enum FinalizePipeline {
     /// What the pipeline decided to do with a recording. Each case mirrors a branch of
     /// `finalizeRecording`, so tests can assert the branch taken without reaching into AppKit.
     public enum Outcome: Equatable {
+        /// The tap delivered zero PCM frames and the wav had no usable payload.
+        case captureFailed
         /// Below `minSamples` — accidental tap, skipped before transcription.
         case tooShort(sampleCount: Int)
         /// RMS below threshold — silent/dead audio, skipped (engine should be rebuilt).
@@ -71,6 +73,9 @@ public enum FinalizePipeline {
         }
         if let fileSamples = readWav(), passesGates(fileSamples) {
             return (fileSamples, nil, true)
+        }
+        if memorySamples.isEmpty {
+            return (memorySamples, .captureFailed, false)
         }
         if memorySamples.count < minSamples {
             return (memorySamples, .tooShort(sampleCount: memorySamples.count), false)

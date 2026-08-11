@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:019fecb2-8ac5-7423-90a3-d70aac039387 · 2026-08-10
+// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import AudioToolbox
 import AVFoundation
 import CoreAudio
@@ -28,6 +28,9 @@ class AudioRecorder {
     private let bufferHealthLock = NSLock()
     private var lastBufferUptime: Double = ProcessInfo.processInfo.systemUptime
     private var peakSinceCheck: Float = 0
+    private var recordingGeneration = 0
+    private var firstBufferArrived = false
+    static let firstBufferGuardSeconds: TimeInterval = 1.0
 
     /// Whether the pre-buffer engine should run. When false, engine only starts on startRecording.
     var preBufferEnabled: Bool = true {
@@ -572,6 +575,7 @@ class AudioRecorder {
             }
             stateLock.unlock()
         } else {
+            firstBufferArrived = true
             // Recording mode: write to file + accumulate samples.
             // Enqueue the write BEFORE releasing stateLock so it is ordered ahead of any
             // drain in stopRecording(): stop() can't take stateLock (to flip _isRecording)
@@ -661,6 +665,15 @@ class AudioRecorder {
         return samples.count > index ? Array(samples[index...]) : []
     }
 
+    static func shouldRecoverMissingFirstBuffer(
+        isRecording: Bool,
+        scheduledGeneration: Int,
+        currentGeneration: Int,
+        firstBufferArrived: Bool
+    ) -> Bool {
+        isRecording && scheduledGeneration == currentGeneration && !firstBufferArrived
+    }
+
     // MARK: - Recording
 
     func startRecording(to outputURL: URL) throws {
@@ -683,6 +696,9 @@ class AudioRecorder {
         pcmSamples = preroll
         audioFile = file
         _isRecording = true
+        recordingGeneration += 1
+        let guardGeneration = recordingGeneration
+        firstBufferArrived = false
         stateLock.unlock()
         writeQueue.async { self.wavWriteFailureLogged = false }
 
@@ -731,6 +747,21 @@ class AudioRecorder {
         if dualEngagedNow(), let bt = AudioDeviceCatalog.cachedBluetoothInput {
             secondaryQueue.async { _ = self.secondaryRecorder.start(device: bt) }
         }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.firstBufferGuardSeconds) { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock()
+            let recover = Self.shouldRecoverMissingFirstBuffer(
+                isRecording: self._isRecording,
+                scheduledGeneration: guardGeneration,
+                currentGeneration: self.recordingGeneration,
+                firstBufferArrived: self.firstBufferArrived)
+            self.stateLock.unlock()
+            guard recover else { return }
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: first-buffer guard found no tap buffer after 1.0s; rebuilding tap")
+            self.reinstallTap()
+        }
     }
 
     /// Write pre-roll Float32 samples to the WAV file.
@@ -749,6 +780,7 @@ class AudioRecorder {
         stateLock.lock()
         guard _isRecording else { stateLock.unlock(); return nil }
         _isRecording = false
+        recordingGeneration += 1
         stateLock.unlock()
 
         var samples: [Float] = []

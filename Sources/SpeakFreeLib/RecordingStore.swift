@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import Foundation
 import Darwin
 import AVFoundation
@@ -219,6 +220,26 @@ public class RecordingStore {
         let sidecar = audioURL.deletingPathExtension().appendingPathExtension("txt")
         try? text.write(to: sidecar, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sidecar.path)
+    }
+
+    @discardableResult
+    public static func updateFinalTranscription(text: String, for audioURL: URL) -> Bool {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        let sidecar = sidecarURL(for: audioURL)
+        guard FileManager.default.fileExists(atPath: audioURL.path),
+              FileManager.default.fileExists(atPath: sidecar.path) else { return false }
+        do {
+            try text.write(to: sidecar, atomically: true, encoding: .utf8)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: sidecar.path)
+            return true
+        } catch {
+            DiagnosticLogger.shared.log(
+                "RecordingStore: failed to update final transcript for \(audioURL.lastPathComponent): "
+                    + error.localizedDescription)
+            return false
+        }
     }
 
     /// Save raw whisper output before any post-processing, as `<audio>.raw.txt`.

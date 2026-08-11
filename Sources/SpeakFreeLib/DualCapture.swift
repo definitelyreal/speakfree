@@ -1,4 +1,4 @@
-// Claude · 2026-07-14 · Session: c58489fa-5c7d-451c-870d-8f4f5578ed2c
+// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import AudioToolbox
 import AVFoundation
 import CoreAudio
@@ -101,6 +101,100 @@ public enum DualCapture {
         let confidence: Double
         let matchedTokens: Int
         let reason: MergeReason
+    }
+
+    enum ForkBReason: Equatable {
+        case identical
+        case bluetoothTooShort
+        case mergeVeto
+        case primaryHasFewerUnknownWords
+        case tied
+        case bluetoothHasFewerUnknownWords
+    }
+
+    struct ForkBDecision: Equatable {
+        let preferBluetooth: Bool
+        let primaryUnknownWords: Int
+        let bluetoothUnknownWords: Int
+        let reason: ForkBReason
+    }
+
+    static let forkBCommonWords: Set<String> = Set("""
+        a about after again all also am an and any are as at back be because been before being
+        better both but by can come could day did do does done down each even every first for
+        from get give go going good got had has have he her here him his how i if in into is it
+        its just keep know last like look made make many may me might more most much my need new
+        no not now of off ok okay on one only or other our out over package people please put
+        putting really right said same say see send should shots so some something still such take
+        than that the their them then there these they thing things think this through time to
+        together too two up us use very want was way we well were what when where which who why
+        will with work would yeah yes you your commas comments periods report today tomorrow
+        """.split(whereSeparator: { $0.isWhitespace }).map(String.init))
+
+    static func forkBDecision(
+        primary: String,
+        bluetooth: String,
+        vocabularyWords: Set<String>,
+        commonWords: Set<String> = forkBCommonWords
+    ) -> ForkBDecision {
+        let primaryTokens = wordTokens(in: primary).map(\.normalized)
+        let bluetoothTokens = wordTokens(in: bluetooth).map(\.normalized)
+        guard primaryTokens != bluetoothTokens else {
+            return ForkBDecision(
+                preferBluetooth: false, primaryUnknownWords: 0, bluetoothUnknownWords: 0,
+                reason: .identical)
+        }
+        if primaryTokens.isEmpty, bluetoothTokens.count >= 2 {
+            return ForkBDecision(
+                preferBluetooth: true,
+                primaryUnknownWords: 0,
+                bluetoothUnknownWords: 0,
+                reason: .bluetoothHasFewerUnknownWords)
+        }
+        let minimumBluetoothWords = Int(ceil(Double(primaryTokens.count) * 0.8))
+        guard !primaryTokens.isEmpty, bluetoothTokens.count >= minimumBluetoothWords else {
+            return ForkBDecision(
+                preferBluetooth: false, primaryUnknownWords: 0, bluetoothUnknownWords: 0,
+                reason: .bluetoothTooShort)
+        }
+
+        let normalizedVocabulary = Set(vocabularyWords.flatMap { term in
+            wordTokens(in: term).map(\.normalized)
+        })
+        let protectedWords = normalizedVocabulary
+        let merge = mergeTranscripts(
+            primary: primary, bluetooth: bluetooth, protectedWords: protectedWords)
+        switch merge.reason {
+        case .bluetoothOmission, .negationRisk, .punctuationRisk, .vocabularyRisk:
+            return ForkBDecision(
+                preferBluetooth: false, primaryUnknownWords: 0, bluetoothUnknownWords: 0,
+                reason: .mergeVeto)
+        default:
+            break
+        }
+
+        let knownWords = commonWords.union(normalizedVocabulary)
+        let primaryUnknown = primaryTokens.filter { !knownWords.contains($0) }.count
+        let bluetoothUnknown = bluetoothTokens.filter { !knownWords.contains($0) }.count
+        if bluetoothUnknown < primaryUnknown {
+            return ForkBDecision(
+                preferBluetooth: true,
+                primaryUnknownWords: primaryUnknown,
+                bluetoothUnknownWords: bluetoothUnknown,
+                reason: .bluetoothHasFewerUnknownWords)
+        }
+        if primaryUnknown < bluetoothUnknown {
+            return ForkBDecision(
+                preferBluetooth: false,
+                primaryUnknownWords: primaryUnknown,
+                bluetoothUnknownWords: bluetoothUnknown,
+                reason: .primaryHasFewerUnknownWords)
+        }
+        return ForkBDecision(
+            preferBluetooth: false,
+            primaryUnknownWords: primaryUnknown,
+            bluetoothUnknownWords: bluetoothUnknown,
+            reason: .tied)
     }
 
     /// Merge raw transcripts before TextPipeline runs. Exact word anchors protect the
