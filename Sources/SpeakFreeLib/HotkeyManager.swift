@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:019fecb2-8ac5-7423-90a3-d70aac039387 · 2026-08-10
 import AppKit
 import Foundation
 import CoreGraphics
@@ -14,7 +15,7 @@ class HotkeyManager {
     private var onKeyDown: (() -> Void)?
     private var onKeyUp: (() -> Void)?
     private var onAbort: (() -> Void)?
-    private var onUserInteraction: (() -> Void)?
+    private var onUserInteraction: ((CursorInteraction) -> Void)?
     private var modifierPressed = false
     /// Consecutive swallowed phantom fn-ups (failsafe cap 4; reset on honored release).
     private var phantomUpStreak = 0
@@ -35,7 +36,7 @@ class HotkeyManager {
         onKeyDown: @escaping () -> Void,
         onKeyUp: @escaping () -> Void,
         onAbort: (() -> Void)? = nil,
-        onUserInteraction: (() -> Void)? = nil
+        onUserInteraction: ((CursorInteraction) -> Void)? = nil
     ) {
         self.onKeyDown = onKeyDown
         self.onKeyUp = onKeyUp
@@ -448,7 +449,12 @@ class HotkeyManager {
                 requiredModifiers: self.requiredModifiers,
                 automationPID: Self.systemEventsPID()
             ) else { return }
-            self.onUserInteraction?()
+            let interaction = Self.cursorInteraction(
+                eventType: event.type,
+                eventKeyCode: event.type == .keyDown ? event.keyCode : 0,
+                eventModifiers: UInt64(event.modifierFlags.rawValue),
+                characters: event.type == .keyDown ? event.characters : nil)
+            self.onUserInteraction?(interaction)
         }
         if interactionMonitor == nil {
             DiagnosticLogger.shared.log(
@@ -484,6 +490,71 @@ class HotkeyManager {
             }
         }
         return true
+    }
+
+    /// A conservative edit model for the remembered cursor tail used by AX-opaque apps.
+    /// Printable typing can extend the known tail; destructive or cursor-moving input drops it.
+    enum CursorInteraction: Equatable {
+        case text(String)
+        case backspace
+        case newline
+        case paste
+        case invalidate
+    }
+
+    static func cursorInteraction(eventType: NSEvent.EventType,
+                                  eventKeyCode: UInt16,
+                                  eventModifiers: UInt64,
+                                  characters: String?) -> CursorInteraction {
+        guard eventType == .keyDown else { return .invalidate }
+
+        let command = UInt64(NSEvent.ModifierFlags.command.rawValue)
+        let control = UInt64(NSEvent.ModifierFlags.control.rawValue)
+        if eventModifiers & command != 0 {
+            // Cmd-V is the one command whose inserted content can be recovered exactly from
+            // the pasteboard. Selection edits, undo, cut, and navigation are unknowable.
+            if eventKeyCode == 9 { return .paste }
+            return .invalidate
+        }
+        if eventModifiers & control != 0 { return .invalidate }
+
+        switch eventKeyCode {
+        case 51: return .backspace
+        case 36, 76: return .newline
+        case 48, 53, 115, 116, 117, 119, 121, 123, 124, 125, 126:
+            return .invalidate
+        default:
+            guard let characters, !characters.isEmpty,
+                  characters.unicodeScalars.allSatisfy({
+                      !CharacterSet.controlCharacters.contains($0)
+                  }) else {
+                return .invalidate
+            }
+            return .text(characters)
+        }
+    }
+
+    /// Apply a known edit to an AX-opaque editor's remembered cursor tail. `nil` means the
+    /// operation could have moved or replaced the cursor in a way we cannot reconstruct.
+    static func updatedCursorTail(_ tail: String,
+                                  after interaction: CursorInteraction,
+                                  pastedText: String? = nil) -> String? {
+        var updated = tail
+        switch interaction {
+        case .text(let text):
+            updated += text
+        case .backspace:
+            guard !updated.isEmpty else { return nil }
+            updated.removeLast()
+        case .newline:
+            updated += "\n"
+        case .paste:
+            guard let pastedText else { return nil }
+            updated += pastedText
+        case .invalidate:
+            return nil
+        }
+        return String(updated.suffix(500))
     }
 
     /// PID of System Events, cached briefly — the interaction monitor consults this on

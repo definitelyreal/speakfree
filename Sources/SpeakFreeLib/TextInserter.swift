@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:019fecb2-8ac5-7423-90a3-d70aac039387 · 2026-08-10
 import AppKit
 import Foundation
 import Cocoa
@@ -626,6 +627,16 @@ class TextInserter {
     /// finite cap, but allow ordinary images to be saved and restored around Cmd+V.
     static let maxRestorableClipboardBytes = 16 * 1_024 * 1_024
 
+    /// Normal apps consume a synthetic Cmd+V synchronously with the key event. Keep a short
+    /// settle beat for Electron/contenteditable event loops, then return the user's prior
+    /// clipboard before a follow-up manual paste. The former 1.5 s delay made Cmd+V half a
+    /// second after dictation paste the dictated text a second time.
+    static let localClipboardRestoreDelay: TimeInterval = 0.3
+
+    /// Remote desktop paste is intentionally slower: `simulatePaste` waits 400 ms before
+    /// sending Cmd+V and the remote client still needs time to synchronize the clipboard.
+    static let remoteClipboardRestoreDelay: TimeInterval = 3.0
+
     static func prefersClipboardPaste(bundleID: String) -> Bool {
         if clipboardPasteApps.contains(bundleID) { return true }
         return bundleID.lowercased().contains("superhuman")
@@ -880,10 +891,11 @@ class TextInserter {
 
         simulatePaste()
 
-        // Restore after a generous delay to let the target app consume the paste.
+        // Restore after the target app has had time to consume the paste.
         // Remote desktop paste is delayed 400ms + needs clipboard sync to remote,
         // so give it extra time before restoring.
-        let restoreDelay: Double = isRemoteDesktopFrontmost() ? 3.0 : 1.5
+        let restoreDelay = isRemoteDesktopFrontmost()
+            ? Self.remoteClipboardRestoreDelay : Self.localClipboardRestoreDelay
         DispatchQueue.main.asyncAfter(deadline: .now() + restoreDelay) {
             // Only restore if OUR write is still the live clipboard content. If changeCount moved
             // past our write, the user or another app put something on the clipboard — leave it.
