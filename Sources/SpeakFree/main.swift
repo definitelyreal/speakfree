@@ -252,6 +252,10 @@ case "status":
 case "notice-preview":
     // Dev-only: tile every recordings-notice design variant on screen, buttons inert.
     RecordingsNoticePreview.run()
+case "overlay-preview":
+    // Dev-only: loop the recording overlay's entry animation against simulated
+    // speech, so the sequence can be judged without dictating. Mic untouched.
+    RecordingOverlayPreview.run(style: args.count > 2 ? (Int(args[2]) ?? 5) : 5)
 case "--help", "-h", "help":
     printUsage()
 case nil:
