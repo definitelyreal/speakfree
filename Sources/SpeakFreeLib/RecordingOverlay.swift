@@ -259,11 +259,23 @@ class RecordingOverlay {
         // auto-hide in place.
         let isError = { if case .error = state { return true }; return false }()
         let prominent = state == .recording || isError
+        // Michael's locked entry (2026-08-12) opens as a bare record mark on a fully
+        // transparent window, so it needs a canvas big enough for the widest ring
+        // pulse — clipping one into a corner arc is the exact artifact the lab was
+        // built to avoid.
+        let emergence = prominent && !isError
+            && OverlayContentView.usesEmergenceEntry(style: style)
         let pillSize: NSSize
         let frame: NSRect
         let bottomMargin: CGFloat = 48
         if prominent {
-            pillSize = isError ? OverlayContentView.errorSize : OverlayContentView.prominentSize
+            if isError {
+                pillSize = OverlayContentView.errorSize
+            } else if emergence {
+                pillSize = OverlayContentView.emergenceSize
+            } else {
+                pillSize = OverlayContentView.prominentSize
+            }
             frame = NSRect(x: screen.frame.midX - pillSize.width / 2,
                            y: screen.frame.midY - pillSize.height / 2,
                            width: pillSize.width, height: pillSize.height)
@@ -278,7 +290,12 @@ class RecordingOverlay {
         win.level = .floating
         win.isOpaque = false
         win.backgroundColor = .clear
-        win.hasShadow = true
+        // AppKit derives the shadow from the window's alpha channel and caches it.
+        // The emergence entry's content goes from a 9pt dot to a 150pt card, so a
+        // cached shadow reads as a grey ghost rectangle around empty space. The
+        // locked design was judged without a drop shadow; keep it that way and put
+        // the shadow back when the overlay becomes an ordinary pill again.
+        win.hasShadow = !emergence
         win.ignoresMouseEvents = true
         // .fullScreenAuxiliary: without it the overlay is invisible over full-screen
         // apps (2026-07-25 UX audit #11) — exactly where a user can't see the menu bar.
@@ -335,6 +352,9 @@ class RecordingOverlay {
             return
         }
         view.overlayState = state
+        // Leaving the recording phase drops the emergence canvas for an ordinary
+        // pill, which wants its shadow back (see show()).
+        if state != .recording { win.hasShadow = true }
 
         let pillSize = OverlayContentView.pillSize(for: state, streamingText: view.streamingText)
         let bottomMargin: CGFloat = 48
@@ -395,6 +415,10 @@ class RecordingOverlay {
     /// center, no travel — the shrink-and-move was rejected as distracting; an
     /// in-place decay was the reviewers' livability centerpiece).
     private func scheduleSettle() {
+        // The emergence entry has no settle phase: its end state IS the shipped
+        // purple pill at 1.2×, which stays put and keeps tracking speech (Michael:
+        // "once the lines are created I want it to go back to what it was").
+        guard !OverlayContentView.usesEmergenceEntry(style: style) else { return }
         let generation = showGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
             guard let self = self, self.showGeneration == generation,
@@ -461,26 +485,58 @@ class RecordingOverlay {
         })
     }
 
+    /// Frames elapsed since show(); only used to sub-sample the 60Hz emergence
+    /// timer back down to the shipped 30Hz waveform cadence.
+    private var frameCount: UInt64 = 0
+
     private func startAnimation() {
-        animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        // The emergence entry redraws at 60Hz — three ring pulses crossing 61pt in
+        // 520ms is visibly steppy at 30. The waveform state machine still advances
+        // at 30Hz (its smoothing, jitter period and travel cadence are tuned for
+        // that rate, and "exactly as shipped" is the requirement for the steady
+        // state), so the extra frames are pure redraw.
+        let emergence = OverlayContentView.usesEmergenceEntry(style: style)
+        let hz: Double = emergence ? 60.0 : 30.0
+        let stateEvery: UInt64 = emergence ? 2 : 1
+        frameCount = 0
+        animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / hz, repeats: true) { [weak self] _ in
             guard let self = self, let view = self.contentView else { return }
-            view.tick += 1
-            if let recorder = self.recorder {
-                let raw = CGFloat(recorder.currentLevel)
-                // Noise gate: suppress ambient noise, rescale speech range
-                let gated = max(raw - 0.08, 0) / 0.92
-                view.audioLevel = min(pow(gated, 0.5) * 1.4, 1.0)
-                // First real speech triggers the record-icon -> waveform explosion
-                // (Michael 2026-07-25). Gate well above room tone so breath alone
-                // doesn't trigger it.
-                if !view.heardSpeech && view.audioLevel > 0.25 {
-                    view.heardSpeech = true
+            self.frameCount &+= 1
+            if self.frameCount % stateEvery == 0 {
+                view.tick += 1
+                if let recorder = self.recorder {
+                    let raw = CGFloat(recorder.currentLevel)
+                    // Noise gate: suppress ambient noise, rescale speech range
+                    let gated = max(raw - 0.08, 0) / 0.92
+                    view.audioLevel = min(pow(gated, 0.5) * 1.4, 1.0)
+                    // First real speech triggers the record-icon -> waveform explosion
+                    // (Michael 2026-07-25). Gate well above room tone so breath alone
+                    // doesn't trigger it.
+                    if !view.heardSpeech && view.audioLevel > 0.25 {
+                        view.heardSpeech = true
+                        view.speechStartedAt = Date()
+                    }
                 }
+                // The per-bar waveform state used to advance inside drawBars, which
+                // meant it never advanced at all while the prominent banner was up
+                // (that path draws through drawBannerBars) — the banner's bars sat
+                // frozen at zero for the whole recording. Advancing it here, once per
+                // state tick, is what makes the banner and the emergence end state
+                // genuinely speech-reactive.
+                view.advanceLevels()
             }
             if view.heardSpeech && view.explodeProgress < 1 {
-                view.explodeProgress = min(1, view.explodeProgress + 0.09)
-                if view.explodeProgress >= 1 {
-                    self.scheduleSettle()
+                if emergence {
+                    // Wall-clock, not per-tick increments: the locked 520ms has to be
+                    // 520ms whatever the frame rate does.
+                    let started = view.speechStartedAt ?? Date()
+                    let elapsed = -started.timeIntervalSinceNow
+                    view.explodeProgress = min(1, CGFloat(elapsed / OverlayEmergence.emergeDuration))
+                } else {
+                    view.explodeProgress = min(1, view.explodeProgress + 0.09)
+                    if view.explodeProgress >= 1 {
+                        self.scheduleSettle()
+                    }
                 }
             }
             view.needsDisplay = true
@@ -505,13 +561,25 @@ class OverlayContentView: NSView {
     /// driven from the 30fps animation tick.
     var heardSpeech = false
     var explodeProgress: CGFloat = 0
+    /// Wall-clock instant the first real speech landed. The locked emergence
+    /// (2026-08-12) runs on real time, not on a per-tick increment, so its 520ms
+    /// stays 520ms regardless of frame rate.
+    var speechStartedAt: Date?
     /// In-place decay to the compact steady state (0 = full banner, 1 = compact).
     var settleProgress: CGFloat = 0
     var recordingStartedAt = Date()
-    /// Render-harness override for the elapsed timer (deterministic stills).
+    /// Render-harness override for the elapsed timer (deterministic stills). Also
+    /// pins the idle ring's phase, so emergence stills are reproducible.
     var renderElapsedOverride: TimeInterval?
     /// Visual variant (config `overlayStyle` 1–5); drawing dispatches on it.
     var style: Int = 1
+
+    /// Which variant gets Michael's locked record-icon entry (2026-08-12).
+    ///
+    /// Style 5 is what an unset `overlayStyle` resolves to (`AppDelegate` clamps
+    /// `config.overlayStyle ?? 5` into 1…5), so it is the one he actually sees.
+    /// The old style-5 comet is preserved below as an unreachable `case 6`.
+    static func usesEmergenceEntry(style: Int) -> Bool { style == 5 }
     var audioLevel: CGFloat = 0
     var tick: Int = 0
     @objc dynamic var borderWidth: CGFloat = 0
@@ -562,6 +630,15 @@ class OverlayContentView: NSView {
     /// keypress is the only reliable signal for a dead tap or dead app).
     static let prominentSize = NSSize(width: 340, height: 110)
     static let errorSize = NSSize(width: 400, height: 96)
+
+    /// Canvas for the locked record-icon entry. Fully transparent until the purple
+    /// bloom opens; sized so the outermost ring pulse (radius 74.5pt at the locked
+    /// dials) never touches an edge — a clipped pulse reads as a stray corner arc.
+    static let emergenceSize: NSSize = {
+        let g = OverlayEmergence.geometry(centerX: 0, centerY: 0)
+        let span = ceil(OverlayEmergence.maxInkRadius(geometry: g) * 2) + 20
+        return NSSize(width: max(340, span), height: span)
+    }()
 
     static func pillSize(for state: RecordingOverlay.OverlayState, streamingText: String = "") -> NSSize {
         if case .error = state { return errorSize }
@@ -902,6 +979,10 @@ class OverlayContentView: NSView {
     }
 
     private func drawProminentBanner(ctx: CGContext, rect: NSRect, pillPath: CGPath) {
+        if Self.usesEmergenceEntry(style: style) {
+            drawEmergenceEntry(ctx: ctx, rect: rect)
+            return
+        }
         if settleProgress >= 1 {
             drawSettledCard(ctx: ctx, rect: rect, pillPath: pillPath)
             return
@@ -984,8 +1065,12 @@ class OverlayContentView: NSView {
                 drawBannerBars(ctx: ctx, rect: barsRect, emergence: p, settleColor: .white)
             }
 
-        case 5: // WINNER (R2 three-of-four lenses; R3 codex geometry fixes):
-            // record mark travels left to a REAL dock at the bar field's edge,
+        case 6: // Comet Dock — the 2026-07-25 winner, SUPERSEDED 2026-08-12 by the
+            // Ring-Pulses/Purple-bloom entry that now owns style 5 (see
+            // drawEmergenceEntry). Kept intact for side-by-side comparison; the
+            // config clamp in AppDelegate caps overlayStyle at 5, so nothing reaches
+            // this case today and the render harness drives it directly.
+            // Record mark travels left to a REAL dock at the bar field's edge,
             // shedding bars behind it — comet, one continuous red mass.
             let dotInset: CGFloat = 34
             let dockX = rect.minX + dotInset
@@ -1041,6 +1126,108 @@ class OverlayContentView: NSView {
             ctx.setStrokeColor(NSColor(red: 0.6, green: 0.25, blue: 0.8, alpha: 0.9).cgColor)
             ctx.setLineWidth(borderWidth)
             ctx.strokePath()
+        }
+    }
+
+    // MARK: - Locked record-icon entry (2026-08-12)
+
+    private func setFill(_ ctx: CGContext, _ rgb: OverlayEmergence.RGB, _ alpha: CGFloat) {
+        ctx.setFillColor(red: rgb.r, green: rgb.g, blue: rgb.b, alpha: alpha)
+    }
+
+    private func strokeRing(_ ctx: CGContext, center: CGPoint, stroke: OverlayEmergence.RingStroke,
+                            color: OverlayEmergence.RGB) {
+        guard stroke.radius > 0, stroke.alpha > 0, stroke.lineWidth > 0 else { return }
+        ctx.setStrokeColor(red: color.r, green: color.g, blue: color.b, alpha: stroke.alpha)
+        ctx.setLineWidth(stroke.lineWidth)
+        ctx.strokeEllipse(in: CGRect(x: center.x - stroke.radius, y: center.y - stroke.radius,
+                                     width: stroke.radius * 2, height: stroke.radius * 2))
+    }
+
+    /// The blooming purple pill: a rounded rect that starts as a disc the size of
+    /// the record mark and relaxes into the shipped card at 1.2×.
+    private func drawBloomCard(_ ctx: CGContext, geometry g: OverlayEmergence.Geometry,
+                               card: OverlayEmergence.CardShape) {
+        guard card.alpha > 0, card.width > 0, card.height > 0 else { return }
+        let box = CGRect(x: g.centerX - card.width / 2, y: g.centerY - card.height / 2,
+                         width: card.width, height: card.height)
+        let path = CGPath(roundedRect: box, cornerWidth: card.cornerRadius,
+                          cornerHeight: card.cornerRadius, transform: nil)
+        ctx.saveGState()
+        ctx.addPath(path)
+        ctx.clip()
+        let a = OverlayEmergence.purpleA
+        let b = OverlayEmergence.purpleB
+        let colors = [
+            CGColor(red: a.r, green: a.g, blue: a.b, alpha: card.alpha),
+            CGColor(red: b.r, green: b.g, blue: b.b, alpha: card.alpha),
+        ] as CFArray
+        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                     colors: colors, locations: [0.0, 1.0]) {
+            ctx.drawLinearGradient(gradient,
+                                   start: CGPoint(x: box.minX, y: box.midY),
+                                   end: CGPoint(x: box.maxX, y: box.midY), options: [])
+        }
+        ctx.restoreGState()
+
+        let bw = g.borderWidth
+        guard bw > 0, card.borderAlpha > 0 else { return }
+        let inner = box.insetBy(dx: bw / 2, dy: bw / 2)
+        guard inner.width > 0, inner.height > 0 else { return }
+        let r = max(0, card.cornerRadius - bw / 2)
+        ctx.addPath(CGPath(roundedRect: inner, cornerWidth: r, cornerHeight: r, transform: nil))
+        let bc = OverlayEmergence.borderColor
+        ctx.setStrokeColor(red: bc.r, green: bc.g, blue: bc.b, alpha: card.borderAlpha)
+        ctx.setLineWidth(bw)
+        ctx.strokePath()
+    }
+
+    /// Michael's locked entry (build/26-08-12-record-icon-animation/LOCKED-SETTINGS.json).
+    ///
+    /// Paint order matches the lab exactly: bloom card, then the emergence pulses,
+    /// then the bars, then the idle ring and the record mark on top. Everything is
+    /// a continuous function of `explodeProgress`, so p = 1 is simultaneously the
+    /// last frame of the entry and the permanent steady state — the bars keep
+    /// tracking the mic from there with no separate code path and no settle.
+    private func drawEmergenceEntry(ctx: CGContext, rect: NSRect) {
+        let p = OverlayEmergence.clamp01(explodeProgress)
+        let g = OverlayEmergence.geometry(centerX: rect.midX, centerY: rect.midY)
+        let center = CGPoint(x: g.centerX, y: g.centerY)
+
+        drawBloomCard(ctx, geometry: g, card: OverlayEmergence.card(progress: p, geometry: g))
+
+        for stroke in OverlayEmergence.emergencePulses(progress: p, geometry: g) {
+            strokeRing(ctx, center: center, stroke: stroke, color: OverlayEmergence.ringColor)
+        }
+
+        let solid = OverlayEmergence.solidity(progress: p, geometry: g)
+        for i in 0..<g.count where solid[i] > 0 {
+            let level = min(1, max(0, displayLevels[i]))
+            let h = g.targetHeight(level: level) * solid[i]
+            guard h > 0 else { continue }
+            let x = g.homeX(i)
+            let bar = CGRect(x: x - g.barWidth / 2, y: g.centerY - h / 2,
+                             width: g.barWidth, height: h)
+            // Corner radius tracks level, so silence renders as round dots and loud
+            // speech as capsules — the shipped drawBars rule, at 1.2×.
+            let r = level * g.barWidth / 2
+            ctx.addPath(CGPath(roundedRect: bar, cornerWidth: r, cornerHeight: r, transform: nil))
+            setFill(ctx, OverlayEmergence.barColor(index: i, progress: p, geometry: g),
+                    OverlayEmergence.barAlpha)
+            ctx.fillPath()
+        }
+
+        let elapsed = renderElapsedOverride ?? -recordingStartedAt.timeIntervalSinceNow
+        for stroke in OverlayEmergence.idleRings(progress: p, time: CGFloat(elapsed)) {
+            strokeRing(ctx, center: center, stroke: stroke, color: OverlayEmergence.ringColor)
+        }
+
+        let markR = OverlayEmergence.markRadius(progress: p)
+        let markA = OverlayEmergence.markAlpha(progress: p)
+        if markR > 0 && markA > 0 {
+            setFill(ctx, OverlayEmergence.discRed, markA)
+            ctx.fillEllipse(in: CGRect(x: center.x - markR, y: center.y - markR,
+                                       width: markR * 2, height: markR * 2))
         }
     }
 
@@ -1107,23 +1294,25 @@ class OverlayContentView: NSView {
         }
     }
 
-    private func drawBars(ctx: CGContext, rect: NSRect, color: NSColor, compressed: Bool) {
+    /// Read-only view of the waveform state, so tests can assert that the levels
+    /// advance without going through a draw pass.
+    internal func levelForRender(_ index: Int) -> CGFloat {
+        displayLevels.indices.contains(index) ? displayLevels[index] : 0
+    }
+
+    /// Advance the per-bar waveform state by one animation tick.
+    ///
+    /// This used to live inside `drawBars`, which meant it only ran on the code
+    /// path that draws the plain pill. The prominent banner and the settled card
+    /// both render through `drawBannerBars`, which only READS `displayLevels` — so
+    /// their bars never moved. The animation timer now calls this once per tick for
+    /// every state, which is what makes every variant speech-reactive; `drawBars`
+    /// is pure rendering.
+    ///
+    /// Behaviour is byte-for-byte the old code (same smoothing, jitter period,
+    /// travel cadence and edge suppression) — only the call site moved.
+    func advanceLevels() {
         if overlayState == .transcribing { return }
-
-        let effectiveDotSize = compressed ? Self.compressedDotSize : Self.dotSize
-        let effectiveGap = compressed ? Self.compressedBarGap : Self.barGap
-        let effectiveMaxHeight = compressed ? Self.compressedMaxBarHeight : Self.maxBarHeight
-
-        // When compressed, left-align bars; otherwise center them
-        let startX: CGFloat
-        let centerY: CGFloat
-        if compressed {
-            startX = Self.hPadding
-            centerY = rect.midY
-        } else {
-            startX = Self.hPadding
-            centerY = rect.midY
-        }
 
         // Fast attack, moderate release
         let smoothing: CGFloat = audioLevel > smoothLevel ? 0.8 : 0.4
@@ -1143,8 +1332,6 @@ class OverlayContentView: NSView {
             travelBoost[i] += (travelBoost[i - 1] - travelBoost[i]) * 0.4
         }
         travelBoost[0] *= 0.85 // decay the source
-
-        ctx.setFillColor(color.cgColor)
 
         for i in 0..<Self.barCount {
             // Edge suppression: 20% outermost, 12% second, 5% third
@@ -1171,7 +1358,23 @@ class OverlayContentView: NSView {
             // Fast attack, smoother release
             let displaySmoothing: CGFloat = target > displayLevels[i] ? 0.8 : 0.5
             displayLevels[i] += (target - displayLevels[i]) * displaySmoothing
+        }
+    }
 
+    private func drawBars(ctx: CGContext, rect: NSRect, color: NSColor, compressed: Bool) {
+        if overlayState == .transcribing { return }
+
+        let effectiveDotSize = compressed ? Self.compressedDotSize : Self.dotSize
+        let effectiveGap = compressed ? Self.compressedBarGap : Self.barGap
+        let effectiveMaxHeight = compressed ? Self.compressedMaxBarHeight : Self.maxBarHeight
+
+        // Bars are left-aligned from the horizontal padding in both layouts.
+        let startX: CGFloat = Self.hPadding
+        let centerY: CGFloat = rect.midY
+
+        ctx.setFillColor(color.cgColor)
+
+        for i in 0..<Self.barCount {
             let dl = max(displayLevels[i], 0)
             let minH: CGFloat = compressed ? 0.5 : 1.0
             let h = minH + (effectiveMaxHeight - minH) * dl
