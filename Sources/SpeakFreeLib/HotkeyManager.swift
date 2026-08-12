@@ -43,6 +43,7 @@ class HotkeyManager {
         self.onAbort = onAbort
         self.onUserInteraction = onUserInteraction
         startInteractionMonitor()
+        startLifecycleObservers()
 
         // For modifier-only keys (like Fn), use a CGEventTap so we can suppress
         // the default system action (e.g. the emoji drawer that Fn normally opens).
@@ -54,6 +55,24 @@ class HotkeyManager {
     }
 
     func stop() {
+        // A stopped manager can never deliver a pending release: force-end an in-flight
+        // take rather than strand it. Unconditional — no hardware read — because whatever
+        // the key state, no future event will arrive through this instance. Config
+        // reloads are deferred past an in-flight take (AppDelegate L1), but `isPressed`
+        // (main thread) lags `modifierPressed` (tap thread) by one main-queue hop, so a
+        // press landing inside a reload or the post-buffer window can still reach here
+        // pressed: the queue becomes [onKeyDown][forced keyUp] — a zero-length take, the
+        // deliberate trade against the old behavior (a silently stranded one). At app
+        // termination this async block never runs and the recorder is already stopped
+        // (applicationWillTerminate), so this exists for teardown races, not quit.
+        if modifierPressed {
+            modifierPressed = false
+            phantomUpStreak = 0
+            DiagnosticLogger.shared.log("HotkeyManager: stopped while pressed — force-ending take")
+            let keyUp = onKeyUp
+            DispatchQueue.main.async { keyUp?() }
+        }
+        stopLifecycleObservers()
         tearDownEventTap()
         if let monitor = globalMonitor {
             NSEvent.removeMonitor(monitor)
@@ -81,7 +100,8 @@ class HotkeyManager {
     /// path — which is the right way round: a truncated take is recoverable, a stranded one
     /// silently eats a dictation.
     private func reconcilePressedState(_ reason: String) {
-        guard modifierPressed, !Self.hotkeyIsPhysicallyDown(keyCode: keyCode) else { return }
+        guard Self.shouldReconcile(modifierPressed: modifierPressed,
+                                   physicallyDown: physicallyDownRead(keyCode)) else { return }
         modifierPressed = false
         phantomUpStreak = 0
         DiagnosticLogger.shared.log(
@@ -92,8 +112,47 @@ class HotkeyManager {
         }
     }
 
-    /// Verify the event tap is alive. If it died, recreate it.
+    /// The reconcile decision, pure: end the take only when we believe the key is held
+    /// but the hardware says it is not. A wrong hardware read can only end a take early
+    /// (bounded, recoverable) — never strand one.
+    static func shouldReconcile(modifierPressed: Bool, physicallyDown: Bool) -> Bool {
+        modifierPressed && !physicallyDown
+    }
+
+    /// Test seam for the hardware key-state read that drives `reconcilePressedState`.
+    /// Production default asks the HID system state; tests inject an answer so the
+    /// outage-recovery paths can be exercised without holding a physical key.
+    var physicallyDownRead: (UInt16) -> Bool = { HotkeyManager.hotkeyIsPhysicallyDown(keyCode: $0) }
+
+    /// What `ensureTapHealthy` had to do. `.none` means the listening mechanism was
+    /// verified healthy — and, deliberately, that no reconcile runs: while the tap is
+    /// healthy the release will arrive as an event, so a spurious hardware "key up"
+    /// read must not be able to truncate a live take on an ordinary health poll.
+    enum TapRepair: Equatable { case none, reEnabled, recreated, monitorRecreated }
+
+    /// Test seam: replaces the real repair (which would create a live CGEventTap in the
+    /// test process) while leaving the reconcile policy under test.
+    var tapRepairOverride: (() -> TapRepair)?
+
+    /// Verify the event tap is alive. If it died, repair it AND reconcile the pressed
+    /// state — the outage may have swallowed the release, and before 2026-08-11 these
+    /// two branches were exactly the recovery paths that never reconciled (the 30s
+    /// health poll was also gated off during a take, so a stranded take could not heal).
     func ensureTapHealthy() {
+        switch repairTapIfNeeded() {
+        case .none:
+            break
+        case .reEnabled:
+            reconcilePressedState("health-check re-enable")
+        case .recreated:
+            reconcilePressedState("health-check recreate")
+        case .monitorRecreated:
+            break  // startGlobalMonitor() reconciles on its own path
+        }
+    }
+
+    private func repairTapIfNeeded() -> TapRepair {
+        if let override = tapRepairOverride { return override() }
         // Modifier-only keys run on a CGEventTap; everything else ("Other…" keys) runs on an
         // NSEvent global monitor. Both can die, but only the tap was ever healed — so an
         // "Other…" hotkey whose monitor was torn down stayed silently dead until relaunch
@@ -102,18 +161,81 @@ class HotkeyManager {
             if globalMonitor == nil {
                 DiagnosticLogger.shared.log("HotkeyManager: global monitor missing — recreating")
                 startGlobalMonitor()
+                return .monitorRecreated
             }
-            return
+            return .none
         }
         if let tap = eventTap {
             if !CGEvent.tapIsEnabled(tap: tap) {
                 DiagnosticLogger.shared.log("HotkeyManager: event tap disabled — re-enabling")
                 CGEvent.tapEnable(tap: tap, enable: true)
+                return .reEnabled
             }
+            return .none
         } else {
             DiagnosticLogger.shared.log("HotkeyManager: event tap missing — recreating")
             startEventTap()
+            // Creation can fail (TCC propagation, revoked Accessibility) and leave the
+            // global-monitor FALLBACK as the live — healthy — mechanism, with `eventTap`
+            // permanently nil. Claiming `.recreated` then would reconcile a live take on
+            // every 30s poll tick and every pre-recording check (adversarial round 1,
+            // finding 1). Report a repair only when a tap actually exists now; the blind
+            // windows of a failed creation are covered by the retry ladder's per-rung
+            // reconcile and `startGlobalMonitor`'s own reconcile-on-install.
+            return eventTap != nil ? .recreated : .none
         }
+    }
+
+    // MARK: - Sleep / wake / fast-user-switch
+
+    /// While the machine sleeps or the session is switched away, the tap exists but sees
+    /// nothing — a release in that window is gone, and unlike a tap outage the tap often
+    /// comes back looking perfectly healthy. These are KNOWN-blind windows, so resume
+    /// reconciles unconditionally (the hardware read deciding; a user is essentially
+    /// never still holding the hotkey across a sleep or user switch).
+    private var lifecycleObservers: [NSObjectProtocol] = []
+
+    private func startLifecycleObservers() {
+        guard lifecycleObservers.isEmpty else { return }
+        let nc = NSWorkspace.shared.notificationCenter
+        let resumeEvents: [(Notification.Name, String)] = [
+            (NSWorkspace.didWakeNotification, "wake from sleep"),
+            (NSWorkspace.sessionDidBecomeActiveNotification, "fast-user-switch return"),
+        ]
+        for (name, reason) in resumeEvents {
+            lifecycleObservers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.handleSystemResume(reason)
+            })
+        }
+    }
+
+    private func stopLifecycleObservers() {
+        let nc = NSWorkspace.shared.notificationCenter
+        for observer in lifecycleObservers { nc.removeObserver(observer) }
+        lifecycleObservers.removeAll()
+    }
+
+    /// Wake / session-return recovery: heal the listening mechanism, then end any take
+    /// whose release fell into the blind window. Internal so tests can drive it without
+    /// posting workspace notifications.
+    func handleSystemResume(_ reason: String) {
+        ensureTapHealthy()
+        reconcilePressedState(reason)
+    }
+
+    /// Test-only priming: install a key-up callback and (optionally) mark the key as
+    /// held, without creating any event tap or monitor, so the outage-recovery paths
+    /// can be exercised in-process. Never touches live event infrastructure.
+    func primeForTesting(pressed: Bool = true, onKeyUp: @escaping () -> Void) {
+        self.onKeyUp = onKeyUp
+        self.modifierPressed = pressed
+    }
+
+    /// Test-only: swap the key-up callback WITHOUT touching `modifierPressed`, so a test
+    /// can observe the pressed state a previous phase actually left behind (adversarial
+    /// round 2: re-priming `pressed: false` overwrote the very state under observation).
+    func replaceKeyUpForTesting(_ onKeyUp: @escaping () -> Void) {
+        self.onKeyUp = onKeyUp
     }
 
     deinit {
@@ -194,6 +316,10 @@ class HotkeyManager {
                 DiagnosticLogger.shared.log("HotkeyManager: event tap creation failed — retry \(tapRetryCount)/10 in \(Int(delay))s")
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                     guard let self = self, self.eventTap == nil else { return }
+                    // The whole retry ladder is a blind window (up to ~55s with no tap
+                    // installed) — a release during it reached nobody. Check on every rung,
+                    // not just at the end, so a stranded take ends within one rung.
+                    self.reconcilePressedState("tap-creation retry")
                     self.startEventTap()
                 }
             } else {
@@ -234,6 +360,10 @@ class HotkeyManager {
             DiagnosticLogger.shared.log("HotkeyManager: event tap up — removed superseded global-monitor fallback")
         }
         DiagnosticLogger.shared.log("HotkeyManager: event tap created on dedicated thread")
+        // Creation succeeded, possibly after a blind gap (retry ladder, health-check
+        // recreate, 5-in-10s rebuild) — end any take whose release fell into it. On the
+        // very first start() no take exists and this is a no-op.
+        reconcilePressedState("tap created")
     }
 
     private func tearDownEventTap() {
@@ -350,15 +480,26 @@ class HotkeyManager {
         //     worth it — see the cost asymmetry at the bottom of this comment. The point is that
         //     acting on this event buys little and risks a truncated dictation.)
         //   - The case that reasoning was reaching for, a release lost while the tap was blind,
-        //     mostly belongs to `reconcilePressedState`, which asks the HARDWARE whether the key
-        //     is still held and so can only ever end a take that is genuinely over. It is called
-        //     from the 5-in-10s rebuild, the tap-disable re-enable, and the global-monitor
-        //     fallback. It is NOT called from `ensureTapHealthy`'s re-enable or recreate branches,
-        //     from `startEventTap`'s retry ladder (up to 55s with no tap), or from `stop()`, and
-        //     there is no sleep/wake or fast-user-switch handler at all. The 30s health poll that
-        //     would reach the first two is itself gated on `!isPressed`, which is false for the
-        //     whole duration of a stranded take. So the coverage is partial, by inspection
-        //     (2026-07-26 round-3 review) — do not read it as a guarantee.
+        //     belongs to `reconcilePressedState`, which asks the HARDWARE whether the key is
+        //     still held and so can only ever end a take that is genuinely over. As of
+        //     2026-08-11 it fires from every path that loses or replaces the tap: the 5-in-10s
+        //     rebuild, the tap-disable re-enable, the global-monitor fallback, `ensureTapHealthy`'s
+        //     re-enable and recreate branches (reached by the 30s health poll, which is no longer
+        //     gated off during a take), every rung of `startEventTap`'s retry ladder plus its
+        //     success path, and the sleep-wake / fast-user-switch resume handlers. `stop()`
+        //     force-ends an in-flight take outright — a stopped manager can never deliver the
+        //     release. THREE residual gaps, all deliberate or pre-existing: (1) a healthy-looking
+        //     tap with a stuck `modifierPressed` (this fall-through's phantom-swallow edge) is NOT
+        //     reconciled by the poll, so a hardware misread cannot truncate a live take; that case
+        //     costs the extra tap(s) described below. (2) Non-modifier ("Other…") hotkeys never
+        //     set `modifierPressed` (handleNSEvent calls the callbacks directly), so the whole
+        //     watchdog — reconcile AND stop()'s force-end — is inert for them; a release lost
+        //     while their global monitor is down is still stranded until the next press. Fixing
+        //     that needs pressed-state tracking plus a keyState-based hardware read for regular
+        //     keycodes — separate work. (3) `modifierPressed` is an unsynchronized Bool with
+        //     tap-thread and main-thread writers, so two racing reconcile paths can both dispatch
+        //     onKeyUp; the user-visible double-stop is prevented by `guard isPressed` in
+        //     AppDelegate.handleRecordingStop, not by anything in this file.
         //
         // Worst case if a release is missed and no reconcile path fires, walked in both modes:
         // in HOLD mode the next release is honored normally and the take ends one tap later. In
@@ -590,7 +731,12 @@ class HotkeyManager {
         }
         // Reaching here after a tap failure means events were unobserved for however long the
         // ten retries took. A release in that window is gone; don't leave a take running.
-        reconcilePressedState("tap→global-monitor fallback")
+        // Gated on the install actually succeeding (adversarial round 2): reconciling after a
+        // FAILED install would re-create the fixed `.recreated`-on-failure bug the moment
+        // Other-key pressed-state tracking ships — a failed repair is not a completed outage.
+        if globalMonitor != nil {
+            reconcilePressedState("tap→global-monitor fallback")
+        }
     }
 
     /// The fn transition implied by a flagsChanged event in the global-monitor fallback, given the

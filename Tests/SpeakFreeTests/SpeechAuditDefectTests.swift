@@ -83,55 +83,6 @@ final class SpeechAuditDefectTests: XCTestCase {
         XCTAssertEqual(result, "Okay.")
     }
 
-    func testForkBPrefersCorrectPackageOfShotsFixture() {
-        let primary = "look up at this video package"
-        let bluetooth = "Putting together a package of shots for you"
-        let decision = DualCapture.forkBDecision(
-            primary: primary,
-            bluetooth: bluetooth,
-            vocabularyWords: ["shots"],
-            commonWords: ["look", "up", "at", "this", "package", "putting", "together",
-                          "a", "of", "for", "you"])
-
-        XCTAssertTrue(decision.preferBluetooth)
-    }
-
-    func testForkBPrefersCorrectCommasAndPeriodsFixture() {
-        let primary = "and bad comments and things that should be common in favours in stacker"
-        let bluetooth = "add commas and things that should be commas and periods and it is not good"
-        let decision = DualCapture.forkBDecision(
-            primary: primary,
-            bluetooth: bluetooth,
-            vocabularyWords: [],
-            commonWords: ["add", "and", "bad", "be", "comments", "common", "good", "in",
-                          "is", "it", "commas", "periods", "not", "that", "things", "should"])
-
-        XCTAssertTrue(decision.preferBluetooth)
-    }
-
-    func testForkBRejectsTruncatedBluetoothTrack() {
-        let decision = DualCapture.forkBDecision(
-            primary: "please send the completed report to everyone this afternoon",
-            bluetooth: "this afternoon",
-            vocabularyWords: [],
-            commonWords: ["please", "send", "the", "completed", "report", "to", "everyone",
-                          "this", "afternoon"])
-
-        XCTAssertFalse(decision.preferBluetooth)
-        XCTAssertEqual(decision.reason, .bluetoothTooShort)
-    }
-
-    func testForkBKeepsExistingNegationVeto() {
-        let decision = DualCapture.forkBDecision(
-            primary: "please do not forward this message",
-            bluetooth: "please do please forward this message",
-            vocabularyWords: [],
-            commonWords: ["please", "do", "not", "forward", "this", "message"])
-
-        XCTAssertFalse(decision.preferBluetooth)
-        XCTAssertEqual(decision.reason, .mergeVeto)
-    }
-
     func testElectronRejectsLiveAXButKeepsRememberedTailEligible() {
         XCTAssertNil(AppDelegate.liveCursorContext(
             "untrusted Electron AX text", isElectronClass: true))

@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
+import AppKit
 import AudioToolbox
 import AVFoundation
 import CoreAudio
@@ -39,6 +40,9 @@ class AudioRecorder {
                 startEngine()
             } else if !preBufferEnabled && !isRecording {
                 // Stop the engine when not recording
+                stopBoundDeviceWatch()
+                boundDeviceUID = nil
+                boundDeviceID = nil
                 audioEngine?.inputNode.removeTap(onBus: 0)
                 audioEngine?.stop()
                 releaseEngineOffMain(&audioEngine)
@@ -80,22 +84,39 @@ class AudioRecorder {
 
     /// Shut down the audio engine. Call before app exit.
     func shutdown() {
+        stopBoundDeviceWatch()
+        boundDeviceUID = nil
+        boundDeviceID = nil
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         releaseEngineOffMain(&audioEngine)
     }
 
     /// Start the always-on audio engine. Call once on app launch.
+    ///
+    /// Bounced to main: `setup()` runs off-main, and every engine-lifecycle field here
+    /// (`audioEngine`, `isRebuilding`, `boundDevice*`, `pendingReinstall`) is main-thread
+    /// state with no lock of its own.
     func warmUp() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.warmUp() }
+            return
+        }
+        // The device monitors run even with the pre-buffer off, so a device change while
+        // idle still leaves a correct binding for the next on-demand engine start.
+        startDeviceChangeMonitor()
         guard preBufferEnabled else { return }
         startEngine()
-        startDeviceChangeMonitor()
     }
 
     /// Verify audio is flowing. If the engine is dead, rebuild it.
     /// Call this before every recording to catch silent AirPods handoffs.
     /// Only rebuilds audio — never touches the whisper model.
     func ensureAudioHealthy() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.ensureAudioHealthy() }
+            return
+        }
         guard preBufferEnabled else { return }
 
         // No engine at all — start one
@@ -131,48 +152,178 @@ class AudioRecorder {
     /// device is missing at engine build time, capture falls back to the default (logged).
     private(set) var pinnedInputDeviceUID: String?
 
-    // MARK: - Dual-mic capture
+    /// Consecutive engine builds whose device bind FAILED while the device was present.
+    /// Caps how many times a device-list event may retry the same failing bind (see the
+    /// finding-2 comment at the bind site). Reset on any successful or pin-free build.
+    private var consecutiveBindFailures = 0
+    static let bindRetryCap = 3
 
-    /// When on and no explicit pin is set, the always-on engine is pinned to the
-    /// built-in mic. Any available Bluetooth mic opens only during a recording.
-    var dualCaptureEnabled = false {
-        didSet {
-            guard dualCaptureEnabled != oldValue else { return }
-            DiagnosticLogger.shared.log("AudioRecorder: dual-mic capture → \(dualCaptureEnabled)")
-            // Setup applies routing before warmUp. Starting a delayed rebuild with no
-            // engine yet races warmUp's immediate start and can stop the new engine.
-            guard audioEngine != nil else { return }
-            reinstallTap()
+    // MARK: - Effective capture device (default-pin rule, 2026-08-12)
+
+    /// THE capture-device rule: an explicit user pin always wins; with no pin,
+    /// speakfree captures the BUILT-IN microphone whenever the Mac has one; only a
+    /// machine with no built-in input (a Mac mini with USB mics only) follows the
+    /// system default. `nil` means "follow the system default".
+    ///
+    /// Why the built-in is the default: macOS silently flips the default input to
+    /// AirPods the moment they connect. That both degrades their audio (the HFP/SCO
+    /// downgrade) and captures a microphone the user never chose — 11.9% of the local
+    /// recording archive was captured that way. Pinning the built-in makes the flip a
+    /// no-op; anyone who genuinely wants another mic picks it in the menu-bar selector.
+    static func effectivePin(explicitPin: String?, builtInUID: String?) -> String? {
+        explicitPin ?? builtInUID
+    }
+
+    /// `effectivePin` against the current device cache. Cache-only by design: this runs
+    /// on the main thread inside startEngine and the rebuild path, and live HAL reads
+    /// here contributed to the 2026-07-15 main-thread wedge.
+    private func effectivePinNow() -> String? {
+        Self.effectivePin(
+            explicitPin: pinnedInputDeviceUID,
+            builtInUID: AudioDeviceCatalog.cachedBuiltInInput?.uid)
+    }
+
+    /// A primary bound to a specific device (explicitly or by the built-in default)
+    /// does not need rebuilding when the system default changes. This is also the
+    /// circuit break that prevents our own device binding from creating an
+    /// AVAudioEngine configuration-change feedback loop.
+    private func primaryFollowsSystemDefaultNow() -> Bool {
+        effectivePinNow() == nil
+    }
+
+    // MARK: - Bound-device tracking (device-churn resilience, 2026-08-12)
+    //
+    // The pin is UID-keyed, but the ENGINE is bound to a numeric AudioDeviceID, and
+    // CoreAudio renumbers those across re-enumeration (sleep/wake, USB replug, Bluetooth
+    // rejoin). A pin that still resolves while the engine talks to a dead ID is the
+    // ghost-pepper bug class: everything looks healthy and no audio arrives. So the
+    // numeric ID we actually bound is retained ALONGSIDE the UID, purely so a device-list
+    // change can be compared against it. Nothing else may key off `boundDeviceID`.
+
+    private var boundDeviceUID: String?
+    private var boundDeviceID: AudioDeviceID?
+    private var boundDeviceListeners: [AudioDeviceCatalog.DeviceListenerToken] = []
+    /// Per-device CoreAudio alerts land here — never main (a blocking main-thread HAL
+    /// callback is the 2026-07-15 wedge) and never the HAL's own thread.
+    private let deviceWatchQueue = DispatchQueue(
+        label: "com.speakfree.capturedevicewatch", qos: .utility)
+
+    /// Why a device-list change invalidates the current engine binding, or nil when it
+    /// does not. Pure: the whole rule is visible here and testable without hardware.
+    ///
+    /// - An engine following the system default is not covered here — the default-input
+    ///   listener already owns it, and reacting twice re-creates the 2026-07-20 loop.
+    /// - A bound UID that is gone, or that came back on a different `AudioDeviceID`, is a
+    ///   dead binding.
+    /// - A pin that was ABSENT at build time (engine fell back to the system default) and
+    ///   is now present must also rebuild — otherwise reconnecting the chosen microphone
+    ///   never takes effect.
+    static func deviceListRebuildReason(
+        boundUID: String?, boundID: AudioDeviceID?,
+        effectivePinTarget: String? = nil, engineExists: Bool = false,
+        bindRetryExhausted: Bool = false,
+        devices: [AudioInputDevice]
+    ) -> String? {
+        guard let uid = boundUID else {
+            // Cold-start heal (adversarial VERIFY 2026-08-12, blocker 2): the first engine
+            // build can beat the catalog's async first scan, in which case an unpinned
+            // user's engine binds NOTHING and follows the system default (AirPods!) while
+            // `currentCaptureDeviceName` reports the built-in mic into every sidecar. The
+            // default-input listener won't repair it (its guard asks what SHOULD happen,
+            // not what did), so this branch closes the disagreement: a live engine with no
+            // binding, when the pin target is now enumerable, is an orphan — rebuild it.
+            if engineExists, let target = effectivePinTarget,
+               devices.contains(where: { $0.uid == target }) {
+                return "engine is unbound but pin target \(target) is now present (cold-start heal)"
+            }
+            return nil
+        }
+        let match = devices.first { $0.uid == uid }
+        switch (boundID, match) {
+        case (nil, nil):
+            return nil
+        case (nil, .some(let device)):
+            // Retry budget (finding 2): this state is EITHER a device that was absent and
+            // returned (retry immediately, always) OR a bind that keeps failing while the
+            // device sits present (retry only until the cap, or every device event storms
+            // a rebuild that fails the same way).
+            guard !bindRetryExhausted else { return nil }
+            return "pinned device \(device.name) is present again"
+        case (.some, nil):
+            return "bound capture device \(uid) departed"
+        case (.some(let old), .some(let device)):
+            guard old != device.id else { return nil }
+            return "bound capture device \(device.name) was renumbered (\(old) → \(device.id))"
         }
     }
-    private let secondaryRecorder = SecondaryRecorder()
-    /// Dedicated serial queue for the secondary (Bluetooth) capture stream's CoreAudio
-    /// start/teardown. Keeps HAL calls off the main thread (2026-07-15 wedge): a stuck
-    /// coreaudiod must never block a menu-bar click while speakfree holds the event tap.
-    private let secondaryQueue = DispatchQueue(label: "com.speakfree.secondarycapture", qos: .utility)
-    private func dualEngagedNow() -> Bool {
-        // Cache-only: this runs inside startEngine (main thread via the rebuild path);
-        // live HAL reads here contributed to the 2026-07-15 main-thread wedge.
-        DualCapture.shouldEngage(
-            flagOn: dualCaptureEnabled,
-            pinnedUID: pinnedInputDeviceUID,
-            hasBuiltIn: AudioDeviceCatalog.cachedBuiltInInput != nil,
-            hasBluetooth: AudioDeviceCatalog.cachedBluetoothInput != nil)
+
+    /// Whether a per-device property alert on the bound capture device warrants a rebuild.
+    ///
+    /// `presentInDeviceList` is the authority and is checked FIRST: a departed device can
+    /// keep reporting `IsAlive == true` with a valid ID, so `IsAlive` is never trusted on
+    /// its own. The settle window is the same circuit break the configuration-change path
+    /// uses — binding the unit makes the device's own rate/stream properties move, and
+    /// treating that as an external change is exactly the 2026-07-20 self-induced rebuild
+    /// loop. A DEPARTURE is never self-induced, so it skips the window.
+    static func shouldRebuildForDeviceAlert(
+        selector: AudioObjectPropertySelector,
+        isAlive: Bool?,
+        presentInDeviceList: Bool,
+        secondsSinceEngineBuilt: TimeInterval
+    ) -> Bool {
+        if !presentInDeviceList { return true }
+        if secondsSinceEngineBuilt < selfInducedConfigWindowSeconds { return false }
+        if selector == kAudioDevicePropertyDeviceIsAlive { return isAlive == false }
+        // HasChanged / StreamConfiguration / NominalSampleRate: the format under the
+        // installed tap may have moved, and a tap on a stale format receives nothing.
+        return true
     }
 
-    private func usesBuiltInPrimaryNow() -> Bool {
-        DualCapture.shouldUseBuiltInPrimary(
-            flagOn: dualCaptureEnabled,
-            pinnedUID: pinnedInputDeviceUID,
-            hasBuiltIn: AudioDeviceCatalog.cachedBuiltInInput != nil)
+    /// What waking (or returning from a fast-user-switch) should do to the capture engine.
+    ///
+    /// Sleep is a known-blind window: device IDs can be renumbered and the input unit's
+    /// stream description can go stale, with no notification that survives the sleep. An
+    /// existing engine is therefore ALWAYS discarded and rebuilt rather than inspected —
+    /// there is no cheap way to prove a post-wake engine is still live, and a rebuild
+    /// costs about a second of pre-roll while a stale engine costs a whole dictation.
+    enum ResumeAction: Equatable { case none, startEngine, rebuild }
+
+    static func resumeAction(preBufferEnabled: Bool, engineExists: Bool) -> ResumeAction {
+        if engineExists { return .rebuild }
+        return preBufferEnabled ? .startEngine : .none
     }
 
-    private func primaryFollowsSystemDefaultNow() -> Bool {
-        DualCapture.primaryFollowsSystemDefault(
-            flagOn: dualCaptureEnabled,
-            pinnedUID: pinnedInputDeviceUID,
-            hasBuiltIn: AudioDeviceCatalog.cachedBuiltInInput != nil)
+    /// Whether the input format the engine reports can be trusted enough to install a tap.
+    ///
+    /// Zero rate or zero channels is the AirPods SCO-negotiation race (installTap throws,
+    /// which libggml's terminate hook turns into SIGABRT). A rate that disagrees with the
+    /// hardware's own nominal rate is the documented stale-format trap: after re-binding,
+    /// the input unit can keep reporting the PREVIOUS device's stream description, and a
+    /// tap installed with it never receives a frame (the 2026-07-22 dead-air outage).
+    /// Hardware values are optional because an unreadable device must not veto capture.
+    static func isCaptureFormatUsable(
+        engineRate: Double, engineChannels: UInt32, deviceRate: Double?, deviceChannels: Int?
+    ) -> Bool {
+        guard engineRate > 0, engineChannels > 0 else { return false }
+        if let deviceRate = deviceRate, deviceRate > 0, abs(engineRate - deviceRate) > 1.0 {
+            return false
+        }
+        if let deviceChannels = deviceChannels, deviceChannels > 0,
+           Int(engineChannels) > deviceChannels {
+            return false
+        }
+        return true
     }
+
+    /// Skip-and-retry, but bounded: after `maxRetries` the suspect format is accepted
+    /// anyway. No engine at all is a worse failure than a suspect one — a stale format is
+    /// caught by the in-recording watchdog, while an engineless recorder captures nothing
+    /// and has nothing left to recover from.
+    static func shouldSkipUnusableFormat(retriesSoFar: Int, maxRetries: Int = 3) -> Bool {
+        retriesSoFar < maxRetries
+    }
+
+    private var unusableFormatRetries = 0
 
     /// Change the capture device and rebuild the engine onto it.
     func setPinnedInputDevice(uid: String?) {
@@ -184,22 +335,31 @@ class AudioRecorder {
         reinstallTap()
     }
 
-    /// Name of the device the recorder is actually capturing from (the pin when set and
-    /// present, else the system default). Logged into each recording's meta sidecar.
+    /// Name of the device the recorder is actually capturing from: the explicit pin when
+    /// set and present, else the built-in mic (the default-pin rule), else the system
+    /// default. Logged into each recording's meta sidecar.
     func currentCaptureDeviceName() -> String? {
-        if let uid = pinnedInputDeviceUID, let dev = AudioDeviceCatalog.cachedDevice(withUID: uid) {
-            return dev.name
+        if let uid = pinnedInputDeviceUID {
+            // An explicit pin whose device has vanished is NOT replaced by the built-in:
+            // startEngine leaves the unit on the system default and says so in the log.
+            return AudioDeviceCatalog.cachedDevice(withUID: uid)?.name
+                ?? AudioDeviceCatalog.cachedDefaultInput?.name
         }
-        if usesBuiltInPrimaryNow() {
-            return AudioDeviceCatalog.cachedBuiltInInput?.name
-        }
-        return AudioDeviceCatalog.cachedDefaultInput?.name
+        return AudioDeviceCatalog.cachedBuiltInInput?.name
+            ?? AudioDeviceCatalog.cachedDefaultInput?.name
     }
 
     private var deviceChangeObserver: NSObjectProtocol?
+    private var resumeObservers: [NSObjectProtocol] = []
+    private var deviceMonitorsStarted = false
 
     /// Reinstall the audio tap when the input device changes (e.g. AirPods connect/disconnect).
     private func startDeviceChangeMonitor() {
+        guard !deviceMonitorsStarted else { return }
+        deviceMonitorsStarted = true
+        startDeviceListMonitor()
+        startResumeObservers()
+
         // AVAudioEngine notification — fires for most device changes.
         // IMPORTANT: this fires while AVAudioEngine's internal engine queue holds
         // its recursive_mutex during IOUnitConfigurationChanged(). Calling
@@ -289,6 +449,136 @@ class AudioRecorder {
         }
     }
 
+    // MARK: - Device-list watch (the authoritative churn signal, 2026-08-12)
+
+    /// `kAudioHardwarePropertyDevices` is the signal that actually fires for Bluetooth
+    /// re-registration; AVFoundation's connect/disconnect notifications do not fire
+    /// reliably for it, which leaves an app recording from a device that no longer
+    /// exists. AudioDeviceCatalog already owns that HAL listener, so this subscribes to
+    /// the catalog rather than registering a competing one — one list, one refresh order.
+    private func startDeviceListMonitor() {
+        AudioDeviceCatalog.onDeviceListChanged = { [weak self] _, current in
+            // Catalog callbacks already arrive on main.
+            self?.handleDeviceListChanged(current)
+        }
+        // Reconcile against the cache that already exists (VERIFY round 2, finding 1):
+        // the catalog's FIRST scan can land between engine build and this subscription,
+        // and a delta published before the subscriber exists is silently dropped — which
+        // is exactly the scan the cold-start heal was built to catch. Evaluating once at
+        // install time makes the repair deterministic instead of waiting on a second
+        // device event that may never come.
+        handleDeviceListChanged(AudioDeviceCatalog.cachedInputDevices)
+    }
+
+    /// Main-thread. Internal so tests can drive the rule with a synthetic device list.
+    func handleDeviceListChanged(_ devices: [AudioInputDevice]) {
+        guard let reason = Self.deviceListRebuildReason(
+            boundUID: boundDeviceUID, boundID: boundDeviceID,
+            effectivePinTarget: effectivePinNow(), engineExists: audioEngine != nil,
+            bindRetryExhausted: consecutiveBindFailures >= Self.bindRetryCap,
+            devices: devices) else { return }
+        noteDisruption()
+        DiagnosticLogger.shared.log("AudioRecorder: device list changed — \(reason)")
+        if isRecording {
+            reinstallTap()
+        } else {
+            scheduleReinstallDebounced()
+        }
+    }
+
+    // MARK: - Per-device watch on the bound capture device
+
+    /// Watch the device we are actually capturing from, not just the system's device list:
+    /// a device can change its stream format or start dying without the list changing at
+    /// all, and the tap installed on the old format then receives nothing.
+    private func startBoundDeviceWatch(deviceID: AudioDeviceID) {
+        stopBoundDeviceWatch()
+        boundDeviceListeners = AudioDeviceCatalog.addCaptureDeviceListeners(
+            deviceID: deviceID, queue: deviceWatchQueue
+        ) { [weak self] selector in
+            // Already off-main on our own queue: safe to do the blocking HAL reads the
+            // decision needs, and required — never tear an engine down inside a CoreAudio
+            // callback (Apple's documented deadlock).
+            guard let self = self else { return }
+            let isAlive = AudioDeviceCatalog.deviceIsAlive(deviceID)
+            let present = AudioDeviceCatalog.inputDevices().contains { $0.id == deviceID }
+            DispatchQueue.main.async {
+                guard self.boundDeviceID == deviceID else { return }  // stale callback
+                let shouldRebuild = Self.shouldRebuildForDeviceAlert(
+                    selector: selector, isAlive: isAlive, presentInDeviceList: present,
+                    secondsSinceEngineBuilt: Date().timeIntervalSince(self.engineBuiltAt))
+                guard shouldRebuild else { return }
+                self.noteDisruption()
+                DiagnosticLogger.shared.log(
+                    "AudioRecorder: capture device alert \(Self.selectorLabel(selector)) "
+                    + "(alive=\(isAlive.map(String.init) ?? "unknown"), inList=\(present)) — rebuilding")
+                if self.isRecording {
+                    self.reinstallTap()
+                } else {
+                    self.scheduleReinstallDebounced()
+                }
+            }
+        }
+    }
+
+    private func stopBoundDeviceWatch() {
+        guard !boundDeviceListeners.isEmpty else { return }
+        AudioDeviceCatalog.removeCaptureDeviceListeners(boundDeviceListeners)
+        boundDeviceListeners = []
+    }
+
+    static func selectorLabel(_ selector: AudioObjectPropertySelector) -> String {
+        switch selector {
+        case kAudioDevicePropertyDeviceHasChanged: return "DeviceHasChanged"
+        case kAudioDevicePropertyDeviceIsAlive: return "DeviceIsAlive"
+        case kAudioDevicePropertyStreamConfiguration: return "StreamConfiguration"
+        case kAudioDevicePropertyNominalSampleRate: return "NominalSampleRate"
+        default: return "selector \(selector)"
+        }
+    }
+
+    // MARK: - Sleep / wake / fast-user-switch
+
+    /// Sleep and fast-user-switch are blind windows for audio in a way no notification
+    /// covers: devices can be renumbered while the machine is asleep, and the input unit
+    /// can come back holding a stale stream description. The catalog is refreshed FIRST so
+    /// the rebuild resolves the pin against post-wake IDs — rebuilding against the
+    /// pre-sleep cache would bind an AudioDeviceID that no longer exists.
+    private func startResumeObservers() {
+        let nc = NSWorkspace.shared.notificationCenter
+        let events: [(Notification.Name, String)] = [
+            (NSWorkspace.didWakeNotification, "wake from sleep"),
+            (NSWorkspace.sessionDidBecomeActiveNotification, "fast-user-switch return"),
+        ]
+        for (name, reason) in events {
+            resumeObservers.append(
+                nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    self?.handleSystemResume(reason)
+                })
+        }
+    }
+
+    /// Main-thread. Internal so tests can drive it without posting workspace notifications.
+    func handleSystemResume(_ reason: String) {
+        DiagnosticLogger.shared.log("AudioRecorder: \(reason) — re-enumerating devices")
+        AudioDeviceCatalog.refreshNow { [weak self] in
+            guard let self = self else { return }
+            switch Self.resumeAction(
+                preBufferEnabled: self.preBufferEnabled, engineExists: self.audioEngine != nil) {
+            case .none:
+                DiagnosticLogger.shared.log(
+                    "AudioRecorder: \(reason) — pre-buffer off and no engine, nothing to rebuild")
+            case .startEngine:
+                DiagnosticLogger.shared.log("AudioRecorder: \(reason) — starting engine")
+                self.startEngine()
+            case .rebuild:
+                DiagnosticLogger.shared.log(
+                    "AudioRecorder: \(reason) — discarding the pre-sleep engine and rebuilding")
+                self.reinstallTap()
+            }
+        }
+    }
+
     private var needsTapReinstall = false
     private var isRebuilding = false
 
@@ -365,12 +655,27 @@ class AudioRecorder {
     /// Tears down the old engine on a background thread to avoid deadlocking
     /// with CoreAudio's internal locks during reconfiguration.
     private func reinstallTap() {
+        // Every caller must land on main. `ensureAudioHealthy` runs from an off-main
+        // startup path, and the CoreAudio/HAL callbacks below are on their own queues —
+        // a rebuild from any of those would race main over `isRebuilding`/`audioEngine`
+        // AND risk tearing an engine down inside a CoreAudio callback (Apple's documented
+        // deadlock). Async, never sync: a sync hop from a HAL callback is the deadlock.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.reinstallTap() }
+            return
+        }
         guard !isRebuilding else {
             DiagnosticLogger.shared.log("AudioRecorder: rebuild already in progress — skipping")
             return
         }
         isRebuilding = true
         DiagnosticLogger.shared.log("AudioRecorder: tearing down engine for device change (isMainThread=\(Thread.isMainThread))")
+
+        // Stop watching the device this engine was bound to BEFORE the teardown, so a
+        // late per-device alert can never schedule a rebuild against a retired binding.
+        stopBoundDeviceWatch()
+        boundDeviceUID = nil
+        boundDeviceID = nil
 
         // Capture the old engine and nil out our reference immediately
         let oldEngine = audioEngine
@@ -439,19 +744,45 @@ class AudioRecorder {
         reinstallTap()
     }
 
+    /// Bounded retry after a skipped engine start. Without it a skip waits for the next
+    /// device event, and if none ever comes the recorder sits engineless — the 0-sample
+    /// dictation. Bounded because an unbounded self-scheduled rebuild IS the storm.
+    private func scheduleFormatRetry(_ detail: String) {
+        guard Self.shouldSkipUnusableFormat(retriesSoFar: unusableFormatRetries) else {
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: \(detail) — retry budget spent; waiting for the next device event")
+            return
+        }
+        unusableFormatRetries += 1
+        DiagnosticLogger.shared.log("AudioRecorder: \(detail) — retry \(unusableFormatRetries)")
+        scheduleReinstallDebounced()
+    }
+
     /// Internal: create and start the audio engine regardless of preBufferEnabled.
     private func startEngine() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.startEngine() }
+            return
+        }
         guard audioEngine == nil else { return }
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
 
         // Apply the microphone pin BEFORE reading the input format — the format below
-        // reflects whichever device the input unit is bound to. Dual capture pins the
-        // always-on engine to the built-in mic implicitly (Bluetooth stays released
-        // until a recording actually starts).
-        let effectivePin = pinnedInputDeviceUID
-            ?? (usesBuiltInPrimaryNow() ? AudioDeviceCatalog.cachedBuiltInInput?.uid : nil)
+        // reflects whichever device the input unit is bound to. With no explicit pin the
+        // engine binds the BUILT-IN mic (see `effectivePin`), so an AirPods connect can
+        // never silently move capture off the microphone the user chose.
+        let effectivePin = effectivePinNow()
+        if pinnedInputDeviceUID == nil, effectivePin != nil {
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: no explicit microphone pin — defaulting capture to the built-in mic")
+        }
+        // The device this engine ends up genuinely bound to, or nil when it is following
+        // the system default. Recorded into `boundDevice*` only once the engine actually
+        // STARTS: a binding retained for an engine that never came up would compare equal
+        // on the next device-list change and suppress the rebuild that would fix it.
+        var boundDevice: AudioInputDevice?
         if let uid = effectivePin {
             if let dev = AudioDeviceCatalog.cachedDevice(withUID: uid), let unit = inputNode.audioUnit {
                 var deviceID = dev.id
@@ -461,6 +792,11 @@ class AudioRecorder {
                 DiagnosticLogger.shared.log(
                     "AudioRecorder: pinned capture to \(dev.name)"
                     + (status == noErr ? "" : " FAILED (err \(status)) — using default"))
+                // A failed bind leaves the unit on the system default, so no device is
+                // retained: nothing of ours is bound to it, and the next device-list
+                // change should try again rather than compare against a bind that never
+                // happened.
+                if status == noErr { boundDevice = dev }
             } else {
                 DiagnosticLogger.shared.log(
                     "AudioRecorder: pinned device \(uid) not present — using system default")
@@ -471,8 +807,7 @@ class AudioRecorder {
         // after re-binding the input unit (pin to built-in while the system default
         // is AirPods), the client scope keeps reporting the OLD device's format
         // (24 kHz SCO) — a tap installed with it never receives a frame, and every
-        // rebuild died the same way (0-sample recordings, all dropped). The
-        // SecondaryRecorder learned this on 2026-07-20; the primary now matches.
+        // rebuild died the same way (0-sample recordings, all dropped).
         let inputFormat = inputNode.inputFormat(forBus: 0)
 
         // Guard against the AirPods/Bluetooth-handoff race: during SCO negotiation the
@@ -484,7 +819,30 @@ class AudioRecorder {
                 "AudioRecorder: skip startEngine — input format not yet valid "
                 + "(rate=\(inputFormat.sampleRate), ch=\(inputFormat.channelCount)); will retry on next config change"
             )
+            scheduleFormatRetry("input format not yet valid")
             return
+        }
+
+        // Stale-format guard: cross-check the unit's reported format against the hardware
+        // it was just bound to. Applied ONLY when we actually re-bound the unit, which is
+        // the case the trap is documented for — after `kAudioOutputUnitProperty_CurrentDevice`
+        // the unit can keep answering with the PREVIOUS device's stream description, and a
+        // tap installed on it never receives a frame. (System-default engines are left
+        // alone: nothing re-bound them, so a cache/unit disagreement there is a race in
+        // the check, not in the format.)
+        if let dev = boundDevice,
+           !Self.isCaptureFormatUsable(
+                engineRate: inputFormat.sampleRate, engineChannels: inputFormat.channelCount,
+                deviceRate: dev.nominalSampleRate, deviceChannels: dev.inputChannels) {
+            let detail = "input format \(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch"
+                + " disagrees with \(dev.name) hardware"
+                + " (\(dev.nominalSampleRate)Hz/\(dev.inputChannels)ch) — stale unit format"
+            if Self.shouldSkipUnusableFormat(retriesSoFar: unusableFormatRetries) {
+                scheduleFormatRetry(detail)
+                return
+            }
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: \(detail); accepting it anyway — a suspect engine beats no engine")
         }
 
         guard let conv = AVAudioConverter(from: inputFormat, to: targetFormat) else {
@@ -523,6 +881,24 @@ class AudioRecorder {
             lastBufferUptime = ProcessInfo.processInfo.systemUptime
             bufferHealthLock.unlock()
             engineBuiltAt = Date()
+            unusableFormatRetries = 0
+            // Retain the binding and watch the device we are actually on — only after a
+            // successful start, so neither a listener nor a comparison baseline can
+            // outlive an engine that never existed.
+            boundDeviceUID = effectivePin
+            boundDeviceID = boundDevice?.id
+            // Bind-retry budget (VERIFY round 2, finding 2): a bind that FAILED while the
+            // device was present lands in the same (uid, nil-id) state as an absent
+            // device, so every device-list event would retry it — likely failing the same
+            // way, a rebuild-per-event storm during AirPods churn. Retry up to the cap,
+            // then stop letting list events re-trigger; wake/config-reload paths still
+            // recover the device later.
+            if boundDevice != nil || effectivePin == nil {
+                consecutiveBindFailures = 0
+            } else {
+                consecutiveBindFailures += 1
+            }
+            if let dev = boundDevice { startBoundDeviceWatch(deviceID: dev.id) }
             print("AudioRecorder: audio engine started")
         } catch {
             print("AudioRecorder: engine start failed: \(error.localizedDescription)")
@@ -742,12 +1118,6 @@ class AudioRecorder {
             }
         }
 
-        // Dual capture: open the Bluetooth comparison stream for this recording only.
-        // CoreAudio start runs on the dedicated secondary queue, never main (AU-D).
-        if dualEngagedNow(), let bt = AudioDeviceCatalog.cachedBluetoothInput {
-            secondaryQueue.async { _ = self.secondaryRecorder.start(device: bt) }
-        }
-
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.firstBufferGuardSeconds) { [weak self] in
             guard let self else { return }
             self.stateLock.lock()
@@ -775,7 +1145,7 @@ class AudioRecorder {
         }
     }
 
-    func stopRecording() -> (url: URL, samples: [Float], secondary: SecondaryCaptureResult)? {
+    func stopRecording() -> (url: URL, samples: [Float])? {
         // Atomically flip back to pre-roll mode
         stateLock.lock()
         guard _isRecording else { stateLock.unlock(); return nil }
@@ -807,20 +1177,6 @@ class AudioRecorder {
         print("AudioRecorder: recording stopped, \(samples.count) total samples (\(duration)s, \(levelNote))")
         DiagnosticLogger.shared.log("AudioRecorder: recording stopped, \(samples.count) samples (\(duration)s, \(levelNote))")
 
-        // Queue stop behind start on the SAME serial queue. The old main-thread buffer
-        // snapshot could beat a slow Bluetooth start and return an empty track for short
-        // dictations. Finalization awaits this result off-main.
-        let secondary = SecondaryCaptureResult()
-        secondaryQueue.async {
-            let btSamples = self.secondaryRecorder.stop()
-            if !btSamples.isEmpty {
-                DiagnosticLogger.shared.log(
-                    "AudioRecorder: dual capture collected \(btSamples.count) BT samples "
-                    + "(\(String(format: "%.1f", Double(btSamples.count) / 16000.0))s)")
-            }
-            secondary.resolve(btSamples)
-        }
-
         // If pre-buffer is off, stop the engine until next recording
         if !preBufferEnabled {
             audioEngine?.inputNode.removeTap(onBus: 0)
@@ -834,7 +1190,7 @@ class AudioRecorder {
         }
 
         guard let url = currentOutputURL else { return nil }
-        return (url: url, samples: samples, secondary: secondary)
+        return (url: url, samples: samples)
     }
 }
 

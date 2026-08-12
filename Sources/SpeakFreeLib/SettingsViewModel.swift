@@ -51,7 +51,7 @@ public class SettingsViewModel: ObservableObject {
         self.toggleMode = c.toggleMode?.value ?? false
         self.modelSize = c.modelSize
         self.language = c.language
-        self.punctuationMode = c.spokenPunctuation ?? .off
+        self.punctuationMode = c.effectivePunctuationMode
         self.maxRecordings = c.maxRecordings ?? 0  // 0 = keep everything (default)
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
@@ -85,7 +85,7 @@ public class SettingsViewModel: ObservableObject {
         self.toggleMode = c.toggleMode?.value ?? false
         self.modelSize = c.modelSize
         self.language = c.language
-        self.punctuationMode = c.spokenPunctuation ?? .off
+        self.punctuationMode = c.effectivePunctuationMode
         self.maxRecordings = c.maxRecordings ?? 0
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true

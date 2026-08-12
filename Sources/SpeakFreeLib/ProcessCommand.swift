@@ -77,7 +77,11 @@ public enum ProcessCommand {
         } catch {
             throw Error.transcriptionFailed(error)
         }
-        let punctuationMode = config.spokenPunctuation ?? .hybrid
+        // Aligned to the app (Michael 2026-08-12): this was the last `?? .hybrid` outlier,
+        // so `speakfree process` punctuated keyless legacy configs differently than
+        // dictation did. Behavior change is confined to configs with no spokenPunctuation
+        // key: they now run Automatic Only here too, matching the app and the UI label.
+        let punctuationMode = config.effectivePunctuationMode
         // Pass the real duration when we decoded samples so the seam-dedup gate can tell
         // single-window recordings from chunkable ones (nil = dedup stays enabled).
         let duration = samples.map { Double($0.count) / 16000.0 }

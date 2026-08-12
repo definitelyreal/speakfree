@@ -1,9 +1,9 @@
 // Claude · 2026-07-15 · Session: ed573fa2-e6e0-4a72-b0e5-8eab0a7411b1
 //
 // Round-3 lifecycle fixes:
-//   L2  the dual-capture .bt.raw.txt sidecar write goes through RecordingStore.saveBluetoothRaw,
-//       which takes the mutationLock and honors a wav-exists guard so a concurrent "Delete All"
-//       can't resurrect an orphaned transcript sidecar.
+//   L2  covered the dual-capture .bt.raw.txt sidecar WRITE path (RecordingStore.saveBluetoothRaw).
+//       Dual capture was removed 2026-08-12, and with it that write path and these tests; the
+//       .bt.* READ/exclusion/deletion filters remain (the archive still holds real dual takes).
 //   L4  the AX SelectedText set is now three-way: .success → inserted, .cannotComplete (the 0.5s
 //       messaging-cap timeout, which may have COMMITTED) → concealed clipboard (never retype/
 //       duplicate), any other error → keystroke fallback. The per-element 2s messaging timeout is
@@ -42,69 +42,6 @@ final class AdversarialR3Tests: XCTestCase {
                       .apiDisabled, .noValue, .notEnoughPrecision] {
             XCTAssertEqual(TextInserter.axSetOutcome(error), .fallbackToKeystrokes,
                            "\(error) is a clean rejection — keystroke fallback, not conceal")
-        }
-    }
-
-    // MARK: - L2: dual-capture bt sidecar write is lock-guarded + wav-existence gated
-
-    private func withScratchConfigDir(_ body: (URL) throws -> Void) rethrows {
-        let scratch = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakfree-r3-\(UUID().uuidString)")
-        Config.configDirOverride = scratch
-        defer {
-            Config.configDirOverride = nil
-            try? FileManager.default.removeItem(at: scratch)
-        }
-        try? FileManager.default.createDirectory(at: RecordingStore.recordingsDir,
-                                                 withIntermediateDirectories: true)
-        try body(scratch)
-    }
-
-    /// Happy path: the primary wav is still on disk, so the bt sidecar is written.
-    func test_l2_saveBluetoothRaw_writesWhenRecordingPresent() throws {
-        try withScratchConfigDir { _ in
-            let mainURL = RecordingStore.newRecordingURL()
-            let btURL = mainURL.deletingPathExtension().appendingPathExtension("bt.wav")
-            try Data("primary-audio".utf8).write(to: mainURL)
-            try Data("bt-audio".utf8).write(to: btURL)
-
-            RecordingStore.saveBluetoothRaw(text: "hello world", btAudioURL: btURL, mainAudioURL: mainURL)
-
-            let sidecar = btURL.deletingPathExtension().appendingPathExtension("raw.txt")
-            XCTAssertTrue(FileManager.default.fileExists(atPath: sidecar.path),
-                          "bt sidecar must be written while the recording exists")
-            XCTAssertEqual(try? String(contentsOf: sidecar, encoding: .utf8), "hello world")
-        }
-    }
-
-    /// The race L2 fixes: a "Delete All" removed both wavs during the detached transcription. The
-    /// guard must skip the write so no orphaned `.bt.raw.txt` is resurrected with no audio behind it.
-    func test_l2_saveBluetoothRaw_skipsWhenRecordingDeleted() throws {
-        try withScratchConfigDir { _ in
-            let mainURL = RecordingStore.newRecordingURL()
-            let btURL = mainURL.deletingPathExtension().appendingPathExtension("bt.wav")
-            // Simulate Delete All having already run: neither wav is on disk.
-
-            RecordingStore.saveBluetoothRaw(text: "resurrected", btAudioURL: btURL, mainAudioURL: mainURL)
-
-            let sidecar = btURL.deletingPathExtension().appendingPathExtension("raw.txt")
-            XCTAssertFalse(FileManager.default.fileExists(atPath: sidecar.path),
-                           "a deleted recording must NOT resurrect a bt transcript sidecar")
-        }
-    }
-
-    /// The bt.wav alone (main pruned, bt still present) also counts as "recording present".
-    func test_l2_saveBluetoothRaw_writesWhenOnlyBtWavPresent() throws {
-        try withScratchConfigDir { _ in
-            let mainURL = RecordingStore.newRecordingURL()
-            let btURL = mainURL.deletingPathExtension().appendingPathExtension("bt.wav")
-            try Data("bt-audio".utf8).write(to: btURL)   // only the bt track survives
-
-            RecordingStore.saveBluetoothRaw(text: "kept", btAudioURL: btURL, mainAudioURL: mainURL)
-
-            let sidecar = btURL.deletingPathExtension().appendingPathExtension("raw.txt")
-            XCTAssertTrue(FileManager.default.fileExists(atPath: sidecar.path),
-                          "bt sidecar must be written when the bt wav still exists")
         }
     }
 }
