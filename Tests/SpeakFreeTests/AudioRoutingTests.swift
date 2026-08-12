@@ -3,7 +3,8 @@ import XCTest
 @testable import SpeakFreeLib
 
 /// The 2026-07-14 audio-routing work: microphone pinning, the contention detector,
-/// dev mode, and the dual-capture prototype's pure pieces.
+/// and dev mode — plus the 2026-08-12 default-pin rule that replaced the removed
+/// dual-capture prototype.
 final class AudioRoutingTests: XCTestCase {
 
     // MARK: - Device catalog (smoke — CI runners may expose zero input devices)
@@ -131,76 +132,43 @@ final class AudioRoutingTests: XCTestCase {
                                            devMode: false).contains("Dev"))
     }
 
-    // MARK: - Dual capture engagement (pure rule)
+    // MARK: - Effective capture device (default-pin rule, 2026-08-12)
 
-    func testDualCapturePinsPrimaryBeforeBluetoothAppears() {
-        XCTAssertTrue(DualCapture.shouldUseBuiltInPrimary(
-            flagOn: true, pinnedUID: nil, hasBuiltIn: true))
-        XCTAssertFalse(DualCapture.shouldUseBuiltInPrimary(
-            flagOn: false, pinnedUID: nil, hasBuiltIn: true))
-        XCTAssertFalse(DualCapture.shouldUseBuiltInPrimary(
-            flagOn: true, pinnedUID: "some-mic", hasBuiltIn: true))
+    /// THE rule speakfree captures by: an explicit pin wins; otherwise the built-in mic.
+    /// Michael's ruling 2026-08-12 — "we need a way to steer people away from AirPods.
+    /// I guess we could just have the default be pinned to the Mac recording."
+    func testExplicitPinAlwaysWinsOverTheBuiltInDefault() {
+        XCTAssertEqual(
+            AudioRecorder.effectivePin(explicitPin: "studio-mic", builtInUID: "built-in"),
+            "studio-mic",
+            "a device the user chose in the menu is never overridden")
     }
 
-    func testDualCaptureEngagesOnlyWhenBluetoothIsAvailable() {
-        XCTAssertTrue(DualCapture.shouldEngage(
-            flagOn: true, pinnedUID: nil, hasBuiltIn: true, hasBluetooth: true))
-        XCTAssertFalse(DualCapture.shouldEngage(
-            flagOn: false, pinnedUID: nil, hasBuiltIn: true, hasBluetooth: true),
-            "flag off = byte-identical legacy behavior")
-        XCTAssertFalse(DualCapture.shouldEngage(
-            flagOn: true, pinnedUID: "some-mic", hasBuiltIn: true, hasBluetooth: true),
-            "an explicit user pin always wins")
-        XCTAssertFalse(DualCapture.shouldEngage(
-            flagOn: true, pinnedUID: nil, hasBuiltIn: true, hasBluetooth: false),
-            "Bluetooth need not be default, but it must be available")
-        XCTAssertFalse(DualCapture.shouldEngage(
-            flagOn: true, pinnedUID: nil, hasBuiltIn: false, hasBluetooth: true),
-            "no built-in mic = no primary track to carry pre-roll")
+    func testNoPinCapturesTheBuiltInMicrophone() {
+        XCTAssertEqual(
+            AudioRecorder.effectivePin(explicitPin: nil, builtInUID: "built-in"),
+            "built-in",
+            "an AirPods connect must not silently move capture off the Mac mic")
     }
 
-    func testPinnedAndDualPrimariesIgnoreDefaultRouteChanges() {
-        XCTAssertFalse(DualCapture.primaryFollowsSystemDefault(
-            flagOn: true, pinnedUID: nil, hasBuiltIn: true))
-        XCTAssertFalse(DualCapture.primaryFollowsSystemDefault(
-            flagOn: false, pinnedUID: "studio-mic", hasBuiltIn: true))
-        XCTAssertTrue(DualCapture.primaryFollowsSystemDefault(
-            flagOn: false, pinnedUID: nil, hasBuiltIn: true))
-        XCTAssertTrue(DualCapture.primaryFollowsSystemDefault(
-            flagOn: true, pinnedUID: nil, hasBuiltIn: false))
+    func testNoPinAndNoBuiltInFollowsTheSystemDefault() {
+        XCTAssertNil(
+            AudioRecorder.effectivePin(explicitPin: nil, builtInUID: nil),
+            "a Mac with no built-in input (external mics only) keeps the old behavior")
     }
 
-    // MARK: - Token agreement
-
-    func testTokenAgreementIdenticalIsOne() {
-        XCTAssertEqual(DualCapture.tokenAgreement("Hello world, this works.",
-                                                  "hello WORLD this works"), 1.0)
+    func testExplicitPinWinsEvenWithNoBuiltInPresent() {
+        XCTAssertEqual(
+            AudioRecorder.effectivePin(explicitPin: "usb-mic", builtInUID: nil), "usb-mic")
     }
 
-    func testTokenAgreementDisjointIsZero() {
-        XCTAssertEqual(DualCapture.tokenAgreement("alpha beta", "gamma delta"), 0.0)
-    }
-
-    func testTokenAgreementPartial() {
-        // 3 of 4 tokens agree in order → 0.75.
-        XCTAssertEqual(DualCapture.tokenAgreement("one two three four", "one two three x"),
-                       0.75, accuracy: 0.001)
-    }
-
-    func testTokenAgreementEmptyStrings() {
-        XCTAssertEqual(DualCapture.tokenAgreement("", ""), 1.0)
-        XCTAssertEqual(DualCapture.tokenAgreement("words here", ""), 0.0)
-    }
-
-    // MARK: - Wav writer round-trip
-
-    func testWriteWavRoundTripsSampleCount() throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("dualcap-test-\(UUID().uuidString).wav")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let samples = (0..<32_000).map { Float(sin(Double($0) * 0.01)) * 0.3 }
-        try DualCapture.writeWav(samples: samples, to: url)
-        let back = try ProcessCommand.loadSamples(from: url)
-        XCTAssertEqual(back.count, samples.count)
+    /// The engine only follows system-default route changes when nothing is bound —
+    /// this is the circuit break against a self-induced config-change rebuild loop.
+    func testPrimaryFollowsSystemDefaultOnlyWhenNothingIsBound() {
+        XCTAssertNil(AudioRecorder.effectivePin(explicitPin: nil, builtInUID: nil))
+        XCTAssertNotNil(AudioRecorder.effectivePin(explicitPin: nil, builtInUID: "built-in"))
+        XCTAssertNotNil(AudioRecorder.effectivePin(explicitPin: "studio-mic", builtInUID: nil))
+        XCTAssertNotNil(
+            AudioRecorder.effectivePin(explicitPin: "studio-mic", builtInUID: "built-in"))
     }
 }

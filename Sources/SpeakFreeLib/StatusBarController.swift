@@ -24,7 +24,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var animationFrames: [NSImage] = []
     private var downloadProgress: String?
     private var copiedFeedback = false
-    private var pendingBetterTranscript: String?
     private var menuItemTargets: [MenuItemTarget] = []
     // M1: the recent-submenu's targets are retained separately from the main menu's so a top-level
     // rebuild (which clears `menuItemTargets`) can't invalidate the actions of an open submenu.
@@ -69,7 +68,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         /// the user spoke, held the key, and deserves to know nothing was heard.
         case noSpeech
         case captureFailed
-        case betterTranscriptAvailable
         /// Secure-Input fallback: dictated text was copied with concealment markers and will
         /// auto-clear after the configured delay. Shows a distinct notification so the user
         /// knows the clipboard will self-clean (audit M2).
@@ -111,27 +109,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         buildMenu()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             self?.copiedFeedback = false
-            self?.buildMenu()
-        }
-    }
-
-    func offerBetterTranscript(_ text: String) {
-        pendingBetterTranscript = text
-        state = .betterTranscriptAvailable
-        buildMenu()
-    }
-
-    private func copyBetterTranscript() {
-        guard let text = pendingBetterTranscript else { return }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-        pendingBetterTranscript = nil
-        state = .copiedToClipboard
-        buildMenu()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard self?.state == .copiedToClipboard else { return }
-            self?.state = .idle
             self?.buildMenu()
         }
     }
@@ -200,7 +177,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         // Microphone selector — FIRST section (Michael, 2026-07-14): the AirPods link
         // degrades unpredictably, and switching the capture device must be one click.
-        // Radio list: System Default + every input device; checkmark = active pin.
+        // Radio list: the default entry + every input device; checkmark = active pin.
         let micHeader = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
         micHeader.isEnabled = false
         menu.addItem(micHeader)
@@ -208,19 +185,36 @@ class StatusBarController: NSObject, NSMenuDelegate {
         // Cache-only reads: menu builds happen on the main thread on every state flip,
         // and live CoreAudio reads here are what wedged the app on 2026-07-15.
         let pinnedUID = (NSApplication.shared.delegate as? AppDelegate)?.currentInputDeviceUID()
-        let defaultName = AudioDeviceCatalog.cachedDefaultInput?.name ?? "System Default"
+        // Honest default label (2026-08-12): with no explicit pick, speakfree captures
+        // the BUILT-IN mic, not whatever macOS made the system default (an AirPods
+        // connect used to move capture silently). Only a Mac with no built-in input
+        // falls back to the system default, and the label says so.
+        let defaultTitle: String
+        if let builtIn = AudioDeviceCatalog.cachedBuiltInInput {
+            defaultTitle = "\(builtIn.name) (default)"
+        } else {
+            let systemName = AudioDeviceCatalog.cachedDefaultInput?.name ?? "System Default"
+            defaultTitle = "System Default (\(systemName))"
+        }
         let defaultTarget = MenuItemTarget {
             (NSApplication.shared.delegate as? AppDelegate)?.selectInputDevice(uid: nil)
         }
         menuItemTargets.append(defaultTarget)
-        let defaultItem = NSMenuItem(title: "System Default (\(defaultName))",
+        let builtInUID = AudioDeviceCatalog.cachedBuiltInInput?.uid
+        let defaultItem = NSMenuItem(title: defaultTitle,
                                      action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
         defaultItem.target = defaultTarget
-        defaultItem.state = pinnedUID == nil ? .on : .off
+        // An explicit pin of the built-in mic captures identically to the implicit
+        // default, so both states check this entry (adversarial review 2026-08-12:
+        // showing the built-in twice as two radio rows that differ only in config
+        // bytes, and rebuild the engine when toggled, was confusing for nothing).
+        defaultItem.state = (pinnedUID == nil || pinnedUID == builtInUID) ? .on : .off
         menu.addItem(defaultItem)
 
         for device in AudioDeviceCatalog.cachedInputDevices {
             let uid = device.uid
+            // The built-in mic is already represented by the "(default)" entry above.
+            if uid == builtInUID { continue }
             let target = MenuItemTarget {
                 (NSApplication.shared.delegate as? AppDelegate)?.selectInputDevice(uid: uid)
             }
@@ -268,7 +262,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
             case .copiedToClipboard: stateText = "Copied to clipboard"
             case .noSpeech: stateText = "⚠️ No speech detected — check your mic"
             case .captureFailed: stateText = "⚠️ Capture failed - please try again"
-            case .betterTranscriptAvailable: stateText = "Better Bluetooth text available - Copy"
             case .secureInputCopied: stateText = "Copied — auto-clears in 15s (Secure Input)"
             case .noModel: stateText = "⚠️ No model — open Settings to download"
             case .setupFailed(let message): stateText = "⛔ Setup failed: \(message)"
@@ -304,13 +297,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 }
                 menuItemTargets.append(target)
                 let stateItem = NSMenuItem(title: stateText, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-                stateItem.target = target
-                menu.addItem(stateItem)
-            } else if case .betterTranscriptAvailable = state {
-                let target = MenuItemTarget { [weak self] in self?.copyBetterTranscript() }
-                menuItemTargets.append(target)
-                let stateItem = NSMenuItem(
-                    title: stateText, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
                 stateItem.target = target
                 menu.addItem(stateItem)
             } else if case .noModel = state {
@@ -534,8 +520,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
             setIcon(StatusBarController.drawCheckmarkIcon())
         case .noSpeech, .captureFailed:
             setIcon(StatusBarController.drawErrorIcon())
-        case .betterTranscriptAvailable:
-            setIcon(StatusBarController.drawCheckmarkIcon())
         case .noModel:
             setIcon(StatusBarController.drawNoModelIcon())
         case .setupFailed:

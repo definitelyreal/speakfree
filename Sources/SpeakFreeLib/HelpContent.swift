@@ -158,7 +158,7 @@ public struct HelpFacts: Equatable {
             whisperModel: c.modelSize,
             parakeetModel: c.parakeetModel ?? "parakeet-tdt-0.6b-v3",
             saveRecordings: DevMode.effectiveSaveRecordings(c),
-            punctuationMode: c.spokenPunctuation ?? .off,
+            punctuationMode: c.effectivePunctuationMode,
             recordingsPath: RecordingStore.recordingsDir.path,
             vocabularyPath: Config.vocabularyFile.path,
             logsPath: Config.configDir.appendingPathComponent("logs").path

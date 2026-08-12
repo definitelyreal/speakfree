@@ -4,6 +4,7 @@ import Foundation
 import Cocoa
 import Carbon.HIToolbox
 import ApplicationServices
+import IOKit
 
 class TextInserter {
     // Cache the 'v' key code — only changes if keyboard layout changes
@@ -226,7 +227,7 @@ class TextInserter {
         if isSecureInputActive() {
             DiagnosticLogger.shared.log("TextInserter: Secure Input is active — concealed clipboard fallback instead of inserting")
             secureInputClipboardFallback(text)
-            onSecureInputFallback?()
+            onSecureInputFallback?(text, .secureInput)
             onFocusLost?()
             return false
         }
@@ -246,7 +247,7 @@ class TextInserter {
                         if self.isSecureInputActive() {
                             DiagnosticLogger.shared.log("TextInserter: Secure Input became active during focus-settle — concealed clipboard fallback")
                             self.secureInputClipboardFallback(text)
-                            self.onSecureInputFallback?()
+                            self.onSecureInputFallback?(text, .secureInput)
                             onFocusLost?()
                             return
                         }
@@ -367,7 +368,7 @@ class TextInserter {
             // the auto-clear notify instead, mirroring the Secure-Input fallback.
             DiagnosticLogger.shared.log("TextInserter: AX insertion timed out (may have committed) — concealed clipboard fallback instead of retyping")
             secureInputClipboardFallback(text)
-            onSecureInputFallback?()
+            onSecureInputFallback?(text, .axTimeoutMayHaveCommitted)
             return
         case .fallbackToKeystrokes:
             break
@@ -918,12 +919,20 @@ class TextInserter {
     /// that the plaintext does not linger, yet long enough for most users to paste.
     var secureInputClipboardClearDelay: TimeInterval = 15
 
+    /// Why the concealed clipboard path was taken. The distinction matters to the UI:
+    /// `.secureInput` means the text was definitely NOT inserted, so telling the user to
+    /// press ⌘V (and auto-retrying the insert) is safe; `.axTimeoutMayHaveCommitted`
+    /// means the AX write MAY have landed, so any retry or paste prompt risks a duplicate
+    /// — the UI must stay at "copied" and do nothing clever.
+    enum ConcealedFallbackReason { case secureInput, axTimeoutMayHaveCommitted }
+
     /// Called when `insert()` falls back to the concealed Secure-Input clipboard path instead of
     /// inserting text directly. Unlike `onFocusLost` (which fires for any focus failure), this
-    /// fires ONLY for the secure-input case so the UI can show an auto-clear notification.
-    /// Set by the caller (AppDelegate) before each insertion. Reset to nil after each use so it
-    /// does not accidentally fire on a later non-secure fallback.
-    var onSecureInputFallback: (() -> Void)?
+    /// fires ONLY for the concealed-copy cases so the UI can react (Secure-Input retry
+    /// dialog / auto-clear notification). Carries the dictated text so the `.secureInput`
+    /// case can auto-retry the insertion once Secure Input clears (Michael 2026-08-12).
+    /// Set by the caller (AppDelegate) before each insertion.
+    var onSecureInputFallback: ((String, ConcealedFallbackReason) -> Void)?
 
     /// Secure-Input clipboard fallback (audit AR-1). Dictating into a password field is the
     /// worst case, so unlike `copyToClipboard` this:
@@ -954,6 +963,43 @@ class TextInserter {
                 DiagnosticLogger.shared.log("TextInserter: auto-cleared concealed Secure-Input clipboard text")
             }
         }
+    }
+
+    /// Name of the app holding Secure Input, read from IOHIDSystem's
+    /// kCGSSessionSecureInputPID (the same source `ioreg -l | grep SecureInput` shows).
+    /// Best-effort: nil when the property is absent, unreadable, or the PID has no
+    /// running application. Used only to make the Secure-Input dialog name the blocker.
+    static func secureInputHolderName() -> String? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault,
+                                                  IOServiceMatching("IOHIDSystem"))
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+        var props: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(service, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+              let dict = props?.takeRetainedValue() as? [String: Any] else { return nil }
+        let pid = (dict["kCGSSessionSecureInputPID"] as? Int)
+            ?? ((dict["HIDParameters"] as? [String: Any])?["kCGSSessionSecureInputPID"] as? Int)
+        guard let pid else { return nil }
+        return NSRunningApplication(processIdentifier: pid_t(pid))?.localizedName
+    }
+
+    /// One tick of the Secure-Input retry loop (Michael 2026-08-12: "a little box that
+    /// says secure input activated, hit Command V … keeps retrying, and if it gets it,
+    /// it shuts down the box"). Pure so the policy is testable:
+    ///   - the dictation leaving the clipboard (user copied something else, or the
+    ///     auto-clear fired) or the hold expiring ends the dialog — nothing to paste;
+    ///   - while Secure Input stays on, keep waiting (the user can still press ⌘V);
+    ///   - when it clears, auto-insert ONLY if the same app is still frontmost —
+    ///     inserting into whatever the user switched to would land text in the wrong app.
+    enum SecureInputRetryAction: Equatable { case wait, insert, dismiss }
+
+    static func secureInputRetryAction(secureInputActive: Bool,
+                                       clipboardMoved: Bool,
+                                       frontmostMatchesTarget: Bool,
+                                       deadlinePassed: Bool) -> SecureInputRetryAction {
+        if deadlinePassed || clipboardMoved { return .dismiss }
+        if secureInputActive { return .wait }
+        return frontmostMatchesTarget ? .insert : .wait
     }
 
     /// Write `text` to `pasteboard` exactly as `pasteViaClipboard` does (clearContents +

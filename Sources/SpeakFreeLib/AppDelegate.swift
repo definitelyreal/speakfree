@@ -477,7 +477,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Apply routing BEFORE enabling pre-buffer. Assigning preBufferEnabled=true
         // starts the engine immediately; doing that first briefly opens the system
         // default route and then races the route-triggered rebuild at launch.
-        recorder.dualCaptureEnabled = config.dualMicCapture?.value ?? false
         recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
         recorder.preBufferEnabled = config.preBuffer?.value ?? true
 
@@ -584,13 +583,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         isReady = true
-        // Idle tap-health poll (2026-07-25 audit: a dead event tap was UNDETECTABLE —
-        // the only health check was gated behind a successful keypress). Every 30s
-        // while idle, verify and re-arm the tap so "press fn, nothing happens" gets
-        // fixed before the user hits it.
+        // Tap-health poll (2026-07-25 audit: a dead event tap was UNDETECTABLE —
+        // the only health check was gated behind a successful keypress). Every 30s,
+        // verify and re-arm the tap so "press fn, nothing happens" gets fixed before
+        // the user hits it. NOT gated on isPressed (2026-08-11): a stranded take —
+        // release lost during a tap outage — keeps isPressed true indefinitely, so an
+        // idle-only poll was disabled during exactly the failure it guards. Running it
+        // mid-take is safe: ensureTapHealthy reconciles only when it actually repaired
+        // something, so a healthy take in progress is never touched.
         DispatchQueue.main.async { [weak self] in
             self?.tapHealthTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-                guard let self = self, !self.isPressed, !self.isTerminating else { return }
+                guard let self = self, !self.isTerminating else { return }
                 self.hotkeyManager?.ensureTapHealthy()
             }
         }
@@ -899,7 +902,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
     private func reloadHotkeyAndSettings() {
         // Routing must be settled before pre-buffer can start an absent engine.
-        recorder.dualCaptureEnabled = config.dualMicCapture?.value ?? false
         recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
         recorder.preBufferEnabled = config.preBuffer?.value ?? true
 
@@ -1369,6 +1371,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleRecordingStart() {
         guard !isPressed else { return }
 
+        // A stale Secure-Input retry must never fire mid-take or after a newer dictation —
+        // starting a new recording supersedes the parked text.
+        cancelSecureInputRetry()
+
         // Microphone gate: never silently record silence. If access is missing, this prompts
         // (notDetermined) or shows an actionable alert (denied) and aborts this attempt.
         guard Permissions.ensureMicrophoneForRecording() else { return }
@@ -1455,6 +1461,66 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // hide — the user pressed the key, spoke, and got nothing. Now a red
             // center-screen banner says so (auto-hides).
             recordingOverlay.show(state: .error("Recording failed: check your microphone"))
+        }
+    }
+
+    // MARK: - Secure-Input retry dialog (Michael 2026-08-12)
+    //
+    // "A little box that says secure input activated, hit Command V to paste your
+    // dictation … keeps retrying, and if it gets it, it shuts down the box."
+    // The dialog reuses the center-screen overlay banner; the retry polls every 0.5s and
+    // lives exactly as long as the concealed clipboard hold (secureInputClipboardClearDelay),
+    // so the box never promises a paste the clipboard can no longer deliver.
+
+    private var secureInputRetryTimer: Timer?
+
+    private func beginSecureInputRetry(text: String) {
+        cancelSecureInputRetry()
+        let targetBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let generalPasteboard = NSPasteboard.general
+        let heldChangeCount = generalPasteboard.changeCount
+        let deadline = Date().addingTimeInterval(inserter.secureInputClipboardClearDelay)
+        let holder = TextInserter.secureInputHolderName()
+        let blocker = holder.map { " (\($0))" } ?? ""
+        recordingOverlay.show(
+            state: .error("Secure Input\(blocker) blocked dictation — press ⌘V to paste"),
+            autoHideError: false)
+        DiagnosticLogger.shared.log(
+            "SecureInputRetry: dialog shown, holder=\(holder ?? "unknown"), retrying for "
+            + "\(Int(inserter.secureInputClipboardClearDelay))s")
+        secureInputRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let action = TextInserter.secureInputRetryAction(
+                secureInputActive: self.inserter.isSecureInputActive(),
+                clipboardMoved: generalPasteboard.changeCount != heldChangeCount,
+                frontmostMatchesTarget:
+                    NSWorkspace.shared.frontmostApplication?.bundleIdentifier == targetBundleID,
+                deadlinePassed: Date() >= deadline)
+            switch action {
+            case .wait:
+                break
+            case .dismiss:
+                DiagnosticLogger.shared.log(
+                    "SecureInputRetry: dismissed without auto-insert (clipboard moved or hold expired)")
+                self.cancelSecureInputRetry()
+            case .insert:
+                self.cancelSecureInputRetry()
+                DiagnosticLogger.shared.log("SecureInputRetry: Secure Input cleared — auto-inserting")
+                self.inserter.insert(text: text)
+                self.statusBar.state = .idle
+                self.statusBar.buildMenu()
+            }
+        }
+    }
+
+    private func cancelSecureInputRetry() {
+        guard secureInputRetryTimer != nil else { return }
+        secureInputRetryTimer?.invalidate()
+        secureInputRetryTimer = nil
+        recordingOverlay.hide()
+        if statusBar.state == .secureInputCopied {
+            statusBar.state = .idle
+            statusBar.buildMenu()
         }
     }
 
@@ -1621,7 +1687,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let audioURL = recording.url
-        let secondaryCapture = recording.secondary
 
         // Pre-transcription gates (too-short / silent), with the wav on disk as arbiter:
         // if the in-memory samples fail a gate but the just-written wav passes, transcribe
@@ -1632,12 +1697,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             memorySamples: recording.samples,
             readWav: { try? ProcessCommand.loadSamples(from: audioURL) }
         )
-        // Dead-primary rescue (2026-07-22 outage): the built-in engine went dead-air
-        // (stale-scope tap) and every dictation was dropped as too-short/silent while
-        // the Bluetooth track had captured Michael's actual voice — and was discarded.
-        // When a Bluetooth input is present, a failed primary gate defers the skip
-        // decision into the finalize Task, which checks the BT track first.
-        var primaryGateFailure: FinalizePipeline.Outcome?
         if let failure = gate.failure {
             if case .captureFailed = failure {
                 DiagnosticLogger.shared.log(
@@ -1653,91 +1712,75 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             default:
                 break
             }
-            // Rescue only on DEAD-ENGINE signatures (0 samples / silence). A tooShort
-            // with real samples is a genuine accidental tap — the BT track covers the
-            // same instant and has nothing more to say; routing taps through the
-            // rescue would only widen the hallucination surface (verifier R2).
-            let deadEngineSignature: Bool
             switch failure {
-            case .captureFailed: deadEngineSignature = true
-            case .silent: deadEngineSignature = true
-            default: deadEngineSignature = false
-            }
-            if deadEngineSignature, AudioDeviceCatalog.cachedBluetoothInput != nil {
+            case .tooShort(let count):
+                // Likely an accidental tap — skip quietly.
                 DiagnosticLogger.shared.log(
-                    "Primary gate failed (\(failure)) — attempting Bluetooth-track rescue")
-                primaryGateFailure = failure
-            } else {
-                switch failure {
-                case .tooShort(let count):
-                    // Likely an accidental tap — skip quietly.
-                    DiagnosticLogger.shared.log(
-                        "Recording too short (\(count) samples / \(Int(Double(count) / 16000.0 * 1000))ms) — skipping")
-                default:
-                    // NOTE: the wav either agreed or could not be read — resolveGateSamples does
-                    // not distinguish; do not claim agreement in the log.
-                    DiagnosticLogger.shared.log(
-                        "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples))) and the wav did not rescue it — audio engine may be dead, rebuilding")
-                }
-                // Keep the wav on a SILENT failure even when saving is off (2026-07-25
-                // audit F11): a silent capture means the mic/route is broken, and the
-                // audio is the diagnostic evidence. Only genuine accidental taps
-                // (.tooShort with real samples) honor the opt-out deletion.
-                let isSilentFailure: Bool
-                if case .silent = failure { isSilentFailure = true } else { isSilentFailure = false }
-                let isCaptureFailure: Bool
-                if case .captureFailed = failure {
-                    isCaptureFailure = true
-                    try? FileManager.default.removeItem(at: audioURL)
-                } else {
-                    isCaptureFailure = false
-                }
-                if !DevMode.effectiveSaveRecordings(config) && !isSilentFailure {
-                    try? FileManager.default.removeItem(at: audioURL)
-                }
-                if isCaptureFailure {
-                    statusBar.state = .captureFailed
-                    statusBar.buildMenu()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                        if self.statusBar.state == .captureFailed {
-                            self.statusBar.state = .idle
-                            self.statusBar.buildMenu()
-                        }
-                    }
-                    recordingOverlay.show(state: .error("Capture failed: please try again"))
-                    showCaptureFailureAlert()
-                } else if isSilentFailure {
-                    // Empty sidecar (review #6): the kept wav is diagnostic evidence,
-                    // NOT a recoverable dictation — without this the launch sweep
-                    // re-offers known-silent audio every launch and masks real orphans.
-                    RecordingStore.saveTranscription(text: "", for: audioURL)
-                }
-                RecordingStore.clearSentinel()
-                focusCapture.reset()
-                // I4: a gate-failed dictation never consumes its OCR, so clear it and invalidate any
-                // in-flight capture — otherwise this recording's screenContextText survives and biases
-                // the NEXT dictation's prompt with stale on-screen text.
-                screenContextText = nil
-                screenCaptureGeneration = UUID()
-                if isSilentFailure {
-                    // The user held the key and spoke into a dead mic — say so (F12:
-                    // gate failures were a silent no-op; the empty-transcript fix
-                    // didn't cover this path).
-                    statusBar.state = .noSpeech
-                    statusBar.buildMenu()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                        if self.statusBar.state == .noSpeech {
-                            self.statusBar.state = .idle
-                            self.statusBar.buildMenu()
-                        }
-                    }
-                    recordingOverlay.show(state: .error("No speech captured: check your mic"))
-                } else {
-                    statusBar.state = .idle
-                    recordingOverlay.hide()
-                }
-                return
+                    "Recording too short (\(count) samples / \(Int(Double(count) / 16000.0 * 1000))ms) — skipping")
+            default:
+                // NOTE: the wav either agreed or could not be read — resolveGateSamples does
+                // not distinguish; do not claim agreement in the log.
+                DiagnosticLogger.shared.log(
+                    "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples))) and the wav did not rescue it — audio engine may be dead, rebuilding")
             }
+            // Keep the wav on a SILENT failure even when saving is off (2026-07-25
+            // audit F11): a silent capture means the mic/route is broken, and the
+            // audio is the diagnostic evidence. Only genuine accidental taps
+            // (.tooShort with real samples) honor the opt-out deletion.
+            let isSilentFailure: Bool
+            if case .silent = failure { isSilentFailure = true } else { isSilentFailure = false }
+            let isCaptureFailure: Bool
+            if case .captureFailed = failure {
+                isCaptureFailure = true
+                try? FileManager.default.removeItem(at: audioURL)
+            } else {
+                isCaptureFailure = false
+            }
+            if !DevMode.effectiveSaveRecordings(config) && !isSilentFailure {
+                try? FileManager.default.removeItem(at: audioURL)
+            }
+            if isCaptureFailure {
+                statusBar.state = .captureFailed
+                statusBar.buildMenu()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                    if self.statusBar.state == .captureFailed {
+                        self.statusBar.state = .idle
+                        self.statusBar.buildMenu()
+                    }
+                }
+                recordingOverlay.show(state: .error("Capture failed: please try again"))
+                showCaptureFailureAlert()
+            } else if isSilentFailure {
+                // Empty sidecar (review #6): the kept wav is diagnostic evidence,
+                // NOT a recoverable dictation — without this the launch sweep
+                // re-offers known-silent audio every launch and masks real orphans.
+                RecordingStore.saveTranscription(text: "", for: audioURL)
+            }
+            RecordingStore.clearSentinel()
+            focusCapture.reset()
+            // I4: a gate-failed dictation never consumes its OCR, so clear it and invalidate any
+            // in-flight capture — otherwise this recording's screenContextText survives and biases
+            // the NEXT dictation's prompt with stale on-screen text.
+            screenContextText = nil
+            screenCaptureGeneration = UUID()
+            if isSilentFailure {
+                // The user held the key and spoke into a dead mic — say so (F12:
+                // gate failures were a silent no-op; the empty-transcript fix
+                // didn't cover this path).
+                statusBar.state = .noSpeech
+                statusBar.buildMenu()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                    if self.statusBar.state == .noSpeech {
+                        self.statusBar.state = .idle
+                        self.statusBar.buildMenu()
+                    }
+                }
+                recordingOverlay.show(state: .error("No speech captured: check your mic"))
+            } else {
+                statusBar.state = .idle
+                recordingOverlay.hide()
+            }
+            return
         }
         if gate.usedWavFallback {
             // Divergence between the tap's in-memory copy and the wav is an upstream bug —
@@ -1779,22 +1822,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         // Recordings privacy: persisting audio + transcripts is opt-in (2026-07-14).
         let keepRecording = DevMode.effectiveSaveRecordings(config)
-        // LEFT AS `.off` DELIBERATELY, and it disagrees with every other site on purpose until
-        // Michael picks a direction (open item in the canonical decisions doc under build/CURRENT).
-        //
-        // `Config.defaultConfig`, `SettingsViewModel` and `ProcessCommand` all resolve a missing
-        // `spokenPunctuation` to `.hybrid`, so a legacy config predating the key shows
-        // "Automatic & Spoken" in Settings while dictation runs Automatic Only. That mismatch is
-        // real. Changing THIS site to `.hybrid` was tried on 2026-07-26 and reverted: `.off`
-        // skips `TextPostProcessor.process` entirely, so switching is not "spoken words now
-        // convert" — it turns on the whole ambiguous-word pass, which measurably corrupts text
-        // `.off` left alone ("During that period we grew a lot" -> "During that. We grew a lot";
-        // "I met Bob, Alice, and Carol" -> "I met Bob. Alice, and Carol"). The equally valid fix
-        // is the reverse: resolve nil to `.off` in the view model so the UI reports what
-        // dictation actually does and nobody's output changes. That is a product call about
-        // people's real dictation, not a cleanup, so it is not being made inside a help-text
-        // change.
-        let mode = config.spokenPunctuation ?? .off
+        // Resolved through the one shared default (Michael 2026-08-12). The full history of
+        // why a missing key means `.off` — including the reverted 2026-07-26 flip to
+        // `.hybrid` and the text corruption it caused — lives on
+        // `Config.effectivePunctuationMode`, which every consumer (here, Settings, Help,
+        // ProcessCommand) now reads. Do not reintroduce a site-local `??` default.
+        let mode = config.effectivePunctuationMode
         let glossary = Config.loadVocabulary()
         let overrides = Config.loadOverrides()
         let capturedStyleMode = recordingStyleMode
@@ -1879,82 +1912,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
 
-                if primaryGateFailure != nil {
-                    let btSamples = await secondaryCapture.value(
-                        timeout: DualCapture.secondaryResultTimeout)
-                    guard FinalizePipeline.passesGates(btSamples) else {
-                        let zeroPayload: Bool
-                        if case .some(.captureFailed) = primaryGateFailure {
-                            zeroPayload = true
-                            try? FileManager.default.removeItem(at: audioURL)
-                        } else {
-                            zeroPayload = false
-                            if !keepRecording {
-                                try? FileManager.default.removeItem(at: audioURL)
-                            }
-                        }
-                        DiagnosticLogger.shared.log(
-                            "Recording failed both tracks (primary \(samples.count) samples, "
-                            + "bt \(btSamples.count)); capture failed")
-                        RecordingStore.clearSentinel()
-                        DispatchQueue.main.async {
-                            self.statusBar.state = zeroPayload ? .captureFailed : .noSpeech
-                            self.statusBar.buildMenu()
-                            self.recordingOverlay.show(
-                                state: .error(zeroPayload
-                                    ? "Capture failed: please try again"
-                                    : "No speech captured: check your mic"))
-                            if zeroPayload {
-                                self.showCaptureFailureAlert()
-                            }
-                        }
-                        return
-                    }
-                    DiagnosticLogger.shared.log(String(
-                        format: "Dead-primary rescue: dictating from the Bluetooth track "
-                            + "(%.1fs), primary had %d samples",
-                        Double(btSamples.count) / 16000.0, samples.count))
-                    let btURL = audioURL.deletingPathExtension().appendingPathExtension("bt.wav")
-                    try? DualCapture.writeWav(samples: btSamples, to: btURL)
-                    let bluetoothRaw = try await transcriber.transcribe(
-                        audioURL: btURL, samples: btSamples, prompt: prompt)
-                    let text = TextPipeline.run(
-                        makeInput(bluetoothRaw, btSamples.count),
-                        precomputedPrompt: .some(prompt)).finalText
-                    RecordingStore.finishRecording(
-                        audioURL: audioURL, keep: keepRecording, raw: bluetoothRaw, text: text,
-                        meta: RecordingStore.RecordingMeta(
-                            appVersion: SpeakFree.version,
-                            engine: metaEngine,
-                            model: transcriber.modelID,
-                            inputDevice: metaDevice,
-                            date: ISO8601DateFormatter().string(from: Date()),
-                            durationSeconds: Double(btSamples.count) / 16_000.0,
-                            transcriptChars: text.count,
-                            targetApp: metaTargetApp))
-                    RecordingStore.clearSentinel()
-                    if keepRecording {
-                        RecordingStore.saveDualSourceRaws(
-                            primary: "", bluetooth: bluetoothRaw,
-                            btAudioURL: btURL, mainAudioURL: audioURL)
-                    } else {
-                        try? FileManager.default.removeItem(at: btURL)
-                    }
-                    if keepRecording && maxRecordings > 0 {
-                        RecordingStore.prune(maxCount: maxRecordings)
-                    }
-                    DispatchQueue.main.async {
-                        self.presentFinalizedText(
-                            text,
-                            sampleCount: btSamples.count,
-                            stopTime: stopTime,
-                            prependSpace: capturedPrependSpace,
-                            contextBefore: capturedInputText,
-                            element: capturedElement)
-                    }
-                    return
-                }
-
                 let (primaryRaw, reusedPartial) = try await FinalizePipeline.resolveRaw(
                     reuseDecision: reuseDecision
                 ) {
@@ -1992,25 +1949,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         prependSpace: capturedPrependSpace,
                         contextBefore: capturedInputText,
                         element: capturedElement
-                    ) {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
-                            Task {
-                                await self?.runForkBComparison(
-                                    secondaryCapture: secondaryCapture,
-                                    transcriber: transcriber,
-                                    audioURL: audioURL,
-                                    primaryRaw: primaryRaw,
-                                    prompt: prompt,
-                                    punctuationMode: mode,
-                                    cursorContextText: capturedInputText,
-                                    screenContextText: capturedScreenText,
-                                    styleMode: capturedStyleMode,
-                                    glossary: glossary,
-                                    overrides: overrides,
-                                    keepRecording: keepRecording)
-                            }
-                        }
-                    }
+                    )
                 }
             } catch {
                 RecordingStore.clearSentinel()
@@ -2088,8 +2027,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         stopTime: Double,
         prependSpace: Bool,
         contextBefore: String?,
-        element: AXUIElement?,
-        completion: (() -> Void)? = nil
+        element: AXUIElement?
     ) {
         recordingOverlay.hide()
         if !text.isEmpty {
@@ -2104,12 +2042,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             let audioSeconds = Double(sampleCount) / 16_000.0
             UsageStats.shared.recordDictation(
                 characters: text.count, audioSeconds: audioSeconds)
-            inserter.onSecureInputFallback = {
+            inserter.onSecureInputFallback = { text, reason in
                 self.statusBar.state = .secureInputCopied
                 self.statusBar.buildMenu()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    self.statusBar.state = .idle
-                    self.statusBar.buildMenu()
+                switch reason {
+                case .axTimeoutMayHaveCommitted:
+                    // The AX write MAY have landed — never prompt a paste or auto-retry
+                    // here, both risk a duplicate. Checkmark only, as before.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        self.statusBar.state = .idle
+                        self.statusBar.buildMenu()
+                    }
+                case .secureInput:
+                    // Definitely NOT inserted: show the retry dialog (Michael 2026-08-12)
+                    // and auto-insert the moment Secure Input clears.
+                    self.beginSecureInputRetry(text: text)
                 }
             }
             let pasted = inserter.insert(
@@ -2153,7 +2100,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        completion?()
     }
 
     private func showCaptureFailureAlert() {
@@ -2170,103 +2116,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")
         alert.runModal()
-    }
-
-    private func runForkBComparison(
-        secondaryCapture: SecondaryCaptureResult,
-        transcriber: Transcriber,
-        audioURL: URL,
-        primaryRaw: String,
-        prompt: String?,
-        punctuationMode: PunctuationMode,
-        cursorContextText: String?,
-        screenContextText: String?,
-        styleMode: TextPostProcessor.StyleMode,
-        glossary: String?,
-        overrides: [String: String],
-        keepRecording: Bool
-    ) async {
-        let btSamples = await secondaryCapture.value(
-            timeout: DualCapture.secondaryResultTimeout)
-        guard FinalizePipeline.passesGates(btSamples) else { return }
-
-        let btURL = audioURL.deletingPathExtension().appendingPathExtension("bt.wav")
-        do {
-            try DualCapture.writeWav(samples: btSamples, to: btURL)
-        } catch {
-            DiagnosticLogger.shared.log(
-                "forkB: failed to write Bluetooth track: \(error.localizedDescription)")
-            return
-        }
-        var keepBluetoothArtifact = false
-        defer {
-            if !keepBluetoothArtifact {
-                try? FileManager.default.removeItem(at: btURL)
-            }
-        }
-
-        let started = CFAbsoluteTimeGetCurrent()
-        let bluetoothRaw: String
-        do {
-            bluetoothRaw = try await transcriber.transcribe(
-                audioURL: btURL, samples: btSamples, prompt: prompt)
-        } catch {
-            DiagnosticLogger.shared.log(
-                "forkB: Bluetooth inference failed: \(error.localizedDescription)")
-            return
-        }
-        DiagnosticLogger.shared.log(String(
-            format: "forkB: post-insertion Bluetooth inference completed in %.3fs",
-            CFAbsoluteTimeGetCurrent() - started))
-
-        if keepRecording {
-            RecordingStore.saveDualSourceRaws(
-                primary: primaryRaw,
-                bluetooth: bluetoothRaw,
-                btAudioURL: btURL,
-                mainAudioURL: audioURL)
-            keepBluetoothArtifact = true
-        }
-
-        let vocabularyWords = DualCapture.protectedWordSet(fromGlossary: glossary)
-        let decision = DualCapture.forkBDecision(
-            primary: primaryRaw,
-            bluetooth: bluetoothRaw,
-            vocabularyWords: vocabularyWords)
-        guard decision.preferBluetooth else {
-            DiagnosticLogger.shared.log(
-                "forkB: primary retained (\(decision.reason), primary unknown "
-                    + "\(decision.primaryUnknownWords), bt unknown "
-                    + "\(decision.bluetoothUnknownWords))")
-            return
-        }
-
-        let betterText = TextPipeline.run(TextPipeline.Input(
-            raw: bluetoothRaw,
-            punctuationMode: punctuationMode,
-            cursorContextText: cursorContextText,
-            screenContextText: screenContextText,
-            styleMode: styleMode,
-            glossaryWords: glossary,
-            overrides: overrides,
-            audioDurationSeconds: Double(btSamples.count) / 16_000.0
-        ), precomputedPrompt: .some(prompt)).finalText
-        guard !betterText.isEmpty else { return }
-
-        if keepRecording {
-            _ = RecordingStore.updateFinalTranscription(
-                text: betterText, for: audioURL)
-        }
-        let primaryExcerpt = String(primaryRaw.prefix(60))
-            .replacingOccurrences(of: "\n", with: " ")
-        let bluetoothExcerpt = String(bluetoothRaw.prefix(60))
-            .replacingOccurrences(of: "\n", with: " ")
-        DiagnosticLogger.shared.log(
-            "forkB: bt track preferred primary=\"\(primaryExcerpt)\" "
-                + "bt=\"\(bluetoothExcerpt)\"")
-        DispatchQueue.main.async {
-            self.statusBar.offerBetterTranscript(betterText)
-        }
     }
 
     // MARK: - Streaming Transcription

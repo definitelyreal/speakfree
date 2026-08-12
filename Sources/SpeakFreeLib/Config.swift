@@ -60,10 +60,12 @@ public struct Config: Codable {
     // menu-bar microphone selector; falls back to the default if the device vanishes.
     public var inputDeviceUID: String?
 
-    // Dual-mic capture prototype (2026-07-14, flag-gated, default OFF): when the
-    // default input is Bluetooth, pin the always-on engine to the built-in mic
-    // (pre-roll + A2DP release) and record a second comparison track from the
-    // Bluetooth mic during dictation. See DualCapture.swift.
+    // Deprecated 2026-08-12: dual-mic capture was removed. Recording a second
+    // Bluetooth track alongside the built-in mic and comparing the two transcripts
+    // bought no measurable accuracy (26-08-12 dual-mic troubleshoot). Capturing the
+    // built-in mic by default, which was the prototype's real benefit, is now
+    // unconditional in AudioRecorder. Key is kept so old configs decode and the value
+    // round-trips, but nothing reads it.
     public var dualMicCapture: FlexBool?
 
     // Recordings are kept forever by DEFAULT — they are the dictation corpus that
@@ -74,6 +76,19 @@ public struct Config: Codable {
         guard let raw = value, raw > 0 else { return 0 }
         return min(raw, 100)
     }
+
+    /// THE single resolution of a missing `spokenPunctuation` key (Michael's ruling
+    /// 2026-08-12: "build the shared function and align the CLI"). A config predating the
+    /// key keeps its historical runtime behavior: automatic engine punctuation, no
+    /// spoken-word conversion (`.off`). Resolving to `.hybrid` was tried 2026-07-26 and
+    /// reverted — `.off` skips TextPostProcessor entirely, so flipping is not "spoken
+    /// words now convert", it turns on the whole ambiguous-word pass ("During that period
+    /// we grew" becomes "During that. We grew"). Every consumer — dictation
+    /// (AppDelegate), Settings, Help, and the CLI (ProcessCommand) — must resolve through
+    /// this property; site-local `??` defaults are exactly how the display-vs-runtime
+    /// drift ("Settings says Automatic & Spoken while dictation runs Automatic Only")
+    /// happened, and how the CLI drifted from the app.
+    public var effectivePunctuationMode: PunctuationMode { spokenPunctuation ?? .off }
 
     // MARK: - Product defaults (Michael, 2026-06-11)
     //

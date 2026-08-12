@@ -75,6 +75,14 @@ enum NoticeCopy {
     static func confirmBody(fileCount: Int, folder: String) -> String {
         "This will permanently delete \(fileCount) files in \(folder)."
     }
+    // Michael's wording, 2026-08-12 — shown in the delete confirmation so the user knows
+    // what the recordings are for before destroying them.
+    static let confirmDataNote = """
+    A note before you delete: my saved recordings have been an incredible data source, \
+    allowing me to run changes on Speakfree against all my past dictations and study \
+    voice patterns / usage history. They are on your computer and never sent anywhere, \
+    but can of course pose a privacy risk.
+    """
     static let confirmQuestion = "Are you sure you want to do this?"
 }
 
@@ -256,6 +264,11 @@ struct DeleteRecordingsConfirmView: View {
                 .font(.headline)
             Text(NoticeCopy.confirmBody(fileCount: fileCount, folder: folderPath))
                 .fixedSize(horizontal: false, vertical: true)
+            Text(NoticeCopy.confirmDataNote)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("confirm-data-note")
             Text(NoticeCopy.confirmQuestion)
 
             HStack {

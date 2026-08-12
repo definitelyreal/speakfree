@@ -248,7 +248,7 @@ final class SecureInputTests: XCTestCase {
     func test_secureInput_onSecureInputFallbackFires() {
         let inserter = makeInserter(secureInput: true)
         var fallbackFired = false
-        inserter.onSecureInputFallback = { fallbackFired = true }
+        inserter.onSecureInputFallback = { _, _ in fallbackFired = true }
         inserter.insert(text: "password-dictation")
         XCTAssertTrue(fallbackFired, "onSecureInputFallback must fire when Secure Input is active")
     }
@@ -257,7 +257,7 @@ final class SecureInputTests: XCTestCase {
     func test_noSecureInput_onSecureInputFallbackDoesNotFire() {
         let inserter = makeInserter(secureInput: false)
         var fallbackFired = false
-        inserter.onSecureInputFallback = { fallbackFired = true }
+        inserter.onSecureInputFallback = { _, _ in fallbackFired = true }
         inserter.insert(text: "normal-text")
         XCTAssertFalse(fallbackFired, "onSecureInputFallback must not fire on the normal insertion path")
     }

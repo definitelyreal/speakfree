@@ -510,43 +510,13 @@ public class RecordingStore {
         }
     }
 
-    /// Persist both source transcripts alongside the merged `.raw.txt`. These are not
-    /// ground-truth labels; they are source evidence for later corpus review.
-    public static func saveDualSourceRaws(
-        primary: String, bluetooth: String, btAudioURL: URL, mainAudioURL: URL
-    ) {
-        mutationLock.lock()
-        defer { mutationLock.unlock() }
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: mainAudioURL.path) || fm.fileExists(atPath: btAudioURL.path) else {
-            DiagnosticLogger.shared.log("RecordingStore: recording vanished before bt-finish — skipping bt sidecar for \(btAudioURL.lastPathComponent)")
-            return
-        }
-        let primarySidecar = mainAudioURL.deletingPathExtension()
-            .appendingPathExtension("builtin.raw.txt")
-        try? primary.write(to: primarySidecar, atomically: true, encoding: .utf8)
-        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: primarySidecar.path)
-        saveRaw(text: bluetooth, for: btAudioURL)
-    }
-
-    /// Compatibility surface for the original comparison-only dual-capture path.
-    public static func saveBluetoothRaw(
-        text: String, btAudioURL: URL, mainAudioURL: URL
-    ) {
-        mutationLock.lock()
-        defer { mutationLock.unlock() }
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: mainAudioURL.path)
-                || fm.fileExists(atPath: btAudioURL.path) else {
-            DiagnosticLogger.shared.log(
-                "RecordingStore: recording vanished before bt-finish — skipping bt sidecar for \(btAudioURL.lastPathComponent)")
-            return
-        }
-        saveRaw(text: text, for: btAudioURL)
-    }
-
     /// The known recording-artifact extensions, longest-first so a compound suffix
     /// (`.bt.raw.txt`) is matched before its tail (`.raw.txt`, `.txt`).
+    ///
+    /// `.bt.wav` / `.bt.raw.txt` / `.builtin.raw.txt` are DEAD WRITE FORMATS as of
+    /// 2026-08-12 (dual capture removed) but stay in this list forever: the local
+    /// archive holds 905 real dual-capture takes, and every one of those files must
+    /// still be excluded from recording counts and still be deleted by Delete All.
     private static let artifactSuffixes = [
         ".builtin.raw.txt", ".bt.raw.txt", ".raw.txt", ".meta.json", ".bt.wav", ".wav", ".txt",
     ]
