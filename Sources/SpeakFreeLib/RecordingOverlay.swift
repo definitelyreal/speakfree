@@ -427,6 +427,15 @@ class RecordingOverlay {
             return
         }
         view.overlayState = state
+        // Emergence hold (Michael 2026-08-12): the centered card stays exactly where
+        // and how big it was during recording, all the way through transcription — no
+        // move to the bottom, no shrink to the spinner pill. The draw path paints the
+        // working pulse on the same card; here we just refresh and keep the geometry
+        // (and the emergence's no-shadow treatment) untouched.
+        if OverlayContentView.emergenceTranscribing(style: style, state: state) {
+            view.needsDisplay = true
+            return
+        }
         // Leaving the recording phase drops the emergence canvas for an ordinary
         // pill, which wants its shadow back (see show()).
         if state != .recording { win.hasShadow = true }
@@ -687,7 +696,23 @@ class OverlayContentView: NSView {
     /// allowed through so the overlay exits normally. Pure, so the rule is testable.
     static func emergenceSuppressesStreamingText(
         style: Int, state: RecordingOverlay.OverlayState) -> Bool {
-        usesEmergenceEntry(style: style) && state == .recording
+        // Recording AND transcribing (inline review 2026-08-12): a cold model load
+        // (measured 14-42s) pushes a "Loading speech model…" streaming update DURING
+        // the transcribing phase; without covering that state, it would reposition the
+        // held-centered emergence card to the bottom pill — the exact jump the hold was
+        // built to prevent, in the slowest case where "it's working" matters most.
+        usesEmergenceEntry(style: style) && (state == .recording || state == .transcribing)
+    }
+
+    /// Michael's hold ruling (2026-08-12): for the emergence style the centered card
+    /// HOLDS through transcription rather than dropping to the bottom spinner — its
+    /// presence is the "working" signal, its disappearance the only "stopped" one.
+    /// True while the emergence style is transcribing, so both `update()` (skip the
+    /// bottom-pill reposition) and `draw()` (paint the working pulse in place) branch
+    /// on the one rule. Pure, so it is unit-testable.
+    static func emergenceTranscribing(
+        style: Int, state: RecordingOverlay.OverlayState) -> Bool {
+        usesEmergenceEntry(style: style) && state == .transcribing
     }
     var audioLevel: CGFloat = 0
     /// Latching speech-onset detector for the emergence trigger (recalibrated
@@ -855,6 +880,14 @@ class OverlayContentView: NSView {
         // (Michael: "less transparency, like 1/3 of the transparency").
         if prominent && overlayState == .recording {
             drawProminentBanner(ctx: ctx, rect: rect, pillPath: pillPath)
+            return
+        }
+
+        // Emergence hold: the centered card stays put through transcription with a
+        // calm "working" pulse (Michael 2026-08-12). Painted before the generic
+        // transcribing/spinner path so the emergence style never falls to it.
+        if prominent && Self.emergenceTranscribing(style: style, state: overlayState) {
+            drawEmergenceTranscribing(ctx: ctx, rect: rect)
             return
         }
 
@@ -1348,6 +1381,34 @@ class OverlayContentView: NSView {
             setFill(ctx, OverlayEmergence.discRed, markA)
             ctx.fillEllipse(in: CGRect(x: center.x - markR, y: center.y - markR,
                                        width: markR * 2, height: markR * 2))
+        }
+    }
+
+    /// Transcribing HOLD (Michael 2026-08-12): the emergence card stays centered at
+    /// its end-state geometry (the purple pill × 1.2, the same box it held while
+    /// recording) and runs a calm, indeterminate "working" pulse instead of the live
+    /// waveform. The card's presence is the "working" signal, so its disappearance —
+    /// when the overlay hides on completion — is the only "stopped" signal. No mark,
+    /// no rings, no bottom jump.
+    private func drawEmergenceTranscribing(ctx: CGContext, rect: NSRect) {
+        let g = OverlayEmergence.geometry(centerX: rect.midX, centerY: rect.midY)
+
+        drawBloomCard(ctx, geometry: g, card: OverlayEmergence.card(progress: 1, geometry: g))
+
+        let elapsed = renderElapsedOverride ?? -recordingStartedAt.timeIntervalSinceNow
+        let levels = OverlayEmergence.transcribingBarLevels(time: CGFloat(elapsed), count: g.count)
+        for i in 0..<g.count {
+            let level = min(1, max(0, levels[i]))
+            let h = g.targetHeight(level: level)
+            guard h > 0 else { continue }
+            let x = g.homeX(i)
+            let bar = CGRect(x: x - g.barWidth / 2, y: g.centerY - h / 2,
+                             width: g.barWidth, height: h)
+            let r = level * g.barWidth / 2
+            ctx.addPath(CGPath(roundedRect: bar, cornerWidth: r, cornerHeight: r, transform: nil))
+            // Steady lilac — the bars are done carrying the mark's red at p = 1.
+            setFill(ctx, OverlayEmergence.barLilac, OverlayEmergence.barAlpha)
+            ctx.fillPath()
         }
     }
 

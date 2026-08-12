@@ -400,6 +400,42 @@ public enum OverlayEmergence {
         }
     }
 
+    // MARK: - Transcribing "working" pulse (2026-08-12, Michael's hold ruling)
+    //
+    // On key-release the emergence card HOLDS centered through the whole
+    // transcription phase — Michael: "The centered card should hold for all
+    // transcription... it's really important to notice when it's not transcribing."
+    // The card's presence is the "working" signal, so it must not jump to the
+    // bottom spinner. To read as distinct from live recording, the bars stop
+    // tracking the mic and run this calm, indeterminate pulse instead: a soft bump
+    // sweeping left→right on a ~1.4s loop. Deliberately low-amplitude and rhythmic,
+    // so it can never be mistaken for the spiky, speech-reactive recording waveform.
+
+    /// Loop period of the working pulse, seconds.
+    public static let transcribingPeriod: CGFloat = 1.4
+    /// Resting floor of the pulse (every bar at least a dot).
+    public static let transcribingFloor: CGFloat = 0.10
+    /// Extra height at the crest of the sweeping bump.
+    public static let transcribingCrest: CGFloat = 0.50
+
+    /// Gentle "working" bar levels at `time` seconds — a soft bump sweeping across
+    /// the field on `transcribingPeriod`. Pure and deterministic so the whole
+    /// treatment is unit-testable without a draw pass.
+    public static func transcribingBarLevels(time: CGFloat, count: Int = barCount) -> [CGFloat] {
+        guard count > 0 else { return [] }
+        var phase = (time / transcribingPeriod).truncatingRemainder(dividingBy: 1)
+        if phase < 0 { phase += 1 }
+        let head = phase * CGFloat(count - 1)
+        let width: CGFloat = 2.2
+        var out = [CGFloat](repeating: 0, count: count)
+        for i in 0..<count {
+            let d = abs(CGFloat(i) - head) / width
+            let bump = max(0, 1 - d * d)          // raised parabola, 0 outside the width
+            out[i] = transcribingFloor + transcribingCrest * bump
+        }
+        return out
+    }
+
     // MARK: - Adaptive outline contrast (2026-08-12)
     //
     // "if the screen behind it is bright, it should be a black outline around the

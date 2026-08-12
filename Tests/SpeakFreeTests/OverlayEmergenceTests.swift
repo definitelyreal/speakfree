@@ -494,13 +494,16 @@ final class OverlayEmergenceTests: XCTestCase {
 
     // MARK: - DEFECT 2: streaming text can't disturb the emergence window
 
-    func test_emergenceSuppressesStreamingTextOnlyDuringRecording() {
+    func test_emergenceSuppressesStreamingTextThroughRecordingAndTranscribing() {
         XCTAssertTrue(OverlayContentView.emergenceSuppressesStreamingText(style: 5, state: .recording))
-        // Post-release states are allowed through so the overlay exits normally.
-        XCTAssertFalse(OverlayContentView.emergenceSuppressesStreamingText(style: 5, state: .transcribing))
-        // Non-emergence styles keep their streaming-text pill.
+        // Transcribing too (inline review 2026-08-12): a cold-load "Loading speech
+        // model…" streaming update must NOT reposition the held-centered card to the
+        // bottom pill. This was the buggy case the first version of the fix missed.
+        XCTAssertTrue(OverlayContentView.emergenceSuppressesStreamingText(style: 5, state: .transcribing))
+        // Non-emergence styles keep their streaming-text pill in every state.
         XCTAssertFalse(OverlayContentView.emergenceSuppressesStreamingText(style: 1, state: .recording))
         XCTAssertFalse(OverlayContentView.emergenceSuppressesStreamingText(style: 3, state: .recording))
+        XCTAssertFalse(OverlayContentView.emergenceSuppressesStreamingText(style: 1, state: .transcribing))
     }
 
     // MARK: - DEFECT 3: bigger resting record mark, same end pill
@@ -546,5 +549,55 @@ final class OverlayEmergenceTests: XCTestCase {
         let mean = E.averageLuminance(of: [(0, 0, 0), (1, 1, 1)])
         XCTAssertNotNil(mean)
         XCTAssertEqual(mean!, 0.5, accuracy: 1e-9)
+    }
+
+    // MARK: - Transcribing HOLD (Michael's ruling 2026-08-12)
+
+    /// The emergence card holds centered through transcription — the rule both
+    /// `update()` (skip the bottom-pill reposition) and `draw()` (paint the working
+    /// pulse) branch on. Only for the emergence style, only while transcribing.
+    func test_emergenceTranscribingRuleIsStyle5AndTranscribingOnly() {
+        XCTAssertTrue(OverlayContentView.emergenceTranscribing(style: 5, state: .transcribing))
+        XCTAssertFalse(OverlayContentView.emergenceTranscribing(style: 5, state: .recording))
+        XCTAssertFalse(OverlayContentView.emergenceTranscribing(style: 1, state: .transcribing))
+        XCTAssertFalse(OverlayContentView.emergenceTranscribing(style: 3, state: .transcribing))
+    }
+
+    /// The working pulse is a calm bump: 16 bars, always within a gentle bounded
+    /// range, and it moves over time (indeterminate, never static).
+    func test_transcribingPulseIsBoundedAndHas16Bars() {
+        for step in 0...140 {
+            let t = CGFloat(step) / 10  // 0…14s, several loop periods
+            let levels = E.transcribingBarLevels(time: t)
+            XCTAssertEqual(levels.count, 16)
+            for v in levels {
+                XCTAssertGreaterThanOrEqual(v, E.transcribingFloor - 1e-9)
+                XCTAssertLessThanOrEqual(v, E.transcribingFloor + E.transcribingCrest + 1e-9)
+            }
+        }
+    }
+
+    func test_transcribingPulseMovesOverTimeAndLoops() {
+        let a = E.transcribingBarLevels(time: 0)
+        let b = E.transcribingBarLevels(time: E.transcribingPeriod * 0.5)
+        XCTAssertNotEqual(a, b, "the bump must travel — a static pulse reads as frozen")
+        // One full period returns to the start (a clean loop, no seam).
+        let c = E.transcribingBarLevels(time: E.transcribingPeriod)
+        for i in 0..<a.count { XCTAssertEqual(a[i], c[i], accuracy: 1e-6) }
+        // Negative time is handled (phase wrap), never NaN or out of range.
+        for v in E.transcribingBarLevels(time: -0.3) {
+            XCTAssertFalse(v.isNaN)
+            XCTAssertGreaterThanOrEqual(v, E.transcribingFloor - 1e-9)
+        }
+    }
+
+    /// The crest is meaningfully taller than the floor (a visible bump) but stays
+    /// gentle — well under a full-height bar — so it never reads as live speech.
+    func test_transcribingPulseIsGentleButVisible() {
+        // At t=0 the head sits on bar 0, so bar 0 is at the crest.
+        let levels = E.transcribingBarLevels(time: 0)
+        XCTAssertEqual(levels[0], E.transcribingFloor + E.transcribingCrest, accuracy: 1e-9)
+        XCTAssertGreaterThan(levels[0], levels[8], "the bump is localized, not a full field")
+        XCTAssertLessThan(E.transcribingFloor + E.transcribingCrest, 0.7, "stays calm vs live speech")
     }
 }
