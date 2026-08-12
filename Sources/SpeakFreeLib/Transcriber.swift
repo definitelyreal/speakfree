@@ -2,15 +2,83 @@
 import Foundation
 import AVFoundation
 
+/// Named, rationale-carrying tuning constants for the hallucination-spare decision.
+///
+/// The filter deletes filler-word hallucinations ("So.", "Yeah.", "Okay.") that whisper/parakeet
+/// emit on near-silence. A short filler is *spared* (kept) only when the captured audio actually
+/// contains a real, voiced, human word. Two independent upgrades harden that spare:
+///   1. QUIET-ROOM / SNR — in a genuinely quiet room ANY speech-level energy is almost certainly a
+///      real word, so the spare fires on a lower bar (peak energy far above the room's noise floor)
+///      than the stricter sustained-energy bar needed in a noisy room.
+///   2. VOICEDNESS — a bang/tap/door-slam is a broadband transient with no pitch; voiced speech has
+///      a clear fundamental (~85–255 Hz) and harmonics. A pitch-detector gate means a tap that
+///      clears the energy bar but has no pitch does NOT resurrect a hallucinated filler word.
+public enum HallucinationFilterTuning {
+    /// Sustained-energy bar (the pre-existing noisy-room rule). Peak window must be clearly above
+    /// speech level AND span several windows. 0.04 RMS sits well above breath/room tone (~0.01) and
+    /// above the 0.02 "any speech energy" floor; 3 windows ≈ 90 ms, longer than a click transient.
+    public static let sustainedPeakRMS: Float = 0.04
+    public static let sustainedWindowCount = 3
+
+    /// Quiet-room SNR margin. Peak speech energy must exceed the estimated room noise floor by this
+    /// factor for the low-bar quiet-room spare. Tuned against the audit specimens: a genuinely quiet
+    /// office floor runs ~0.001–0.004 RMS while even a soft real "Yeah." peaks ~0.03–0.06 (ratio
+    /// 8–50×), whereas a noisy room's floor (~0.02) leaves a bare filler-level peak only ~1.5× above
+    /// it. 8× cleanly separates "clearly a word spoken into quiet" from "barely above the noise" and
+    /// keeps the strict sustained bar as the only path in noisy rooms. The absolute floor is still
+    /// enforced by `hasAnySpeechEnergy` (peak ≥ 0.02), so a tiny noise floor cannot spare true silence.
+    public static let quietRoomSNRMargin: Float = 8.0
+
+    /// Noise-floor estimator percentile. The 20th-percentile window RMS across the whole take is a
+    /// robust "quiet background" estimate: the median (50th) is polluted upward when a large share of
+    /// the take is speech, while the 20th percentile still lands in the quiet portion of nearly every
+    /// real dictation (which is mostly non-speech between words). Lower percentiles chase the single
+    /// quietest sample and are noisy.
+    public static let noiseFloorPercentile: Double = 0.20
+
+    /// Voiced-pitch search band. Adult voice fundamental spans ~85 Hz (low male) to ~255 Hz (high
+    /// female/child). At 16 kHz this is lag 63 (16000/255) to 188 (16000/85) samples.
+    public static let voicingMinPitchHz: Double = 85.0
+    public static let voicingMaxPitchHz: Double = 255.0
+
+    /// Voicedness threshold on the normalized cross-correlation peak in the pitch band. A periodic
+    /// (voiced) signal self-correlates ~0.9–1.0 at its pitch period; a single-impulse click stays
+    /// near 0. 0.5 sits safely between; real voiced dictation windows measured 0.6–0.98 on the audit
+    /// specimens. NCC alone is not enough — broadband white noise, maximized over ~125 lags × dozens
+    /// of windows, can randomly clear any moderate NCC bar, and a constant/DC block self-correlates
+    /// to 1.0 — so voicedness ALSO requires the zero-crossing band below.
+    public static let voicingNCCThreshold: Float = 0.5
+
+    /// Zero-crossing band for a voiced window (belt-and-suspenders with NCC, and the primary guard
+    /// against broadband energy). A voiced fundamental of 85–255 Hz crosses zero ~5–15 times per
+    /// 30 ms (480-sample) window; real speech's higher formants push this up modestly but stay well
+    /// under a quarter of the window. A DC/constant block crosses ~0 times (→ reject as not speech);
+    /// white noise and sharp clicks cross ~half the samples (~240/480 → far above the ceiling), so
+    /// the ceiling rejects them decisively no matter how their autocorrelation happens to fall.
+    public static let voicingMinZeroCrossings = 2
+    public static let voicingMaxZeroCrossingFraction: Double = 0.25
+}
+
 public class Transcriber {
     struct AudioEvidence: Equatable {
         let durationSeconds: Double
         let peakWindowRMS: Float
         let speechWindowCount: Int
+        /// Estimated room noise floor: the `noiseFloorPercentile` window RMS across the whole take.
+        let noiseFloorRMS: Float
+        /// True when at least one energetic window carries a voiced-speech pitch (harmonic structure
+        /// in the 85–255 Hz band), i.e. the energy is a human word rather than a tap/click/noise burst.
+        let hasVoicedSpeech: Bool
 
         var hasAnySpeechEnergy: Bool { speechWindowCount > 0 }
         var hasSustainedSpeechEnergy: Bool {
-            peakWindowRMS >= 0.04 && speechWindowCount >= 3
+            peakWindowRMS >= HallucinationFilterTuning.sustainedPeakRMS
+                && speechWindowCount >= HallucinationFilterTuning.sustainedWindowCount
+        }
+        /// Quiet-room SNR spare: peak speech energy stands a strong margin above the noise floor.
+        /// (`hasAnySpeechEnergy` supplies the absolute floor, so a zero noise floor cannot spare silence.)
+        var hasQuietRoomSNR: Bool {
+            peakWindowRMS >= noiseFloorRMS * HallucinationFilterTuning.quietRoomSNRMargin
         }
     }
 
@@ -77,40 +145,161 @@ public class Transcriber {
         "hello", "hi", "thank you",
     ]
 
+    static let audioEvidenceWindowSize = 480
+    static let audioEvidenceSampleRate: Double = 16_000.0
+
     static func audioEvidence(in samples: [Float]) -> AudioEvidence {
-        let windowSize = 480
+        let windowSize = audioEvidenceWindowSize
         var peakWindowRMS: Float = 0
         var speechWindowCount = 0
+        var windowRMSValues: [Float] = []
+        windowRMSValues.reserveCapacity(samples.count / windowSize + 1)
+        var hasVoicedSpeech = false
         var start = 0
         while start < samples.count {
             let end = min(start + windowSize, samples.count)
             let count = end - start
             guard count > 0 else { break }
+            let window = samples[start..<end]
             var sumSquares: Float = 0
-            for sample in samples[start..<end] {
+            for sample in window {
                 sumSquares += sample * sample
             }
             let rms = sqrtf(sumSquares / Float(count))
             peakWindowRMS = max(peakWindowRMS, rms)
+            windowRMSValues.append(rms)
             if rms >= PostBufferPolicy.defaultSpeechThreshold {
                 speechWindowCount += 1
+                // Voicedness is expensive relative to RMS, so only test energetic windows and
+                // short-circuit once any one is voiced — a single genuinely voiced window is enough
+                // to conclude the energy came from a human word, not a transient.
+                if !hasVoicedSpeech, isVoicedWindow(window) {
+                    hasVoicedSpeech = true
+                }
             }
             start = end
         }
         return AudioEvidence(
-            durationSeconds: Double(samples.count) / 16_000.0,
+            durationSeconds: Double(samples.count) / audioEvidenceSampleRate,
             peakWindowRMS: peakWindowRMS,
-            speechWindowCount: speechWindowCount)
+            speechWindowCount: speechWindowCount,
+            noiseFloorRMS: noiseFloorRMS(from: windowRMSValues),
+            hasVoicedSpeech: hasVoicedSpeech)
     }
 
-    private static func shouldSpareHallucination(_ text: String, evidence: AudioEvidence) -> Bool {
+    /// Robust room-noise-floor estimate: the `noiseFloorPercentile` window RMS across the take.
+    /// Pure and directly testable. Empty input → 0 (treated as perfectly quiet).
+    static func noiseFloorRMS(
+        from windowRMSValues: [Float],
+        percentile: Double = HallucinationFilterTuning.noiseFloorPercentile
+    ) -> Float {
+        guard !windowRMSValues.isEmpty else { return 0 }
+        let sorted = windowRMSValues.sorted()
+        let clamped = min(max(percentile, 0), 1)
+        let index = min(sorted.count - 1, Int(clamped * Double(sorted.count)))
+        return sorted[index]
+    }
+
+    /// Voiced-speech test for one sample window: is there harmonic pitch structure in the adult-voice
+    /// band? Requires BOTH (a) a strong DC-removed normalized-cross-correlation peak in the pitch-lag
+    /// band — a periodic voiced signal peaks near 1.0 at its pitch period, a click stays near 0 — AND
+    /// (b) a zero-crossing count inside the voiced band, which rejects a DC/constant block (≈0
+    /// crossings) and broadband white noise / sharp clicks (≈half the samples) regardless of how
+    /// their autocorrelation happens to fall.
+    static func isVoicedWindow(
+        _ window: ArraySlice<Float>,
+        sampleRate: Double = audioEvidenceSampleRate,
+        threshold: Float = HallucinationFilterTuning.voicingNCCThreshold
+    ) -> Bool {
+        let crossings = zeroCrossingCount(window)
+        let maxCrossings = Int(Double(window.count) * HallucinationFilterTuning.voicingMaxZeroCrossingFraction)
+        guard crossings >= HallucinationFilterTuning.voicingMinZeroCrossings,
+              crossings <= maxCrossings else { return false }
+        return normalizedPitchAutocorrelation(window, sampleRate: sampleRate) >= threshold
+    }
+
+    /// Zero crossings of the mean-removed window. DC/constant → ~0; voiced tone → ~2·f·Δt;
+    /// broadband noise/clicks → ~half the sample count. Pure and directly testable.
+    static func zeroCrossingCount(_ window: ArraySlice<Float>) -> Int {
+        let samples = Array(window)
+        guard samples.count > 1 else { return 0 }
+        var mean: Float = 0
+        for value in samples { mean += value }
+        mean /= Float(samples.count)
+        var crossings = 0
+        var previous = samples[0] - mean
+        for index in 1..<samples.count {
+            let current = samples[index] - mean
+            if (previous < 0 && current >= 0) || (previous >= 0 && current < 0) {
+                crossings += 1
+            }
+            previous = current
+        }
+        return crossings
+    }
+
+    /// Peak normalized cross-correlation over the pitch-period lag band (adult voice 85–255 Hz).
+    /// Pure DSP over the Float samples (no Accelerate dependency, no allocation beyond the local
+    /// mean-removed copy). Returns 0 when the window is too short, silent, or DC-only.
+    static func normalizedPitchAutocorrelation(
+        _ window: ArraySlice<Float>,
+        sampleRate: Double = audioEvidenceSampleRate,
+        minPitchHz: Double = HallucinationFilterTuning.voicingMinPitchHz,
+        maxPitchHz: Double = HallucinationFilterTuning.voicingMaxPitchHz
+    ) -> Float {
+        let samples = Array(window)
+        let n = samples.count
+        let minLag = max(1, Int((sampleRate / maxPitchHz).rounded(.down)))
+        let maxLag = min(n - 1, Int((sampleRate / minPitchHz).rounded(.up)))
+        guard maxLag > minLag, n > maxLag else { return 0 }
+
+        // Remove DC so a constant/near-constant block does not self-correlate as if it were pitched.
+        var mean: Float = 0
+        for value in samples { mean += value }
+        mean /= Float(n)
+        let centered = samples.map { $0 - mean }
+
+        var bestNCC: Float = 0
+        for lag in minLag...maxLag {
+            var dot: Float = 0
+            var energyA: Float = 0
+            var energyB: Float = 0
+            var index = 0
+            let limit = n - lag
+            while index < limit {
+                let a = centered[index]
+                let b = centered[index + lag]
+                dot += a * b
+                energyA += a * a
+                energyB += b * b
+                index += 1
+            }
+            let denom = sqrtf(energyA * energyB)
+            guard denom > 0 else { continue }
+            let ncc = dot / denom
+            if ncc > bestNCC { bestNCC = ncc }
+        }
+        return bestNCC
+    }
+
+    /// Duration (seconds) at/above which a bare filler is spared on length alone (long take with
+    /// at least one voiced window ⇒ the speaker said something even if energy wasn't sustained).
+    static let spareMinDurationSeconds: Double = 2.5
+
+    static func shouldSpareHallucination(_ text: String, evidence: AudioEvidence) -> Bool {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
             .trimmingCharacters(in: .punctuationCharacters)
             .trimmingCharacters(in: .whitespaces)
+        // Only these filler words are ever sparable; markers, "you", "bye", subtitle leaks stay deleted.
         guard speechSensitiveHallucinations.contains(normalized),
               evidence.hasAnySpeechEnergy else { return false }
-        return evidence.hasSustainedSpeechEnergy || evidence.durationSeconds >= 2.5
+        // BOTH energy-shaped evidence AND voicedness are required: a tap/click can clear the energy
+        // bar but has no pitch, so it must not resurrect a hallucinated filler.
+        let energyEvidence = evidence.hasQuietRoomSNR
+            || evidence.hasSustainedSpeechEnergy
+            || evidence.durationSeconds >= spareMinDurationSeconds
+        return energyEvidence && evidence.hasVoicedSpeech
     }
 
     private func isHallucination(_ text: String) -> Bool {

@@ -438,6 +438,31 @@ struct SettingsView: View {
         return sortedLanguages.filter { allowed.contains($0.id) }
     }
 
+    /// Punctuation modes offered for the active engine. Spoken Only is Whisper-only
+    /// (see SettingsViewModel.availablePunctuationModes for why).
+    private var availablePunctuationModes: [PunctuationMode] {
+        SettingsViewModel.availablePunctuationModes(engine: viewModel.engine)
+    }
+
+    /// Selection binding for the punctuation picker.
+    ///
+    /// On Parakeet the picker omits Spoken Only. A config saved on Whisper as .spoken and then
+    /// switched to Parakeet would leave the Picker with a selection (.spoken) that matches no tag,
+    /// blanking it. So on READ we coalesce .spoken → .hybrid on Parakeet purely for display — the
+    /// two are behaviorally identical there. We deliberately do NOT persist that coalescing: the
+    /// stored .spoken is untouched, so switching back to Whisper restores the user's Spoken Only.
+    private var punctuationSelection: Binding<PunctuationMode> {
+        Binding(
+            get: {
+                if viewModel.engine == "parakeet" && viewModel.punctuationMode == .spoken {
+                    return .hybrid
+                }
+                return viewModel.punctuationMode
+            },
+            set: { viewModel.punctuationMode = $0 }
+        )
+    }
+
     /// Footnote describing the Parakeet language constraint, shown only for Parakeet.
     private var parakeetLanguageNote: String? {
         guard let info = selectedParakeetModelInfo else { return nil }
@@ -723,10 +748,11 @@ struct SettingsView: View {
 
                             GridRow {
                                 Text("Punctuation")
-                                Picker("", selection: $viewModel.punctuationMode) {
-                                    Text("Automatic & Spoken").tag(PunctuationMode.hybrid)
-                                    Text("Automatic Only").tag(PunctuationMode.off)
-                                    Text("Spoken Only").tag(PunctuationMode.spoken)
+                                Picker("", selection: punctuationSelection) {
+                                    // Spoken Only is omitted on Parakeet (Whisper-only).
+                                    ForEach(availablePunctuationModes, id: \.self) { mode in
+                                        Text(SettingsViewModel.punctuationModeLabel(mode)).tag(mode)
+                                    }
                                 }
                                 .pickerStyle(.menu)
                                 .labelsHidden()

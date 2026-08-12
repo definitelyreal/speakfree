@@ -105,8 +105,12 @@ public struct TextPostProcessor {
     // Ellipsis support removed — whisper generates "..." from pauses, causing false positives.
     // All multi-dot sequences are now stripped unconditionally.
 
-    // Fallback replacements for spoken mode (no whisper auto-punct, so no context to read).
-    // These use the same boundaries as alwaysReplace — replace regardless of surrounding punct.
+    // LEGACY unguarded table. As of 2026-08-12 PRODUCTION never reaches this branch:
+    // TextPipeline routes BOTH .spoken and .hybrid through the guarded path (`hybrid: true`),
+    // so `.off` is the only non-guarded mode and it skips process() entirely. This table is
+    // therefore reachable only via direct `process(_, hybrid: false)` unit tests. It is the
+    // UNGUARDED substitution that used to make Spoken Only mangle "a period of time" →
+    // "a. Of time" and "colon cancer" → ": cancer"; do NOT wire it back into a punctuation mode.
     private static var spokenFallback: [(pattern: String, replacement: String)] {[
         // NOTE: kamala/karma are deliberately NOT here. This is the SPOKEN-mode always-replace
         // fallback; kamala/karma are real words, so they only convert in the position-gated hybrid
@@ -120,8 +124,12 @@ public struct TextPostProcessor {
     ]}
 
     /// Process spoken punctuation words into symbols.
-    /// - Parameter hybrid: true for hybrid mode (context-aware replacement for ambiguous words),
-    ///                     false for spoken mode (always replace everything).
+    /// - Parameter hybrid: true = guarded substitution (context-aware `contextReplace` table +
+    ///   `convertStandaloneAmbiguous`). PRODUCTION passes true for BOTH the Automatic & Spoken
+    ///   (.hybrid) and Spoken Only (.spoken) modes — the guards are identical, and suppression of
+    ///   the engine's own auto-punct (upstream) is the only thing that distinguishes them.
+    ///   false = the LEGACY unguarded `spokenFallback` table; no production mode passes false any
+    ///   more, so it is exercised only by direct unit tests.
     public static func process(_ text: String, hybrid: Bool = false) -> String {
         var result = text
         // Spurious pause-split softener (2026-07-25, corpus 0.3% of raws): the

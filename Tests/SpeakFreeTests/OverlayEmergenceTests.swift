@@ -393,4 +393,158 @@ final class OverlayEmergenceTests: XCTestCase {
         for _ in 0..<12 { view.tick += 1; view.advanceLevels() }
         for i in 0..<16 { XCTAssertEqual(view.levelForRender(i), 0, accuracy: 1e-9) }
     }
+
+    // MARK: - DEFECT 1: recalibrated speech gate + onset (2026-08-12)
+    //
+    // Calibrated against 15 real dictations (~/.config/speakfree/recordings): per
+    // 33ms window, room-tone `currentLevel` ≈ 0.012–0.028, speech ≈ 0.050–0.162.
+    // These tests double as mutation tests — reverting the noise floor to the old
+    // 0.08, or moving the onset threshold off the speech band, fails at least one.
+
+    /// The gate must flatten room tone to nothing and lift ordinary speech into a
+    /// visibly tall bar. The OLD 0.08 floor collapsed median speech (0.085) to ~0.03
+    /// and is exactly what left the bars flat — so the p50 assertion is the guard.
+    func test_waveformGateFlattensRoomToneAndLiftsSpeech() {
+        XCTAssertEqual(E.waveformLevel(currentLevel: 0), 0, accuracy: 1e-9)
+        XCTAssertEqual(E.waveformLevel(currentLevel: 0.017), 0, accuracy: 1e-9) // silence p50
+        XCTAssertEqual(E.waveformLevel(currentLevel: 0.028), 0, accuracy: 1e-9) // silence p90
+        XCTAssertGreaterThan(E.waveformLevel(currentLevel: 0.050), 0.2)  // speech p10 visible
+        XCTAssertGreaterThan(E.waveformLevel(currentLevel: 0.085), 0.4)  // speech p50 tall
+        XCTAssertGreaterThan(E.waveformLevel(currentLevel: 0.162), 0.85) // speech p90 near full
+        XCTAssertEqual(E.waveformLevel(currentLevel: 1.0), 1, accuracy: 1e-9)
+    }
+
+    func test_waveformGateIsMonotonicAndClamped() {
+        var last: CGFloat = -1
+        for step in 0...200 {
+            let v = E.waveformLevel(currentLevel: CGFloat(step) / 200)
+            XCTAssertGreaterThanOrEqual(v, last - 1e-9)
+            XCTAssertGreaterThanOrEqual(v, 0)
+            XCTAssertLessThanOrEqual(v, 1)
+            last = v
+        }
+        // Negative (impossible) input clamps to zero, not NaN from pow.
+        XCTAssertEqual(E.waveformLevel(currentLevel: -1), 0, accuracy: 1e-9)
+    }
+
+    /// Onset must latch on ordinary speech within the hold window and NEVER on room
+    /// tone. Raising the threshold above the speech level, or dropping it into room
+    /// tone, breaks exactly one of these two — the required mutation coverage.
+    func test_onsetLatchesOnSpeechWithinHoldTicks() {
+        var d = E.SpeechOnsetDetector()
+        let speech = E.waveformLevel(currentLevel: 0.085) // median speech
+        var ticks = 0
+        var fired = false
+        for _ in 0..<10 {
+            ticks += 1
+            fired = d.update(audioLevel: speech)
+            if fired { break }
+        }
+        XCTAssertTrue(fired, "median speech must latch the emergence")
+        XCTAssertLessThanOrEqual(ticks, E.onsetHoldTicks) // ~66ms
+    }
+
+    func test_onsetNeverLatchesOnRoomTone() {
+        var d = E.SpeechOnsetDetector()
+        let tone = E.waveformLevel(currentLevel: 0.028) // silence p90 → 0
+        for _ in 0..<300 { _ = d.update(audioLevel: tone) }
+        XCTAssertFalse(d.fired)
+    }
+
+    /// A lone loud window (breath/keyboard click) must not latch — the reason onset
+    /// needs `onsetHoldTicks` consecutive ticks instead of a bare peak trigger.
+    func test_onsetRejectsSingleWindowSpike() {
+        var d = E.SpeechOnsetDetector()
+        _ = d.update(audioLevel: 1.0)
+        XCTAssertFalse(d.fired, "one loud window is a click/breath, not onset")
+        for _ in 0..<20 { _ = d.update(audioLevel: 0) }
+        XCTAssertFalse(d.fired)
+        _ = d.update(audioLevel: 0.6)
+        XCTAssertTrue(d.update(audioLevel: 0.6), "sustained speech latches")
+    }
+
+    func test_onsetStaysLatchedOnceFired() {
+        var d = E.SpeechOnsetDetector()
+        for _ in 0..<E.onsetHoldTicks { _ = d.update(audioLevel: 0.6) }
+        XCTAssertTrue(d.fired)
+        for _ in 0..<50 { XCTAssertTrue(d.update(audioLevel: 0), "onset is a one-way door") }
+    }
+
+    /// End-to-end DEFECT-1 guard through the real content view: feeding the view a
+    /// realistic per-tick speech level (median speech through the gate) must latch
+    /// heardSpeech, while pure room tone must never latch it.
+    func test_liveViewLatchesEmergenceOnSpeechButNotRoomTone() {
+        let speechView = OverlayContentView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+        speechView.style = 5
+        speechView.prominent = true
+        let speech = E.waveformLevel(currentLevel: 0.085)
+        for _ in 0..<4 where !speechView.heardSpeech {
+            if speechView.onsetDetector.update(audioLevel: speech) { speechView.heardSpeech = true }
+        }
+        XCTAssertTrue(speechView.heardSpeech)
+
+        let toneView = OverlayContentView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+        toneView.style = 5
+        let tone = E.waveformLevel(currentLevel: 0.028)
+        for _ in 0..<200 where !toneView.heardSpeech {
+            if toneView.onsetDetector.update(audioLevel: tone) { toneView.heardSpeech = true }
+        }
+        XCTAssertFalse(toneView.heardSpeech)
+    }
+
+    // MARK: - DEFECT 2: streaming text can't disturb the emergence window
+
+    func test_emergenceSuppressesStreamingTextOnlyDuringRecording() {
+        XCTAssertTrue(OverlayContentView.emergenceSuppressesStreamingText(style: 5, state: .recording))
+        // Post-release states are allowed through so the overlay exits normally.
+        XCTAssertFalse(OverlayContentView.emergenceSuppressesStreamingText(style: 5, state: .transcribing))
+        // Non-emergence styles keep their streaming-text pill.
+        XCTAssertFalse(OverlayContentView.emergenceSuppressesStreamingText(style: 1, state: .recording))
+        XCTAssertFalse(OverlayContentView.emergenceSuppressesStreamingText(style: 3, state: .recording))
+    }
+
+    // MARK: - DEFECT 3: bigger resting record mark, same end pill
+
+    func test_recordMarkIsEnlargedButEndPillUnchanged() {
+        XCTAssertGreaterThanOrEqual(E.dotRadius, 14, "the resting record mark must be meaningfully bigger")
+        let g = geo()
+        let shipped = OverlayContentView.pillSize(for: .recording)
+        // The settled purple pill is still exactly the shipped pill × endScale.
+        XCTAssertEqual(g.cardWidth, shipped.width * E.endScale, accuracy: 0.001)
+        XCTAssertEqual(g.cardHeight, shipped.height * E.endScale, accuracy: 0.001)
+        // The armed disc (card at p=0) is the enlarged mark's size…
+        XCTAssertEqual(E.card(progress: 0, geometry: g).width, E.dotRadius * 2, accuracy: 0.001)
+        // …and the window still holds the widest ink at the larger mark.
+        let size = OverlayContentView.emergenceSize
+        XCTAssertGreaterThanOrEqual(min(size.width, size.height) / 2, E.maxInkRadius(geometry: g))
+    }
+
+    // MARK: - DEFECT 4: adaptive outline contrast
+
+    func test_luminanceOfKnownColors() {
+        XCTAssertEqual(E.luminance((0, 0, 0)), 0, accuracy: 1e-9)
+        XCTAssertEqual(E.luminance((1, 1, 1)), 1, accuracy: 1e-9)
+        XCTAssertGreaterThan(E.luminance((0, 1, 0)), E.luminance((1, 0, 0)))  // green brightest
+        XCTAssertGreaterThan(E.luminance((1, 0, 0)), E.luminance((0, 0, 1)))  // red over blue
+    }
+
+    func test_brightBackdropGivesDarkOutlineDarkGivesLight() {
+        let onWhite = E.adaptiveOutlineColor(backgroundLuminance: E.luminance((0.95, 0.95, 0.95)))
+        XCTAssertEqual(onWhite.r, E.outlineDark.r, accuracy: 1e-9)
+        XCTAssertEqual(onWhite.g, E.outlineDark.g, accuracy: 1e-9)
+        let onDark = E.adaptiveOutlineColor(backgroundLuminance: E.luminance((0.08, 0.08, 0.08)))
+        XCTAssertEqual(onDark.r, E.outlineLight.r, accuracy: 1e-9)
+        // The decision flips exactly at the threshold (bright side → dark).
+        XCTAssertEqual(E.adaptiveOutlineColor(backgroundLuminance: E.outlineLumThreshold).r,
+                       E.outlineDark.r, accuracy: 1e-9)
+        XCTAssertEqual(E.adaptiveOutlineColor(backgroundLuminance: E.outlineLumThreshold - 0.001).r,
+                       E.outlineLight.r, accuracy: 1e-9)
+    }
+
+    func test_averageLuminanceEmptyIsNilAndMeanIsCorrect() {
+        XCTAssertNil(E.averageLuminance(of: []), "no pixels → nil so the caller fails safe")
+        let mean = E.averageLuminance(of: [(0, 0, 0), (1, 1, 1)])
+        XCTAssertNotNil(mean)
+        XCTAssertEqual(mean!, 0.5, accuracy: 1e-9)
+    }
 }

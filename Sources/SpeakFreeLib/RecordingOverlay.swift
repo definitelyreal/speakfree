@@ -149,6 +149,11 @@ class RecordingOverlay {
 
     /// Visual variant for the prominent banner (config overlayStyle 1-5).
     var style: Int = 1
+
+    /// Diagnostic-only: `SPEAKFREE_OVERLAY_LEVELS=1` prints the recalibrated mic
+    /// levels each tick so the trigger can be re-verified on a live mic. Off by
+    /// default; magnitudes only, never transcript content.
+    static let levelDebugEnabled = ProcessInfo.processInfo.environment["SPEAKFREE_OVERLAY_LEVELS"] == "1"
     // Seam for unit tests: override to inject a known window frame without real AX.
     var windowFrameProvider: (() -> NSRect?)? = nil
     // Seam for unit tests: override to inject a known cursor location.
@@ -235,6 +240,68 @@ class RecordingOverlay {
         }
     }
 
+    /// DEFECT 4 (2026-08-12): sample the desktop luminance directly behind the
+    /// record mark and choose a dark or light outline. Runs ONCE per show(),
+    /// off-main, never per frame. Fails safe (keeps the locked white ring) if
+    /// screen-capture permission is missing or any capture step returns nil.
+    private func sampleBackdropOutline(windowNumber: Int, cocoaFrame: NSRect,
+                                       for expectedGeneration: UInt64) {
+        // No permission → keep the locked white ring. Do NOT prompt: an unexpected
+        // screen-recording prompt on record-start would be worse than a white ring.
+        guard CGPreflightScreenCaptureAccess() else { return }
+        // Read the primary-screen height on MAIN (AppKit isn't documented thread-safe;
+        // adversarial VERIFY finding a): a display reconfig racing the off-main read could
+        // hand back a wrong-but-valid rect. Hoisting it here removes the only AppKit touch
+        // from the background block.
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? cocoaFrame.maxY
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let rgb = RecordingOverlay.backdropOutlineColor(
+                belowWindow: CGWindowID(windowNumber), cocoaFrame: cocoaFrame,
+                primaryHeight: primaryHeight) else { return }
+            DispatchQueue.main.async {
+                guard let self = self, self.showGeneration == expectedGeneration,
+                      let view = self.contentView else { return }
+                view.adaptiveOutline = rgb
+                view.needsDisplay = true
+            }
+        }
+    }
+
+    /// Capture the ~48pt box behind the record mark (excluding our own overlay via
+    /// `.optionOnScreenBelowWindow`) and reduce it to an outline colour. Pure
+    /// decision math lives in `OverlayEmergence`; this only does the capture + a
+    /// tiny 8×8 downsample so the cost is a single small blit.
+    static func backdropOutlineColor(belowWindow windowID: CGWindowID,
+                                     cocoaFrame: NSRect,
+                                     primaryHeight: CGFloat) -> OverlayEmergence.RGB? {
+        let sampleSide: CGFloat = 48
+        let center = CGPoint(x: cocoaFrame.midX, y: cocoaFrame.midY)
+        // Cocoa (bottom-left, primary-relative) → CGWindow global (top-left) flip.
+        // `primaryHeight` is read on main by the caller (thread-safety, VERIFY finding a).
+        let cgRect = CGRect(x: center.x - sampleSide / 2,
+                            y: primaryHeight - center.y - sampleSide / 2,
+                            width: sampleSide, height: sampleSide)
+        guard let image = CGWindowListCreateImage(cgRect, .optionOnScreenBelowWindow,
+                                                  windowID, [.nominalResolution]) else { return nil }
+        let dim = 8
+        var data = [UInt8](repeating: 0, count: dim * dim * 4)
+        let space = CGColorSpaceCreateDeviceRGB()
+        guard let bmp = CGContext(data: &data, width: dim, height: dim, bitsPerComponent: 8,
+                                  bytesPerRow: dim * 4, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        bmp.draw(image, in: CGRect(x: 0, y: 0, width: dim, height: dim))
+        var pixels: [OverlayEmergence.RGB] = []
+        pixels.reserveCapacity(dim * dim)
+        for i in stride(from: 0, to: data.count, by: 4) {
+            pixels.append((CGFloat(data[i]) / 255, CGFloat(data[i + 1]) / 255,
+                           CGFloat(data[i + 2]) / 255))
+        }
+        guard let lum = OverlayEmergence.averageLuminance(of: pixels) else { return nil }
+        return OverlayEmergence.adaptiveOutlineColor(backgroundLuminance: lum)
+    }
+
     func show(state: OverlayState, recorder: AudioRecorder? = nil, autoHideError: Bool = true) {
         // Hard kill any existing window (no animation)
         showGeneration &+= 1
@@ -318,6 +385,14 @@ class RecordingOverlay {
 
         startAnimation()
 
+        // DEFECT 4: pick a dark/light record outline from the backdrop luminance,
+        // once, off-main. Only for the emergence entry (it owns the ring); fails
+        // safe to the locked white ring.
+        if emergence {
+            sampleBackdropOutline(windowNumber: win.windowNumber, cocoaFrame: frame,
+                                  for: showGeneration)
+        }
+
         // Snappy entrance (2026-07-25): 80ms fade — the 200ms fade + 100ms border
         // delay read as sluggishness at the moment that most needs to feel instant.
         NSAnimationContext.runAnimationGroup { ctx in
@@ -369,6 +444,20 @@ class RecordingOverlay {
     /// Called from the main thread during recording as partial results arrive.
     func updateStreamingText(_ text: String) {
         guard let view = contentView, let win = window, let screen = resolvedTargetScreen() else { return }
+
+        // DEFECT 2 (2026-08-12): live streaming preview is on by default, so during
+        // the emergence recording this used to resize and reposition the centered
+        // emergence window into the OLD streaming-text pill (a small pill anchored at
+        // the bottom of the screen when empty, a wide centered pill once text
+        // arrived) — the "jump down to the small size at the bottom" Michael saw. The
+        // locked emergence shows its own live waveform and draws NO streaming text
+        // (drawProminentBanner returns before the text path), so the geometry change
+        // was pure corruption. Ignore streaming text entirely while the emergence
+        // entry owns the window; update(.transcribing) still exits it normally.
+        if OverlayContentView.emergenceSuppressesStreamingText(style: style,
+                                                               state: view.overlayState) {
+            return
+        }
 
         // Only grow the text, never shrink — prevents flickering from re-processing
         if text.count < view.streamingText.count { return }
@@ -506,15 +595,25 @@ class RecordingOverlay {
                 view.tick += 1
                 if let recorder = self.recorder {
                     let raw = CGFloat(recorder.currentLevel)
-                    // Noise gate: suppress ambient noise, rescale speech range
-                    let gated = max(raw - 0.08, 0) / 0.92
-                    view.audioLevel = min(pow(gated, 0.5) * 1.4, 1.0)
-                    // First real speech triggers the record-icon -> waveform explosion
-                    // (Michael 2026-07-25). Gate well above room tone so breath alone
-                    // doesn't trigger it.
-                    if !view.heardSpeech && view.audioLevel > 0.25 {
+                    // Recalibrated gate (2026-08-12): the old `max(raw-0.08,0)/0.92`
+                    // never cleared room tone on Michael's quiet mic, so the record
+                    // stayed a static dot and the bars stayed flat. `waveformLevel`
+                    // and the onset threshold are measured against his real
+                    // recordings (see OverlayEmergence). The onset detector needs two
+                    // consecutive ticks above threshold, so a lone breath spike can't
+                    // latch the emergence.
+                    view.audioLevel = OverlayEmergence.waveformLevel(currentLevel: raw)
+                    if !view.heardSpeech && view.onsetDetector.update(audioLevel: view.audioLevel) {
                         view.heardSpeech = true
                         view.speechStartedAt = Date()
+                    }
+                    // Diagnostic-gated (SPEAKFREE_OVERLAY_LEVELS=1): lets Michael watch
+                    // the recalibrated levels on his live mic without a rebuild. Prints
+                    // magnitudes only, never transcript content. Off by default.
+                    if RecordingOverlay.levelDebugEnabled {
+                        print(String(format:
+                            "overlay-level: currentLevel %.3f audioLevel %.3f heardSpeech %@",
+                            raw, view.audioLevel, view.heardSpeech ? "Y" : "n"))
                     }
                 }
                 // The per-bar waveform state used to advance inside drawBars, which
@@ -580,7 +679,23 @@ class OverlayContentView: NSView {
     /// `config.overlayStyle ?? 5` into 1…5), so it is the one he actually sees.
     /// The old style-5 comet is preserved below as an unreachable `case 6`.
     static func usesEmergenceEntry(style: Int) -> Bool { style == 5 }
+
+    /// DEFECT 2 (2026-08-12): while the emergence entry owns the recording window it
+    /// renders its own live waveform and shows NO streaming text, so a streaming
+    /// update must not resize or reposition the window. True only for the emergence
+    /// style while still in the recording phase; `.transcribing` (post-release) is
+    /// allowed through so the overlay exits normally. Pure, so the rule is testable.
+    static func emergenceSuppressesStreamingText(
+        style: Int, state: RecordingOverlay.OverlayState) -> Bool {
+        usesEmergenceEntry(style: style) && state == .recording
+    }
     var audioLevel: CGFloat = 0
+    /// Latching speech-onset detector for the emergence trigger (recalibrated
+    /// 2026-08-12). Fresh per show() because show() builds a new content view.
+    var onsetDetector = OverlayEmergence.SpeechOnsetDetector()
+    /// Adaptive ring/outline colour sampled from the backdrop at show(); nil keeps
+    /// the locked white ring (the fail-safe default).
+    var adaptiveOutline: OverlayEmergence.RGB?
     var tick: Int = 0
     @objc dynamic var borderWidth: CGFloat = 0
     var hideContents = false
@@ -1194,10 +1309,15 @@ class OverlayContentView: NSView {
         let g = OverlayEmergence.geometry(centerX: rect.midX, centerY: rect.midY)
         let center = CGPoint(x: g.centerX, y: g.centerY)
 
+        // The record's outline (ring + emergence/idle pulses) flips dark on a bright
+        // backdrop and stays the locked white on a dark one (DEFECT 4). nil (sample
+        // unavailable) keeps the locked white ring. Bars and card are unaffected.
+        let ringRGB = adaptiveOutline ?? OverlayEmergence.ringColor
+
         drawBloomCard(ctx, geometry: g, card: OverlayEmergence.card(progress: p, geometry: g))
 
         for stroke in OverlayEmergence.emergencePulses(progress: p, geometry: g) {
-            strokeRing(ctx, center: center, stroke: stroke, color: OverlayEmergence.ringColor)
+            strokeRing(ctx, center: center, stroke: stroke, color: ringRGB)
         }
 
         let solid = OverlayEmergence.solidity(progress: p, geometry: g)
@@ -1219,7 +1339,7 @@ class OverlayContentView: NSView {
 
         let elapsed = renderElapsedOverride ?? -recordingStartedAt.timeIntervalSinceNow
         for stroke in OverlayEmergence.idleRings(progress: p, time: CGFloat(elapsed)) {
-            strokeRing(ctx, center: center, stroke: stroke, color: OverlayEmergence.ringColor)
+            strokeRing(ctx, center: center, stroke: stroke, color: ringRGB)
         }
 
         let markR = OverlayEmergence.markRadius(progress: p)
