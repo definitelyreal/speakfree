@@ -166,10 +166,20 @@ public enum TextPipeline {
         let seamPossible = input.audioDurationSeconds.map { $0 > 14 } ?? true
         let marker = stripWhisperBracketMarkers(sanitized)
         let stripped = seamPossible ? collapseBoundaryDuplicateWord(marker) : marker
-        let hybrid = input.punctuationMode == .hybrid
+        // Both .spoken and .hybrid run the SAME guarded substitution (the contextReplace
+        // table + convertStandaloneAmbiguous). Suppressing the engine's OWN auto-punctuation
+        // — Transcriber.suppressAutoPunctuation, set upstream for .spoken only — is the ONLY
+        // behavior that distinguishes Spoken Only from Automatic & Spoken.
+        // Before this, .spoken used the UNGUARDED spokenFallback table and skipped
+        // convertStandaloneAmbiguous, so "a period of time" → "a. Of time" and "colon cancer"
+        // → ": cancer". Routing it through the guarded path keeps those intact exactly as in
+        // Hybrid. It also makes Spoken == Hybrid on Parakeet, where suppression is a no-op
+        // (Parakeet ignores suppressAutoPunctuation) — so the old "engine punctuation PLUS
+        // unguarded rewrites" failure on Parakeet disappears.
+        let guarded = input.punctuationMode == .spoken || input.punctuationMode == .hybrid
         let processed = (input.punctuationMode == .off)
             ? stripped
-            : TextPostProcessor.process(stripped, hybrid: hybrid)
+            : TextPostProcessor.process(stripped, hybrid: guarded)
         let styled = TextPostProcessor.applyStyle(processed, mode: input.styleMode)
         // Glossary correction: fix near-miss misspellings of curated proper nouns
         // (makes custom names work on Parakeet, which ignores the glossary prompt).

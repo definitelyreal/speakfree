@@ -105,7 +105,11 @@ public struct HelpFacts: Equatable {
         switch punctuationMode {
         case .hybrid: return "Automatic & Spoken"
         case .off: return "Automatic Only"
-        case .spoken: return "Spoken Only"
+        case .spoken:
+            // On Parakeet, Spoken Only is not offered and behaves identically to Automatic &
+            // Spoken (Parakeet ignores auto-punct suppression). Report the effective behavior so
+            // Help never announces a mode the app is not actually running.
+            return engineIsParakeet ? "Automatic & Spoken" : "Spoken Only"
         }
     }
 
@@ -348,14 +352,13 @@ public enum HelpContent {
                  + "result alone: saying \"comma\" types the word comma, and none of the tidying "
                  + "the other modes do (collapsing runs of commas, repairing spacing) is applied "
                  + "either. The most literal option."),
-            .row("Spoken Only", "For when you want to place every mark yourself. Two caveats "
-                 + "worth knowing before choosing it. It replaces punctuation words wherever they "
-                 + "appear, without the checks the default mode applies, so \"a period of time\" "
-                 + "becomes \"a. Of time\" and \"colon cancer\" becomes \": cancer\". And asking "
-                 + "the engine to stop punctuating only works on Whisper; Parakeet ignores it. On "
-                 + "Parakeet you therefore get the engine's punctuation AND the unguarded "
-                 + "replacements, which is rarely what anyone wants. Automatic & Spoken is the "
-                 + "safer choice unless you are dictating with Whisper and want strict control."),
+            .row("Spoken Only", "For when you want to place every mark yourself. The engine's own "
+                 + "automatic punctuation is turned off, so only the marks you speak appear. Your "
+                 + "spoken words are converted with the same safeguards as Automatic & Spoken, so "
+                 + "phrases like \"a period of time\" and \"colon cancer\" are left alone. Turning "
+                 + "off the engine's punctuation only works on Whisper, so this mode is offered on "
+                 + "Whisper only. On Parakeet it is not shown, because Parakeet cannot suppress its "
+                 + "own punctuation and the mode would be identical to Automatic & Spoken there."),
             .spacer,
             .paragraph("Spoken punctuation understands the common names, including \"period\", "
                        + "\"comma\", \"question mark\", \"exclamation point\", \"colon\", "

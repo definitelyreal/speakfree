@@ -39,9 +39,18 @@ public enum OverlayEmergence {
 
     // The record mark and its ring. NOT scaled by endScale (the lab does not
     // scale them either — the mark is the same size regardless of the end card).
-    public static let dotRadius: CGFloat = 9         // dotR
-    public static let ringGap: CGFloat = 4.5         // ringGap
-    public static let ringWidth: CGFloat = 1.2       // ringW
+    //
+    // Size bump 2026-08-12 (Michael, dogfooding: "the record should be bigger"):
+    // dotR 9 → 16, ringGap 4.5 → 6, ringW 1.2 → 1.6 — the whole mark cluster grows
+    // ~1.8×, keeping the ring/dot proportion the locked design was judged at. The
+    // end pill is governed by `endScale` (below) and is UNCHANGED by this: the card
+    // end size derives from the bar field, not from dotRadius, so the resting mark
+    // is bigger while the settled purple pill stays at exactly 1.2×. `emergenceSize`
+    // recomputes from `maxInkRadius`, so the window still holds the widest pulse.
+    // LOCKED-SETTINGS.json updated to match (dotR/ringGap/ringW) for reproducibility.
+    public static let dotRadius: CGFloat = 16        // dotR
+    public static let ringGap: CGFloat = 6           // ringGap
+    public static let ringWidth: CGFloat = 1.6       // ringW
     public static let ringAlpha: CGFloat = 0.7       // ringAlpha
     public static let ringFadeFraction: CGFloat = 0.35  // ringFade
     public static let idleAmp: CGFloat = 0.45        // idleAmp
@@ -327,5 +336,104 @@ public enum OverlayEmergence {
     public static func maxInkRadius(geometry g: Geometry) -> CGFloat {
         max(dotRadius + ringGap + g.reach,
             max(g.cardWidth, g.cardHeight) / 2)
+    }
+
+    // MARK: - Speech onset + waveform gate (recalibrated 2026-08-12)
+    //
+    // The old gate (`gated = max(currentLevel - 0.08, 0) / 0.92`, trigger at
+    // `audioLevel > 0.25`) was tuned for a hot mic and almost never fired on
+    // Michael's quiet built-in microphone: the record stayed a static dot and the
+    // waveform bars sat flat for the whole recording (his 2026-08-12 dogfood report).
+    //
+    // These constants were measured, not guessed, against 15 of his real dictations
+    // in ~/.config/speakfree/recordings (see CALIBRATION.md). Per 33ms window — the
+    // rate the overlay samples `AudioRecorder.currentLevel` at 30Hz — his levels are:
+    //
+    //   signal      RMS %FS (p10–p90)   →  currentLevel = min(rms/0.15, 1) (p10–p90)
+    //   speech      0.76 – 2.44          →  0.050 – 0.162   (rare peaks to ~0.47)
+    //   room tone   0.18 – 0.42          →  0.012 – 0.028   (rare breath to ~0.09)
+    //
+    // So the noise floor sits just above room tone (currentLevel 0.028) and the span
+    // reaches the top of the speech band (~0.16). With this gate, 97.6% of measured
+    // speech windows drive a visible bar (audioLevel > 0.2) while 95.8% of silence
+    // windows stay flat, and the two-tick onset latches within ~70–150ms of speech
+    // onset across all 15 recordings, with no false latch during leading silence.
+
+    /// Room-tone ceiling on `currentLevel`; anything at or below this is silence.
+    public static let waveformNoiseFloor: CGFloat = 0.03
+    /// `currentLevel` span from the noise floor to the top of the speech band.
+    public static let waveformSpan: CGFloat = 0.15
+    /// Gamma < 1 lifts mid-level speech into a visibly tall bar on the quiet mic.
+    public static let waveformGamma: CGFloat = 0.6
+
+    /// The gated audioLevel a tick must clear to count toward speech onset.
+    public static let onsetThreshold: CGFloat = 0.25
+    /// Consecutive 33ms ticks (~66ms) required above `onsetThreshold` to latch the
+    /// emergence. Two ticks rejects the single-window breath/click spikes that a
+    /// bare peak trigger would fire on, while still latching well inside 150ms.
+    public static let onsetHoldTicks = 2
+
+    /// Map `AudioRecorder.currentLevel` (RMS-derived, 0…1) to a 0…1 waveform
+    /// amplitude. Silence lands at 0; ordinary speech lands in a visible 0.3–1.0.
+    public static func waveformLevel(currentLevel: CGFloat) -> CGFloat {
+        let g = clamp01((currentLevel - waveformNoiseFloor) / waveformSpan)
+        return pow(g, waveformGamma)
+    }
+
+    /// Latching speech-onset detector. Fed the gated `audioLevel` once per animation
+    /// tick; fires the moment `onsetHoldTicks` consecutive ticks clear
+    /// `onsetThreshold`, and then stays fired (the emergence is a one-way door).
+    public struct SpeechOnsetDetector {
+        private var run = 0
+        public private(set) var fired = false
+        public init() {}
+        /// Returns whether onset has fired (latched) after consuming this tick.
+        public mutating func update(audioLevel: CGFloat) -> Bool {
+            if fired { return true }
+            if audioLevel > onsetThreshold {
+                run += 1
+                if run >= onsetHoldTicks { fired = true }
+            } else {
+                run = 0
+            }
+            return fired
+        }
+    }
+
+    // MARK: - Adaptive outline contrast (2026-08-12)
+    //
+    // "if the screen behind it is bright, it should be a black outline around the
+    // record, and if the screen is dark, it could be light." The screen-region
+    // sampling that produces `backgroundLuminance` lives in RecordingOverlay (it is
+    // an impure capture); everything decision-shaped is here and unit-tested. If the
+    // sample fails (no permission, capture error) the overlay keeps the locked white
+    // ring, so this can only ever improve contrast, never break the shipped look.
+
+    /// Near-black outline for bright backgrounds.
+    public static let outlineDark: RGB = (0.06, 0.06, 0.06)
+    /// The locked white ring — also the fail-safe default.
+    public static let outlineLight: RGB = ringColor
+    /// Relative luminance at or above which the background reads as "bright" and the
+    /// outline flips to dark. Biased high (0.6) so the locked light ring is kept
+    /// unless the backdrop is clearly bright (a light editor, a white page).
+    public static let outlineLumThreshold: CGFloat = 0.6
+
+    /// Rec. 709 relative luminance of an sRGB colour. Gamma-naive on purpose: a
+    /// threshold decision does not need linearisation, and this stays a pure,
+    /// allocation-free scalar.
+    public static func luminance(_ c: RGB) -> CGFloat {
+        0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+    }
+
+    /// Mean luminance of a set of sampled background pixels (empty → nil so the
+    /// caller fails safe to the locked ring).
+    public static func averageLuminance(of pixels: [RGB]) -> CGFloat? {
+        guard !pixels.isEmpty else { return nil }
+        return pixels.reduce(CGFloat(0)) { $0 + luminance($1) } / CGFloat(pixels.count)
+    }
+
+    /// Bright background → dark outline; dark background → light outline.
+    public static func adaptiveOutlineColor(backgroundLuminance lum: CGFloat) -> RGB {
+        lum >= outlineLumThreshold ? outlineDark : outlineLight
     }
 }

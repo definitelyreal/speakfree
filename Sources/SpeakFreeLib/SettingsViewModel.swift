@@ -144,6 +144,31 @@ public class SettingsViewModel: ObservableObject {
         onSave?()
     }
 
+    // MARK: - Punctuation modes per engine
+
+    /// The punctuation modes the picker offers for a given engine, in display order.
+    ///
+    /// Spoken Only (.spoken) is Whisper-only. Its ONLY distinguishing behavior is suppressing the
+    /// engine's own automatic punctuation (Transcriber.suppressAutoPunctuation) so that only
+    /// spoken words punctuate; the word-substitution is now identically guarded across .spoken and
+    /// .hybrid. Parakeet ignores that suppression, so on Parakeet Spoken Only would be byte-for-byte
+    /// identical to Automatic & Spoken (.hybrid) — redundant and misleading. It is therefore omitted
+    /// for Parakeet. Whisper keeps all three modes.
+    public static func availablePunctuationModes(engine: String) -> [PunctuationMode] {
+        engine == "parakeet"
+            ? [.hybrid, .off]
+            : [.hybrid, .off, .spoken]
+    }
+
+    /// The picker label for a punctuation mode, matching the Settings UI wording.
+    public static func punctuationModeLabel(_ mode: PunctuationMode) -> String {
+        switch mode {
+        case .hybrid: return "Automatic & Spoken"
+        case .off:    return "Automatic Only"
+        case .spoken: return "Spoken Only"
+        }
+    }
+
     // MARK: - Model description helpers
 
     /// Estimated RAM usage for a Whisper model, read from the same table the model picker uses.

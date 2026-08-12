@@ -811,6 +811,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
+        // Spoken Only on Parakeet: Parakeet ignores suppressAutoPunctuation, and the spoken-word
+        // substitution is now identically guarded across Spoken Only and Automatic & Spoken, so the
+        // two modes are behaviorally identical here. We do NOT rewrite the stored mode (a user who
+        // switches back to Whisper keeps Spoken Only); log one line for observability.
+        if effectiveEngineID == "parakeet" && config.spokenPunctuation == .spoken {
+            DiagnosticLogger.shared.log(
+                "Punctuation: Spoken Only on Parakeet behaves as Automatic & Spoken "
+                + "(Parakeet cannot suppress its own auto-punctuation); stored mode left unchanged.")
+        }
+
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
         transcriber.startMemoryPressureMonitoring()

@@ -176,4 +176,37 @@ final class SettingsViewModelTests: XCTestCase {
 
         XCTAssertTrue(callbackCalled)
     }
+
+    // MARK: - Punctuation modes per engine (Spoken Only is Whisper-only)
+
+    func test_availablePunctuationModes_whisperOffersAllThree() {
+        XCTAssertEqual(SettingsViewModel.availablePunctuationModes(engine: "whisper"),
+                       [.hybrid, .off, .spoken])
+    }
+
+    func test_availablePunctuationModes_parakeetOmitsSpokenOnly() {
+        let modes = SettingsViewModel.availablePunctuationModes(engine: "parakeet")
+        XCTAssertEqual(modes, [.hybrid, .off])
+        XCTAssertFalse(modes.contains(.spoken),
+                       "Spoken Only must not be offered on Parakeet (suppression is a no-op there)")
+    }
+
+    /// Membership is the load-bearing invariant, pinned independent of order so a reorder of the
+    /// picker cannot silently reintroduce Spoken Only on Parakeet.
+    func test_availablePunctuationModes_spokenPresenceIsEngineGated() {
+        XCTAssertTrue(SettingsViewModel.availablePunctuationModes(engine: "whisper").contains(.spoken))
+        XCTAssertFalse(SettingsViewModel.availablePunctuationModes(engine: "parakeet").contains(.spoken))
+        // Hybrid and Off are always offered, on both engines.
+        for engine in ["whisper", "parakeet"] {
+            let modes = SettingsViewModel.availablePunctuationModes(engine: engine)
+            XCTAssertTrue(modes.contains(.hybrid), "\(engine) must offer Automatic & Spoken")
+            XCTAssertTrue(modes.contains(.off), "\(engine) must offer Automatic Only")
+        }
+    }
+
+    func test_punctuationModeLabel_matchesPickerWording() {
+        XCTAssertEqual(SettingsViewModel.punctuationModeLabel(.hybrid), "Automatic & Spoken")
+        XCTAssertEqual(SettingsViewModel.punctuationModeLabel(.off), "Automatic Only")
+        XCTAssertEqual(SettingsViewModel.punctuationModeLabel(.spoken), "Spoken Only")
+    }
 }

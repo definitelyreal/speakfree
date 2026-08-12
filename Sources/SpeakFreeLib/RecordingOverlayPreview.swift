@@ -129,6 +129,7 @@ public enum RecordingOverlayPreview {
             sim.reset()
             view.heardSpeech = false
             view.speechStartedAt = nil
+            view.onsetDetector = OverlayEmergence.SpeechOnsetDetector()
             view.explodeProgress = 0
             view.seedLevelsForRender([CGFloat](repeating: 0, count: 16))
             view.recordingStartedAt = Date()
@@ -143,8 +144,11 @@ public enum RecordingOverlayPreview {
             if frame % 2 == 0 {
                 sim.advance(1000.0 / 30.0)
                 view.tick += 1
+                // The simulator already emits a 0…1 speech envelope (audioLevel
+                // space), so it feeds the detector directly — same latch the live
+                // path uses on the gated mic level.
                 view.audioLevel = sim.level
-                if !view.heardSpeech && view.audioLevel > 0.25 {
+                if !view.heardSpeech && view.onsetDetector.update(audioLevel: view.audioLevel) {
                     view.heardSpeech = true
                     view.speechStartedAt = Date()
                 }
