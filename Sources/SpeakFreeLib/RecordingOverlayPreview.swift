@@ -78,9 +78,6 @@ private final class PreviewBackdropView: NSView {
 /// `speakfree overlay-preview [style]` — loops the recording overlay entry.
 public enum RecordingOverlayPreview {
 
-    /// Seconds the finished steady state is held before the sequence replays.
-    private static let holdSeconds: Double = 3.5
-
     public static func run(style: Int = 5) {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
@@ -96,7 +93,7 @@ public enum RecordingOverlayPreview {
         let backdrop = PreviewBackdropView(frame: canvas)
 
         let caption = NSTextField(labelWithString:
-            "style \(style) — click to flip backdrop · replays every \(Int(holdSeconds))s")
+            "style \(style) — record → speak → release → transcribe (held, no bottom jump) · click to flip backdrop")
         caption.font = .systemFont(ofSize: 11)
         caption.textColor = NSColor(white: 0.5, alpha: 1)
         caption.frame = NSRect(x: pad, y: 10, width: canvas.width - pad * 2, height: 16)
@@ -122,11 +119,13 @@ public enum RecordingOverlayPreview {
 
         var sim = PreviewSpeechSimulator()
         var frame: UInt64 = 0
-        var doneAt: Date?
+        var doneAt: Date?          // emergence explosion finished
+        var transcribeAt: Date?    // simulated key-release → transcribing hold
         var startedAt = Date()
 
         func replay() {
             sim.reset()
+            view.overlayState = .recording
             view.heardSpeech = false
             view.speechStartedAt = nil
             view.onsetDetector = OverlayEmergence.SpeechOnsetDetector()
@@ -135,13 +134,21 @@ public enum RecordingOverlayPreview {
             view.recordingStartedAt = Date()
             startedAt = Date()
             doneAt = nil
+            transcribeAt = nil
         }
         replay()
+
+        // The full arc: hold the live end-state, then "release" into the CENTERED
+        // transcribing hold (no bottom jump — the point of Michael's ruling), then
+        // "done" (the overlay would hide; here it loops).
+        let recordHold: Double = 1.8
+        let transcribeHold: Double = 2.6
 
         // 60Hz redraw, 30Hz state — the same split the live overlay uses.
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
             frame &+= 1
-            if frame % 2 == 0 {
+            let recording = view.overlayState == .recording
+            if frame % 2 == 0 && recording {
                 sim.advance(1000.0 / 30.0)
                 view.tick += 1
                 // The simulator already emits a 0…1 speech envelope (audioLevel
@@ -153,16 +160,26 @@ public enum RecordingOverlayPreview {
                     view.speechStartedAt = Date()
                 }
                 view.advanceLevels()
+            } else if frame % 2 == 0 {
+                // Keep the tick advancing through transcription so the working pulse
+                // animates, exactly as the live overlay's timer keeps running.
+                view.tick += 1
             }
-            if view.heardSpeech && view.explodeProgress < 1 {
+            if recording && view.heardSpeech && view.explodeProgress < 1 {
                 let started = view.speechStartedAt ?? Date()
                 view.explodeProgress = min(1, CGFloat(-started.timeIntervalSinceNow
                                                       / OverlayEmergence.emergeDuration))
                 if view.explodeProgress >= 1 { doneAt = Date() }
             }
-            if let done = doneAt, -done.timeIntervalSinceNow > holdSeconds { replay() }
+            // Live end-state held → simulate key-release into the transcribing hold.
+            if recording, let done = doneAt, -done.timeIntervalSinceNow > recordHold {
+                view.overlayState = .transcribing
+                transcribeAt = Date()
+            }
+            // Transcribing held → "done": the real overlay hides here; the preview loops.
+            if let t = transcribeAt, -t.timeIntervalSinceNow > transcribeHold { replay() }
             // Guard against a simulator that somehow never crosses the speech gate.
-            if !view.heardSpeech && -startedAt.timeIntervalSinceNow > 6 { replay() }
+            if recording && !view.heardSpeech && -startedAt.timeIntervalSinceNow > 6 { replay() }
             view.needsDisplay = true
         }
         RunLoop.main.add(timer, forMode: .common)
