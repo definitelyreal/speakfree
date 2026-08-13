@@ -142,4 +142,64 @@ final class ElectronDetectionTests: XCTestCase {
                                          selectionLengthBefore: 0, insertedCount: 0),
             .inconclusive)
     }
+
+    // MARK: - Verdict → outcome routing (2026-08-12 Chrome silent-drop bug)
+    //
+    // The bug: a web contenteditable (Chrome) accepted the AX SelectedText write, reported success,
+    // applied nothing, and the field verifiably did not grow. The verdict `.didNotLand` was mapped
+    // to `.concealClipboard`, which copies WITHOUT pasting — so the text landed on the clipboard and
+    // never on the page. Correct mapping: a provable non-insertion must PASTE, distinct from the
+    // genuine 0.5s-cap timeout (which "may have committed" and must stay conceal-only, no duplicate).
+
+    /// THE fix, as a mutation test: field-did-not-grow must route to PASTE, never conceal.
+    func test_didNotLand_routesToPaste_notConceal() {
+        XCTAssertEqual(TextInserter.outcomeForVerification(.didNotLand), .retryViaPaste)
+        XCTAssertNotEqual(TextInserter.outcomeForVerification(.didNotLand), .concealClipboard,
+                          "provable non-insertion must paste, not conceal-without-paste (the Chrome bug)")
+    }
+
+    /// A field that grew, and the honest can't-see field, are both treated as success — never retried.
+    func test_landedAndInconclusive_areInserted() {
+        XCTAssertEqual(TextInserter.outcomeForVerification(.landed), .inserted)
+        XCTAssertEqual(TextInserter.outcomeForVerification(.inconclusive), .inserted)
+    }
+
+    /// The two AX-failure signals must stay DISTINCT: provable-drop (paste) vs may-have-committed
+    /// timeout (conceal). Collapsing them either re-drops Chrome (conceal) or duplicates on timeout.
+    func test_retryViaPaste_isDistinctFrom_concealClipboard() {
+        XCTAssertNotEqual(TextInserter.AXSetOutcome.retryViaPaste, .concealClipboard)
+    }
+
+    /// The genuine-timeout guard is PRESERVED: a 0.5s-cap `.cannotComplete` still conceals (may have
+    /// committed), and is NOT rerouted to the new paste path — that would risk a double insertion.
+    func test_cannotCompleteTimeout_stillConceals_notPaste() {
+        XCTAssertEqual(TextInserter.axSetOutcome(.cannotComplete), .concealClipboard)
+        XCTAssertNotEqual(TextInserter.axSetOutcome(.cannotComplete), .retryViaPaste)
+    }
+
+    // MARK: - Browsers route to clipboard paste (proactive fix)
+    //
+    // Chrome/Safari/etc. web content drops AX writes the same way, and Chrome is not caught by the
+    // embedded-Chromium probe (it ships "Google Chrome Framework", not the frameworks the probe
+    // looks for). So a known browser bundle must prefer clipboard paste up front.
+
+    func test_knownBrowsers_areRoutedToClipboardPaste() {
+        for bundle in ["com.google.chrome", "com.apple.safari", "org.mozilla.firefox",
+                       "company.thebrowser.browser", "com.brave.browser", "com.microsoft.edgemac",
+                       "com.operasoftware.opera", "com.vivaldi.vivaldi", "com.kagi.kagimacos"] {
+            XCTAssertTrue(TextInserter.isBrowser(bundleID: bundle),
+                          "\(bundle) should be recognised as a browser and prefer clipboard paste")
+        }
+    }
+
+    func test_browserMatchIsCaseInsensitive() {
+        XCTAssertTrue(TextInserter.isBrowser(bundleID: "COM.GOOGLE.CHROME"))
+    }
+
+    func test_nonBrowsersAreNotRoutedByBrowserRule() {
+        for bundle in ["com.apple.finder", "com.example.totallynew", "com.anthropic.claudefordesktop"] {
+            XCTAssertFalse(TextInserter.isBrowser(bundleID: bundle),
+                           "\(bundle) is not a browser")
+        }
+    }
 }
