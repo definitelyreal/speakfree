@@ -85,11 +85,22 @@ public struct TextPostProcessor {
         // never the loose non-word tail. Verified against the same day's corpus: ". Comment,"
         // converts, while "the right comment bar", "in off-handed comments I", "bad comments and"
         // and "should be common in" all correctly do NOT (no trailing punctuation, or plural).
-        ("[.;]\\s*(?:comment|common)[.,!?;:]", ","),
+        ("[.;]\\s*(?:comment|common|coma)[.,!?;:]", ","),
+        // Same high-signal shape at utterance end: an existing punctuation mark immediately
+        // followed by a comma-homophone and nothing else. This catches "Turkey, comment" without
+        // touching ordinary "leave a comment" prose (no punctuation directly before the noun).
+        ("[,!?:]\\s*(?:comment|common|coma|karma|kamala)\\s*$", ","),
+        // Short discourse markers followed by a punctuated comma-homophone are command-shaped:
+        // "Shoot comment, I…" / "Okay awesome comment. I…". Keep the marker list closed and
+        // require punctuation after the candidate; broad sentence-medial comment rewriting would
+        // destroy legitimate review/document language.
+        ("(\\b(?:shoot|okay|awesome|great|cool|thanks|interesting|right|yeah|yes|no|anyway)"
+            + "(?:[ ,]+(?:really|very|so|pretty|totally|awesome|good|great|cool))*)"
+            + "[ ,]+(?:comment|common|coma)[.,!?;:](?=\\s|$)", "$1,"),
         ("(?<=[,!?:])\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:kamala|karma)[.,!?;:]", ","),
-        ("(?<=[,!?:])\\s*(?:comment|common)[.,!?;:]", ","),
+        ("(?<=[,!?:])\\s*(?:comment|common|coma)[.,!?;:]", ","),
         ("(?<=[.,!?;:])\\s*period(?!\\s+(?:of|piece)\\b)(?:[.,!?;:]|(?=\\s|$))", "."),
         ("(?<=[.,!?;:])\\s*colon(?!\\s+(?:cancer|surgery|cleanse|polyps?)\\b)(?:[.,!?;:]|(?=\\s|$))", ":"),
         ("(?<=[.,!?;:])\\s*dash(?!\\s+(?:of|board|cam)\\b)(?:[.,!?;:]|(?=\\s|$))", " —"),
@@ -552,9 +563,23 @@ public struct TextPostProcessor {
             ("komma", ",", [], [], false),
             ("kana", ",", [], [], false),
             ("kanna", ",", [], [], false),
-            ("period", ".", ["of", "piece"],
+            // skipBefore also carries the menstrual "period <noun>" collocations
+            // (period cramps/pain/tracker/…): a menstrual noun directly after "period"
+            // is unambiguously the noun sense. These only fire when the noun is ADJACENT
+            // ("period cramps"); an emphatic "…it hurt. Period. Cramps everywhere." keeps
+            // the sentence break, so nextWord is empty there and the token still converts.
+            // literalPreceders carries ONLY collocations with no live emphatic reading
+            // (clinical "menstrual period", the fixed grace/trial/billing/… family).
+            // Evaluative or state adjectives (late/heavy/light/missed/irregular) are
+            // DELIBERATELY excluded — each has a live emphatic command reading ("the results
+            // were irregular. Period.", "I'm running late. Period."), so protecting them
+            // would swallow the command. The menstrual noun is instead carried by the
+            // possessive guard, the menstrual-verb gate, and these skip nouns.
+            ("period", ".", ["of", "piece",
+              "cramps", "cramp", "pain", "tracker", "tracking", "symptoms", "flow"],
              ["transition", "grace", "grading", "trial", "notice", "probationary", "probation",
-              "incubation", "menstrual", "cooling-off", "billing", "waiting", "recovery"], true),
+              "incubation", "menstrual", "cooling-off", "billing", "waiting",
+              "recovery"], true),
             ("colon", ":", ["cancer", "surgery", "cleanse", "polyp"],
              ["sigmoid", "transverse", "ascending", "descending"], true),
             ("dash", " —", ["of", "board", "cam"], [], true),
@@ -607,16 +632,64 @@ public struct TextPostProcessor {
                             .prefix(while: { $0.isLetter || $0 == "'" || $0 == "’" || $0 == "-" })
                             .reversed()
                     ).lowercased()
+                    // Whole run of words before the match, for the multi-token lookback
+                    // guards below (time-period window, having-a-period). Split on
+                    // non-word chars so a "." breaks the phrase; each lookback guard is
+                    // itself gated on `precedingWord` (the strict adjacent scan above), so
+                    // a "X. period" case — where precedingWord is empty — never reaches them.
+                    let priorWords = String(beforeTrimmed).lowercased()
+                        .split(whereSeparator: {
+                            !($0.isLetter || $0 == "'" || $0 == "’" || $0 == "-")
+                        })
+                        .map(String.init)
+                    // Menstrual-verb gate (runs FIRST so it beats the utterance-final drops
+                    // below). "having/getting/missed/skipped/tracking <a|an|her|his> period" is
+                    // the menstrual noun and must be protected in every position: "having her."
+                    // / "getting a." cannot end a clause, so there is NO emphatic command to
+                    // swallow. Gated on a menstrual verb immediately before the article/
+                    // possessive, so the "end with a period" demo (verb "with"/"to"/"be") and
+                    // the bare object-pronoun command "…and her. Period." (verb "and") are NOT
+                    // rescued — they still convert. This is the ONLY thing that protects the
+                    // article/possessive cases the drops below would otherwise convert.
+                    if word == "period",
+                       ["a", "an", "her", "his"].contains(precedingWord) {
+                        let menstrualVerbs: Set<String> = [
+                            "having", "have", "had", "has", "getting", "get", "gets", "got",
+                            "missed", "miss", "missing", "skipped", "skip", "skipping",
+                            "tracking", "track",
+                        ]
+                        if menstrualVerbs.contains(priorWords.dropLast().last ?? "") { continue }
+                    }
                     // Utterance-final articles stay convertible: the live capture
                     // "…and end with a comma." (recording 2026-04-29-022224) is a spoken
                     // command demo, and "a/an <command>" at the very end reads as command
-                    // far more often than noun. Possessives and "the" read as noun
-                    // ("track my period.") in every position.
+                    // far more often than noun. "the" and the possessive DETERMINERS that
+                    // cannot double as object pronouns (my/your/our/their/its) read as noun
+                    // ("track my period.") in every position. But "her"/"his" also serve as
+                    // object/predicate pronouns, so utterance-final "…and her period." /
+                    // "…it's his period." is genuinely ambiguous between the noun ("her
+                    // period") and an emphatic command ("…and her. Period."). Per the
+                    // population ruling (2026-08-12, tightened after the over-broadness panel):
+                    // a swallowed command is worse than a visible typo, so at utterance end the
+                    // emphatic command wins (convert) unless the menstrual-verb gate above
+                    // already protected it; mid-utterance still reads as the noun (protected).
+                    // Scoped to "period"; comma/colon keep the full possessive set.
+                    let droppedFinal: Set<String> = word == "period"
+                        ? ["a", "an", "her", "his"]
+                        : ["a", "an"]
                     let finalGuard: Set<String> = isUtteranceFinal
-                        ? nounDeterminers.subtracting(["a", "an"])
+                        ? nounDeterminers.subtracting(droppedFinal)
                         : nounDeterminers
                     if finalGuard.contains(precedingWord) { continue }
                     if literalPreceders.contains(precedingWord) { continue }
+                    // NOTE: there is deliberately NO "time period" noun protection. The
+                    // over-broadness panel (2026-08-12) showed any "protect period after time"
+                    // form — even gated on a definite article or possessive — swallows the very
+                    // common emphatic "take your time. Period." / "on your own time. Period." /
+                    // "give it the time. Period." The rare formal noun "at the appropriate time
+                    // period" is left to convert to "…time." (a visible typo, the accepted
+                    // cost — this is Michael's original corpus defect, 3 raws). See
+                    // build/26-08-12-noun-protection/TAXONOMY.ai.md.
                 }
 
                 // If the next non-space character is whisper auto-punct, consume it —

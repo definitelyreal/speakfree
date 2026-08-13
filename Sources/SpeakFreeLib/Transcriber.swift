@@ -94,6 +94,7 @@ public class Transcriber {
 
     public var supportsStreaming: Bool { engine.supportsStreaming }
     public var supportsPrompt: Bool { engine.supportsPrompt }
+    public var lastDiagnostics: TranscriptionDiagnostics? { engine.lastDiagnostics }
     public var isLoaded: Bool { engine.isLoaded }
     public var keepModelLoaded: String {
         get { engine.keepModelLoaded }

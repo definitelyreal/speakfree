@@ -956,4 +956,153 @@ final class TextPostProcessorTests: XCTestCase {
             TextPostProcessor.process("The errors. Kama problems everywhere.", hybrid: true),
             "The errors, problems everywhere.")
     }
+
+    // MARK: - Noun-protection extension 2026-08-12 (menstrual sense; NO time-period rule)
+
+    // 71. There is deliberately NO "time period" noun protection (removed after the
+    // over-broadness panel). Every "…time period" spoken-punctuation command converts —
+    // including the possessive/definite forms that a determiner-gated rule would have
+    // wrongly protected. These are the panel's HIGH-severity regressions.
+    func testHybrid71_timePeriodAlwaysConverts() {
+        XCTAssertEqual(
+            TextPostProcessor.process("Take your time period", hybrid: true),
+            "Take your time.")
+        XCTAssertEqual(
+            TextPostProcessor.process("Do it on your own time period", hybrid: true),
+            "Do it on your own time.")
+        XCTAssertEqual(
+            TextPostProcessor.process("Finish it on my time period", hybrid: true),
+            "Finish it on my time.")
+        // The rare formal noun is the accepted casualty: it converts to "…time." (visible typo).
+        XCTAssertEqual(
+            TextPostProcessor.process(
+                "Let us discuss it at the appropriate time period", hybrid: true),
+            "Let us discuss it at the appropriate time.")
+    }
+
+    // 72. INDEFINITE / prepositional "time period" also converts, incl. Michael's corpus
+    // ground-truth (CorpusTests, recording 2026-04-29: "a very exciting time period. I think…").
+    func testHybrid72_indefiniteAndIdiomTimeConverts() {
+        XCTAssertEqual(
+            TextPostProcessor.process("This is a very exciting time period", hybrid: true),
+            "This is a very exciting time.")
+        XCTAssertEqual(
+            TextPostProcessor.process("That was a crazy time period", hybrid: true),
+            "That was a crazy time.")
+        XCTAssertEqual(
+            TextPostProcessor.process("We can start right on time period", hybrid: true),
+            "We can start right on time.")
+        XCTAssertEqual(
+            TextPostProcessor.process("Builds take weeks of time period", hybrid: true),
+            "Builds take weeks of time.")
+    }
+
+    // 73. Emphatic-period collision sanity: the DOMINANT spoken-period cases whose preceding
+    // word is NOT "time" must still convert. Protecting these would break the feature.
+    func testHybrid73_emphaticPeriodDominantStillConverts() {
+        XCTAssertEqual(
+            TextPostProcessor.process("I am done with this period", hybrid: true),
+            "I am done with this.")
+        XCTAssertEqual(
+            TextPostProcessor.process("Just do it now period", hybrid: true),
+            "Just do it now.")
+        XCTAssertEqual(
+            TextPostProcessor.process("That is how we do period", hybrid: true),
+            "That is how we do.")
+        XCTAssertEqual(
+            TextPostProcessor.process("We ship one round period", hybrid: true),
+            "We ship one round.")
+    }
+
+    // 74. Plural "time periods" followed by an emphatic "period" is naturally safe: the
+    // converter's matched token is preceded by "periods", not "time", so the emphatic
+    // period still converts while the plural noun is untouched (corpus: "…performance of
+    // these different funds at different time periods period it should offer…").
+    func testHybrid74_pluralTimePeriodsThenEmphaticPeriodConverts() {
+        XCTAssertEqual(
+            TextPostProcessor.process(
+                "Compare them at different time periods period it should offer more", hybrid: true),
+            "Compare them at different time periods. It should offer more")
+    }
+
+    // 75. Menstrual noun — possessive determiners that CANNOT double as object pronouns
+    // (my/your/our/their/its) protect "period" in every position, including utterance-final:
+    // "…got my period." reads only as the noun ("…my. Period." is ungrammatical). General
+    // English, not Michael's usage — designed for the whole user population.
+    func testHybrid75_possessiveMenstrualNounSurvives() {
+        XCTAssertEqual(
+            TextPostProcessor.process("I think I finally got my period.", hybrid: true),
+            "I think I finally got my period.")
+        XCTAssertEqual(
+            TextPostProcessor.process("Did you get your period?", hybrid: true),
+            "Did you get your period?")
+        // Mid-utterance her/his (a clause continues after) reads as the noun → protect.
+        XCTAssertEqual(
+            TextPostProcessor.process("She said her period is late this month.", hybrid: true),
+            "She said her period is late this month.")
+    }
+
+    // 76. The hard collision, resolved by position: "her"/"his" also serve as object/predicate
+    // pronouns, so at UTTERANCE END bare "…and her period." is ambiguous with the emphatic
+    // command "…and her. Period." — the command wins (converts). Mid-utterance stays the noun
+    // (75); a menstrual verb before it also protects it (79). "and"/"entirely" are not verbs.
+    func testHybrid76_objectPronounPeriodUtteranceFinalConverts() {
+        XCTAssertEqual(
+            TextPostProcessor.process("That is between you and her period", hybrid: true),
+            "That is between you and her.")
+        XCTAssertEqual(
+            TextPostProcessor.process("The decision is entirely his period", hybrid: true),
+            "The decision is entirely his.")
+    }
+
+    // 77. Menstrual "period <noun>" collocation (skipBefore): an ADJACENT menstrual noun is
+    // read as the noun sense → protect. Known limitation (documented): like the pre-existing
+    // "period of" skip, an emphatic "…hurt. Period. Cramps…" with NO sentence break before
+    // the menstrual word is indistinguishable and gets protected; a break makes nextWord
+    // empty so the token converts.
+    func testHybrid77_menstrualFollowingNounSurvives() {
+        XCTAssertEqual(
+            TextPostProcessor.process("The period cramps were unbearable.", hybrid: true),
+            "The period cramps were unbearable.")
+        XCTAssertEqual(
+            TextPostProcessor.process("She uses a period tracker app.", hybrid: true),
+            "She uses a period tracker app.")
+        // Sentence break present → the emphatic period converts (nextWord is empty).
+        XCTAssertEqual(
+            TextPostProcessor.process("My stomach hurt period. Cramps are the worst.", hybrid: true),
+            "My stomach hurt. Cramps are the worst.")
+    }
+
+    // 78. Evaluative/state adjectives are DELIBERATELY NOT literalPreceders — each has a live
+    // emphatic reading, so "…was irregular period" / "…running late period" must CONVERT
+    // (panel HIGH regression: "irregular" was a bad literalPreceder).
+    func testHybrid78_evaluativeAdjectivePeriodConverts() {
+        XCTAssertEqual(
+            TextPostProcessor.process("The results were irregular period", hybrid: true),
+            "The results were irregular.")
+        XCTAssertEqual(
+            TextPostProcessor.process("We are running late period", hybrid: true),
+            "We are running late.")
+    }
+
+    // 79. Menstrual-verb gate — "having/getting/missed/skipped/tracking <a|her|his> period" is
+    // the menstrual noun and is protected in EVERY position; it must WIN over the utterance-
+    // final a/an and her/his drops ("having her." cannot end a clause, so no command is
+    // swallowed). The "end with a period" demo (verb "with") still converts.
+    func testHybrid79_menstrualVerbGateWinsOverConvert() {
+        // Panel #5 opposite-direction bug: this MUST keep the word now.
+        XCTAssertEqual(
+            TextPostProcessor.process("She is having her period", hybrid: true),
+            "She is having her period")
+        XCTAssertEqual(
+            TextPostProcessor.process("I think she missed her period", hybrid: true),
+            "I think she missed her period")
+        XCTAssertEqual(
+            TextPostProcessor.process("She thinks she is having a period", hybrid: true),
+            "She thinks she is having a period")
+        // The spoken-command demo shape is preserved (no menstrual verb before "a").
+        XCTAssertEqual(
+            TextPostProcessor.process("End the sentence with a period", hybrid: true),
+            "End the sentence with a.")
+    }
 }

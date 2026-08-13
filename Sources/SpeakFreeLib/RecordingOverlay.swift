@@ -336,7 +336,12 @@ class RecordingOverlay {
         screenResolved = true
         cachedScreen = instantScreen()
         guard let screen = cachedScreen else { screenResolved = false; return }
-        refineScreenAsync(for: showGeneration)
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        let avoidsLiveWindowContext = TextInserter.shouldAvoidLiveWindowContext(
+            bundleID: frontApp?.bundleIdentifier, bundleURL: frontApp?.bundleURL)
+        if !avoidsLiveWindowContext {
+            refineScreenAsync(for: showGeneration)
+        }
 
         // Record-start and errors open as a LARGE CENTER-SCREEN banner (Michael
         // 2026-07-25): unmissable positive feedback, so NOT seeing it after a keypress
@@ -407,7 +412,7 @@ class RecordingOverlay {
         // One off-main screen grab behind the overlay feeds BOTH the dark/light
         // record outline (DEFECT 4) and the static frosted-blur backdrop (Michael
         // 2026-08-12). Only for the emergence entry; fails safe to the locked look.
-        if emergence {
+        if emergence && !avoidsLiveWindowContext {
             sampleBackdrop(windowNumber: win.windowNumber, cocoaFrame: frame,
                            for: showGeneration)
         }

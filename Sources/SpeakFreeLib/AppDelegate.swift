@@ -1194,6 +1194,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Resolve the Electron classification on main, where `frontmostApplication` is
         // authoritative, rather than re-reading it from the background reader below.
         let electronClass = TextInserter.prefersClipboardPaste(app: frontApp)
+        let avoidLiveWindowContext = TextInserter.shouldAvoidLiveWindowContext(
+            bundleID: frontBundle, bundleURL: frontApp?.bundleURL)
 
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             var capturedElement: AXUIElement?
@@ -1204,7 +1206,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // AXManualAccessibility persists per-app once flipped, so subsequent
             // reads succeed on this FIRST attempt — the gates must not live only
             // on the unlock-retry path). Native apps keep full-fidelity context.
-            let result = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef)
+            let result = avoidLiveWindowContext
+                ? AXError.cannotComplete
+                : AXUIElementCopyAttributeValue(
+                    systemWide, kAXFocusedUIElementAttribute as CFString, &elementRef)
             if result == .success, let element = elementRef {
                 // swiftlint:disable:next force_cast
                 let axElement = element as! AXUIElement
@@ -1380,6 +1385,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleRecordingStart() {
         guard !isPressed else { return }
+        let startRequestedAt = CFAbsoluteTimeGetCurrent()
 
         // A stale Secure-Input retry must never fire mid-take or after a newer dictation —
         // starting a new recording supersedes the parked text.
@@ -1393,16 +1399,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Verify all subsystems before every recording
         verifySubsystems(context: "pre-recording")
+        let healthFinishedAt = CFAbsoluteTimeGetCurrent()
 
         // Detect style mode from frontmost app before menu bar steals focus. The
         // bundle id is also kept for the .meta.json sidecar — the edit-feedback batch
         // (tune-corpus) correlates dictations with where the text landed.
         let frontApp = NSWorkspace.shared.frontmostApplication
         let frontBundleID = frontApp?.bundleIdentifier
+        let avoidLiveWindowContext = TextInserter.shouldAvoidLiveWindowContext(
+            bundleID: frontBundleID, bundleURL: frontApp?.bundleURL)
         recordingTargetBundleID = frontBundleID
         inserter.livePrependProbeSuppressed =
             TextInserter.prefersClipboardPaste(app: frontApp)
         recordingStyleMode = TextPostProcessor.detectStyleMode(bundleID: frontBundleID)
+        let classificationFinishedAt = CFAbsoluteTimeGetCurrent()
 
         // Capture focused element before anything else changes.
         // Skip for remote desktop — AX reads the Splashtop UI, not the remote text field.
@@ -1425,7 +1435,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // feeds the screen-aware NAME corrector, which works on every engine —
         // Parakeet users get on-screen spellings (Kris vs Chris) even though the
         // engine ignores prompts.
-        if config.screenContext?.value == true && !isRemoteDesktop {
+        if config.screenContext?.value == true && !isRemoteDesktop && !avoidLiveWindowContext {
             // Bump generation so any in-flight OCR from a previous recording is discarded.
             let capturedGeneration = UUID()
             screenCaptureGeneration = capturedGeneration
@@ -1441,12 +1451,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         statusBar.state = .recording
         recordingOverlay.style = min(5, max(1, config.overlayStyle ?? 5))
         recordingOverlay.show(state: .recording, recorder: recorder)
+        let overlayFinishedAt = CFAbsoluteTimeGetCurrent()
         startRecordingWatchdog()
         do {
             // Always write to recordings dir — crash recovery works regardless of maxRecordings
             let outputURL = RecordingStore.newRecordingURL()
             RecordingStore.writeSentinel(recordingURL: outputURL)
             try recorder.startRecording(to: outputURL)
+            let recordingStartedAt = CFAbsoluteTimeGetCurrent()
+            if recordingStartedAt - startRequestedAt >= 0.25 {
+                DiagnosticLogger.shared.log(String(
+                    format: "Recording start slow: health=%.2fs classify=%.2fs overlay=%.2fs file=%.2fs total=%.2fs",
+                    healthFinishedAt - startRequestedAt,
+                    classificationFinishedAt - healthFinishedAt,
+                    overlayFinishedAt - classificationFinishedAt,
+                    recordingStartedAt - overlayFinishedAt,
+                    recordingStartedAt - startRequestedAt))
+            }
 
             // Start streaming transcription timer — processes audio every 2s for live preview
             startStreamingTimer()
@@ -1945,13 +1966,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         date: ISO8601DateFormatter().string(from: Date()),
                         durationSeconds: Double(samples.count) / 16_000.0,
                         transcriptChars: text.count,
-                        targetApp: metaTargetApp
+                        targetApp: metaTargetApp,
+                        transcriptionDiagnostics: transcriber.lastDiagnostics
                     ))
                 RecordingStore.clearSentinel()
                 if keepRecording && maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
                 }
                 DispatchQueue.main.async {
+                    if keepRecording {
+                        self.statusBar.noteFinishedRecording(url: audioURL, text: text)
+                    }
                     self.presentFinalizedText(
                         text,
                         sampleCount: samples.count,

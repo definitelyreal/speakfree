@@ -92,6 +92,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
 
         buildMenu()
+        requestRecentRecordingsRefresh()
     }
 
     // Called before the menu is displayed — rebuild items so state changes are reflected
@@ -164,7 +165,28 @@ class StatusBarController: NSObject, NSMenuDelegate {
         buildMenuItems(into: menu)
         menu.delegate = self
         statusItem.menu = menu
-        requestRecentRecordingsRefresh()
+    }
+
+    /// Keep the newest saved take visible without rescanning the 50k-artifact corpus after every
+    /// state change. The old buildMenu-triggered scan occasionally took 10–35 seconds under load;
+    /// that competed with the event tap and produced the user-visible "fn did nothing, then the
+    /// Globe panel opened" outage. Disk reconciliation still runs at launch and submenu-open.
+    func noteFinishedRecording(url: URL, text: String) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.noteFinishedRecording(url: url, text: text)
+            }
+            return
+        }
+        let name = url.deletingPathExtension().lastPathComponent
+        let stamp = String(name.dropFirst(RecordingStore.filePrefix.count).prefix(17))
+        let date = RecordingStore.parseTimestamp(stamp) ?? Date()
+        recentRecordingsSnapshot.removeAll { $0.url == url }
+        recentRecordingsSnapshot.insert(Recording(url: url, date: date, text: text), at: 0)
+        if recentRecordingsSnapshot.count > 15 {
+            recentRecordingsSnapshot.removeLast(recentRecordingsSnapshot.count - 15)
+        }
+        hasLoadedRecentRecordings = true
     }
 
     private func buildMenuItems(into menu: NSMenu) {

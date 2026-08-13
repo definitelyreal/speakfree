@@ -681,8 +681,21 @@ class TextInserter {
     static let remoteClipboardRestoreDelay: TimeInterval = 3.0
 
     static func prefersClipboardPaste(bundleID: String) -> Bool {
-        if clipboardPasteApps.contains(bundleID) { return true }
-        return bundleID.lowercased().contains("superhuman")
+        let normalizedBundleID = bundleID.lowercased()
+        if clipboardPasteApps.contains(where: { $0.lowercased() == normalizedBundleID }) {
+            return true
+        }
+        return normalizedBundleID.contains("superhuman")
+    }
+
+    /// The AX-unreliable contenteditable class: every known/probed Electron or CEF app, plus
+    /// explicit clipboard-routed editors. These apps already cannot use AX insertion reliably;
+    /// live focused-element/window reads are optional enrichment and must not contend with the
+    /// hotkey path. Native apps and browsers keep context unless separately classified.
+    static func shouldAvoidLiveWindowContext(bundleID: String?, bundleURL: URL?) -> Bool {
+        guard let bundleID else { return false }
+        if prefersClipboardPaste(bundleID: bundleID) { return true }
+        return isChromiumEmbedded(bundleID: bundleID, bundleURL: bundleURL)
     }
 
     /// Chromium-embedding frameworks. An app shipping one of these renders its text fields

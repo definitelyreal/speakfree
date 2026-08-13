@@ -35,6 +35,19 @@ final class CommaMishearTests: XCTestCase {
         XCTAssertFalse(out.lowercased().contains("comment"), "got: \(out)")
     }
 
+    func test_trailingRealWordHomophoneAfterPunctuationBecomesComma() {
+        XCTAssertEqual(hybrid("I've always wanted to go to Turkey, comment"),
+                       "I've always wanted to go to Turkey,")
+        XCTAssertEqual(hybrid("That is the plan: coma"), "That is the plan,")
+    }
+
+    func test_discourseMarkerRealWordHomophoneBecomesComma() {
+        XCTAssertEqual(hybrid("Shoot comment, I thought I sent it"),
+                       "Shoot, I thought I sent it")
+        XCTAssertEqual(hybrid("Okay awesome comment. I think we're set"),
+                       "Okay awesome, I think we're set")
+    }
+
     // MARK: - Must NOT convert — all four are real strings from the same day's corpus
 
     /// "One thing is that the right comment bar and the meme should…" (00:36, Chrome)
@@ -62,6 +75,12 @@ final class CommaMishearTests: XCTestCase {
         XCTAssertEqual(hybrid(input), input)
         let input2 = "That is unusual. Common sense would say otherwise"
         XCTAssertEqual(hybrid(input2), input2)
+    }
+
+    func test_realComaAndCommentNounsStayUntouched() {
+        XCTAssertEqual(hybrid("The patient remained in a coma."),
+                       "The patient remained in a coma.")
+        XCTAssertEqual(hybrid("Please leave a comment."), "Please leave a comment.")
     }
 
     // MARK: - The existing family must not regress
