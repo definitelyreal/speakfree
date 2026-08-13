@@ -280,11 +280,14 @@ public class RecordingStore {
         /// The edit-feedback batch (tune-corpus) uses it to find the final artifact
         /// (sent message, saved doc) to diff against what was inserted.
         public let targetApp: String?
+        /// Optional engine quality signals (present for Parakeet takes recorded after P2/P3).
+        public let transcriptionDiagnostics: TranscriptionDiagnostics?
 
         public init(appVersion: String, engine: String, model: String,
                     inputDevice: String?, date: String,
                     durationSeconds: Double, transcriptChars: Int,
-                    targetApp: String? = nil) {
+                    targetApp: String? = nil,
+                    transcriptionDiagnostics: TranscriptionDiagnostics? = nil) {
             self.appVersion = appVersion
             self.engine = engine
             self.model = model
@@ -293,6 +296,7 @@ public class RecordingStore {
             self.durationSeconds = durationSeconds
             self.transcriptChars = transcriptChars
             self.targetApp = targetApp
+            self.transcriptionDiagnostics = transcriptionDiagnostics
         }
     }
 

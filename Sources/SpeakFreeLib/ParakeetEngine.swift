@@ -1,5 +1,6 @@
 import Foundation
 import FluidAudio
+import CoreML
 
 /// Wraps FluidAudio's Parakeet TDT ASR for in-process transcription on the Apple Neural Engine.
 ///
@@ -43,6 +44,83 @@ public final class ParakeetEngine: TranscriptionEngine {
     /// Never strip more than this many words — a timing anomaly must not delete real
     /// content. Observed hallucinations are 1-3 words ("here.", "being carried down.").
     static let padHallucinationMaxWords = 6
+
+    // MARK: - Confidence/gap confabulation gate (P2)
+
+    static let confabulationGapSeconds = 1.0
+    static let confabulationMeanConfidence: Float = 0.52
+    static let confabulationMaxConfidence: Float = 0.70
+    static let confabulationTokenConfidence: Float = 0.50
+    static let confabulationMaxWords = 8
+
+    struct ConfidenceStripResult: Equatable {
+        let text: String
+        let removedTokenCount: Int
+    }
+
+    /// Remove a trailing phrase only when three independent signs agree: it begins after a long
+    /// decoder-time gap, the whole suffix is weak, and several of its tokens are weak. A single
+    /// low-confidence final word is kept. This is intentionally asymmetric: a visible invention is
+    /// preferable to swallowing plausible speech unless the whole tail has the confabulation shape.
+    static func strippingLowConfidenceTail(
+        text: String, timings: [TokenTiming]?
+    ) -> ConfidenceStripResult {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let timings, timings.count >= 4 else {
+            return ConfidenceStripResult(text: trimmed, removedTokenCount: 0)
+        }
+
+        // Search oldest boundary first. A confabulated tail can itself contain several long gaps;
+        // choosing the newest one would leave its first invented word behind. Punctuation pieces
+        // are retained in the suffix confidence
+        // calculation because they are decoder decisions too, but at least three lexical pieces
+        // are required before any transcript text may be removed.
+        for cut in 1..<timings.count {
+            let gap = timings[cut].startTime - timings[cut - 1].endTime
+            guard gap >= confabulationGapSeconds else { continue }
+            let suffix = Array(timings[cut...])
+            let lexicalCount = suffix.filter {
+                !$0.token.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.isEmpty
+            }.count
+            guard lexicalCount >= 3, lexicalCount <= confabulationMaxWords else { continue }
+            let confidences = suffix.map(\.confidence)
+            let mean = confidences.reduce(0, +) / Float(confidences.count)
+            let weakCount = confidences.filter { $0 < confabulationTokenConfidence }.count
+            guard mean < confabulationMeanConfidence,
+                  confidences.max() ?? 1 < confabulationMaxConfidence,
+                  weakCount * 2 >= confidences.count else { continue }
+
+            let droppedNorm = normalizedWordKey(suffix.map(\.token).joined())
+            guard !droppedNorm.isEmpty else { continue }
+            var words = trimmed.split(separator: " ", omittingEmptySubsequences: true)
+            var peeled: [Substring] = []
+            while let last = words.last, peeled.count < confabulationMaxWords {
+                peeled.insert(last, at: 0)
+                words.removeLast()
+                if normalizedWordKey(peeled.joined(separator: " ")) == droppedNorm {
+                    let kept = words.joined(separator: " ")
+                    guard !kept.isEmpty else { break }
+                    return ConfidenceStripResult(text: kept, removedTokenCount: suffix.count)
+                }
+            }
+        }
+        return ConfidenceStripResult(text: trimmed, removedTokenCount: 0)
+    }
+
+    // MARK: - Voice-activity endpointing (P3)
+
+    static let vadMinimumTailTrimSeconds = 1.0
+
+    /// Preserve the beginning/pre-roll and every internal pause; trim only a long non-speech tail
+    /// after Silero's final speech segment. Empty/no-result VAD is a conservative no-op.
+    static func endpointedSamples(_ samples: [Float], segments: [VadSegment]) -> [Float] {
+        guard let last = segments.last else { return samples }
+        let end = max(0, min(last.endSample(sampleRate: 16_000), samples.count))
+        let removable = samples.count - end
+        guard end >= FinalizePipeline.minSamples,
+              Double(removable) / 16_000.0 >= vadMinimumTailTrimSeconds else { return samples }
+        return Array(samples[..<end])
+    }
 
     /// Drop trailing words the decoder invented over the appended silence pad
     /// (2026-07-21 corpus, confirmed against whisper-large-v3-turbo on the same wavs:
@@ -109,6 +187,8 @@ public final class ParakeetEngine: TranscriptionEngine {
         private var vocabTermCount = 0
         /// Handle on the background vocab setup, for the SPEAKFREE_WAIT_VOCAB test seam only.
         private var vocabSetupTask: Task<Void, Never>?
+        private var vadManager: VadManager?
+        private var vadSetupTask: Task<Void, Never>?
 
         /// The model identifier currently loaded, e.g. "parakeet-tdt-0.6b-v3". `nil` when unloaded.
         private var loadedModelID: String?
@@ -136,9 +216,12 @@ public final class ParakeetEngine: TranscriptionEngine {
 
         /// Notifies the outer facade so it can update its NSLock-guarded `isLoaded` mirror.
         private let onLoadedChange: @Sendable (Bool) -> Void
+        private let onDiagnostics: @Sendable (TranscriptionDiagnostics?) -> Void
 
-        init(onLoadedChange: @escaping @Sendable (Bool) -> Void) {
+        init(onLoadedChange: @escaping @Sendable (Bool) -> Void,
+             onDiagnostics: @escaping @Sendable (TranscriptionDiagnostics?) -> Void) {
             self.onLoadedChange = onLoadedChange
+            self.onDiagnostics = onDiagnostics
         }
 
         var isLoaded: Bool { manager != nil }
@@ -231,6 +314,25 @@ public final class ParakeetEngine: TranscriptionEngine {
             vocabSetupTask?.cancel()
             let modelForVocab = modelID
             vocabSetupTask = Task { await self.setupVocabBoosting(models: models, forModelID: modelForVocab) }
+            vadSetupTask?.cancel()
+            vadSetupTask = Task { await self.setupEndpointing(forModelID: modelForVocab) }
+        }
+
+        private func setupEndpointing(forModelID: String) async {
+            do {
+                let vad = try await VadManager(config: VadConfig(
+                    // Silero is tiny. Keep it off the Neural Engine so it cannot evict or contend
+                    // with Parakeet + the CTC vocabulary graph. Dogfood 2026-08-13 showed a fast
+                    // median but random 1.2–5.7s release tails after adding an ANE-backed VAD.
+                    defaultThreshold: 0.85, debugMode: false, computeUnits: .cpuOnly))
+                guard loadedModelID == forModelID, manager != nil else { return }
+                vadManager = vad
+                DiagnosticLogger.shared.log("ParakeetEngine: Silero endpointing ready")
+            } catch {
+                DiagnosticLogger.shared.log(
+                    "ParakeetEngine: endpointing unavailable — \(error.localizedDescription); using full audio")
+                vadManager = nil
+            }
         }
 
         /// Try to configure batch-anchored custom-vocabulary boosting. Gated on a
@@ -306,7 +408,29 @@ public final class ParakeetEngine: TranscriptionEngine {
             // 7.8s and 10.8s). Pad up to `trailingSilenceSamples`, but never past the
             // single-chunk cap so longer clips keep as much pad as fits (FluidAudio
             // auto-chunks anything beyond the cap).
-            var audio = samples
+            var speechSamples = samples
+            let vadStart = CFAbsoluteTimeGetCurrent()
+            if let vadManager {
+                do {
+                    let segments = try await vadManager.segmentSpeech(
+                        samples,
+                        config: VadSegmentationConfig(
+                            minSpeechDuration: 0.15, minSilenceDuration: 0.75,
+                            maxSpeechDuration: .infinity, speechPadding: 0.20))
+                    speechSamples = ParakeetEngine.endpointedSamples(samples, segments: segments)
+                } catch {
+                    DiagnosticLogger.shared.log(
+                        "ParakeetEngine: endpointing failed — \(error.localizedDescription); using full audio")
+                }
+            }
+            let vadElapsed = CFAbsoluteTimeGetCurrent() - vadStart
+            let vadTrimmedSeconds = Double(samples.count - speechSamples.count) / 16_000.0
+            if vadTrimmedSeconds > 0 {
+                DiagnosticLogger.shared.log(String(
+                    format: "ParakeetEngine: VAD trimmed %.2fs trailing non-speech", vadTrimmedSeconds))
+            }
+
+            var audio = speechSamples
             let pad = ParakeetEngine.paddedSampleCount(audio.count) - audio.count
             if pad > 0 {
                 audio += [Float](repeating: 0, count: pad)
@@ -331,6 +455,7 @@ public final class ParakeetEngine: TranscriptionEngine {
             var decoderState = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
 
             let result: ASRResult
+            let asrStart = CFAbsoluteTimeGetCurrent()
             do {
                 result = try await mgr.transcribe(audio, decoderState: &decoderState, language: hint)
             } catch let error as ASRError {
@@ -338,6 +463,7 @@ public final class ParakeetEngine: TranscriptionEngine {
             } catch {
                 throw TranscriptionEngineError.transcriptionFailed
             }
+            let asrElapsed = CFAbsoluteTimeGetCurrent() - asrStart
 
             var text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -349,6 +475,7 @@ public final class ParakeetEngine: TranscriptionEngine {
             // batchText exactly matching the token timings; the strip below only peels
             // tail words and refuses on any mismatch, so a boosted tail word merely
             // declines the strip (conservative keep).
+            let vocabStart = CFAbsoluteTimeGetCurrent()
             if let spotter = vocabSpotter, let rescorer = vocabRescorer, let ctx = vocabContext {
                 do {
                     let boosted = try await VocabularyBoost.boost(
@@ -369,16 +496,44 @@ public final class ParakeetEngine: TranscriptionEngine {
                         "ParakeetEngine: vocab boost failed (\(error.localizedDescription)) — using batch text")
                 }
             }
+            let vocabElapsed = CFAbsoluteTimeGetCurrent() - vocabStart
+            let inferenceElapsed = vadElapsed + asrElapsed + vocabElapsed
+            if inferenceElapsed >= 0.75 {
+                DiagnosticLogger.shared.log(String(
+                    format: "ParakeetEngine: slow stages VAD=%.2fs ASR=%.2fs vocab=%.2fs",
+                    vadElapsed, asrElapsed, vocabElapsed))
+            }
 
             // Strip words the decoder hallucinated over the silence pad we appended
             // (counts only in the log — never transcript content).
+            let confidenceStrip = ParakeetEngine.strippingLowConfidenceTail(
+                text: text, timings: result.tokenTimings)
+            if confidenceStrip.removedTokenCount > 0 {
+                DiagnosticLogger.shared.log(
+                    "ParakeetEngine: stripped low-confidence tail (\(confidenceStrip.removedTokenCount) timing tokens)")
+            }
+            text = confidenceStrip.text
+
             let stripped = ParakeetEngine.strippingPadHallucination(
                 text: text, timings: result.tokenTimings,
-                realAudioSeconds: Double(samples.count) / 16_000.0)
+                realAudioSeconds: Double(speechSamples.count) / 16_000.0)
             if stripped.count != text.count {
                 DiagnosticLogger.shared.log(String(
                     format: "ParakeetEngine: stripped pad hallucination (%d chars past %.2fs)",
-                    text.count - stripped.count, Double(samples.count) / 16_000.0))
+                    text.count - stripped.count, Double(speechSamples.count) / 16_000.0))
+            }
+            let minConfidence = result.tokenTimings?.map(\.confidence).min()
+            let uncertain = result.confidence < 0.5 || (minConfidence.map { $0 < 0.3 } ?? false)
+            onDiagnostics(TranscriptionDiagnostics(
+                aggregateConfidence: result.confidence,
+                minimumTokenConfidence: minConfidence,
+                lowConfidenceTailTokensRemoved: confidenceStrip.removedTokenCount,
+                vadTrimmedSeconds: vadTrimmedSeconds,
+                uncertain: uncertain))
+            if uncertain {
+                DiagnosticLogger.shared.log(String(
+                    format: "ParakeetEngine: uncertain take (aggregate %.3f, min-token %.3f)",
+                    result.confidence, minConfidence ?? -1))
             }
             return stripped
         }
@@ -408,6 +563,8 @@ public final class ParakeetEngine: TranscriptionEngine {
     /// The serialized owner of all model state. Lazily wired so it can capture `self`'s mirror
     /// updater without an initializer ordering problem.
     private var core: Core!
+    private let diagnosticsLock = NSLock()
+    private var diagnosticsMirror: TranscriptionDiagnostics?
 
     /// Guards `keepModelLoaded` and the `isLoadedMirror` — the only fields the synchronous protocol
     /// surface touches. The actor owns everything else.
@@ -428,12 +585,22 @@ public final class ParakeetEngine: TranscriptionEngine {
             self.stateLock.lock()
             self.isLoadedMirror = loaded
             self.stateLock.unlock()
+        }, onDiagnostics: { [weak self] diagnostics in
+            guard let self else { return }
+            self.diagnosticsLock.lock()
+            self.diagnosticsMirror = diagnostics
+            self.diagnosticsLock.unlock()
         })
     }
 
     // MARK: - TranscriptionEngine identity
 
     public var engineID: String { "parakeet" }
+    public var lastDiagnostics: TranscriptionDiagnostics? {
+        diagnosticsLock.lock()
+        defer { diagnosticsLock.unlock() }
+        return diagnosticsMirror
+    }
 
     public var supportsStreaming: Bool { false }
 

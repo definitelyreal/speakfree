@@ -202,4 +202,28 @@ final class ElectronDetectionTests: XCTestCase {
                            "\(bundle) is not a browser")
         }
     }
+
+    func test_knownClipboardEditorsAvoidLiveWindowContextIPC() {
+        XCTAssertTrue(TextInserter.shouldAvoidLiveWindowContext(
+            bundleID: "com.openai.codex", bundleURL: nil))
+        XCTAssertTrue(TextInserter.shouldAvoidLiveWindowContext(
+            bundleID: "COM.OPENAI.CHAT", bundleURL: nil))
+        XCTAssertTrue(TextInserter.shouldAvoidLiveWindowContext(
+            bundleID: "com.microsoft.VSCode", bundleURL: nil))
+    }
+
+    func test_unlistedElectronAppsAlsoAvoidLiveWindowContextIPC() {
+        let bundle = makeBundle(named: "FutureElectron", framework: "Electron Framework.framework")
+        XCTAssertTrue(TextInserter.shouldAvoidLiveWindowContext(
+            bundleID: "com.example.future-electron", bundleURL: bundle))
+    }
+
+    func test_nativeAndBrowserAppsKeepOptionalWindowContext() {
+        let native = makeBundle(named: "Native", framework: "Sparkle.framework")
+        XCTAssertFalse(TextInserter.shouldAvoidLiveWindowContext(
+            bundleID: "com.example.native", bundleURL: native))
+        XCTAssertFalse(TextInserter.shouldAvoidLiveWindowContext(
+            bundleID: "com.google.Chrome", bundleURL: nil))
+        XCTAssertFalse(TextInserter.shouldAvoidLiveWindowContext(bundleID: nil, bundleURL: nil))
+    }
 }

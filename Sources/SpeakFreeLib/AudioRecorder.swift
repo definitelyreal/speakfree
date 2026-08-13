@@ -1053,6 +1053,14 @@ class AudioRecorder {
     // MARK: - Recording
 
     func startRecording(to outputURL: URL) throws {
+        // Sub-phase timing (2026-08-13 perf audit): "Recording start slow" in AppDelegate
+        // pins the delay to this whole call but not to a phase inside it. Real dogfood logs
+        // showed 1.2-3.7s stalls here on ~25% of takes with no correlated device-list change,
+        // engine teardown, or concurrent build — the four most obvious causes were each
+        // checked against real logs and ruled out. Split the phases so the NEXT occurrence
+        // is self-diagnosing instead of another round of blind hypotheses.
+        let phaseStart = CFAbsoluteTimeGetCurrent()
+
         // Set up the file BEFORE flipping the flag, so the audio thread doesn't try to
         // write to a nil audioFile. WavWriter (not AVAudioFile): it re-patches the RIFF
         // header every ~5s, so a killed process loses seconds, not the whole recording —
@@ -1061,6 +1069,7 @@ class AudioRecorder {
         // WavWriter creates the file 0o600 itself (no world-readable window).
         let file = try WavWriter(url: outputURL)
         currentOutputURL = outputURL
+        let wavWriterDoneAt = CFAbsoluteTimeGetCurrent()
 
         // Atomically: drain pre-roll, set up file, flip to recording mode
         // This ensures no audio samples are lost between drain and flag flip
@@ -1077,15 +1086,18 @@ class AudioRecorder {
         firstBufferArrived = false
         stateLock.unlock()
         writeQueue.async { self.wavWriteFailureLogged = false }
+        let stateFlipDoneAt = CFAbsoluteTimeGetCurrent()
 
         print("AudioRecorder: recording started, pre-roll: \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms)")
         let device = currentCaptureDeviceName() ?? "unknown"
         DiagnosticLogger.shared.log("AudioRecorder: recording started, pre-roll \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms), input device: \(device)")
+        let logDoneAt = CFAbsoluteTimeGetCurrent()
 
         // Write pre-roll to WAV file (async, flag is already set so tap writes new audio too)
         if !preroll.isEmpty {
             writePrerollToFile(preroll)
         }
+        let engineWasWarm = audioEngine != nil
 
         // If engine isn't running (pre-buffer off), start it now
         if audioEngine == nil {
@@ -1116,6 +1128,20 @@ class AudioRecorder {
                 try? FileManager.default.removeItem(at: outputURL)
                 throw AudioRecorderError.engineStartFailed
             }
+        }
+
+        let engineCheckDoneAt = CFAbsoluteTimeGetCurrent()
+        let totalElapsed = engineCheckDoneAt - phaseStart
+        if totalElapsed >= 0.25 {
+            DiagnosticLogger.shared.log(String(
+                format: "AudioRecorder: slow startRecording — wavWriter=%.2fs stateFlip=%.2fs "
+                    + "diagLog=%.2fs engineCheck=%.2fs (engineWasWarm=%@) total=%.2fs",
+                wavWriterDoneAt - phaseStart,
+                stateFlipDoneAt - wavWriterDoneAt,
+                logDoneAt - stateFlipDoneAt,
+                engineCheckDoneAt - logDoneAt,
+                engineWasWarm ? "true" : "false",
+                totalElapsed))
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.firstBufferGuardSeconds) { [weak self] in

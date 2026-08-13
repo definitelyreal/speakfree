@@ -208,6 +208,52 @@ final class ParakeetEngineTests: XCTestCase {
                     confidence: 0.5)
     }
 
+    private func timing(_ token: String, _ start: Double, _ confidence: Float) -> TokenTiming {
+        TokenTiming(token: token, tokenId: 0, startTime: start, endTime: start + 0.1,
+                    confidence: confidence)
+    }
+
+    func testConfidenceGapStripsMultiwordWeakTail() {
+        let out = ParakeetEngine.strippingLowConfidenceTail(
+            text: "If that doesn't work we could also do like this on that jump",
+            timings: [
+                timing("▁could", 4.8, 0.99), timing("▁also", 5.1, 0.99),
+                timing("▁do", 5.5, 0.99), timing("▁like", 7.68, 0.665),
+                timing("▁this", 11.36, 0.467), timing("▁on", 12.0, 0.254),
+                timing("▁that", 12.5, 0.317), timing("▁jump", 14.0, 0.510),
+            ])
+        XCTAssertEqual(out.text, "If that doesn't work we could also do")
+        XCTAssertEqual(out.removedTokenCount, 5)
+    }
+
+    func testConfidenceGateKeepsShortOrPlausibleTail() {
+        let short = ParakeetEngine.strippingLowConfidenceTail(
+            text: "Please send it tomorrow",
+            timings: [timing("▁Please", 0, 0.9), timing("▁send", 0.3, 0.9),
+                      timing("▁it", 0.6, 0.9), timing("▁tomorrow", 2.0, 0.2)])
+        XCTAssertEqual(short.text, "Please send it tomorrow")
+
+        let confident = ParakeetEngine.strippingLowConfidenceTail(
+            text: "Please send it first thing tomorrow morning",
+            timings: [timing("▁Please", 0, 0.9), timing("▁send", 0.3, 0.9),
+                      timing("▁it", 0.6, 0.9), timing("▁first", 2.0, 0.45),
+                      timing("▁thing", 2.2, 0.82), timing("▁tomorrow", 2.5, 0.48),
+                      timing("▁morning", 2.8, 0.44)])
+        XCTAssertEqual(confident.text, "Please send it first thing tomorrow morning")
+    }
+
+    func testEndpointingOnlyTrimsLongTrailingNonSpeech() {
+        let samples = [Float](repeating: 0.1, count: 64_000)
+        let trimmed = ParakeetEngine.endpointedSamples(
+            samples, segments: [VadSegment(startTime: 0.2, endTime: 2.5)])
+        XCTAssertEqual(trimmed.count, 40_000)
+
+        let nearEnd = ParakeetEngine.endpointedSamples(
+            samples, segments: [VadSegment(startTime: 0.2, endTime: 3.4)])
+        XCTAssertEqual(nearEnd.count, samples.count, "sub-second tails stay intact")
+        XCTAssertEqual(ParakeetEngine.endpointedSamples(samples, segments: []).count, samples.count)
+    }
+
     func testStripsTrailingWordsThatStartInsidePad() {
         // Live case rec-130443: audio ends at 12.4s, Parakeet appended "here." over
         // the pad. Whisper on the same wav hears no "here".
