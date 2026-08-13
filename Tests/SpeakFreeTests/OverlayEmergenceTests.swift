@@ -600,4 +600,32 @@ final class OverlayEmergenceTests: XCTestCase {
         XCTAssertGreaterThan(levels[0], levels[8], "the bump is localized, not a full field")
         XCTAssertLessThan(E.transcribingFloor + E.transcribingCrest, 0.7, "stays calm vs live speech")
     }
+
+    // MARK: - Lighter waveform (Michael 2026-08-12: "a little bit lighter")
+
+    /// The live waveform is dialed lighter than the locked barAlpha / full width,
+    /// but stays visible — a mutation to 0/1 (back to full weight) fails here.
+    func test_liveWaveformIsLighterThanLockedButStillVisible() {
+        XCTAssertLessThan(E.waveformAlpha, E.barAlpha, "opacity must be lighter than the locked 0.75")
+        XCTAssertGreaterThan(E.waveformAlpha, 0.25, "but still clearly visible")
+        XCTAssertLessThan(E.waveformWidthScale, 1.0, "slimmer bars read lighter")
+        XCTAssertGreaterThan(E.waveformWidthScale, 0.5, "not hairlines")
+    }
+
+    // MARK: - Frosted backdrop capture geometry
+
+    /// The Cocoa (bottom-left, primary-relative) overlay frame maps to a CGWindow
+    /// (top-left) capture rect covering the same on-screen region. Pure so the flip
+    /// is verifiable without a display.
+    func test_backdropCaptureRectFlipsYIntoCGWindowSpace() {
+        // A 200×100 overlay whose top sits 300 down from the top of an 1000-tall
+        // primary display: cocoa maxY = 700 → cg minY = 1000 - 700 = 300.
+        let cocoa = CGRect(x: 120, y: 600, width: 200, height: 100)
+        let cg = E.backdropCaptureRect(cocoaFrame: cocoa, primaryHeight: 1000)
+        XCTAssertEqual(cg.origin.x, 120, accuracy: 1e-9)
+        XCTAssertEqual(cg.origin.y, 300, accuracy: 1e-9)   // 1000 - (600+100)
+        XCTAssertEqual(cg.width, 200, accuracy: 1e-9)
+        XCTAssertEqual(cg.height, 100, accuracy: 1e-9)
+        XCTAssertGreaterThan(E.backdropBlurRadius, 0)
+    }
 }

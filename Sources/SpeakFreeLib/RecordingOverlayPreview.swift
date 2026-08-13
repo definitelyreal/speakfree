@@ -62,10 +62,18 @@ struct PreviewSpeechSimulator {
 private final class PreviewBackdropView: NSView {
     var isLight = false
     var onClick: (() -> Void)?
+    /// A busy sample image drawn behind the overlay so the frosted-blur backdrop is
+    /// visible in the preview (the preview has no real screen behind it). In the
+    /// live app this stand-in is the actual captured screen snapshot.
+    var sampleImage: CGImage?
+    var sampleFrame: NSRect = .zero
 
     override func draw(_ dirtyRect: NSRect) {
         (isLight ? NSColor(white: 0.93, alpha: 1) : NSColor(white: 0.08, alpha: 1)).setFill()
         bounds.fill()
+        if let img = sampleImage, let ctx = NSGraphicsContext.current?.cgContext {
+            ctx.draw(img, in: sampleFrame)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -77,6 +85,44 @@ private final class PreviewBackdropView: NSView {
 
 /// `speakfree overlay-preview [style]` — loops the recording overlay entry.
 public enum RecordingOverlayPreview {
+
+    /// A busy, colourful pattern used ONLY in the preview as a stand-in for the real
+    /// screen behind the overlay, so the frosted-blur backdrop is demonstrable
+    /// without screen-capture permission. Diagonal colour bands + high-contrast
+    /// circles give the Gaussian blur something obvious to soften.
+    private static func makeSampleBackdrop(size: NSSize) -> CGImage? {
+        let w = Int(size.width), h = Int(size.height)
+        guard w > 0, h > 0 else { return nil }
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        let colors: [(CGFloat, CGFloat, CGFloat)] = [
+            (0.95, 0.35, 0.20), (0.20, 0.60, 0.95), (0.95, 0.80, 0.20),
+            (0.40, 0.85, 0.40), (0.70, 0.30, 0.90),
+        ]
+        let band = CGFloat(w + h) / CGFloat(colors.count * 3)
+        for i in 0..<(colors.count * 3) {
+            let c = colors[i % colors.count]
+            ctx.setFillColor(red: c.0, green: c.1, blue: c.2, alpha: 1)
+            let x = CGFloat(i) * band - CGFloat(h)
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: x, y: 0))
+            ctx.addLine(to: CGPoint(x: x + band, y: 0))
+            ctx.addLine(to: CGPoint(x: x + band + CGFloat(h), y: CGFloat(h)))
+            ctx.addLine(to: CGPoint(x: x + CGFloat(h), y: CGFloat(h)))
+            ctx.closePath()
+            ctx.fillPath()
+        }
+        ctx.setFillColor(red: 1, green: 1, blue: 1, alpha: 0.85)
+        for p in [CGPoint(x: 0.25, y: 0.4), CGPoint(x: 0.6, y: 0.7), CGPoint(x: 0.82, y: 0.3)] {
+            let r = CGFloat(min(w, h)) * 0.10
+            ctx.fillEllipse(in: CGRect(x: p.x * CGFloat(w) - r, y: p.y * CGFloat(h) - r,
+                                       width: 2 * r, height: 2 * r))
+        }
+        return ctx.makeImage()
+    }
 
     public static func run(style: Int = 5) {
         let app = NSApplication.shared
@@ -93,7 +139,7 @@ public enum RecordingOverlayPreview {
         let backdrop = PreviewBackdropView(frame: canvas)
 
         let caption = NSTextField(labelWithString:
-            "style \(style) — record → speak → release → transcribe (held, no bottom jump) · click to flip backdrop")
+            "style \(style) — record → speak → release → transcribe (held) · frosted backdrop over the sample pattern · click to flip")
         caption.font = .systemFont(ofSize: 11)
         caption.textColor = NSColor(white: 0.5, alpha: 1)
         caption.frame = NSRect(x: pad, y: 10, width: canvas.width - pad * 2, height: 16)
@@ -107,6 +153,18 @@ public enum RecordingOverlayPreview {
         view.style = style
         view.borderWidth = 1
         backdrop.addSubview(view)
+
+        // Frosted-blur demo: paint the busy sample behind the overlay, and hand the
+        // view the BLURRED sample as its backdrop — the same CGImage the live path
+        // gets from the real screen. The card then shows the frost; the surround
+        // shows the sharp sample, so the effect is obvious. Emergence style only.
+        if OverlayContentView.usesEmergenceEntry(style: style),
+           let sample = makeSampleBackdrop(size: overlaySize) {
+            backdrop.sampleImage = sample
+            backdrop.sampleFrame = view.frame
+            view.backdropImage = RecordingOverlay.gaussianBlur(
+                sample, radius: OverlayEmergence.backdropBlurRadius)
+        }
 
         let window = NSWindow(contentRect: canvas,
                               styleMask: [.titled, .closable],
