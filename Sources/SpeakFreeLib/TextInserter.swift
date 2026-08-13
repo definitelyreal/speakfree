@@ -274,7 +274,11 @@ class TextInserter {
                                     self.secureInputClipboardFallback(text)
                                     onFocusLost?()
                                     return
-                                case .fallbackToKeystrokes:
+                                case .fallbackToKeystrokes, .retryViaPaste:
+                                    // `axSetOutcome` never yields `.retryViaPaste` (that comes only
+                                    // from the read-back verifier in `insertViaAccessibility`), but
+                                    // the switch must stay exhaustive; both mean "not inserted",
+                                    // which falls through to the focus-checked clipboard paste below.
                                     axInserted = false
                                 }
                             } else {
@@ -370,6 +374,13 @@ class TextInserter {
             secureInputClipboardFallback(text)
             onSecureInputFallback?(text, .axTimeoutMayHaveCommitted)
             return
+        case .retryViaPaste:
+            // The AX set reported success but the field verifiably did NOT grow — provable
+            // non-insertion (distinct from the timeout above). A real Cmd+V paste inserts the
+            // text inline. Concealing without pasting was the Chrome silent-drop bug.
+            DiagnosticLogger.shared.log("TextInserter: AX insertion dropped silently (field did not grow) — clipboard paste")
+            pasteViaClipboard(text)
+            return
         case .fallbackToKeystrokes:
             break
         }
@@ -440,7 +451,16 @@ class TextInserter {
     ///   - any other error (a clean rejection — attribute unsupported, invalid element, …)
     ///     → `.fallbackToKeystrokes` (nothing was written; safe to retype)
     /// Pure so the AXError→decision mapping is unit-testable without a real AX round-trip.
-    enum AXSetOutcome: Equatable { case inserted, fallbackToKeystrokes, concealClipboard }
+    ///
+    /// `.retryViaPaste` is a FOURTH outcome that `axSetOutcome` itself never returns — it is
+    /// produced only by `insertViaAccessibility` after the read-back verification proves the set
+    /// silently dropped (the field verifiably did NOT grow). It is deliberately DISTINCT from
+    /// `.concealClipboard`: conceal means "the write MAY have committed, so do not paste (would
+    /// duplicate)"; retry-via-paste means "the write provably did NOT commit, so paste it inline".
+    /// Collapsing the two is exactly the Chrome silent-drop bug (2026-08-12): a web contenteditable
+    /// accepts the AX set, reports success, applies nothing, and the old code concealed to the
+    /// clipboard WITHOUT pasting — so the text never appeared on the page.
+    enum AXSetOutcome: Equatable { case inserted, fallbackToKeystrokes, concealClipboard, retryViaPaste }
 
     static func axSetOutcome(_ error: AXError) -> AXSetOutcome {
         switch error {
@@ -482,6 +502,24 @@ class TextInserter {
             return .inconclusive
         }
         return after == before ? .didNotLand : .landed
+    }
+
+    /// Pure map from a read-back verdict to what `insertViaAccessibility` should return. Split out
+    /// so the load-bearing decision — "a field that verifiably did NOT grow must PASTE, not conceal"
+    /// — is unit-testable without a live text field.
+    ///
+    ///   - `.landed`       → `.inserted` (the text is on screen; done)
+    ///   - `.inconclusive` → `.inserted` (blind/ambiguous field; treat as success, never retry —
+    ///                        retrying a field we can't read risks a duplicate)
+    ///   - `.didNotLand`   → `.retryViaPaste` (POSITIVE proof of non-insertion; a real clipboard
+    ///                        paste puts the text inline). This is NOT `.concealClipboard`: conceal
+    ///                        is only for the genuine 0.5s-cap timeout, where the write MAY have
+    ///                        committed and a paste would duplicate. Here it provably did not.
+    static func outcomeForVerification(_ verdict: AXVerification) -> AXSetOutcome {
+        switch verdict {
+        case .landed, .inconclusive: return .inserted
+        case .didNotLand: return .retryViaPaste
+        }
     }
 
     /// `(characterCount, selectionLength)` for an element, either component nil when unreadable.
@@ -551,15 +589,19 @@ class TextInserter {
                                            insertedCount: text.count)
         }
 
-        guard verdict == .didNotLand else { return .inserted }
-
-        // Confirmed silent drop. Do NOT retype — we cannot rule out a delayed commit, and a
-        // duplicate insertion is worse than a paste prompt. Hand it to the conceal-clipboard
-        // path, the same recovery Secure Input uses.
-        DiagnosticLogger.shared.log(
-            "TextInserter: AX set reported success but field did not grow (\(before.chars.map(String.init) ?? "?") chars, "
-            + "inserting \(text.count)) — treating as dropped, concealing to clipboard")
-        return .concealClipboard
+        let verifiedOutcome = Self.outcomeForVerification(verdict)
+        if verifiedOutcome == .retryViaPaste {
+            // Confirmed silent drop: the set reported success but the field verifiably did not
+            // grow, so we KNOW nothing committed (this is NOT the 0.5s-cap timeout that "may have
+            // committed" — that path is `.concealClipboard` from `axSetOutcome`, untouched). A real
+            // clipboard paste puts the text inline. The old code concealed WITHOUT pasting here, so
+            // dictation into Chrome/Safari web fields landed only on the clipboard and never on the
+            // page (2026-08-12 Chrome silent-drop bug).
+            DiagnosticLogger.shared.log(
+                "TextInserter: AX set reported success but field did not grow (\(before.chars.map(String.init) ?? "?") chars, "
+                + "inserting \(text.count)) — provable non-insertion, pasting via clipboard")
+        }
+        return verifiedOutcome
     }
 
     /// Remote desktop apps that don't properly forward CGEvent unicode key events.
@@ -714,20 +756,23 @@ class TextInserter {
         // Known list, then a generic embedded-Chromium probe of the live bundle.
         if Self.prefersClipboardPaste(app: frontApp) { return true }
 
-        // Browser-agnostic check: Google Docs/Sheets/Slides in any browser
-        let lower = bundleID.lowercased()
-        if isBrowser(bundleID: lower), let title = frontWindowTitle() {
-            let t = title.lowercased()
-            if t.contains("google docs") || t.contains("google sheets") || t.contains("google slides") {
-                return true
-            }
-        }
+        // Browsers render their text fields as web contenteditables/textareas. Chromium accepts an
+        // AX SelectedText write, reports success, and applies NOTHING — and Chrome's own bundle is
+        // not caught by the embedded-Chromium probe (it ships "Google Chrome Framework", not the
+        // "Electron"/"Chromium Embedded Framework" the probe looks for). So proactively route ALL
+        // browser content to clipboard paste. This covers web contenteditables in general, not only
+        // Google Docs/Sheets/Slides (the previous narrow window-title check), and it is safe for the
+        // browser's own chrome-UI: Cmd+V works in the address bar too. (2026-08-12 Chrome silent-drop.)
+        if Self.isBrowser(bundleID: bundleID) { return true }
 
         return false
     }
 
-    /// Is this bundle ID a known browser? Covers Chromium forks, Safari, and Firefox.
-    private func isBrowser(bundleID: String) -> Bool {
+    /// Is this bundle ID a known browser? Covers Chromium forks, Safari, and Firefox. Static + pure
+    /// (lowercases internally) so the browser→clipboard-paste routing is unit-testable without a live
+    /// frontmost app.
+    static func isBrowser(bundleID: String) -> Bool {
+        let lower = bundleID.lowercased()
         let browsers = [
             "com.google.chrome", "com.apple.safari", "org.mozilla.firefox",
             "company.thebrowser.browser",  // Arc
@@ -736,22 +781,7 @@ class TextInserter {
             "com.microsoft.edgemac.dev", "com.microsoft.edgemac.beta",
             "com.kagi.kagimacos",  // Orion
         ]
-        return browsers.contains(where: { bundleID.contains($0) })
-    }
-
-    /// Get the title of the frontmost window via Accessibility API.
-    private func frontWindowTitle() -> String? {
-        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
-        let appElement = AXUIElementCreateApplication(pid)
-        var windowRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
-              let windowElement = windowRef else { return nil }
-        // swiftlint:disable:next force_cast
-        let window = windowElement as! AXUIElement
-        var titleRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef) == .success,
-              let title = titleRef as? String else { return nil }
-        return title
+        return browsers.contains(where: { lower.contains($0) })
     }
 
     /// One emitted keyboard operation on the synthetic-typing path. Pure value type so the
