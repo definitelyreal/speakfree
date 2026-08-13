@@ -400,6 +400,39 @@ public enum OverlayEmergence {
         }
     }
 
+    // MARK: - Live waveform weight (2026-08-12, Michael: "a little bit lighter")
+    //
+    // Dials down the visual weight of the LIVE waveform bars (the emergence
+    // end-state and the transcribing pulse) without touching the locked geometry,
+    // the purple pill, or the lilac colour. Lower opacity + slimmer bars read as a
+    // lighter, softer animation. The locked `barAlpha` (0.75) is kept for the
+    // record-start explosion's born-red bars; these apply once the bars are the
+    // steady live waveform. Michael judges the final weight.
+
+    /// Opacity of the live waveform bars (was the locked `barAlpha` 0.75).
+    public static let waveformAlpha: CGFloat = 0.5
+    /// Width multiplier on the live waveform bars — slimmer reads lighter.
+    public static let waveformWidthScale: CGFloat = 0.82
+
+    // MARK: - Frosted backdrop (2026-08-12, Michael: "blur the static snapshot")
+    //
+    // ONE screen snapshot of the region behind the overlay is captured at show()
+    // (the same off-main CGWindowListCreateImage grab that feeds the adaptive
+    // outline), blurred once, and rendered as a frosted panel behind the card. It
+    // is never re-sampled per frame — that is the whole point of the "static"
+    // choice (no continuous-capture battery cost). Fails safe to the raw look.
+
+    /// Gaussian blur radius for the frosted backdrop snapshot.
+    public static let backdropBlurRadius: CGFloat = 18
+
+    /// Screen-capture rect in CGWindow space (top-left origin, primary-relative)
+    /// for the region behind an overlay window given its Cocoa (bottom-left) frame.
+    /// Pure so the coordinate flip is unit-testable without a display.
+    public static func backdropCaptureRect(cocoaFrame: CGRect, primaryHeight: CGFloat) -> CGRect {
+        CGRect(x: cocoaFrame.minX, y: primaryHeight - cocoaFrame.maxY,
+               width: cocoaFrame.width, height: cocoaFrame.height)
+    }
+
     // MARK: - Transcribing "working" pulse (2026-08-12, Michael's hold ruling)
     //
     // On key-release the emergence card HOLDS centered through the whole

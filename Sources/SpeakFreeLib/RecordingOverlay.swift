@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 
 // MARK: - Pure screen selection
 
@@ -240,14 +241,15 @@ class RecordingOverlay {
         }
     }
 
-    /// DEFECT 4 (2026-08-12): sample the desktop luminance directly behind the
-    /// record mark and choose a dark or light outline. Runs ONCE per show(),
-    /// off-main, never per frame. Fails safe (keeps the locked white ring) if
-    /// screen-capture permission is missing or any capture step returns nil.
-    private func sampleBackdropOutline(windowNumber: Int, cocoaFrame: NSRect,
-                                       for expectedGeneration: UInt64) {
-        // No permission → keep the locked white ring. Do NOT prompt: an unexpected
-        // screen-recording prompt on record-start would be worse than a white ring.
+    /// Capture ONE snapshot of the screen behind the overlay at show(), off-main,
+    /// and derive BOTH the adaptive outline colour (DEFECT 4) and the frosted-blur
+    /// backdrop (Michael 2026-08-12) from that single grab — never re-sampled per
+    /// frame. Fails safe (locked white ring, raw backdrop) if screen-capture
+    /// permission is missing or any capture step returns nil.
+    private func sampleBackdrop(windowNumber: Int, cocoaFrame: NSRect,
+                                for expectedGeneration: UInt64) {
+        // No permission → keep the locked look. Do NOT prompt: an unexpected
+        // screen-recording prompt on record-start would be worse than no frost.
         guard CGPreflightScreenCaptureAccess() else { return }
         // Read the primary-screen height on MAIN (AppKit isn't documented thread-safe;
         // adversarial VERIFY finding a): a display reconfig racing the off-main read could
@@ -255,34 +257,40 @@ class RecordingOverlay {
         // from the background block.
         let primaryHeight = NSScreen.screens.first?.frame.height ?? cocoaFrame.maxY
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let rgb = RecordingOverlay.backdropOutlineColor(
+            guard let snap = RecordingOverlay.captureBackdrop(
                 belowWindow: CGWindowID(windowNumber), cocoaFrame: cocoaFrame,
                 primaryHeight: primaryHeight) else { return }
             DispatchQueue.main.async {
                 guard let self = self, self.showGeneration == expectedGeneration,
                       let view = self.contentView else { return }
-                view.adaptiveOutline = rgb
+                view.adaptiveOutline = snap.outline
+                view.backdropImage = snap.blurred   // nil if blur failed → raw look
                 view.needsDisplay = true
             }
         }
     }
 
-    /// Capture the ~48pt box behind the record mark (excluding our own overlay via
-    /// `.optionOnScreenBelowWindow`) and reduce it to an outline colour. Pure
-    /// decision math lives in `OverlayEmergence`; this only does the capture + a
-    /// tiny 8×8 downsample so the cost is a single small blit.
-    static func backdropOutlineColor(belowWindow windowID: CGWindowID,
-                                     cocoaFrame: NSRect,
-                                     primaryHeight: CGFloat) -> OverlayEmergence.RGB? {
-        let sampleSide: CGFloat = 48
-        let center = CGPoint(x: cocoaFrame.midX, y: cocoaFrame.midY)
-        // Cocoa (bottom-left, primary-relative) → CGWindow global (top-left) flip.
-        // `primaryHeight` is read on main by the caller (thread-safety, VERIFY finding a).
-        let cgRect = CGRect(x: center.x - sampleSide / 2,
-                            y: primaryHeight - center.y - sampleSide / 2,
-                            width: sampleSide, height: sampleSide)
+    /// One screen grab of the WHOLE region behind the overlay window (excluding our
+    /// own window via `.optionOnScreenBelowWindow`) → adaptive outline colour + a
+    /// blurred snapshot. The outline math and the capture-rect flip are pure and
+    /// tested in `OverlayEmergence`; this does the single capture, an 8×8 downsample
+    /// for the luminance, and one Gaussian blur. `primaryHeight` is read on main by
+    /// the caller (thread-safety, VERIFY finding a).
+    static func captureBackdrop(belowWindow windowID: CGWindowID, cocoaFrame: NSRect,
+                                primaryHeight: CGFloat)
+        -> (outline: OverlayEmergence.RGB, blurred: CGImage?)? {
+        let cgRect = OverlayEmergence.backdropCaptureRect(cocoaFrame: cocoaFrame,
+                                                          primaryHeight: primaryHeight)
         guard let image = CGWindowListCreateImage(cgRect, .optionOnScreenBelowWindow,
                                                   windowID, [.nominalResolution]) else { return nil }
+        guard let outline = outlineColor(from: image) else { return nil }
+        // Blur is best-effort: a nil here just drops the frost and keeps the outline.
+        let blurred = gaussianBlur(image, radius: OverlayEmergence.backdropBlurRadius)
+        return (outline, blurred)
+    }
+
+    /// Reduce a captured image to an adaptive outline colour via an 8×8 downsample.
+    static func outlineColor(from image: CGImage) -> OverlayEmergence.RGB? {
         let dim = 8
         var data = [UInt8](repeating: 0, count: dim * dim * 4)
         let space = CGColorSpaceCreateDeviceRGB()
@@ -300,6 +308,17 @@ class RecordingOverlay {
         }
         guard let lum = OverlayEmergence.averageLuminance(of: pixels) else { return nil }
         return OverlayEmergence.adaptiveOutlineColor(backgroundLuminance: lum)
+    }
+
+    /// Gaussian-blur a CGImage, cropped back to its original extent so the frost has
+    /// no transparent bleed at the edges. Shared by the live path and the preview.
+    static func gaussianBlur(_ image: CGImage, radius: CGFloat) -> CGImage? {
+        let ci = CIImage(cgImage: image)
+        guard let filter = CIFilter(name: "CIGaussianBlur") else { return nil }
+        filter.setValue(ci.clampedToExtent(), forKey: kCIInputImageKey)
+        filter.setValue(radius, forKey: kCIInputRadiusKey)
+        guard let output = filter.outputImage else { return nil }
+        return CIContext(options: nil).createCGImage(output, from: ci.extent)
     }
 
     func show(state: OverlayState, recorder: AudioRecorder? = nil, autoHideError: Bool = true) {
@@ -385,12 +404,12 @@ class RecordingOverlay {
 
         startAnimation()
 
-        // DEFECT 4: pick a dark/light record outline from the backdrop luminance,
-        // once, off-main. Only for the emergence entry (it owns the ring); fails
-        // safe to the locked white ring.
+        // One off-main screen grab behind the overlay feeds BOTH the dark/light
+        // record outline (DEFECT 4) and the static frosted-blur backdrop (Michael
+        // 2026-08-12). Only for the emergence entry; fails safe to the locked look.
         if emergence {
-            sampleBackdropOutline(windowNumber: win.windowNumber, cocoaFrame: frame,
-                                  for: showGeneration)
+            sampleBackdrop(windowNumber: win.windowNumber, cocoaFrame: frame,
+                           for: showGeneration)
         }
 
         // Snappy entrance (2026-07-25): 80ms fade — the 200ms fade + 100ms border
@@ -721,6 +740,9 @@ class OverlayContentView: NSView {
     /// Adaptive ring/outline colour sampled from the backdrop at show(); nil keeps
     /// the locked white ring (the fail-safe default).
     var adaptiveOutline: OverlayEmergence.RGB?
+    /// One blurred snapshot of the screen behind the overlay, captured at show()
+    /// and rendered as a frosted backdrop; nil keeps the raw look (fail-safe).
+    var backdropImage: CGImage?
     var tick: Int = 0
     @objc dynamic var borderWidth: CGFloat = 0
     var hideContents = false
@@ -1347,26 +1369,30 @@ class OverlayContentView: NSView {
         // unavailable) keeps the locked white ring. Bars and card are unaffected.
         let ringRGB = adaptiveOutline ?? OverlayEmergence.ringColor
 
-        drawBloomCard(ctx, geometry: g, card: OverlayEmergence.card(progress: p, geometry: g))
+        let card = OverlayEmergence.card(progress: p, geometry: g)
+        drawFrostedBackdrop(ctx, geometry: g, card: card)
+        drawBloomCard(ctx, geometry: g, card: card)
 
         for stroke in OverlayEmergence.emergencePulses(progress: p, geometry: g) {
             strokeRing(ctx, center: center, stroke: stroke, color: ringRGB)
         }
 
+        // Slimmer, softer live bars (Michael 2026-08-12: "a little bit lighter").
+        let barW = g.barWidth * OverlayEmergence.waveformWidthScale
         let solid = OverlayEmergence.solidity(progress: p, geometry: g)
         for i in 0..<g.count where solid[i] > 0 {
             let level = min(1, max(0, displayLevels[i]))
             let h = g.targetHeight(level: level) * solid[i]
             guard h > 0 else { continue }
             let x = g.homeX(i)
-            let bar = CGRect(x: x - g.barWidth / 2, y: g.centerY - h / 2,
-                             width: g.barWidth, height: h)
+            let bar = CGRect(x: x - barW / 2, y: g.centerY - h / 2,
+                             width: barW, height: h)
             // Corner radius tracks level, so silence renders as round dots and loud
             // speech as capsules — the shipped drawBars rule, at 1.2×.
-            let r = level * g.barWidth / 2
+            let r = level * barW / 2
             ctx.addPath(CGPath(roundedRect: bar, cornerWidth: r, cornerHeight: r, transform: nil))
             setFill(ctx, OverlayEmergence.barColor(index: i, progress: p, geometry: g),
-                    OverlayEmergence.barAlpha)
+                    OverlayEmergence.waveformAlpha)
             ctx.fillPath()
         }
 
@@ -1393,23 +1419,47 @@ class OverlayContentView: NSView {
     private func drawEmergenceTranscribing(ctx: CGContext, rect: NSRect) {
         let g = OverlayEmergence.geometry(centerX: rect.midX, centerY: rect.midY)
 
-        drawBloomCard(ctx, geometry: g, card: OverlayEmergence.card(progress: 1, geometry: g))
+        let card = OverlayEmergence.card(progress: 1, geometry: g)
+        drawFrostedBackdrop(ctx, geometry: g, card: card)
+        drawBloomCard(ctx, geometry: g, card: card)
 
         let elapsed = renderElapsedOverride ?? -recordingStartedAt.timeIntervalSinceNow
         let levels = OverlayEmergence.transcribingBarLevels(time: CGFloat(elapsed), count: g.count)
+        let barW = g.barWidth * OverlayEmergence.waveformWidthScale
         for i in 0..<g.count {
             let level = min(1, max(0, levels[i]))
             let h = g.targetHeight(level: level)
             guard h > 0 else { continue }
             let x = g.homeX(i)
-            let bar = CGRect(x: x - g.barWidth / 2, y: g.centerY - h / 2,
-                             width: g.barWidth, height: h)
-            let r = level * g.barWidth / 2
+            let bar = CGRect(x: x - barW / 2, y: g.centerY - h / 2,
+                             width: barW, height: h)
+            let r = level * barW / 2
             ctx.addPath(CGPath(roundedRect: bar, cornerWidth: r, cornerHeight: r, transform: nil))
-            // Steady lilac — the bars are done carrying the mark's red at p = 1.
-            setFill(ctx, OverlayEmergence.barLilac, OverlayEmergence.barAlpha)
+            // Steady lilac, lighter weight — the bars are done carrying the mark's
+            // red at p = 1 (Michael 2026-08-12: lighter waveform).
+            setFill(ctx, OverlayEmergence.barLilac, OverlayEmergence.waveformAlpha)
             ctx.fillPath()
         }
+    }
+
+    /// Draw the static frosted snapshot behind the card (Michael 2026-08-12: "blur
+    /// the static snapshot"). The blurred backdrop image is captured ONCE at show()
+    /// and clipped to the current card shape, so the overlay sits on a soft blurred
+    /// version of whatever was behind it. No-op (raw look) when the snapshot is
+    /// unavailable — the fail-safe path.
+    private func drawFrostedBackdrop(_ ctx: CGContext, geometry g: OverlayEmergence.Geometry,
+                                     card: OverlayEmergence.CardShape) {
+        guard let bg = backdropImage, card.width > 0, card.height > 0 else { return }
+        let box = CGRect(x: g.centerX - card.width / 2, y: g.centerY - card.height / 2,
+                         width: card.width, height: card.height)
+        let path = CGPath(roundedRect: box, cornerWidth: card.cornerRadius,
+                          cornerHeight: card.cornerRadius, transform: nil)
+        ctx.saveGState()
+        ctx.addPath(path)
+        ctx.clip()
+        // The snapshot spans the whole overlay window, so it maps to the view bounds.
+        ctx.draw(bg, in: bounds)
+        ctx.restoreGState()
     }
 
     /// SETTLED steady state (R2-fixed): inherits its style's card material and the
