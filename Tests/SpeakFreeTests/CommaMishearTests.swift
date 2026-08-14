@@ -83,6 +83,88 @@ final class CommaMishearTests: XCTestCase {
         XCTAssertEqual(hybrid("Please leave a comment."), "Please leave a comment.")
     }
 
+    // MARK: - Sentence-medial shapes (2026-08-14, Michael: "yes" to looser conversion)
+    // Positive cases are verbatim raw transcripts from the 8/13-14 dogfood corpus.
+
+    /// Shape 1: bare word before, punctuation after. Whisper on the same wav hears
+    /// "the subject matter, comma, I would love".
+    func test_bareBeforePunctAfterConverts() {
+        let out = hybrid("incredibly familiar with the subject matter comment, I would love to chat")
+        XCTAssertTrue(out.contains("subject matter, I would love"), "got: \(out)")
+        let out2 = hybrid("There's lots of different memory options common. Maybe that's better")
+        XCTAssertTrue(out2.contains("memory options, Maybe"), "got: \(out2)")
+    }
+
+    /// Shape 2: no punctuation anywhere, clause-continuing conjunction after.
+    func test_bareBothSidesBeforeConjunctionConverts() {
+        let out = hybrid("think about what gates other things comment and think about efficiency")
+        XCTAssertTrue(out.contains("gates other things, and think"), "got: \(out)")
+    }
+
+    /// DELIBERATE non-conversions (VERIFY round 2): a determiner/possessive/copula two tokens
+    /// back is the signature of a real noun phrase ("your GitHub comment"), and these command
+    /// garbles share it exactly ("your talk comment"). Converting them would silently delete
+    /// legitimate nouns, so they stay unconverted — the acoustic layer is the right fix.
+    func test_nounPhraseSignatureTwoTokensBackStaysUnconverted() {
+        let cases = [
+            "It looks like I'll have to miss your talk comment since we're playing",
+            "you're assuming that microphone modeling is EQ comment. There's more to it",
+            "could be from anyone at any point in the party comment, so I would suggest",
+        ]
+        for input in cases {
+            let out = hybrid(input)
+            XCTAssertTrue(out.lowercased().contains("comment"),
+                          "documented loss changed behavior: \(input) → \(out)")
+        }
+    }
+
+    /// Shape 3: punctuation before (consumed), clause-starter after.
+    func test_punctBeforeClauseStarterAfterConverts() {
+        let out = hybrid("I can talk at 6 for about 40 minutes. Common need to leave at 6.40 though")
+        XCTAssertTrue(out.contains("40 minutes, need to leave"), "got: \(out)")
+        let out2 = hybrid("load-bearing for my day-to-day tasks. Common to differentiate between things")
+        XCTAssertTrue(out2.contains("tasks, to differentiate"), "got: \(out2)")
+        let out3 = hybrid("that would work too. Comment either way, period.")
+        XCTAssertTrue(out3.contains("work too, either way"), "got: \(out3)")
+    }
+
+    // MARK: - Sentence-medial guards: preceding word marks legitimate prose
+
+    func test_precedingDeterminerBlocksMedialConversion() {
+        // All corpus-real. "a/the/this/latest" and copulas/comparatives protect the noun.
+        // The last three are the VERIFY round-1 adversarial finds (2026-08-14): compound
+        // modifiers ("long/blog/review comment") with the determiner 2+ tokens back.
+        let cases = [
+            "it's a comment by a user, not a reply",
+            "sell tickets to this comment. Would you",
+            "C this latest comment made by codex.",
+            "that was more common, period",
+            "something there is common and it feels important",
+            "I want you to comment, then merge it",
+            "He posted a long comment. It was rude",
+            "Sarcasm in a code review comment which nobody reads",
+            "Please read the blog comment. Then reply to it",
+            "She left a snarky comment. Then she logged off",
+            "I read your GitHub comment, and I agree with it",
+            "Bike theft here is increasingly common. Lock it up",
+            "His parting comment, which stung, was unnecessary",
+            "I appreciated Sarah's comment, but I disagreed with it",
+        ]
+        for input in cases {
+            let out = hybrid(input)
+            XCTAssertTrue(out.lowercased().contains("comment") || out.lowercased().contains("common"),
+                          "legit word deleted from: \(input) → \(out)")
+        }
+    }
+
+    /// Followers outside the closed clause-starter sets must not trigger shapes 2/3.
+    func test_nonClauseFollowerStaysUntouched() {
+        let input = "Read the thread. Comment moderation is a mess"
+        XCTAssertEqual(hybrid(input), input)
+        let input2 = "the picnic was common knowledge around here"
+        XCTAssertEqual(hybrid(input2), input2)
+    }
+
     // MARK: - The existing family must not regress
 
     func test_existingCommaHomophonesStillConvert() {

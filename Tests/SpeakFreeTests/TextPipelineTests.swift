@@ -34,6 +34,44 @@ final class TextPipelineTests: XCTestCase {
                        "Texting style should strip a single trailing period, got: \(result.finalText)")
     }
 
+    // MARK: - Dictated trailing period survives the texting strip (Michael 2026-08-14)
+
+    func test_run_textingKeepsExplicitlyDictatedTrailingPeriod() {
+        // Raw from rec-015432 (8/14): he SAID "period" — the strip must not undo it.
+        let input = TextPipeline.Input(raw: "I hope you can make it, period.",
+                                       punctuationMode: .hybrid, styleMode: .texting)
+        let result = TextPipeline.run(input)
+        XCTAssertTrue(result.finalText.hasSuffix("."),
+                      "dictated period must survive texting style, got: \(result.finalText)")
+        XCTAssertFalse(result.finalText.lowercased().contains("period"),
+                       "the command word itself must still convert, got: \(result.finalText)")
+    }
+
+    func test_run_slackKeepsExplicitlyDictatedTrailingPeriod() {
+        let input = TextPipeline.Input(raw: "shipping it now, period.",
+                                       punctuationMode: .hybrid, styleMode: .slack)
+        let result = TextPipeline.run(input)
+        XCTAssertTrue(result.finalText.hasSuffix("."), "got: \(result.finalText)")
+    }
+
+    func test_run_textingStillStripsEnginePeriod() {
+        // No spoken command in the raw — the engine's own auto-period still gets stripped.
+        // (Last word must be >2 chars: the abbreviation guard keeps "make it." as-is.)
+        let input = TextPipeline.Input(raw: "I hope you can make it tonight.",
+                                       punctuationMode: .hybrid, styleMode: .texting)
+        let result = TextPipeline.run(input)
+        XCTAssertFalse(result.finalText.hasSuffix("."), "got: \(result.finalText)")
+    }
+
+    func test_endsWithSpokenPeriodCommand() {
+        XCTAssertTrue(TextPostProcessor.endsWithSpokenPeriodCommand("make it, period."))
+        XCTAssertTrue(TextPostProcessor.endsWithSpokenPeriodCommand("make it period"))
+        XCTAssertTrue(TextPostProcessor.endsWithSpokenPeriodCommand("make it, Period"))
+        XCTAssertFalse(TextPostProcessor.endsWithSpokenPeriodCommand("a period of time"))
+        XCTAssertFalse(TextPostProcessor.endsWithSpokenPeriodCommand("make it."))
+        XCTAssertFalse(TextPostProcessor.endsWithSpokenPeriodCommand("periods matter."))
+    }
+
     // MARK: - assemblePromptHints(): the v1.2.11 cursor-context fix
 
     func test_promptHints_rawCursorTextNeverEntersPrompt() {

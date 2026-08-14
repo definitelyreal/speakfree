@@ -180,7 +180,13 @@ public enum TextPipeline {
         let processed = (input.punctuationMode == .off)
             ? stripped
             : TextPostProcessor.process(stripped, hybrid: guarded)
-        let styled = TextPostProcessor.applyStyle(processed, mode: input.styleMode)
+        // An explicitly dictated final "period" survives the texting-style strip (Michael
+        // 2026-08-14: "honor dictated"). Detected on the pre-substitution text — afterwards a
+        // dictated "." is indistinguishable from the engine's auto-punctuation.
+        let dictatedPeriod = input.punctuationMode != .off
+            && TextPostProcessor.endsWithSpokenPeriodCommand(stripped)
+        let styled = TextPostProcessor.applyStyle(processed, mode: input.styleMode,
+                                                 explicitTrailingPeriod: dictatedPeriod)
         // Glossary correction: fix near-miss misspellings of curated proper nouns
         // (makes custom names work on Parakeet, which ignores the glossary prompt).
         // Runs before case-adjust so corrected names feed the keep-capitalized logic.

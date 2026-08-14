@@ -242,8 +242,13 @@ final class ParakeetEngineTests: XCTestCase {
         XCTAssertEqual(confident.text, "Please send it first thing tomorrow morning")
     }
 
-    func testEndpointingOnlyTrimsLongTrailingNonSpeech() {
-        let samples = [Float](repeating: 0.1, count: 64_000)
+    /// Speech-level samples for the head, digital silence for the tail.
+    private func take(speechSeconds: Double, tail: [Float]) -> [Float] {
+        [Float](repeating: 0.1, count: Int(speechSeconds * 16_000)) + tail
+    }
+
+    func testEndpointingTrimsTrueSilenceTail() {
+        let samples = take(speechSeconds: 2.5, tail: [Float](repeating: 0.0003, count: 24_000))
         let trimmed = ParakeetEngine.endpointedSamples(
             samples, segments: [VadSegment(startTime: 0.2, endTime: 2.5)])
         XCTAssertEqual(trimmed.count, 40_000)
@@ -252,6 +257,36 @@ final class ParakeetEngineTests: XCTestCase {
             samples, segments: [VadSegment(startTime: 0.2, endTime: 3.4)])
         XCTAssertEqual(nearEnd.count, samples.count, "sub-second tails stay intact")
         XCTAssertEqual(ParakeetEngine.endpointedSamples(samples, segments: []).count, samples.count)
+    }
+
+    func testEndpointingRefusesRoomToneTail() {
+        // Michael's soft speech (0.003-0.016 RMS) is energy-inseparable from his room tone,
+        // so a room-tone tail may hide missed speech and must never be trimmed (rec-022227
+        // lost 36s of real dictation to exactly this).
+        let samples = take(speechSeconds: 2.5, tail: [Float](repeating: 0.004, count: 24_000))
+        let out = ParakeetEngine.endpointedSamples(
+            samples, segments: [VadSegment(startTime: 0.2, endTime: 2.5)])
+        XCTAssertEqual(out.count, samples.count, "room-tone tail must veto the trim")
+    }
+
+    func testEndpointingRefusesTailWithBuriedQuietSpeech() {
+        // Silent tail except one 200ms quiet-speech burst mid-tail — one audible window vetoes.
+        var tail = [Float](repeating: 0.0003, count: 24_000)
+        for i in 8_000..<11_200 { tail[i] = 0.006 }
+        let samples = take(speechSeconds: 2.5, tail: tail)
+        let out = ParakeetEngine.endpointedSamples(
+            samples, segments: [VadSegment(startTime: 0.2, endTime: 2.5)])
+        XCTAssertEqual(out.count, samples.count)
+    }
+
+    func testTailIsTrueSilenceThreshold() {
+        XCTAssertTrue(ParakeetEngine.tailIsTrueSilence(
+            [Float](repeating: 0.0004, count: 16_000), from: 0))
+        XCTAssertFalse(ParakeetEngine.tailIsTrueSilence(
+            [Float](repeating: 0.0016, count: 16_000), from: 0))
+        // Tail shorter than one 50ms window: nothing to inspect, trim allowed.
+        XCTAssertTrue(ParakeetEngine.tailIsTrueSilence(
+            [Float](repeating: 0.1, count: 16_000), from: 15_500))
     }
 
     func testStripsTrailingWordsThatStartInsidePad() {

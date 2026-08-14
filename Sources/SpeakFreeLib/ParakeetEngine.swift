@@ -110,16 +110,47 @@ public final class ParakeetEngine: TranscriptionEngine {
     // MARK: - Voice-activity endpointing (P3)
 
     static let vadMinimumTailTrimSeconds = 1.0
+    /// 50 ms RMS windows for the true-silence gate.
+    static let energyWindowSamples = 800
+    /// A 50 ms window at or above this RMS could be Michael's quiet speech. Measured 2026-08-14:
+    /// his soft dictation sits at 0.003–0.016 RMS and is inseparable from his room tone
+    /// (0.003–0.004), while genuine silence (mic idle) measures 0.0002–0.0004 — a clean 4x gap
+    /// on either side of this threshold.
+    static let trueSilenceRMSThreshold: Float = 0.0015
 
     /// Preserve the beginning/pre-roll and every internal pause; trim only a long non-speech tail
     /// after Silero's final speech segment. Empty/no-result VAD is a conservative no-op.
+    ///
+    /// True-silence gate (2026-08-14): Silero stops detecting Michael's quiet voice mid-take —
+    /// rec-022227 lost 36.25 s of REAL speech (whisper hears it to the end) because the cut
+    /// trusted the model alone. His quiet speech is energy-inseparable from room tone, so no
+    /// detector can find speech the VAD missed; what energy CAN prove is absence. The tail is
+    /// now trimmed only when every 50 ms window in it sits at digital-silence level. Room-tone
+    /// tails (where soft speech could hide) are never trimmed — the 3 s flush pad makes the kept
+    /// audio near-free, and the stage was verified speed-neutral anyway (f30cb6c).
     static func endpointedSamples(_ samples: [Float], segments: [VadSegment]) -> [Float] {
         guard let last = segments.last else { return samples }
         let end = max(0, min(last.endSample(sampleRate: 16_000), samples.count))
         let removable = samples.count - end
         guard end >= FinalizePipeline.minSamples,
-              Double(removable) / 16_000.0 >= vadMinimumTailTrimSeconds else { return samples }
+              Double(removable) / 16_000.0 >= vadMinimumTailTrimSeconds,
+              tailIsTrueSilence(samples, from: end) else { return samples }
         return Array(samples[..<end])
+    }
+
+    /// True when every 50 ms window from `start` to the end of the buffer is below the
+    /// true-silence threshold. One louder window anywhere in the tail vetoes the trim.
+    static func tailIsTrueSilence(_ samples: [Float], from start: Int) -> Bool {
+        var i = max(0, start)
+        while i + energyWindowSamples <= samples.count {
+            var acc: Float = 0
+            for s in samples[i..<(i + energyWindowSamples)] { acc += s * s }
+            if (acc / Float(energyWindowSamples)).squareRoot() >= trueSilenceRMSThreshold {
+                return false
+            }
+            i += energyWindowSamples
+        }
+        return true
     }
 
     /// Drop trailing words the decoder invented over the appended silence pad
