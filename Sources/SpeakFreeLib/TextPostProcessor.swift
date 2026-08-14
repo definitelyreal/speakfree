@@ -101,6 +101,29 @@ public struct TextPostProcessor {
         ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:kamala|karma)[.,!?;:]", ","),
         ("(?<=[,!?:])\\s*(?:comment|common|coma)[.,!?;:]", ","),
+        // Sentence-medial comment/common (2026-08-14, Michael: "yes" to looser conversion).
+        // Parakeet's dominant comma garble in running speech carries NO adjacent punctuation
+        // ("the subject matter comment, I would love" / "memory options common. Maybe"), so the
+        // both-sides-punctuation family above never fires. Three corpus-validated shapes convert;
+        // the guard is the PRECEDING word: legitimate noun/adjective uses are (in 2 months of
+        // corpus, Jul-Aug 2026: 27+2+19 command hits, 0 legit casualties) always preceded by a
+        // determiner, possessive, comparative, copula, or verb marker ("a comment", "the right
+        // comment bar", "more common", "to comment", "leave a comment or"), all blocklisted.
+        // Plurals never match (the word is followed directly by punctuation or whitespace).
+        // Shape 1: bare word before, punctuation after — "matter comment, I" → "matter, I".
+        ("(?<![.,!?;:])(?<!\\b\(commentPrecedingWordBlock))\(commentNounPhraseLookback)"
+            + "\\s+(?:comment|common)[.,!?;:](?=\\s|$)", ","),
+        // Shape 2: no punctuation anywhere, followed by a clause-continuing conjunction —
+        // "gates other things comment and think" → "gates other things, and think".
+        ("(?<![.,!?;:])(?<!\\b\(commentPrecedingWordBlock))\(commentNounPhraseLookback)"
+            + "\\s+(?:comment|common)\\s+"
+            + "(?=(?:and|but|so|or|since|because|which|instead|then)\\b)", ", "),
+        // Shape 3: punctuation before (consumed — the spoken comma outranks the engine's
+        // auto-period, same rationale as the kama family), clause-starter after —
+        // "tasks. Common to differentiate" → "tasks, to differentiate".
+        ("[.,;]\\s+(?:comment|common)\\s+"
+            + "(?=(?:and|but|so|or|if|either|to|does|do|keep|let|need|should|can|could|would"
+            + "|might|not|just|it|that|this|they|there|you|we|i)\\b)", ", "),
         ("(?<=[.,!?;:])\\s*period(?!\\s+(?:of|piece)\\b)(?:[.,!?;:]|(?=\\s|$))", "."),
         ("(?<=[.,!?;:])\\s*colon(?!\\s+(?:cancer|surgery|cleanse|polyps?)\\b)(?:[.,!?;:]|(?=\\s|$))", ":"),
         ("(?<=[.,!?;:])\\s*dash(?!\\s+(?:of|board|cam)\\b)(?:[.,!?;:]|(?=\\s|$))", " —"),
@@ -112,6 +135,39 @@ public struct TextPostProcessor {
     private static let commaSkipAhead =
         "(?!\\s+(?:separated|delimited|splices?|operator|issues?|problems?|key|questions?|"
         + "things?|usage|placement|rules?|characters?)\\b)"
+
+    /// Preceding words that mark comment/common as legitimate prose (negative lookbehind for
+    /// the sentence-medial rules; every branch is fixed-length as ICU lookbehind requires):
+    /// determiners/possessives ("a comment"), comparatives/intensifiers ("more common"),
+    /// copulas ("is common"), verb markers ("to comment", "will comment"), pronoun subjects
+    /// ("I comment"), negations, and — VERIFY round 1, 2026-08-14 — the noun/adjective
+    /// modifiers that form compounds with "comment" ("a long comment.", "the blog comment.",
+    /// "a code review comment") where the determiner sits 2+ tokens back, past a one-token
+    /// lookbehind. Corpus-validated Jul-Aug 2026: blocks every legitimate use found (including
+    /// the verifier's adversarial set); blocks zero of the 48 corpus command uses.
+    private static let commentPrecedingWordBlock =
+        "(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their|any|no|each|every"
+        + "|one|such|more|most|less|very|pretty|so|quite|really|new|old|right|latest|last"
+        + "|first|next|good|bad|great|nice|is|are|was|were|be|being|been|as|too|to|will"
+        + "|would|can|could|should|might|may|just|not|don't|didn't|won't|can't|shouldn't"
+        + "|wouldn't|couldn't|i|you|we|they|he|she|it|please"
+        + "|long|short|quick|brief|blog|code|review|inline|previous|earlier|original|single"
+        + "|snide|rude|mean|nasty|helpful|written|posted|top|above|below|opening|closing"
+        + "|youtube|reddit|facebook|instagram"
+        + "|\\w{1,24}'s)"
+
+    /// VERIFY round 2, 2026-08-14: an enumerated modifier list cannot close an open English
+    /// class ("a snarky comment", "your GitHub comment", "His parting comment" all leaked).
+    /// What every leak shared was a determiner/possessive/copula sitting exactly TWO tokens
+    /// back — the reliable signature of a noun phrase whose head is "comment"/"common"-as-
+    /// adjective. This second lookbehind blocks that signature. Cost, measured on the Jul-Aug
+    /// corpus: 3 of 29 real command garbles no longer convert ("is EQ comment." / "miss your
+    /// talk comment since" / "in the party comment,") because they are structurally identical
+    /// to legitimate noun phrases — a missed comma is visible and cheap; a silently deleted
+    /// noun is neither. Engine-level (acoustic) correction is the only clean fix for those.
+    private static let commentNounPhraseLookback =
+        "(?<!\\b(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their"
+        + "|is|are|was|were|be|been|being)\\s\\w{1,24})"
 
     // Ellipsis support removed — whisper generates "..." from pauses, causing false positives.
     // All multi-dot sequences are now stripped unconditionally.
@@ -373,6 +429,15 @@ public struct TextPostProcessor {
         case none       // No style processing (default for unknown apps)
     }
 
+    /// True when the transcript tail is a spoken end-of-message period command — the word
+    /// "period" (optionally trailed by the engine's own auto-punctuation) as the last token.
+    /// Checked on the PRE-substitution transcript, because after substitution a dictated "."
+    /// is indistinguishable from an auto-inserted one.
+    public static func endsWithSpokenPeriodCommand(_ rawText: String) -> Bool {
+        rawText.range(of: "\\bperiod[.!?,;:]?\\s*$",
+                      options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
     /// Detect style mode from the frontmost app's bundle ID.
     public static func detectStyleMode(bundleID: String?) -> StyleMode {
         guard let id = bundleID?.lowercased() else { return .none }
@@ -396,7 +461,8 @@ public struct TextPostProcessor {
     /// Apply Michael's writing style to transcribed text.
     /// Based on style profiles derived from 172 messages across platforms.
     /// Only modifies text for messaging apps — email and other apps keep normal punctuation.
-    public static func applyStyle(_ text: String, mode: StyleMode) -> String {
+    public static func applyStyle(_ text: String, mode: StyleMode,
+                                  explicitTrailingPeriod: Bool = false) -> String {
         // Only apply style processing for messaging apps
         guard mode == .texting || mode == .slack else { return text }
 
@@ -405,7 +471,10 @@ public struct TextPostProcessor {
 
         // Strip trailing period only — mid-sentence periods stay for multi-sentence dictations.
         // Michael never ends messages with a period (0% across texting platforms).
-        if result.hasSuffix(".") && !result.hasSuffix("..") {
+        // EXCEPT when he explicitly dictated it (Michael 2026-08-14: "honor dictated"): saying
+        // the word "period" is a deliberate override of his own texting style, and stripping
+        // it reads as "punctuation I said didn't get honored".
+        if !explicitTrailingPeriod, result.hasSuffix(".") && !result.hasSuffix("..") {
             let beforeDot = result.dropLast()
             if !beforeDot.isEmpty {
                 let lastWord = String(beforeDot.split(separator: " ").last ?? "")
