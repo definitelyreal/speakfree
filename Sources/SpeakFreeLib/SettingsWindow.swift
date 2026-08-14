@@ -408,6 +408,33 @@ struct SettingsView: View {
     @State private var storedRecordingCount = 0
     @State private var showDeleteRecordingsSheet = false
 
+    /// Microphone pin (moved here from the menu, Michael 2026-08-14). "" = the built-in
+    /// default; any other value is a device UID pinned via AppDelegate.selectInputDevice.
+    /// Snapshot of the device list is taken on appear — cache-only reads, same rule as the
+    /// menu (live CoreAudio reads on main wedged the app on 2026-07-15).
+    @State private var micSelection: String = ""
+    @State private var micDevices: [AudioInputDevice] = []
+
+    private var micBuiltInUID: String? { AudioDeviceCatalog.cachedBuiltInInput?.uid }
+
+    private var micDefaultLabel: String {
+        // Honest default label (2026-08-12): with no explicit pick, speakfree captures the
+        // BUILT-IN mic; only a Mac with no built-in input falls back to the system default.
+        if let builtIn = AudioDeviceCatalog.cachedBuiltInInput {
+            return "\(builtIn.name) (default)"
+        }
+        let systemName = AudioDeviceCatalog.cachedDefaultInput?.name ?? "System Default"
+        return "System Default (\(systemName))"
+    }
+
+    private func refreshMicState() {
+        micDevices = AudioDeviceCatalog.cachedInputDevices
+        let pinned = (NSApplication.shared.delegate as? AppDelegate)?.currentInputDeviceUID()
+        // An explicit pin of the built-in mic captures identically to the implicit default,
+        // so both states select the default entry (adversarial review 2026-08-12).
+        micSelection = (pinned == nil || pinned == micBuiltInUID) ? "" : pinned!
+    }
+
     private func refreshRecordingsFolderState() {
         // M2: read the cached count so opening Settings no longer rescans a 22k-file corpus on the
         // main thread (finding 9). The cache is kept live by finishRecording/deleteAll/prune.
@@ -594,6 +621,41 @@ struct SettingsView: View {
                                     .controlSize(.small)
                                     .labelsHidden()
                                     .frame(width: 100)
+                                }
+                            }
+
+                            GridRow {
+                                Text("Microphone")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Picker("", selection: $micSelection) {
+                                        Text(micDefaultLabel).tag("")
+                                        ForEach(micDevices.filter { $0.uid != micBuiltInUID },
+                                                id: \.uid) { device in
+                                            Text(device.name).tag(device.uid)
+                                        }
+                                        // A pinned device that is currently unplugged still needs
+                                        // a matching tag or the Picker renders blank (same hazard
+                                        // as the language picker, see reconcilePickerLanguage).
+                                        // Keeping the entry also keeps the pin: coercing the
+                                        // selection to default would silently clear it.
+                                        if !micSelection.isEmpty,
+                                           !micDevices.contains(where: { $0.uid == micSelection }) {
+                                            Text("Pinned device (disconnected)").tag(micSelection)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .labelsHidden()
+                                    .frame(maxWidth: 280, alignment: .leading)
+                                    .onChange(of: micSelection) { newValue in
+                                        (NSApplication.shared.delegate as? AppDelegate)?
+                                            .selectInputDevice(uid: newValue.isEmpty ? nil : newValue)
+                                    }
+                                    Text("The built-in mic transcribes most reliably. Bluetooth "
+                                         + "mics (AirPods) degrade quality unpredictably, and "
+                                         + "virtual devices (Zoom, Splashtop) can record silence.")
+                                        .font(.footnote)
+                                        .foregroundColor(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
                             }
 
@@ -907,6 +969,7 @@ struct SettingsView: View {
             hotkeyPickerSelection = viewModel.hotkeyKeyCode
             launchAtLogin = LaunchAtLogin.isEnabled
             previousLanguage = viewModel.language
+            refreshMicState()
             checkPendingDownload()
         }
         .onChange(of: hotkeyPickerSelection) { newValue in

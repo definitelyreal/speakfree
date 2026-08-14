@@ -197,59 +197,11 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // Microphone selector — FIRST section (Michael, 2026-07-14): the AirPods link
-        // degrades unpredictably, and switching the capture device must be one click.
-        // Radio list: the default entry + every input device; checkmark = active pin.
-        let micHeader = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
-        micHeader.isEnabled = false
-        menu.addItem(micHeader)
-
-        // Cache-only reads: menu builds happen on the main thread on every state flip,
-        // and live CoreAudio reads here are what wedged the app on 2026-07-15.
-        let pinnedUID = (NSApplication.shared.delegate as? AppDelegate)?.currentInputDeviceUID()
-        // Honest default label (2026-08-12): with no explicit pick, speakfree captures
-        // the BUILT-IN mic, not whatever macOS made the system default (an AirPods
-        // connect used to move capture silently). Only a Mac with no built-in input
-        // falls back to the system default, and the label says so.
-        let defaultTitle: String
-        if let builtIn = AudioDeviceCatalog.cachedBuiltInInput {
-            defaultTitle = "\(builtIn.name) (default)"
-        } else {
-            let systemName = AudioDeviceCatalog.cachedDefaultInput?.name ?? "System Default"
-            defaultTitle = "System Default (\(systemName))"
-        }
-        let defaultTarget = MenuItemTarget {
-            (NSApplication.shared.delegate as? AppDelegate)?.selectInputDevice(uid: nil)
-        }
-        menuItemTargets.append(defaultTarget)
-        let builtInUID = AudioDeviceCatalog.cachedBuiltInInput?.uid
-        let defaultItem = NSMenuItem(title: defaultTitle,
-                                     action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-        defaultItem.target = defaultTarget
-        // An explicit pin of the built-in mic captures identically to the implicit
-        // default, so both states check this entry (adversarial review 2026-08-12:
-        // showing the built-in twice as two radio rows that differ only in config
-        // bytes, and rebuild the engine when toggled, was confusing for nothing).
-        defaultItem.state = (pinnedUID == nil || pinnedUID == builtInUID) ? .on : .off
-        menu.addItem(defaultItem)
-
-        for device in AudioDeviceCatalog.cachedInputDevices {
-            let uid = device.uid
-            // The built-in mic is already represented by the "(default)" entry above.
-            if uid == builtInUID { continue }
-            let target = MenuItemTarget {
-                (NSApplication.shared.delegate as? AppDelegate)?.selectInputDevice(uid: uid)
-            }
-            menuItemTargets.append(target)
-            let item = NSMenuItem(title: device.name,
-                                  action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            item.target = target
-            item.state = pinnedUID == uid ? .on : .off
-            item.indentationLevel = 1
-            menu.addItem(item)
-        }
-
-        menu.addItem(NSMenuItem.separator())
+        // Microphone selection moved to Settings (Michael, 2026-08-14): with the built-in
+        // mic as the honest default since 2026-08-12, one-click switching in the menu (the
+        // 2026-07-14 rationale, when AirPods degradation made fast switching matter) no
+        // longer earns its menu space. The Settings picker carries the degradation notice
+        // the menu never had room for.
 
         // Settings — opens the SwiftUI Settings window (first after title)
         let settingsTarget = MenuItemTarget {
