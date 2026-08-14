@@ -481,11 +481,12 @@ public enum HelpContent {
 
     private static func microphone(_ f: HelpFacts) -> HelpTopic {
         HelpTopic(id: "microphone", title: "Microphone", blocks: [
-            .paragraph("The menu lists your input devices under Microphone. \"System Default\", which "
-                       + "names the current device in parentheses, follows whatever macOS is using "
-                       + "and is usually what you want. Picking a specific "
-                       + "device pins speakfree to it, so plugging in headphones or joining a "
-                       + "call does not change what it records from."),
+            .paragraph("Choose your input device in Settings under Microphone. The built-in "
+                       + "mic is the default and transcribes most reliably: Bluetooth mics "
+                       + "(AirPods) degrade quality unpredictably, and virtual devices (Zoom, "
+                       + "Splashtop) can record silence. Picking a specific device pins "
+                       + "speakfree to it, so plugging in headphones or joining a call does "
+                       + "not change what it records from."),
             .paragraph("If a pinned device is unplugged, speakfree falls back to the system "
                        + "default rather than failing to record."),
             .paragraph("Bluetooth headsets take a moment to wake up. \"Pre-Buffer Audio\" under "
