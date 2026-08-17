@@ -2,6 +2,7 @@
 
 import Foundation
 import OSLog
+import SpeakFreeKeyboardCore
 import UIKit
 
 /// Owns the immutable Parakeet model transfers independently of the app's foreground lifetime.
@@ -72,7 +73,25 @@ final class ParakeetModelDownloadCoordinator: NSObject {
 
     func observe(_ observer: @escaping (State) -> Void) {
         self.observer = observer
-        refreshState()
+        let progress = diskProgress()
+        session.getAllTasks { [weak self] tasks in
+            Task { @MainActor in
+                guard let self else { return }
+                if ParakeetDownloadRecoveryPolicy.shouldResume(
+                    downloadedBytes: progress.downloadedBytes,
+                    totalBytes: progress.totalBytes,
+                    userCancelled: FileManager.default.fileExists(
+                        atPath: Self.cancellationMarkerURL.path
+                    ),
+                    activeTaskCount: tasks.count
+                ) {
+                    self.logger.notice("Automatically resuming an interrupted Parakeet download")
+                    self.startOrResume()
+                } else {
+                    self.refreshState()
+                }
+            }
+        }
     }
 
     func startOrResume() {
@@ -86,6 +105,7 @@ final class ParakeetModelDownloadCoordinator: NSObject {
             publishFailure("Not enough free storage. Free at least \(ByteCountFormatter.string(fromByteCount: remainingBytes + 134_217_728, countStyle: .file)) and try again.")
             return
         }
+        try? FileManager.default.removeItem(at: Self.cancellationMarkerURL)
         session.getAllTasks { [weak self] tasks in
             Task { @MainActor in
                 guard let self else { return }
@@ -128,6 +148,11 @@ final class ParakeetModelDownloadCoordinator: NSObject {
 
     func cancel() {
         logger.notice("Cancelling active Parakeet background transfers")
+        try? FileManager.default.createDirectory(
+            at: Self.applicationSupportRoot,
+            withIntermediateDirectories: true
+        )
+        try? Data().write(to: Self.cancellationMarkerURL, options: .atomic)
         session.getAllTasks { [weak self] tasks in
             let pending = DispatchGroup()
             for task in tasks {
@@ -167,6 +192,7 @@ final class ParakeetModelDownloadCoordinator: NSObject {
     private func refreshState(forceDownloading: Bool = false) {
         let progress = diskProgress()
         if progress.downloadedBytes >= progress.totalBytes {
+            try? FileManager.default.removeItem(at: Self.cancellationMarkerURL)
             publish(.completed(progress))
             return
         }
@@ -317,6 +343,10 @@ final class ParakeetModelDownloadCoordinator: NSObject {
 
     nonisolated private static var applicationSupportRoot: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    }
+
+    nonisolated private static var cancellationMarkerURL: URL {
+        applicationSupportRoot.appendingPathComponent("SpeakFreeParakeetDownload.cancelled")
     }
 }
 
