@@ -1,0 +1,183 @@
+# ai-suggestion:unverified · session:01a00cac-80fe-7e81-ad7f-32c2599da24d · 2026-08-16
+name: SpeakFreeKeyboard
+options:
+  bundleIdPrefix: com.speakfree
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  ExecuTorch:
+    path: Vendor/ExecuTorchPackage
+settings:
+  base:
+    SWIFT_VERSION: 5.10
+    DEVELOPMENT_TEAM: SEREW637A4
+    CODE_SIGN_STYLE: Automatic
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 0.1.0
+    ENABLE_USER_SCRIPT_SANDBOXING: true
+    "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+targets:
+  SpeakFreeKeyboardCore:
+    type: framework
+    platform: iOS
+    sources:
+      - Sources/SpeakFreeKeyboardCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard.core
+        DEFINES_MODULE: true
+        SKIP_INSTALL: true
+    info:
+      path: Config/SpeakFreeKeyboardCore-Info.plist
+      properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+  SpeakFreeKeyboard:
+    type: application
+    platform: iOS
+    sources:
+      - Sources/SpeakFreeKeyboardApp
+      - path: Resources/Legal/FUTO-Model-Weights-License-1.0.md
+        buildPhase: resources
+      - path: Resources/Legal/EXECUTORCH-LICENSE.ai.md
+        buildPhase: resources
+      - path: Resources/Legal/XNNPACK-LICENSE.ai.md
+        buildPhase: resources
+      - path: Resources/Vocabulary/WORD-FREQUENCY-LICENSE.md
+        buildPhase: resources
+      - path: Resources/App/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    dependencies:
+      - target: SpeakFreeKeyboardCore
+      - target: SpeakFreeKeyboardExtension
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard
+    entitlements:
+      path: Config/SpeakFreeKeyboard.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.speakfree.keyboard
+    info:
+      path: Config/SpeakFreeKeyboard-Info.plist
+      properties:
+        CFBundleDisplayName: SpeakFree Keyboard
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        "UISupportedInterfaceOrientations~ipad":
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSHumanReadableCopyright: "Copyright © 2026 SpeakFree"
+        ITSAppUsesNonExemptEncryption: false
+  SpeakFreeKeyboardExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Sources/SpeakFreeKeyboardExtension
+      - path: Resources/Models/honorable_sturgeon/model_fp32.pte
+        buildPhase: resources
+      - path: Resources/Models/honorable_sturgeon/metadata.json
+        buildPhase: resources
+      - path: Resources/Vocabulary/wordfreq-en-25000-log.json
+        buildPhase: resources
+      - path: Resources/Vocabulary/WORD-FREQUENCY-LICENSE.md
+        buildPhase: resources
+      - path: Resources/Legal/FUTO-Model-Weights-License-1.0.md
+        buildPhase: resources
+      - path: Resources/Extension/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    dependencies:
+      - target: SpeakFreeKeyboardCore
+      - package: ExecuTorch
+        product: SpeakFreeExecuTorch
+    entitlements:
+      path: Config/SpeakFreeKeyboardExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.speakfree.keyboard
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard.extension
+        APPLICATION_EXTENSION_API_ONLY: true
+        CLANG_WARN_INCOMPLETE_UMBRELLA: NO
+        SKIP_INSTALL: true
+        OTHER_LDFLAGS: "$(inherited) -all_load -lc++ -framework Accelerate"
+    info:
+      path: Config/SpeakFreeKeyboardExtension-Info.plist
+      properties:
+        CFBundleDisplayName: SpeakFree Keyboard
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).KeyboardViewController"
+          NSExtensionAttributes:
+            IsASCIICapable: true
+            PrefersRightToLeft: false
+            PrimaryLanguage: en-US
+            RequestsOpenAccess: false
+  SpeakFreeKeyboardCoreTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/SpeakFreeKeyboardCoreTests
+    dependencies:
+      - target: SpeakFreeKeyboardCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard.core-tests
+        GENERATE_INFOPLIST_FILE: true
+  SpeakFreeKeyboardInferenceTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/SpeakFreeKeyboardInferenceTests
+      - Sources/SpeakFreeKeyboardExtension/FUTOSwipeEncoderRuntime.swift
+      - path: Resources/Models/honorable_sturgeon/model_fp32.pte
+        buildPhase: resources
+    dependencies:
+      - target: SpeakFreeKeyboardCore
+      - package: ExecuTorch
+        product: SpeakFreeExecuTorch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard.inference-tests
+        GENERATE_INFOPLIST_FILE: true
+        CLANG_WARN_INCOMPLETE_UMBRELLA: NO
+        OTHER_LDFLAGS: "$(inherited) -all_load -lc++ -framework Accelerate"
+  SpeakFreeKeyboardUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - Tests/SpeakFreeKeyboardUITests
+    dependencies:
+      - target: SpeakFreeKeyboard
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard.ui-tests
+        GENERATE_INFOPLIST_FILE: true
+schemes:
+  SpeakFreeKeyboard:
+    build:
+      targets:
+        SpeakFreeKeyboard: all
+        SpeakFreeKeyboardCoreTests: [test]
+        SpeakFreeKeyboardInferenceTests: [test]
+        SpeakFreeKeyboardUITests: [test]
+    test:
+      gatherCoverageData: true
+      targets:
+        - SpeakFreeKeyboardCoreTests
+        - SpeakFreeKeyboardInferenceTests
+        - SpeakFreeKeyboardUITests
