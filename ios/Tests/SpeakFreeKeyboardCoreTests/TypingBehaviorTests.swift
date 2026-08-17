@@ -219,4 +219,17 @@ final class TypingBehaviorTests: XCTestCase {
         XCTAssertEqual(edit.applying(to: "hello world"), "hello ")
         XCTAssertNil(engine.lastReplacement)
     }
+
+    func testDeleteWordRemovesAHostSelectionExactlyOnce() {
+        var engine = TypingBehaviorEngine()
+
+        XCTAssertEqual(
+            engine.deleteWord(before: "prefix ", selectedText: "selected text"),
+            .deleteSelection
+        )
+        XCTAssertEqual(
+            engine.deleteWord(before: "prefix word", selectedText: nil),
+            .edit(TypingEdit(deleteBackwardCount: 4))
+        )
+    }
 }

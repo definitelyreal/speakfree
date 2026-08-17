@@ -45,6 +45,7 @@ final class KeyboardSurfaceView: UIView {
     var capsLock = false { didSet { if capsLock != oldValue { refreshAppearance() } } }
     var context: Context = .standard { didSet { if context != oldValue { refreshAppearance() } } }
     var showsGlobe = true { didSet { if showsGlobe != oldValue { refreshAppearance() } } }
+    var dictationAvailable = false { didSet { if dictationAvailable != oldValue { refreshAppearance() } } }
     var swipeEnabled = true
     var numericMode: Bool { context.isNumeric }
     var returnLabel = "return" { didSet { if returnLabel != oldValue { refreshAppearance() } } }
@@ -98,7 +99,10 @@ final class KeyboardSurfaceView: UIView {
             if item.key == .mode, context.isNumeric { label = "ABC" }
             if item.key == .returnKey { label = returnLabel }
             let font = UIFont.systemFont(ofSize: item.key == .space ? 14 : 20, weight: .regular)
-            let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.label]
+            let foreground: UIColor = item.key == .dictation && dictationAvailable
+                ? .systemRed
+                : .label
+            let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: foreground]
             let size = label.size(withAttributes: attributes)
             label.draw(at: CGPoint(x: item.frame.midX - size.width / 2, y: item.frame.midY - size.height / 2), withAttributes: attributes)
         }
@@ -376,7 +380,7 @@ final class KeyboardSurfaceView: UIView {
             case .namePhone:
                 bottomRow = visible([.mode, .globe]) + [.punctuation("+"), .space, .returnKey]
             case .search, .standard:
-                bottomRow = visible([.mode, .globe, .space, .returnKey])
+                bottomRow = visible([.mode, .globe, .dictation, .space, .returnKey])
             case .numbersAndPunctuation, .numeric, .decimal, .phone:
                 bottomRow = []
             }
@@ -397,6 +401,7 @@ final class KeyboardSurfaceView: UIView {
                 case .shift, .delete: 1.45
                 case .mode: 1.35
                 case .globe: 1.0
+                case .dictation: 1.0
                 default: 1.0
                 }
             }
@@ -430,7 +435,10 @@ final class KeyboardSurfaceView: UIView {
             element.accessibilityIdentifier = "key_\(accessibilityIdentifier(for: item.key))"
             element.accessibilityTraits = [.keyboardKey]
             if item.key == .shift, uppercase { element.accessibilityTraits.insert(.selected) }
-            element.accessibilityFrameInContainerSpace = item.frame.insetBy(dx: 2.5, dy: 3)
+            // The painted key keeps a visual gutter, but its accessibility target owns the full
+            // layout cell just like touch hit-testing. Letter columns are narrower than 44 pt on
+            // iPhone; insetting them made VoiceOver and Switch Control targets unnecessarily tiny.
+            element.accessibilityFrameInContainerSpace = item.frame
             element.onActivate = { [weak self] in
                 guard let self else { return false }
                 self.delegate?.keyboardSurface(self, tapped: item.key)
@@ -488,6 +496,7 @@ final class KeyboardSurfaceView: UIView {
         case .shift: capsLock ? "Caps lock" : "Shift"
         case .delete: "Delete"
         case .globe: "Next keyboard"
+        case .dictation: dictationAvailable ? "Insert SpeakFree dictation" : "SpeakFree dictation"
         case .mode: context.isNumeric ? "Letters" : "Numbers"
         case .space: "Space"
         case .returnKey: returnLabel.capitalized
@@ -505,6 +514,7 @@ final class KeyboardSurfaceView: UIView {
         case .shift: value = "shift"
         case .delete: value = "delete"
         case .globe: value = "globe"
+        case .dictation: value = "dictation"
         case .mode: value = "mode"
         case .space: value = "space"
         case .returnKey: value = "return"

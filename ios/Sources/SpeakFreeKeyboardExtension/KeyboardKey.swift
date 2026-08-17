@@ -6,6 +6,7 @@ enum KeyboardKey: Equatable {
     case shift
     case delete
     case globe
+    case dictation
     case mode
     case space
     case returnKey
@@ -17,6 +18,7 @@ enum KeyboardKey: Equatable {
         case .shift: "⇧"
         case .delete: "⌫"
         case .globe: "🌐"
+        case .dictation: "🎙"
         case .mode: "123"
         case .space: "space"
         case .returnKey: "return"

@@ -55,12 +55,23 @@ final class FUTOSwipeEncoderRuntimeTests: XCTestCase {
         }
         XCTAssertEqual(decoded, "computer")
 
-        let vocabulary = VocabularyTrie(entries: [
-            VocabularyEntry(word: "computer", frequency: 1_000),
-            VocabularyEntry(word: "commuter", frequency: 100),
-            VocabularyEntry(word: "compute", frequency: 80),
-            VocabularyEntry(word: "commute", frequency: 50)
-        ])
+        let vocabularyURL = try XCTUnwrap(
+            Bundle(for: Self.self).url(
+                forResource: "wordfreq-en-25000-log",
+                withExtension: "json"
+            )
+        )
+        let rawRows = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: vocabularyURL)) as? [[Any]]
+        )
+        let entries = rawRows.compactMap { row -> VocabularyEntry? in
+            guard row.count == 2,
+                  let word = row[0] as? String,
+                  let frequency = row[1] as? Double else { return nil }
+            return VocabularyEntry(word: word, frequency: frequency)
+        }
+        XCTAssertEqual(entries.count, 25_000)
+        let vocabulary = VocabularyTrie(entries: entries)
         let fullDecoder = SwipeDecoder(
             runtime: runtime,
             vocabulary: vocabulary,
@@ -73,6 +84,34 @@ final class FUTOSwipeEncoderRuntimeTests: XCTestCase {
             candidateLimit: 4
         )
         XCTAssertEqual(candidates.first?.word, "computer")
+        XCTAssertTrue(candidates.prefix(3).contains { $0.word == "computer" })
+
+        for size in [
+            KeyboardSize(width: 320, height: 180),
+            KeyboardSize(width: 390, height: 216),
+            KeyboardSize(width: 844, height: 220),
+            KeyboardSize(width: 768, height: 280),
+        ] {
+            let scaledPoints = points.map {
+                TrajectoryPoint(
+                    x: $0.x * size.width,
+                    y: $0.y * size.height,
+                    timestamp: $0.timestamp
+                )
+            }
+            let start = CFAbsoluteTimeGetCurrent()
+            let sizeCandidates = try fullDecoder.decode(
+                points: scaledPoints,
+                keyboardSize: size,
+                candidateLimit: 4
+            )
+            XCTAssertEqual(sizeCandidates.first?.word, "computer")
+            XCTAssertLessThan(
+                CFAbsoluteTimeGetCurrent() - start,
+                2,
+                "a single swipe must remain interactive on the Simulator"
+            )
+        }
 
         var gesture = KeyboardGestureMachine()
         let surfaceWidth = 390.0
