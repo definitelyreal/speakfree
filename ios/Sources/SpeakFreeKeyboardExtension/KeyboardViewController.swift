@@ -70,7 +70,7 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
         // Suppressing the system-owned button left users with no dictation at all while the local
         // models were downloading, unavailable, or recovering from a failure.
         hasDictationKey = false
-        view.backgroundColor = .systemGray5
+        view.backgroundColor = KeyboardPalette.background
         surface.delegate = self
         candidateBar.onSelect = { [weak self] index in self?.acceptCandidate(at: index) }
         [candidateBar, surface].forEach {
