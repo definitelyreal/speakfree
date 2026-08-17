@@ -59,7 +59,14 @@ final class KeyboardLabUITests: XCTestCase {
         app.launch()
 
         XCTAssertTrue(app.progressIndicators["dictationModelProgress"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["dictationModelDownloadDetail"].exists)
+        XCTAssertEqual(
+            app.staticTexts["dictationStatus"].label,
+            "Downloading Parakeet in the background…"
+        )
+        XCTAssertEqual(
+            app.staticTexts["dictationModelDownloadDetail"].label,
+            "344 MB of 689 MB"
+        )
         let cancel = app.buttons["cancelDictationModelDownload"]
         XCTAssertTrue(cancel.exists)
         cancel.tap()
