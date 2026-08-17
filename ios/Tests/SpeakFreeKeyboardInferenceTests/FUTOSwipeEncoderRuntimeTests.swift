@@ -3,6 +3,52 @@ import XCTest
 @testable import SpeakFreeKeyboardCore
 
 final class FUTOSwipeEncoderRuntimeTests: XCTestCase {
+    /// A deterministic key-center corpus complements the published human trace below. It is not
+    /// a substitute for finger recordings, but it catches broad decoder/vocabulary regressions
+    /// that a single memorized word cannot expose.
+    func testProductionVocabularyDecodesDeterministicCommonWordCorpus() throws {
+        let words = [
+            "about", "after", "because", "could", "first", "from", "good", "have",
+            "hello", "just", "keyboard", "like", "make", "more", "people", "really",
+            "should", "speak", "their", "there", "think", "this", "time", "want",
+            "what", "when", "where", "which", "with", "would",
+        ]
+        let decoder = try productionDecoder()
+        var topOne = 0
+        var topThree = 0
+        var misses: [String] = []
+
+        for word in words {
+            let candidates = try decoder.decode(
+                points: Self.syntheticTrace(for: word),
+                keyboardSize: KeyboardSize(width: 1, height: 1),
+                candidateLimit: 4
+            )
+            if candidates.first?.word == word { topOne += 1 }
+            if candidates.prefix(3).contains(where: { $0.word == word }) {
+                topThree += 1
+            } else {
+                misses.append("\(word)->\(candidates.map(\.word).joined(separator: ","))")
+            }
+        }
+
+        print(
+            "SWIPE_CORPUS top1=\(topOne)/\(words.count) "
+                + "top3=\(topThree)/\(words.count) misses=\(misses.joined(separator: ";"))"
+        )
+
+        XCTAssertGreaterThanOrEqual(
+            topOne,
+            20,
+            "top-1 synthetic common-word accuracy regressed: \(topOne)/\(words.count); \(misses)"
+        )
+        XCTAssertGreaterThanOrEqual(
+            topThree,
+            27,
+            "top-3 synthetic common-word accuracy regressed: \(topThree)/\(words.count); \(misses)"
+        )
+    }
+
     /// Replays FUTO's published real-world "computer" trace through the same iOS runtime used by
     /// the extension. This catches missing resources, incompatible binaries, tensor-order errors,
     /// coordinate mistakes, and model execution failures in one simulator test.
@@ -133,5 +179,79 @@ final class FUTOSwipeEncoderRuntimeTests: XCTestCase {
         }
         XCTAssertTrue(sawPreview)
         XCTAssertEqual(gesture.end(), .commitSwipe)
+    }
+
+    private func productionDecoder() throws -> SwipeDecoder {
+        let runtime = try FUTOSwipeEncoderRuntime(bundle: Bundle(for: Self.self))
+        let vocabularyURL = try XCTUnwrap(
+            Bundle(for: Self.self).url(
+                forResource: "wordfreq-en-25000-log",
+                withExtension: "json"
+            )
+        )
+        let rawRows = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: vocabularyURL)) as? [[Any]]
+        )
+        let entries = rawRows.compactMap { row -> VocabularyEntry? in
+            guard row.count == 2,
+                  let word = row[0] as? String,
+                  let frequency = row[1] as? Double else { return nil }
+            return VocabularyEntry(word: word, frequency: frequency)
+        }
+        XCTAssertEqual(entries.count, 25_000)
+        return SwipeDecoder(
+            runtime: runtime,
+            vocabulary: VocabularyTrie(entries: entries),
+            beamWidth: 100,
+            frequencyWeight: 0.15
+        )
+    }
+
+    private static func syntheticTrace(for word: String) -> [TrajectoryPoint] {
+        let centers = Dictionary(
+            uniqueKeysWithValues: QWERTYKeyboardLayout.standardKeys.map {
+                ($0.character, $0.center)
+            }
+        )
+        var points: [TrajectoryPoint] = []
+        var timestamp = 0.0
+        var previous: NormalizedPoint?
+
+        for character in word {
+            guard let target = centers[character] else { continue }
+            if let start = previous {
+                if start == target {
+                    // Repeated letters need visible motion for CTC to emit the label twice.
+                    for offset in [(-0.018, -0.025), (0.018, -0.025), (0.0, 0.0)] {
+                        timestamp += 0.045
+                        points.append(
+                            TrajectoryPoint(
+                                x: min(1, max(0, target.x + offset.0)),
+                                y: min(1, max(0, target.y + offset.1)),
+                                timestamp: timestamp
+                            )
+                        )
+                    }
+                } else {
+                    for step in 1...6 {
+                        let fraction = Double(step) / 6
+                        timestamp += 0.04
+                        points.append(
+                            TrajectoryPoint(
+                                x: start.x + (target.x - start.x) * fraction,
+                                y: start.y + (target.y - start.y) * fraction,
+                                timestamp: timestamp
+                            )
+                        )
+                    }
+                }
+            } else {
+                points.append(TrajectoryPoint(x: target.x, y: target.y, timestamp: timestamp))
+            }
+            timestamp += 0.06
+            points.append(TrajectoryPoint(x: target.x, y: target.y, timestamp: timestamp))
+            previous = target
+        }
+        return points
     }
 }
