@@ -27,6 +27,7 @@ final class DictationDebugRecorder {
         var finalConfidence: Float? = nil
         var finalPath: String? = nil
         var audioDurationSeconds: Double? = nil
+        var processingTimeSeconds: Double? = nil
         var outcome: String
         var error: String? = nil
     }
@@ -127,7 +128,8 @@ final class DictationDebugRecorder {
         text: String,
         confidence: Float?,
         finalPath: String,
-        audioDurationSeconds: Double
+        audioDurationSeconds: Double,
+        processingTimeSeconds: Double?
     ) {
         mutate(sessionID) {
             $0.finishedAt = Date()
@@ -135,6 +137,7 @@ final class DictationDebugRecorder {
             $0.finalConfidence = confidence
             $0.finalPath = finalPath
             $0.audioDurationSeconds = audioDurationSeconds
+            $0.processingTimeSeconds = processingTimeSeconds
             $0.outcome = "finished"
         }
         if activeSessionID == sessionID { activeSessionID = nil }
@@ -190,6 +193,15 @@ final class DictationDebugRecorder {
         let total = milliseconds(from: session.startedAt, to: session.finishedAt)
         let confidence = session.finalConfidence.map { String(format: "%.3f", $0) } ?? "unavailable"
         let audio = session.audioDurationSeconds.map { String(format: "%.2f s", $0) } ?? "unavailable"
+        let processing = session.processingTimeSeconds.map { String(format: "%.2f s", $0) }
+            ?? "unavailable"
+        let realTimeFactor: String
+        if let audio = session.audioDurationSeconds, audio > 0,
+           let processing = session.processingTimeSeconds {
+            realTimeFactor = String(format: "%.3f", processing / audio)
+        } else {
+            realTimeFactor = "unavailable"
+        }
         var lines = [
             "Session \(session.id.uuidString)",
             "Started: \(session.startedAt.formatted(.iso8601))",
@@ -201,6 +213,8 @@ final class DictationDebugRecorder {
             "Stop → final: \(finalization)",
             "Total: \(total)",
             "Audio: \(audio)",
+            "Final inference: \(processing)",
+            "Final real-time factor: \(realTimeFactor)",
             "Revisions: \(session.revisions.count)",
             "Final path: \(session.finalPath ?? "unavailable")",
             "Final confidence: \(confidence)",
