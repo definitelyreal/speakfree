@@ -230,6 +230,9 @@ final class DictationSessionController: ObservableObject {
                 status = "Parakeet is downloaded. Tap Prepare to finish local setup."
             }
         case .downloading:
+            if phase == .modelRequired || isFailure {
+                phase = .downloadingModel
+            }
             if phase == .downloadingModel {
                 status = "Downloading Parakeet in the background… \(modelDownloadDetail)"
             }
