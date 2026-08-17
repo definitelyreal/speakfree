@@ -79,6 +79,17 @@ final class KeyboardLabUITests: XCTestCase {
         XCTAssertEqual(app.buttons["prepareDictationModel"].label, "Resume Local Model Download")
     }
 
+    func testDeveloperDictationLoggingIsExplicitlyExposed() {
+        let toggle = app.switches["developerDictationLogging"]
+        reveal(toggle)
+        XCTAssertTrue(toggle.exists)
+        XCTAssertEqual(toggle.value as? String, "1", "Development builds should dogfood local diagnostics")
+
+        let summary = app.descendants(matching: .any)["dictationDebugSummary"]
+        reveal(summary)
+        XCTAssertTrue(summary.exists)
+    }
+
     /// Hardware-only end-to-end gate. This intentionally uses the real microphone and bundled
     /// Parakeet models; Simulator runs skip it because injected fixture text is not evidence that
     /// capture, Core ML inference, or physical-device finalization works.
