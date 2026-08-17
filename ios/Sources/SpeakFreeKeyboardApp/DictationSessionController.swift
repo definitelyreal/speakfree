@@ -530,7 +530,8 @@ final class DictationSessionController: ObservableObject {
                 text: transcript,
                 confidence: finishResult.confidence,
                 finalPath: finishResult.path,
-                audioDurationSeconds: finishResult.audioDurationSeconds
+                audioDurationSeconds: finishResult.audioDurationSeconds,
+                processingTimeSeconds: finishResult.processingTimeSeconds
             )
             debugLatestSummary = debugRecorder.latestSummary
             debugSessionID = nil

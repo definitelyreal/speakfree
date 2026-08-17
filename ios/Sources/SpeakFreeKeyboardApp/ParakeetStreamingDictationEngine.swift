@@ -44,6 +44,7 @@ actor ParakeetStreamingDictationEngine {
         let confidence: Float?
         let path: String
         let audioDurationSeconds: Double
+        let processingTimeSeconds: Double?
     }
 
     enum EngineError: LocalizedError, Equatable {
@@ -308,7 +309,8 @@ actor ParakeetStreamingDictationEngine {
             text: finalText,
             confidence: finalResult?.confidence,
             path: finalResult?.text.trimmedForDictation.isEmpty == false ? "tdt-v2" : "eou-fallback",
-            audioDurationSeconds: audioDurationSeconds
+            audioDurationSeconds: audioDurationSeconds,
+            processingTimeSeconds: finalResult?.processingTime
         )
 #else
         throw EngineError.fluidAudioNotLinked
