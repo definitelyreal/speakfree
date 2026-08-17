@@ -19,6 +19,7 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
         let id: Int
         let controllerGeneration: UUID
         let document: DocumentSnapshot
+        let startedAt: Date
     }
 
     private struct QueuedSwipe {
@@ -334,7 +335,8 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
         let request = SwipeRequest(
             id: swipeRequestID,
             controllerGeneration: controllerGeneration,
-            document: expectedDocument
+            document: expectedDocument,
+            startedAt: Date()
         )
         candidateBar.setStatus("Decoding…")
         runtimeStore.decode(
@@ -353,6 +355,10 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
             self.swipeDecodeInFlight = false
             _ = self.queuedSwipes.removeFirst()
             guard case .success(let decoded) = result else {
+                if self.developerLoggingEnabled {
+                    let elapsed = Int(Date().timeIntervalSince(request.startedAt) * 1_000)
+                    self.logger.debug("Swipe decode failed after \(elapsed, privacy: .public) ms")
+                }
                 if case .unavailable(let reason) = result {
                     self.logger.error("Swipe model unavailable: \(reason, privacy: .public)")
                 }
@@ -374,6 +380,12 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
                 SwipeTextRenderer.render($0, capitalization: capitalization)
             }
             let rendered = renderedWords[0]
+            if self.developerLoggingEnabled {
+                let elapsed = Int(Date().timeIntervalSince(request.startedAt) * 1_000)
+                self.logger.debug(
+                    "Swipe decoded in \(elapsed, privacy: .public) ms; result=\(rendered, privacy: .private(mask: .hash)) candidates=\(renderedWords.count, privacy: .public)"
+                )
+            }
             self.surface.accessibilityValue = "\(self.surface.accessibilityValue ?? "");source=model;word=\(rendered)"
             self.candidates = renderedWords
             self.candidateBar.setCandidates(renderedWords)
@@ -739,6 +751,11 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
         _ snapshot: DictationSnapshot,
         from state: DictationRevisionState?
     ) {
+        if developerLoggingEnabled {
+            logger.debug(
+                "Applying dictation session=\(snapshot.sessionID.uuidString, privacy: .private(mask: .hash)) revision=\(snapshot.revision, privacy: .public) phase=\(snapshot.phase.rawValue, privacy: .public) text=\(snapshot.renderedText, privacy: .private(mask: .hash))"
+            )
+        }
         do {
             // First validate a terminal revision against the exact raw history already inserted.
             // Formatting the snapshot before this proof changes finalized segment text and makes
@@ -804,6 +821,12 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
             dictationRevisionState = nil
             candidateBar.setStatus("Dictation update unavailable")
         }
+    }
+
+    private var developerLoggingEnabled: Bool {
+        UserDefaults(suiteName: "group.com.speakfree.keyboard")?.bool(
+            forKey: "developerDictationLoggingEnabled"
+        ) == true
     }
 
     private func formattedTerminalSnapshot(

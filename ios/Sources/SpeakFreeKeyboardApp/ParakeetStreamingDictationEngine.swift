@@ -39,6 +39,13 @@ actor ParakeetStreamingDictationEngine {
         let isFinal: Bool
     }
 
+    struct FinishResult: Sendable, Equatable {
+        let text: String
+        let confidence: Float?
+        let path: String
+        let audioDurationSeconds: Double
+    }
+
     enum EngineError: LocalizedError, Equatable {
         case fluidAudioNotLinked
         case modelNotPrepared
@@ -240,7 +247,7 @@ actor ParakeetStreamingDictationEngine {
     /// fails but the live model produced text, preserve that text rather than losing the utterance.
     func finish(
         checkpointLiveFallback: @escaping @Sendable (String) async -> Void = { _ in }
-    ) async throws -> String {
+    ) async throws -> FinishResult {
         guard isStreaming else { throw EngineError.noActiveStream }
 
 #if canImport(FluidAudio)
@@ -260,6 +267,7 @@ actor ParakeetStreamingDictationEngine {
         // larger final model is loading.
         var samples = accumulatedSamples
         accumulatedSamples = []
+        let audioDurationSeconds = Double(samples.count) / 16_000
         await liveManager.cleanup()
         self.liveManager = nil
 
@@ -296,7 +304,12 @@ actor ParakeetStreamingDictationEngine {
             isConfirmed: true,
             isFinal: true
         ))
-        return finalText
+        return FinishResult(
+            text: finalText,
+            confidence: finalResult?.confidence,
+            path: finalResult?.text.trimmedForDictation.isEmpty == false ? "tdt-v2" : "eou-fallback",
+            audioDurationSeconds: audioDurationSeconds
+        )
 #else
         throw EngineError.fluidAudioNotLinked
 #endif

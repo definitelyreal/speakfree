@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var searchText = ""
     @State private var passwordText = ""
     @State private var diagnosticsCopied = false
+    @State private var debugLogCopied = false
 
     var body: some View {
         NavigationStack {
@@ -194,6 +195,35 @@ struct ContentView: View {
                     Text("The report excludes microphone audio and transcript text. Unified device logs record extension lifecycle, memory warnings, swipe-model failures, and dictation/download errors.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+
+                    Toggle("Developer Dictation Logging", isOn: Binding(
+                        get: { dictation.debugLoggingEnabled },
+                        set: { dictation.setDebugLoggingEnabled($0) }
+                    ))
+                    .accessibilityIdentifier("developerDictationLogging")
+
+                    if dictation.debugLoggingEnabled {
+                        Text("Local dogfood mode is on. It records dictated text, transcript revisions, model path, first-partial latency, finalization latency, and errors on this device. It never records microphone audio or uploads the log.")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+
+                        Text(dictation.debugLatestSummary)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("dictationDebugSummary")
+
+                        Button(debugLogCopied ? "Debug Log Copied" : "Copy Dictation Debug Log") {
+                            UIPasteboard.general.string = dictation.dictationDebugReport
+                            debugLogCopied = true
+                        }
+                        .accessibilityIdentifier("copyDictationDebugLog")
+
+                        Button("Clear Dictation Debug Log", role: .destructive) {
+                            dictation.clearDictationDebugLog()
+                            debugLogCopied = false
+                        }
+                        .accessibilityIdentifier("clearDictationDebugLog")
+                    }
                 }
 
                 Section("Acknowledgements") {
@@ -283,6 +313,8 @@ private struct KeyboardPrivacyPolicyView: View {
                     Text("Microphone audio is processed by downloaded local Parakeet models and is not retained as an audio recording. On iOS 18 or later, a user-created Shortcut can start the same local session in the background from the Action Button, a Control Center Shortcut control, Back Tap, or Siri; a visible Live Activity provides its session-bound Stop control. Current and terminal transcripts use iOS file protection for keyboard handoff. The current file expires shortly; terminal recovery files expire after 24 hours when the app next opens.")
                     Text("Keyboard data").font(.headline)
                     Text("The keyboard does not transmit keystrokes, swipe paths, document context, audio, or model results. It works without Allow Full Access. An active claim keeps only the dictated text and nearby context needed to prove the suffix it owns; a completed claim is reduced to identifiers that prevent duplicate insertion.")
+                    Text("Optional developer diagnostics").font(.headline)
+                    Text("Developer Dictation Logging stores up to ten recent transcript revision timelines, timing measurements, model paths, and errors locally on this device. It never stores microphone audio or uploads the log. Development and TestFlight builds may default it on; public App Store builds default it off. You can disable or clear it in Diagnostics.")
                     Text("Models").font(.headline)
                     Text("Downloaded Parakeet model files remain on device until app data is cleared. Model downloads are the containing app's only network use.")
                 }

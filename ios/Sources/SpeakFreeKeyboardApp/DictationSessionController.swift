@@ -31,9 +31,12 @@ final class DictationSessionController: ObservableObject {
     @Published private(set) var modelTotalBytes: Int64 = 688_651_517
     @Published private(set) var transcript = ""
     @Published private(set) var status = "Download the local Parakeet model to begin."
+    @Published private(set) var debugLoggingEnabled = false
+    @Published private(set) var debugLatestSummary = "No debug session recorded yet."
 
     private let speechEngine = ParakeetStreamingDictationEngine()
     private let modelDownloader = ParakeetModelDownloadCoordinator.shared
+    private let debugRecorder = DictationDebugRecorder.shared
     // AVAudioEngine cannot be trusted after a media-services reset. Keep it replaceable so a
     // subsequent recording does not reuse a poisoned input node.
     private var audioEngine = AVAudioEngine()
@@ -57,6 +60,8 @@ final class DictationSessionController: ObservableObject {
     private var sessionGeneration: UInt64 = 0
     private var finalizationBackgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var stopCommandTracker = DictationStopCommandTracker()
+    private var debugSessionID: UUID?
+    private let audioOverflowGate = AudioOverflowGate()
 
     init() {
         if let container = FileManager.default.containerURL(
@@ -86,6 +91,8 @@ final class DictationSessionController: ObservableObject {
         }
 #endif
         observeAudioSessionLifecycle()
+        debugLoggingEnabled = debugRecorder.isEnabled
+        debugLatestSummary = debugRecorder.latestSummary
         modelDownloader.observe { [weak self] state in
             self?.receiveModelDownloadState(state)
         }
@@ -165,6 +172,19 @@ final class DictationSessionController: ObservableObject {
 
     var isStartAvailable: Bool { phase == .ready }
     var isStopAvailable: Bool { phase == .recording }
+
+    var dictationDebugReport: String { debugRecorder.report }
+
+    func setDebugLoggingEnabled(_ enabled: Bool) {
+        debugRecorder.setEnabled(enabled)
+        debugLoggingEnabled = enabled
+        debugLatestSummary = debugRecorder.latestSummary
+    }
+
+    func clearDictationDebugLog() {
+        debugRecorder.clear()
+        debugLatestSummary = debugRecorder.latestSummary
+    }
 
     func prepareModel() {
         guard phase != .downloadingModel, phase != .preparingModel, phase != .starting,
@@ -343,6 +363,8 @@ final class DictationSessionController: ObservableObject {
             }
             let newLedger = DictationTranscriptLedger()
             transcript = ""
+            debugSessionID = newLedger.sessionID
+            debugRecorder.start(sessionID: newLedger.sessionID)
 
             let updates = await speechEngine.updates
             updateTask?.cancel()
@@ -394,6 +416,7 @@ final class DictationSessionController: ObservableObject {
             try installAudioTap(generation: generation)
             audioEngine.prepare()
             try audioEngine.start()
+            debugRecorder.captureStarted(sessionID: newLedger.sessionID)
 
             // Publish only after capture is live. Setup failure must not leave a claimable
             // "active" session that never actually recorded.
@@ -437,6 +460,11 @@ final class DictationSessionController: ObservableObject {
             try snapshotStore.write(snapshot)
             ledger = currentLedger
             transcript = update.text
+            debugRecorder.recordPartial(
+                sessionID: currentLedger.sessionID,
+                text: update.text,
+                confidence: update.confidence
+            )
             status = update.isConfirmed ? "Stable words updated." : "Listening… words may still improve."
         } catch {
             // A confirmed-prefix regression would make an already-inserted edit unsafe. Stop
@@ -477,9 +505,10 @@ final class DictationSessionController: ObservableObject {
         }
 
         do {
-            let finalText = try await speechEngine.finish { [weak self] fallback in
+            let finishResult = try await speechEngine.finish { [weak self] fallback in
                 await self?.checkpointFinalizingFallback(fallback, generation: generation)
             }
+            let finalText = finishResult.text
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard generation == sessionGeneration, phase == .finalizing else { return }
             guard var currentLedger = ledger, let snapshotStore else {
@@ -495,6 +524,18 @@ final class DictationSessionController: ObservableObject {
                 finalText,
                 contextBeforeInput: "",
                 capitalization: .sentences
+            )
+            debugRecorder.finish(
+                sessionID: currentLedger.sessionID,
+                text: transcript,
+                confidence: finishResult.confidence,
+                finalPath: finishResult.path,
+                audioDurationSeconds: finishResult.audioDurationSeconds
+            )
+            debugLatestSummary = debugRecorder.latestSummary
+            debugSessionID = nil
+            logger.notice(
+                "Dictation finalized locally; audioSeconds=\(finishResult.audioDurationSeconds, privacy: .public) path=\(finishResult.path, privacy: .public)"
             )
             updateTask?.cancel()
             updateTask = nil
@@ -525,6 +566,10 @@ final class DictationSessionController: ObservableObject {
 
     private func requestFinish() {
         guard phase == .recording else { return }
+        if let sessionID = ledger?.sessionID {
+            debugRecorder.stopRequested(sessionID: sessionID)
+            debugLatestSummary = debugRecorder.latestSummary
+        }
         finalizationTask?.cancel()
         let token = UUID()
         finalizationToken = token
@@ -597,6 +642,13 @@ final class DictationSessionController: ObservableObject {
         updateTask = nil
         phase = .modelRequired
         status = "The high-quality final pass timed out in the background. The latest live text was preserved."
+        debugRecorder.fail(
+            sessionID: debugSessionID,
+            message: "High-quality finalization exceeded iOS background time.",
+            outcome: "live-fallback-preserved"
+        )
+        debugLatestSummary = debugRecorder.latestSummary
+        debugSessionID = nil
         deactivateAudioSession()
         scheduleSnapshotRemoval(after: 120)
         Task { await DictationLiveActivityCoordinator.shared.end(status: "Live result preserved") }
@@ -647,8 +699,18 @@ final class DictationSessionController: ObservableObject {
             status: failure == nil ? "Dictation cancelled" : "Dictation stopped"
         )
         if let failure {
+            debugRecorder.fail(sessionID: debugSessionID, message: failure)
+            debugLatestSummary = debugRecorder.latestSummary
+            debugSessionID = nil
             failMessage(failure)
         } else {
+            debugRecorder.fail(
+                sessionID: debugSessionID,
+                message: "Cancelled by user",
+                outcome: "cancelled"
+            )
+            debugLatestSummary = debugRecorder.latestSummary
+            debugSessionID = nil
             phase = .ready
             status = "Dictation cancelled. Unstable words were discarded."
         }
@@ -663,14 +725,25 @@ final class DictationSessionController: ObservableObject {
             throw SessionError.invalidInputFormat
         }
         guard let continuation = audioBufferContinuation else { return }
-        input.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
+        let overflowGate = audioOverflowGate
+        input.installTap(onBus: 0, bufferSize: 1_024, format: format) { [weak self] buffer, _ in
             guard let copy = try? ParakeetStreamingDictationEngine.copyForStreaming(buffer) else {
+                guard overflowGate.signalOnce() else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, self.phase == .recording,
+                          self.sessionGeneration == generation else { return }
+                    await self.cancelSession(
+                        failure: "The microphone buffer could not be retained safely. The session stopped without rewriting your text.",
+                        expectedGeneration: generation
+                    )
+                }
                 return
             }
             switch continuation.yield(copy) {
             case .enqueued:
                 break
             case .dropped:
+                guard overflowGate.signalOnce() else { return }
                 Task { @MainActor [weak self] in
                     guard let self, self.phase == .recording,
                           self.sessionGeneration == generation else { return }
@@ -701,6 +774,7 @@ final class DictationSessionController: ObservableObject {
 
     private func startAudioPump(generation: UInt64) {
         audioPumpTask?.cancel()
+        audioOverflowGate.reset()
         let stream = AsyncStream<AVAudioPCMBuffer>.makeStream(
             bufferingPolicy: .bufferingOldest(256)
         )
@@ -917,6 +991,27 @@ final class DictationSessionController: ObservableObject {
         logger.error("Dictation failed: \(message, privacy: .public)")
         phase = .failed(message)
         status = message
+    }
+}
+
+/// A realtime callback may observe many drops before MainActor teardown runs. Coalesce them into
+/// exactly one cancellation task so overload cannot amplify into a task/memory storm.
+private final class AudioOverflowGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var signalled = false
+
+    func reset() {
+        lock.lock()
+        signalled = false
+        lock.unlock()
+    }
+
+    func signalOnce() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !signalled else { return false }
+        signalled = true
+        return true
     }
 }
 
