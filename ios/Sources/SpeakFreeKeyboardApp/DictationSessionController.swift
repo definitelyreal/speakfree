@@ -488,7 +488,14 @@ final class DictationSessionController: ObservableObject {
             let snapshot = try currentLedger.finish(finalText: finalText)
             try snapshotStore.write(snapshot)
             ledger = currentLedger
-            transcript = finalText
+            // Parakeet intentionally emits mostly lowercase text. The keyboard formats the
+            // claimed transcript against the actual host context; the containing-app preview has
+            // no host context, so render it as a sentence instead of exposing raw model casing.
+            transcript = DictationTextFormatter.format(
+                finalText,
+                contextBeforeInput: "",
+                capitalization: .sentences
+            )
             updateTask?.cancel()
             updateTask = nil
             phase = .preparingModel

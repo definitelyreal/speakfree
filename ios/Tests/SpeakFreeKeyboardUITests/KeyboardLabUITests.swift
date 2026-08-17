@@ -74,6 +74,67 @@ final class KeyboardLabUITests: XCTestCase {
         XCTAssertEqual(app.buttons["prepareDictationModel"].label, "Resume Local Model Download")
     }
 
+    /// Hardware-only end-to-end gate. This intentionally uses the real microphone and bundled
+    /// Parakeet models; Simulator runs skip it because injected fixture text is not evidence that
+    /// capture, Core ML inference, or physical-device finalization works.
+    func testPhysicalParakeetMicrophoneFinalizationAndCapitalization() throws {
+#if targetEnvironment(simulator)
+        throw XCTSkip("Real microphone/Parakeet validation requires a physical iPhone")
+#else
+        let prepare = app.buttons["prepareDictationModel"]
+        if prepare.waitForExistence(timeout: 2) {
+            prepare.tap()
+        }
+
+        let start = app.buttons["startDictation"]
+        XCTAssertTrue(
+            start.waitForExistence(timeout: 300),
+            "Parakeet did not become ready. Status: \(app.staticTexts["dictationStatus"].label)"
+        )
+        start.tap()
+
+        let stop = app.buttons["stopDictation"]
+        XCTAssertTrue(
+            stop.waitForExistence(timeout: 30),
+            "The microphone session did not start. Status: \(app.staticTexts["dictationStatus"].label)"
+        )
+        addTeardownBlock { [weak self] in
+            guard let self else { return }
+            let activeStop = self.app.buttons["stopDictation"]
+            if activeStop.exists {
+                activeStop.tap()
+            }
+        }
+        print("SPEAKFREE_PHYSICAL_MIC_READY")
+
+        let transcript = app.staticTexts["dictationTranscript"]
+        XCTAssertTrue(
+            transcript.waitForExistence(timeout: 45),
+            "No live transcript appeared after physical microphone input"
+        )
+        let liveText = transcript.label
+        XCTAssertFalse(liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+        stop.tap()
+        XCTAssertTrue(
+            start.waitForExistence(timeout: 300),
+            "Finalization or live-model restoration hung. Status: \(app.staticTexts["dictationStatus"].label)"
+        )
+
+        let finalText = transcript.label.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertFalse(finalText.isEmpty)
+        XCTAssertEqual(
+            finalText.first.map(String.init),
+            finalText.first.map { String($0).uppercased() },
+            "Final transcript was not sentence-capitalized: \(finalText)"
+        )
+        XCTAssertTrue(
+            finalText.localizedCaseInsensitiveContains("test"),
+            "Expected the spoken test phrase, got: \(finalText); live: \(liveText)"
+        )
+#endif
+    }
+
     func testShiftCapsLockAndDoubleSpacePeriod() {
         let field = focusField("standardTextField")
 
