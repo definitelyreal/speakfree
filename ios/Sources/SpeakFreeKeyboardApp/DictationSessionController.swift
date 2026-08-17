@@ -81,7 +81,7 @@ final class DictationSessionController: ObservableObject {
             modelDownloadedBytes = 344_325_758
             modelTotalBytes = 688_651_517
             modelProgress = 0.45
-            status = "Downloading Parakeet in the background… 344 MB of 689 MB"
+            status = "Downloading Parakeet in the background…"
             return
         }
 #endif
@@ -119,11 +119,9 @@ final class DictationSessionController: ObservableObject {
     }
 
     var modelDownloadDetail: String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useMB, .useGB]
-        formatter.countStyle = .file
-        return "\(formatter.string(fromByteCount: modelDownloadedBytes)) of "
-            + formatter.string(fromByteCount: modelTotalBytes)
+        let downloadedMB = Int((Double(modelDownloadedBytes) / 1_000_000).rounded())
+        let totalMB = Int((Double(modelTotalBytes) / 1_000_000).rounded())
+        return "\(downloadedMB) MB of \(totalMB) MB"
     }
 
     var diagnosticReport: String {
@@ -234,7 +232,7 @@ final class DictationSessionController: ObservableObject {
                 phase = .downloadingModel
             }
             if phase == .downloadingModel {
-                status = "Downloading Parakeet in the background… \(modelDownloadDetail)"
+                status = "Downloading Parakeet in the background…"
             }
         case .cancelled:
             if phase == .downloadingModel {
