@@ -62,11 +62,13 @@ final class KeyboardSurfaceView: UIView {
     private var gestureGeneration = 0
     private var gestureKeyFrames: [PositionedKey] = []
     private var deleteRepeatWork: DispatchWorkItem?
+    private var keyCaptionViews: [KeyCaptionView] = []
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isMultipleTouchEnabled = false
         isOpaque = false
+        backgroundColor = KeyboardPalette.background
         isAccessibilityElement = false
         shouldGroupAccessibilityChildren = true
         accessibilityIdentifier = "keyboardSurface"
@@ -77,34 +79,38 @@ final class KeyboardSurfaceView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         positionedKeys = makeLayout(in: bounds)
+        layoutKeyCaptions()
         rebuildAccessibilityElements()
+        setNeedsDisplay()
     }
 
     override func draw(_ rect: CGRect) {
         let graphicsContext = UIGraphicsGetCurrentContext()
-        graphicsContext?.setShadow(offset: CGSize(width: 0, height: 1), blur: 0.5, color: UIColor.black.withAlphaComponent(0.25).cgColor)
         for item in positionedKeys {
             let isSpecial = !item.key.isCharacter && item.key != .space && {
                 if case .punctuation = item.key { return false }
                 return true
             }()
-            let fill = isSpecial ? UIColor.secondarySystemFill : UIColor.systemBackground
-            let path = UIBezierPath(roundedRect: item.frame.insetBy(dx: 2.5, dy: 3), cornerRadius: 5)
+            let isPressed = item.key == initialKey && gestureMachine.state != .swiping
+            let fill: UIColor
+            if isPressed {
+                fill = isSpecial ? KeyboardPalette.pressedSpecialKey : KeyboardPalette.pressedKey
+            } else {
+                fill = isSpecial ? KeyboardPalette.specialKey : KeyboardPalette.key
+            }
+            let path = UIBezierPath(
+                roundedRect: item.frame.insetBy(dx: 3, dy: 4),
+                cornerRadius: 5.5
+            )
+            graphicsContext?.saveGState()
+            graphicsContext?.setShadow(
+                offset: CGSize(width: 0, height: 1),
+                blur: 0.75,
+                color: UIColor.black.withAlphaComponent(0.28).cgColor
+            )
             fill.setFill()
             path.fill()
-
-            var label = item.key.label
-            if case .character(let value) = item.key { label = uppercase ? value.uppercased() : value }
-            if item.key == .shift, capsLock { label = "⇪" }
-            if item.key == .mode, context.isNumeric { label = "ABC" }
-            if item.key == .returnKey { label = returnLabel }
-            let font = UIFont.systemFont(ofSize: item.key == .space ? 14 : 20, weight: .regular)
-            let foreground: UIColor = item.key == .dictation && dictationAvailable
-                ? .systemRed
-                : .label
-            let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: foreground]
-            let size = label.size(withAttributes: attributes)
-            label.draw(at: CGPoint(x: item.frame.midX - size.width / 2, y: item.frame.midY - size.height / 2), withAttributes: attributes)
+            graphicsContext?.restoreGState()
         }
 
         if trackingSamples.count > 1, gestureMachine.state == .swiping {
@@ -140,6 +146,7 @@ final class KeyboardSurfaceView: UIView {
             delegate?.keyboardSurface(self, handleGlobeWith: event)
         }
         setNeedsDisplay()
+        updateKeyCaptions()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -237,13 +244,42 @@ final class KeyboardSurfaceView: UIView {
         alternateView?.removeFromSuperview()
         alternateView = nil
         selectedAlternate = nil
+        updateKeyCaptions()
         setNeedsDisplay()
     }
 
     private func refreshAppearance() {
         positionedKeys = makeLayout(in: bounds)
+        layoutKeyCaptions()
         setNeedsDisplay()
         rebuildAccessibilityElements()
+    }
+
+    private func layoutKeyCaptions() {
+        while keyCaptionViews.count < positionedKeys.count {
+            let caption = KeyCaptionView()
+            caption.isUserInteractionEnabled = false
+            addSubview(caption)
+            keyCaptionViews.append(caption)
+        }
+        while keyCaptionViews.count > positionedKeys.count {
+            keyCaptionViews.removeLast().removeFromSuperview()
+        }
+        updateKeyCaptions()
+    }
+
+    private func updateKeyCaptions() {
+        for (caption, item) in zip(keyCaptionViews, positionedKeys) {
+            caption.frame = item.frame.insetBy(dx: 3, dy: 4)
+            caption.configure(
+                key: item.key,
+                uppercase: uppercase,
+                capsLock: capsLock,
+                numericMode: context.isNumeric,
+                returnLabel: returnLabel,
+                dictationAvailable: dictationAvailable
+            )
+        }
     }
 
     private func cancelLongPress() {
@@ -522,6 +558,82 @@ final class KeyboardSurfaceView: UIView {
         return value.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? String($0) : "_" }.joined()
     }
 
+}
+
+private final class KeyCaptionView: UIView {
+    private let label = UILabel()
+    private let imageView = UIImageView()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        label.textAlignment = .center
+        label.adjustsFontSizeToFitWidth = true
+        label.minimumScaleFactor = 0.72
+        imageView.contentMode = .center
+        addSubview(label)
+        addSubview(imageView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        label.frame = bounds.insetBy(dx: 4, dy: 1)
+        imageView.frame = bounds
+    }
+
+    func configure(
+        key: KeyboardKey,
+        uppercase: Bool,
+        capsLock: Bool,
+        numericMode: Bool,
+        returnLabel: String,
+        dictationAvailable: Bool
+    ) {
+        label.isHidden = false
+        imageView.isHidden = true
+        label.textColor = .label
+        label.font = .systemFont(ofSize: 17, weight: .regular)
+
+        switch key {
+        case .character(let value):
+            label.text = uppercase ? value.uppercased() : value.lowercased()
+            label.font = .systemFont(ofSize: 22, weight: .regular)
+        case .punctuation(let value):
+            label.text = value
+            label.font = .systemFont(ofSize: value.count > 1 ? 14 : 21, weight: .regular)
+        case .mode:
+            label.text = numericMode ? "ABC" : "123"
+            label.font = .systemFont(ofSize: 16, weight: .medium)
+        case .space:
+            label.text = "space"
+            label.font = .systemFont(ofSize: 15, weight: .regular)
+        case .returnKey:
+            label.text = returnLabel
+            label.font = .systemFont(ofSize: 15, weight: .medium)
+        case .shift:
+            showSymbol(capsLock ? "capslock.fill" : (uppercase ? "shift.fill" : "shift"))
+        case .delete:
+            showSymbol("delete.left")
+        case .globe:
+            showSymbol("globe")
+        case .dictation:
+            showSymbol("waveform.circle.fill")
+            imageView.tintColor = dictationAvailable ? .systemRed : .secondaryLabel
+        }
+    }
+
+    private func showSymbol(_ name: String) {
+        label.isHidden = true
+        imageView.isHidden = false
+        imageView.tintColor = .label
+        imageView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
+            pointSize: 18,
+            weight: .regular
+        )
+        imageView.image = UIImage(systemName: name)
+    }
 }
 
 private final class KeyboardKeyAccessibilityElement: UIAccessibilityElement {

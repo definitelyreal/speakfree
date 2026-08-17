@@ -51,6 +51,11 @@ final class KeyboardLabUITests: XCTestCase {
             200,
             "Portrait keyboard surface was compressed to the landscape row height: \(surface.frame)"
         )
+
+        let appearance = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        appearance.name = "SpeakFree keyboard portrait appearance"
+        appearance.lifetime = .keepAlways
+        add(appearance)
     }
 
     func testModelDownloadShowsPersistentProgressAndCanBeCancelled() {
