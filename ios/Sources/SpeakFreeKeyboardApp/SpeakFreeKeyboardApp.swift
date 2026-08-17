@@ -3,9 +3,13 @@ import SwiftUI
 
 @main
 struct SpeakFreeKeyboardApp: App {
+    @UIApplicationDelegateAdaptor(SpeakFreeApplicationDelegate.self) private var appDelegate
+    @StateObject private var dictation = DictationSessionController.shared
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(dictation)
         }
     }
 }

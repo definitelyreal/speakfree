@@ -18,14 +18,21 @@ final class KeyboardLabUITests: XCTestCase {
     }
 
     func testKeyboardLabExposesEveryContext() {
-        XCTAssertTrue(app.textFields["standardTextField"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.textFields["emailTextField"].exists)
-        XCTAssertTrue(app.textFields["urlTextField"].exists)
-        XCTAssertTrue(app.textFields["numberTextField"].exists)
-        XCTAssertTrue(app.textFields["searchTextField"].exists)
+        reveal(app.textFields["standardTextField"])
+        for identifier in [
+            "emailTextField", "urlTextField", "numberTextField", "numberPadTextField",
+            "decimalPadTextField", "phonePadTextField", "namePhonePadTextField",
+            "socialTextField", "searchTextField"
+        ] {
+            let field = app.textFields[identifier]
+            reveal(field)
+            XCTAssertTrue(field.exists, "Missing host field \(identifier)")
+        }
+        let secureField = app.secureTextFields["secureTextField"]
+        reveal(secureField)
+        XCTAssertTrue(secureField.exists)
         let privacyPolicy = app.descendants(matching: .any)["keyboardPrivacyPolicy"]
-        for _ in 0..<3 where !privacyPolicy.exists { app.swipeUp() }
-        XCTAssertTrue(privacyPolicy.waitForExistence(timeout: 2))
+        reveal(privacyPolicy)
     }
 
     func testTapTypingUsesTheSpeakFreeExtension() {
@@ -33,6 +40,31 @@ final class KeyboardLabUITests: XCTestCase {
         typeKeys(["key_h", "key_e", "key_l", "key_l", "key_o"])
 
         XCTAssertEqual(field.value as? String, "Hello")
+    }
+
+    func testPortraitKeyboardUsesFullHeightInsteadOfCompressedLandscapeMetrics() {
+        _ = focusField("standardTextField")
+        let surface = app.descendants(matching: .any)["keyboardSurface"]
+        XCTAssertTrue(surface.waitForExistence(timeout: 2))
+        XCTAssertGreaterThanOrEqual(
+            surface.frame.height,
+            200,
+            "Portrait keyboard surface was compressed to the landscape row height: \(surface.frame)"
+        )
+    }
+
+    func testModelDownloadShowsPersistentProgressAndCanBeCancelled() {
+        app.terminate()
+        app.launchArguments.append("-SpeakFreeModelDownloadUITestFixture")
+        app.launch()
+
+        XCTAssertTrue(app.progressIndicators["dictationModelProgress"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["dictationModelDownloadDetail"].exists)
+        let cancel = app.buttons["cancelDictationModelDownload"]
+        XCTAssertTrue(cancel.exists)
+        cancel.tap()
+        XCTAssertTrue(app.buttons["prepareDictationModel"].waitForExistence(timeout: 2))
+        XCTAssertEqual(app.buttons["prepareDictationModel"].label, "Resume Local Model Download")
     }
 
     func testShiftCapsLockAndDoubleSpacePeriod() {
@@ -80,6 +112,101 @@ final class KeyboardLabUITests: XCTestCase {
         XCTAssertEqual(url.value as? String, "ex.com")
     }
 
+    func testNumberPadLayoutExposesOnlyNumberPadControls() {
+        let numberPad = focusField("numberPadTextField")
+
+        typeKeys(labels: ["1", "0"])
+        XCTAssertEqual(numberPad.value as? String, "10")
+        XCTAssertTrue(key(label: "Delete").exists)
+        XCTAssertFalse(hasKey(label: "."), "Number pad must not expose a decimal separator")
+        XCTAssertFalse(hasKey("key_q"), "Number pad must not expose alphabetic keys")
+    }
+
+    func testDecimalPadLayoutExposesItsDecimalSeparator() {
+        let decimalPad = focusField("decimalPadTextField")
+        typeKeys(labels: ["1", ".", "5"])
+        XCTAssertEqual(decimalPad.value as? String, "1.5")
+        XCTAssertTrue(key(label: "Delete").exists)
+    }
+
+    func testNumbersAndPunctuationPreservesLiteralSpacing() {
+        let number = focusField("numberTextField")
+        tapKey(label: "1")
+        tapKey(label: "Space")
+        tapKey(label: ".")
+
+        XCTAssertEqual(
+            number.value as? String,
+            "1 .",
+            "Numeric layouts must not apply prose punctuation or autocorrection rules"
+        )
+    }
+
+    func testPhonePadUsesItsLayoutOrTheSystemKeyboardFallback() {
+        let phonePad = focusField("phonePadTextField", allowingSystemKeyboardFallback: true)
+        guard speakFreeKeyboardIsVisible else {
+            assertSystemKeyboardFallback()
+            return
+        }
+        typeKeys(labels: ["1", "+", "#"])
+        XCTAssertEqual(phonePad.value as? String, "1+#")
+        XCTAssertFalse(hasKey(label: "."), "Phone pad must not expose the decimal separator")
+    }
+
+    func testNamePhonePadUsesItsLayoutOrTheSystemKeyboardFallback() {
+        let namePhone = focusField("namePhonePadTextField", allowingSystemKeyboardFallback: true)
+        guard speakFreeKeyboardIsVisible else {
+            assertSystemKeyboardFallback()
+            return
+        }
+        typeKeys(["key_j"])
+        tapKey(label: "+")
+        XCTAssertEqual(namePhone.value as? String, "J+")
+        XCTAssertTrue(key(label: "Space").exists)
+    }
+
+    func testSocialLayoutExposesHandleAndHashtagControls() {
+        let social = focusField("socialTextField")
+        typeKeys(["key_a"])
+        tapKey(label: "@")
+        typeKeys(["key_b"])
+        tapKey(label: "#")
+        XCTAssertEqual(social.value as? String, "a@b#")
+        XCTAssertTrue(key(label: "Space").exists)
+    }
+
+    func testSecureFieldFallsBackToTheSystemKeyboard() {
+        let secureField = app.secureTextFields["secureTextField"]
+        reveal(secureField)
+        secureField.tap()
+
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 2))
+        XCTAssertFalse(
+            app.descendants(matching: .any)["keyboardSurface"].waitForExistence(timeout: 1),
+            "iOS must use its protected system keyboard for secure text fields"
+        )
+    }
+
+    @available(iOS 17.0, *)
+    func testKeyboardLabPassesVoiceOverDescriptionAndHitRegionAudits() throws {
+        try app.performAccessibilityAudit(for: [.elementDetection, .hitRegion, .sufficientElementDescription, .trait])
+    }
+
+    func testSpeakFreeKeysExposeVoiceOverLabelsAndActivateFromAccessibilityElements() {
+        let field = focusField("socialTextField")
+        let at = key(label: "@")
+        let hashtag = key(label: "#")
+        let space = key(label: "Space")
+
+        XCTAssertTrue(at.isHittable)
+        XCTAssertTrue(hashtag.isHittable)
+        XCTAssertTrue(space.isHittable)
+        at.tap()
+        hashtag.tap()
+        space.tap()
+        XCTAssertEqual(field.value as? String, "@# ")
+    }
+
     func testModePageAndPunctuationSpacing() {
         let field = focusField("standardTextField")
         typeKeys(["key_h", "key_i"])
@@ -124,6 +251,38 @@ final class KeyboardLabUITests: XCTestCase {
         XCTAssertEqual(field.value as? String, "Hello ")
     }
 
+    func testDeleteWordDragDeletesAHostSelectionExactlyOnce() {
+        let field = focusField("standardTextField")
+        typeKeys(["key_h", "key_e", "key_l", "key_l", "key_o"])
+        tapKey(label: "Space")
+        typeKeys(["key_w", "key_o", "key_r", "key_l", "key_d"])
+
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.5)).doubleTap()
+        XCTAssertTrue(
+            app.menuItems["Copy"].waitForExistence(timeout: 2),
+            "The host must have an active text selection before exercising selection deletion"
+        )
+
+        let delete = key(label: "Delete")
+        let deleteStart = delete.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        deleteStart.press(
+            forDuration: 0.1,
+            thenDragTo: deleteStart.withOffset(CGVector(dx: -44, dy: 0))
+        )
+        XCTAssertTrue(
+            ["Hello", "Hello "].contains(field.value as? String),
+            "Deleting the selection once must preserve the full preceding word"
+        )
+    }
+
+    func testDeleteLongPressRepeatsWithoutReleaseTap() {
+        let field = focusField("standardTextField")
+        typeKeys(["key_h", "key_e", "key_l", "key_l", "key_o"])
+
+        key(label: "Delete").press(forDuration: 1.4)
+        assertEmpty(field)
+    }
+
     func testStraightSwipeTraversesTheActualSurfaceAndCommits() {
         let field = focusField("standardTextField")
         let surface = app.descendants(matching: .any)["keyboardSurface"]
@@ -147,6 +306,23 @@ final class KeyboardLabUITests: XCTestCase {
             (surface.value as? String)?.contains("source=model") == true,
             "The shipping extension must commit the model result, not a geometric fallback: \(String(describing: surface.value))"
         )
+    }
+
+    func testSwipeCandidateReplacementAndImmediateDeleteUndo() {
+        let field = focusField("standardTextField")
+        let surface = app.descendants(matching: .any)["keyboardSurface"]
+        XCTAssertTrue(surface.waitForExistence(timeout: 2))
+        performStraightSwipe(on: surface)
+
+        let alternate = app.buttons["candidate1"]
+        XCTAssertTrue(alternate.waitForExistence(timeout: 6))
+        let replacement = alternate.label
+        XCTAssertFalse(replacement.isEmpty)
+        alternate.tap()
+        XCTAssertEqual(field.value as? String, replacement + " ")
+
+        tapKey("key_delete")
+        assertEmpty(field)
     }
 
     func testDragsAreSuppressedInNumericAndVerbatimLayouts() {
@@ -222,18 +398,87 @@ final class KeyboardLabUITests: XCTestCase {
         XCTAssertEqual(field.value as? String, "Hi")
     }
 
-    private func focusField(_ identifier: String) -> XCUIElement {
-        let field = app.textFields[identifier]
-        XCTAssertTrue(field.waitForExistence(timeout: 5), "Missing host field \(identifier)")
-        if !field.isHittable {
-            app.swipeUp()
+    func testClaimedDictationRevisesOnlyItsOwnedTailAndFinalizes() {
+        app.terminate()
+        app.launchArguments.append("-SpeakFreeDictationUITestFixture")
+        app.launch()
+
+        let field = focusField("standardTextField")
+        let mic = key("key_dictation", wait: 3)
+        XCTAssertEqual(mic.label, "Insert SpeakFree dictation")
+        mic.tap()
+        // The claimed local hypothesis appears in the host immediately, revises in place, then
+        // the independent terminal pass replaces that owned suffix and applies sentence casing.
+        waitForValue("hello wor", in: field, timeout: 4)
+        waitForValue("hello world", in: field, timeout: 4)
+        waitForValue("Hello world from SpeakFree", in: field, timeout: 10)
+    }
+
+    private func focusField(
+        _ identifier: String,
+        allowingSystemKeyboardFallback: Bool = false
+    ) -> XCUIElement {
+        // Some system numeric keyboards have no globe key. Prime the selected input mode from a
+        // standard field first so a prior fallback test cannot strand the suite on that keyboard.
+        if [
+            "numberPadTextField", "decimalPadTextField",
+            "phonePadTextField", "namePhonePadTextField"
+        ].contains(identifier) {
+            let bootstrap = app.textFields["standardTextField"]
+            reveal(bootstrap)
+            bootstrap.tap()
+            activateSpeakFreeKeyboard()
         }
+        let field = app.textFields[identifier]
+        reveal(field)
+        XCTAssertTrue(field.exists, "Missing host field \(identifier)")
         field.tap()
-        activateSpeakFreeKeyboard()
+        activateSpeakFreeKeyboard(allowingSystemKeyboardFallback: allowingSystemKeyboardFallback)
         return field
     }
 
-    private func activateSpeakFreeKeyboard() {
+    private func assertEmpty(
+        _ field: XCUIElement,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let value = field.value as? String
+        XCTAssertTrue(
+            value == nil || value == "" || value == "Standard text",
+            "Expected an empty field, got \(String(describing: value))",
+            file: file,
+            line: line
+        )
+    }
+
+    private func reveal(_ element: XCUIElement) {
+        guard !element.isHittable else { return }
+        // SwiftUI Form virtualizes offscreen rows, and whole-app swipes can land on the custom
+        // keyboard after a bootstrap field is focused. Walk forward using gestures confined above
+        // the keyboard. If the row is actually above us, reset to the top and make a second pass.
+        let upper = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let middle = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
+        for _ in 0..<16 where !element.isHittable {
+            middle.press(forDuration: 0.01, thenDragTo: upper)
+        }
+        guard !element.isHittable else { return }
+        for _ in 0..<12 { upper.press(forDuration: 0.01, thenDragTo: middle) }
+        for _ in 0..<20 where !element.isHittable {
+            middle.press(forDuration: 0.01, thenDragTo: upper)
+        }
+        XCTAssertTrue(element.isHittable, "Element is not reachable: \(element)")
+    }
+
+    private var speakFreeKeyboardIsVisible: Bool {
+        app.descendants(matching: .any)["keyboardSurface"].waitForExistence(timeout: 0.5)
+    }
+
+    private func assertSystemKeyboardFallback() {
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 2))
+        XCTAssertFalse(speakFreeKeyboardIsVisible)
+    }
+
+    private func activateSpeakFreeKeyboard(allowingSystemKeyboardFallback: Bool = false) {
         let surface = app.descendants(matching: .any)["keyboardSurface"]
         if surface.waitForExistence(timeout: 1) { return }
 
@@ -258,6 +503,7 @@ final class KeyboardLabUITests: XCTestCase {
             if surface.waitForExistence(timeout: 1) { return }
         }
 
+        if allowingSystemKeyboardFallback { return }
         XCTFail("SpeakFree keyboardSurface never appeared. Enable it with KeyboardEnablementUITests first. Hierarchy: \(app.debugDescription)")
     }
 
@@ -276,27 +522,62 @@ final class KeyboardLabUITests: XCTestCase {
         key(label: label).tap()
     }
 
-    private func key(_ identifier: String) -> XCUIElement {
+    private func key(_ identifier: String, wait: TimeInterval = 2) -> XCUIElement {
         let key = app.descendants(matching: .any)[identifier]
-        XCTAssertTrue(key.waitForExistence(timeout: 2), "Missing SpeakFree key \(identifier)")
+        XCTAssertTrue(key.waitForExistence(timeout: wait), "Missing SpeakFree key \(identifier)")
         return key
     }
 
-    private func key(label: String) -> XCUIElement {
+    private func key(label: String, wait: TimeInterval = 2) -> XCUIElement {
         let key = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", label))
             .firstMatch
-        XCTAssertTrue(key.waitForExistence(timeout: 2), "Missing SpeakFree key labeled \(label)")
+        XCTAssertTrue(key.waitForExistence(timeout: wait), "Missing SpeakFree key labeled \(label)")
         return key
+    }
+
+    private func hasKey(_ identifier: String) -> Bool {
+        app.descendants(matching: .any)[identifier].waitForExistence(timeout: 0.5)
+    }
+
+    private func hasKey(label: String) -> Bool {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", label))
+            .firstMatch
+            .waitForExistence(timeout: 0.5)
     }
 
     private func typeKeys(_ identifiers: [String]) {
         for identifier in identifiers { tapKey(identifier) }
     }
 
+    private func typeKeys(labels: [String]) {
+        for label in labels { tapKey(label: label) }
+    }
+
     private func performStraightSwipe(on surface: XCUIElement) {
         let start = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.125))
         let end = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.125))
         start.press(forDuration: 0.08, thenDragTo: end)
+    }
+
+    private func waitForValue(
+        _ expected: String,
+        in field: XCUIElement,
+        timeout: TimeInterval,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", expected),
+            object: field
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [expectation], timeout: timeout),
+            .completed,
+            "Expected \(expected), got \(String(describing: field.value))",
+            file: file,
+            line: line
+        )
     }
 }

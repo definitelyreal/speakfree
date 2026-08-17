@@ -26,25 +26,28 @@
     <h1>SpeakFree Keyboard Privacy Policy</h1>
     <p class="effective">Effective August 16, 2026</p>
 
-    <p>SpeakFree Keyboard is designed to process typing and swipe gestures on your device.</p>
+    <p>SpeakFree Keyboard processes typing, swipe gestures, and optional speech recognition on your device.</p>
 
     <h2>Data collection</h2>
-    <p>The SpeakFree Keyboard iOS app and keyboard extension do not collect, store, sell, or share personal data. They do not include advertising, analytics, tracking, accounts, or telemetry.</p>
+    <p>SpeakFree does not sell or share personal data and does not include advertising, analytics, tracking, accounts, or telemetry. Dictation temporarily stores transcript text on your device so the containing app can hand it to the keyboard extension.</p>
 
     <h2>Keyboard and swipe data</h2>
     <p>Tap and swipe input is processed locally on your device. The keyboard does not transmit keystrokes, swipe paths, typed text, document context, or model results to SpeakFree or any third party.</p>
 
     <h2>Full Access and networking</h2>
-    <p>The keyboard works without “Allow Full Access.” Its iOS extension configuration does not request open network access.</p>
+    <p>The keyboard works without “Allow Full Access.” Its iOS extension configuration does not request open network access. The containing app uses the network only when you choose to download the local Parakeet speech model; microphone audio and transcript text are not uploaded.</p>
+
+    <h2>Dictation audio and transcripts</h2>
+    <p>A dictation session starts only after you press Start Dictation, or invoke a user-created Shortcut containing the SpeakFree action, and grant microphone permission. On iOS 18 or later, that Shortcut can run from the Action Button, a Control Center Shortcut control, Back Tap, or Siri; a visible Live Activity provides a session-bound Stop control. Audio is processed locally by the downloaded Parakeet model and is not retained as an audio recording. Current and terminal transcript snapshots are written with iOS file protection to the shared App Group so the keyboard can display, insert, and safely finalize text after being temporarily hidden. The current handoff file expires shortly; terminal recovery snapshots are removed after 24 hours when the app next opens. Cancelling removes unstable words.</p>
 
     <h2>Local resources</h2>
-    <p>The keyboard uses a model and word-frequency vocabulary bundled with the app. Current iOS V1 behavior does not create a personal dictionary or retain typing history.</p>
+    <p>The keyboard keeps a private claim receipt so a session is not inserted twice after the extension restarts. During an active session that receipt contains the dictated text and nearby document context needed to prove which suffix the keyboard owns; after terminal delivery it is reduced to session, revision, and document identifiers. It is replaced by a later claim and removed when the app and keyboard data are deleted. SpeakFree does not create a personal dictionary or retain general typing history.</p>
 
     <h2>Apple services</h2>
     <p>Apple may process App Store downloads, TestFlight diagnostics, or crash reports under Apple’s own terms and privacy policy. SpeakFree does not receive data from those services unless a user separately chooses to share it through Apple.</p>
 
     <h2>Changes</h2>
-    <p>If SpeakFree Keyboard later adds an optional feature that collects or transmits data, this policy and the app’s disclosures will be updated before that feature is released.</p>
+    <p>If SpeakFree Keyboard later adds optional cloud transcription or another feature that collects or transmits data, this policy and the app’s disclosures will be updated before that feature is released.</p>
 
     <h2>Contact</h2>
     <p>Questions or privacy requests may be submitted through the <a href="https://github.com/definitelyreal/speakfree/issues">SpeakFree issue tracker</a>.</p>

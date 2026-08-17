@@ -3,7 +3,7 @@
 import Foundation
 
 /// A cursor-local edit that can be applied to `UITextDocumentProxy` without UIKit in this module.
-public struct TypingEdit: Equatable, Sendable {
+public struct TypingEdit: Codable, Equatable, Sendable {
     public var deleteBackwardCount: Int
     public var insertion: String
 
@@ -24,6 +24,14 @@ public struct TypingEdit: Equatable, Sendable {
         result.append(insertion)
         return result
     }
+}
+
+/// Word-delete distinguishes a host-owned selection from cursor-local text. Calling
+/// `deleteBackward()` once removes the selection; replaying a computed word count would continue
+/// deleting characters before it.
+public enum TypingDeletionAction: Equatable, Sendable {
+    case deleteSelection
+    case edit(TypingEdit)
 }
 
 public enum TypingCapitalizationState: Equatable, Sendable {
@@ -258,6 +266,19 @@ public struct TypingBehaviorEngine: Equatable, Sendable {
         return TypingEdit(
             deleteBackwardCount: Self.deleteWordBackwardCount(before: contextBeforeInput)
         )
+    }
+
+    public mutating func deleteWord(
+        before contextBeforeInput: String,
+        selectedText: String?
+    ) -> TypingDeletionAction {
+        lastReplacement = nil
+        if selectedText?.isEmpty == false {
+            return .deleteSelection
+        }
+        return .edit(TypingEdit(
+            deleteBackwardCount: Self.deleteWordBackwardCount(before: contextBeforeInput)
+        ))
     }
 
     private static let sentenceTerminators: Set<Character> = [".", "!", "?"]

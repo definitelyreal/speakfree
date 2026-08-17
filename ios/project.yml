@@ -8,12 +8,14 @@ options:
 packages:
   ExecuTorch:
     path: Vendor/ExecuTorchPackage
+  FluidAudio:
+    path: Vendor/FluidAudioASRPackage
 settings:
   base:
     SWIFT_VERSION: 5.10
-    DEVELOPMENT_TEAM: SEREW637A4
+    DEVELOPMENT_TEAM: AZ53Y7V4UZ
     CODE_SIGN_STYLE: Automatic
-    CURRENT_PROJECT_VERSION: 1
+    CURRENT_PROJECT_VERSION: 2
     MARKETING_VERSION: 0.1.0
     ENABLE_USER_SCRIPT_SANDBOXING: true
     "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
@@ -23,6 +25,8 @@ targets:
     platform: iOS
     sources:
       - Sources/SpeakFreeKeyboardCore
+      - path: Resources/Core/PrivacyInfo.xcprivacy
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard.core
@@ -38,11 +42,24 @@ targets:
     platform: iOS
     sources:
       - Sources/SpeakFreeKeyboardApp
+      - Sources/SpeakFreeDictationShared
       - path: Resources/Legal/FUTO-Model-Weights-License-1.0.md
         buildPhase: resources
       - path: Resources/Legal/EXECUTORCH-LICENSE.ai.md
         buildPhase: resources
       - path: Resources/Legal/XNNPACK-LICENSE.ai.md
+        buildPhase: resources
+      - path: Resources/Legal/CPUINFO-LICENSE.ai.md
+        buildPhase: resources
+      - path: Resources/Legal/PTHREADPOOL-LICENSE.ai.md
+        buildPhase: resources
+      - path: Resources/Legal/FXDIV-LICENSE.ai.md
+        buildPhase: resources
+      - path: Resources/Legal/KLEIDIAI-LICENSE.ai.md
+        buildPhase: resources
+      - path: Resources/Legal/PARAKEET-MODEL-ATTRIBUTION.ai.md
+        buildPhase: resources
+      - path: Resources/Legal/FLUIDAUDIO-LICENSE.ai.md
         buildPhase: resources
       - path: Resources/Vocabulary/WORD-FREQUENCY-LICENSE.md
         buildPhase: resources
@@ -52,9 +69,22 @@ targets:
       - target: SpeakFreeKeyboardCore
       - target: SpeakFreeKeyboardExtension
         embed: true
+      - target: SpeakFreeDictationWidget
+        embed: true
+      - package: FluidAudio
+        product: FluidAudio
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard
+      configs:
+        Debug:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Development
+          PROVISIONING_PROFILE_SPECIFIER: SpeakFree App Development 20260817 v3
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: SpeakFree App AppStore 20260817 v3
     entitlements:
       path: Config/SpeakFreeKeyboard.entitlements
       properties:
@@ -79,7 +109,46 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSHumanReadableCopyright: "Copyright © 2026 SpeakFree"
+        NSMicrophoneUsageDescription: "SpeakFree uses the microphone only during a dictation session you start. Speech recognition runs on this device."
+        UIBackgroundModes:
+          - audio
+        NSSupportsLiveActivities: true
         ITSAppUsesNonExemptEncryption: false
+  SpeakFreeDictationWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Sources/SpeakFreeDictationWidget
+      - Sources/SpeakFreeDictationShared
+      - path: Resources/Widget/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    entitlements:
+      path: Config/SpeakFreeDictationWidget.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.speakfree.keyboard
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard.dictation-widget
+        APPLICATION_EXTENSION_API_ONLY: true
+        SKIP_INSTALL: true
+      configs:
+        Debug:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Development
+          PROVISIONING_PROFILE_SPECIFIER: SpeakFree Widget Development 20260817 v3
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: SpeakFree Widget AppStore 20260817 v3
+    info:
+      path: Config/SpeakFreeDictationWidget-Info.plist
+      properties:
+        CFBundleDisplayName: SpeakFree Dictation
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
   SpeakFreeKeyboardExtension:
     type: app-extension
     platform: iOS
@@ -113,6 +182,15 @@ targets:
         CLANG_WARN_INCOMPLETE_UMBRELLA: NO
         SKIP_INSTALL: true
         OTHER_LDFLAGS: "$(inherited) -all_load -lc++ -framework Accelerate"
+      configs:
+        Debug:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Development
+          PROVISIONING_PROFILE_SPECIFIER: SpeakFree Keyboard Development 20260817 v3
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: SpeakFree Keyboard AppStore 20260817 v3
     info:
       path: Config/SpeakFreeKeyboardExtension-Info.plist
       properties:
@@ -138,6 +216,16 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard.core-tests
         GENERATE_INFOPLIST_FILE: true
+  SpeakFreeDictationSharedTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/SpeakFreeDictationSharedTests
+      - Sources/SpeakFreeDictationShared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.speakfree.keyboard.dictation-shared-tests
+        GENERATE_INFOPLIST_FILE: true
   SpeakFreeKeyboardInferenceTests:
     type: bundle.unit-test
     platform: iOS
@@ -145,6 +233,8 @@ targets:
       - Tests/SpeakFreeKeyboardInferenceTests
       - Sources/SpeakFreeKeyboardExtension/FUTOSwipeEncoderRuntime.swift
       - path: Resources/Models/honorable_sturgeon/model_fp32.pte
+        buildPhase: resources
+      - path: Resources/Vocabulary/wordfreq-en-25000-log.json
         buildPhase: resources
     dependencies:
       - target: SpeakFreeKeyboardCore
@@ -174,10 +264,12 @@ schemes:
         SpeakFreeKeyboard: all
         SpeakFreeKeyboardCoreTests: [test]
         SpeakFreeKeyboardInferenceTests: [test]
+        SpeakFreeDictationSharedTests: [test]
         SpeakFreeKeyboardUITests: [test]
     test:
       gatherCoverageData: true
       targets:
         - SpeakFreeKeyboardCoreTests
         - SpeakFreeKeyboardInferenceTests
+        - SpeakFreeDictationSharedTests
         - SpeakFreeKeyboardUITests
