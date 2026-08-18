@@ -33,5 +33,25 @@ enum KeyboardPalette {
             : UIColor(red: 0.58, green: 0.61, blue: 0.65, alpha: 1)
     }
 
+    /// SpeakFree's own accent. The relay key is painted with it so it can never be mistaken for
+    /// the system's grey dictation control — tapping it only inserts text SpeakFree already has.
+    static let relayKey = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.79, green: 0.20, blue: 0.24, alpha: 1)
+            : UIColor(red: 0.72, green: 0.13, blue: 0.18, alpha: 1)
+    }
+
+    static let pressedRelayKey = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.88, green: 0.30, blue: 0.34, alpha: 1)
+            : UIColor(red: 0.60, green: 0.09, blue: 0.14, alpha: 1)
+    }
+
+    static let idleRelayKey = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.30, green: 0.22, blue: 0.23, alpha: 1)
+            : UIColor(red: 0.80, green: 0.72, blue: 0.74, alpha: 1)
+    }
+
     static let separator = UIColor.separator.withAlphaComponent(0.45)
 }

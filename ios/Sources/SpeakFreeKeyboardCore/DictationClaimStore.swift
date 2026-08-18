@@ -28,6 +28,7 @@ public struct DictationClaimReceipt: Codable, Equatable, Sendable {
                 appliedRevision: revisionState.appliedRevision,
                 finalizedSegments: [],
                 volatileText: "",
+                insertedText: "",
                 anchorSuffix: "",
                 documentIdentifier: revisionState.documentIdentifier,
                 contextAfterInput: nil
