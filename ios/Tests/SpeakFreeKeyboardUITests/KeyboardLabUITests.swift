@@ -18,6 +18,7 @@ final class KeyboardLabUITests: XCTestCase {
     }
 
     func testKeyboardLabExposesEveryContext() {
+        selectTab("Keyboard")
         reveal(app.textFields["standardTextField"])
         for identifier in [
             "emailTextField", "urlTextField", "numberTextField", "numberPadTextField",
@@ -31,6 +32,7 @@ final class KeyboardLabUITests: XCTestCase {
         let secureField = app.secureTextFields["secureTextField"]
         reveal(secureField)
         XCTAssertTrue(secureField.exists)
+        selectTab("Settings")
         let privacyPolicy = app.descendants(matching: .any)["keyboardPrivacyPolicy"]
         reveal(privacyPolicy)
     }
@@ -80,6 +82,7 @@ final class KeyboardLabUITests: XCTestCase {
     }
 
     func testDeveloperDictationLoggingIsExplicitlyExposed() {
+        selectTab("Settings")
         let toggle = app.switches["developerDictationLogging"]
         reveal(toggle)
         XCTAssertTrue(toggle.exists)
@@ -488,13 +491,13 @@ final class KeyboardLabUITests: XCTestCase {
         app.launch()
 
         let field = focusField("standardTextField")
-        let mic = key("key_dictation", wait: 3)
-        XCTAssertEqual(mic.label, "Insert SpeakFree dictation")
-        mic.tap()
+        let relay = key("key_dictation", wait: 3)
+        XCTAssertEqual(relay.label, "SpeakFree dictation relay")
+        relay.tap()
         // The claimed local hypothesis appears in the host immediately, revises in place, then
         // the independent terminal pass replaces that owned suffix and applies sentence casing.
-        waitForValue("hello wor", in: field, timeout: 4)
-        waitForValue("hello world", in: field, timeout: 4)
+        waitForValue("Hello wor", in: field, timeout: 4)
+        waitForValue("Hello world", in: field, timeout: 4)
         waitForValue("Hello world from SpeakFree", in: field, timeout: 10)
     }
 
@@ -502,6 +505,7 @@ final class KeyboardLabUITests: XCTestCase {
         _ identifier: String,
         allowingSystemKeyboardFallback: Bool = false
     ) -> XCUIElement {
+        selectTab("Keyboard")
         // Some system numeric keyboards have no globe key. Prime the selected input mode from a
         // standard field first so a prior fallback test cannot strand the suite on that keyboard.
         if [
@@ -519,6 +523,12 @@ final class KeyboardLabUITests: XCTestCase {
         field.tap()
         activateSpeakFreeKeyboard(allowingSystemKeyboardFallback: allowingSystemKeyboardFallback)
         return field
+    }
+
+    private func selectTab(_ name: String) {
+        let tab = app.tabBars.buttons[name]
+        XCTAssertTrue(tab.waitForExistence(timeout: 2), "Missing \(name) tab")
+        if tab.isSelected == false { tab.tap() }
     }
 
     private func assertEmpty(

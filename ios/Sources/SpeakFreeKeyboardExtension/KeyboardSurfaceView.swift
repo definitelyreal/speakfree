@@ -93,7 +93,18 @@ final class KeyboardSurfaceView: UIView {
             }()
             let isPressed = item.key == initialKey && gestureMachine.state != .swiping
             let fill: UIColor
-            if isPressed {
+            if item.key == .dictation {
+                // The relay key is branded, not a system control, so it keeps its own fill.
+                if isPressed {
+                    fill = dictationAvailable
+                        ? KeyboardPalette.pressedRelayKey
+                        : KeyboardPalette.pressedSpecialKey
+                } else {
+                    fill = dictationAvailable
+                        ? KeyboardPalette.relayKey
+                        : KeyboardPalette.idleRelayKey
+                }
+            } else if isPressed {
                 fill = isSpecial ? KeyboardPalette.pressedSpecialKey : KeyboardPalette.pressedKey
             } else {
                 fill = isSpecial ? KeyboardPalette.specialKey : KeyboardPalette.key
@@ -468,6 +479,7 @@ final class KeyboardSurfaceView: UIView {
         accessibilityElements = positionedKeys.map { item in
             let element = KeyboardKeyAccessibilityElement(accessibilityContainer: self)
             element.accessibilityLabel = accessibilityLabel(for: item.key)
+            element.accessibilityHint = accessibilityHint(for: item.key)
             element.accessibilityIdentifier = "key_\(accessibilityIdentifier(for: item.key))"
             element.accessibilityTraits = [.keyboardKey]
             if item.key == .shift, uppercase { element.accessibilityTraits.insert(.selected) }
@@ -532,11 +544,20 @@ final class KeyboardSurfaceView: UIView {
         case .shift: capsLock ? "Caps lock" : "Shift"
         case .delete: "Delete"
         case .globe: "Next keyboard"
-        case .dictation: dictationAvailable ? "Insert SpeakFree dictation" : "SpeakFree dictation"
+        case .dictation: "SpeakFree dictation relay"
         case .mode: context.isNumeric ? "Letters" : "Numbers"
         case .space: "Space"
         case .returnKey: returnLabel.capitalized
         }
+    }
+
+    /// The relay never starts recording and never opens another app. Say so out loud, and say
+    /// where dictation actually starts, so the key is not mistaken for a system dictation button.
+    private func accessibilityHint(for key: KeyboardKey) -> String? {
+        guard key == .dictation else { return nil }
+        return dictationAvailable
+            ? "Inserts the SpeakFree transcript into this field. Does not record or open an app."
+            : "Start dictation in the SpeakFree app, or run the Start SpeakFree Dictation shortcut, then tap this key to insert the transcript here."
     }
 
     private func accessibilityIdentifier(for key: KeyboardKey) -> String {
@@ -619,8 +640,12 @@ private final class KeyCaptionView: UIView {
         case .globe:
             showSymbol("globe")
         case .dictation:
-            showSymbol("waveform.circle.fill")
-            imageView.tintColor = dictationAvailable ? .systemRed : .secondaryLabel
+            // Deliberately a wordmark rather than a microphone or waveform glyph: the keyboard
+            // extension can neither record nor open an app, and a mic-shaped key here reads as
+            // (and gets tapped as) the system dictation control.
+            label.text = "SF"
+            label.font = .systemFont(ofSize: 15, weight: .heavy)
+            label.textColor = dictationAvailable ? .white : .secondaryLabel
         }
     }
 

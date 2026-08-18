@@ -273,7 +273,8 @@ final class DictationHandoffTests: XCTestCase {
                     appliedRevision: 1,
                     finalizedSegments: [segment("f", "Hello ")],
                     volatileText: "wor",
-                    anchorSuffix: "Draft: Hello ",
+                    insertedText: "Hello wor",
+                    anchorSuffix: "Draft: ",
                     documentIdentifier: "document-a",
                     contextAfterInput: " suffix"
                 )
@@ -296,6 +297,7 @@ final class DictationHandoffTests: XCTestCase {
                     appliedRevision: 1,
                     finalizedSegments: [],
                     volatileText: "",
+                    insertedText: "",
                     anchorSuffix: "existing",
                     documentIdentifier: "document-a",
                     contextAfterInput: nil
@@ -325,13 +327,15 @@ final class DictationHandoffTests: XCTestCase {
             from: previous
         )
 
+        // "recog" already reads correctly on screen: only "nition" is appended.
         XCTAssertEqual(
             edit(from: decision),
-            TypingEdit(deleteBackwardCount: 5, insertion: "recognition")
+            TypingEdit(deleteBackwardCount: 0, insertion: "nition")
         )
         XCTAssertEqual(state(from: decision)?.volatileText, "recognition")
+        XCTAssertEqual(state(from: decision)?.insertedText, "Speech: recognition")
         XCTAssertEqual(state(from: decision)?.finalizedSegments, [segment("f", "Speech: ")])
-        XCTAssertEqual(state(from: decision)?.anchorSuffix, "Note. Speech: ")
+        XCTAssertEqual(state(from: decision)?.anchorSuffix, "Note. ")
     }
 
     func testRevisionPromotesVolatileSegmentAndAppendsNewVolatileText() throws {
@@ -353,11 +357,12 @@ final class DictationHandoffTests: XCTestCase {
 
         XCTAssertEqual(
             edit(from: decision),
-            TypingEdit(deleteBackwardCount: 3, insertion: "hello wor")
+            TypingEdit(deleteBackwardCount: 0, insertion: "lo wor")
         )
         XCTAssertEqual(state(from: decision)?.finalizedSegments, [segment("s1", "hello ")])
         XCTAssertEqual(state(from: decision)?.volatileText, "wor")
-        XCTAssertEqual(state(from: decision)?.anchorSuffix, "Prefix hello ")
+        XCTAssertEqual(state(from: decision)?.insertedText, "hello wor")
+        XCTAssertEqual(state(from: decision)?.anchorSuffix, "Prefix ")
     }
 
     func testFinalizedTerminalRevisionPromotesTextAndClearsVolatileOwnership() throws {
@@ -377,8 +382,9 @@ final class DictationHandoffTests: XCTestCase {
             from: previous
         )
 
-        XCTAssertEqual(edit(from: decision), TypingEdit(deleteBackwardCount: 3, insertion: "hello"))
+        XCTAssertEqual(edit(from: decision), TypingEdit(deleteBackwardCount: 0, insertion: "lo"))
         XCTAssertEqual(state(from: decision)?.volatileText, "")
+        XCTAssertEqual(state(from: decision)?.insertedText, "hello")
         XCTAssertEqual(state(from: decision)?.finalizedSegments, [segment("s", "hello")])
     }
 
@@ -436,9 +442,10 @@ final class DictationHandoffTests: XCTestCase {
             from: previous
         )
 
+        // "café " is shared; only the emoji tail is deleted, and never mid-cluster.
         XCTAssertEqual(
             edit(from: decision),
-            TypingEdit(deleteBackwardCount: volatile.count, insertion: "café revised")
+            TypingEdit(deleteBackwardCount: 3, insertion: "revised")
         )
         XCTAssertEqual(volatile.count, 8)
     }
@@ -454,7 +461,8 @@ final class DictationHandoffTests: XCTestCase {
         let state = try stateAfterFirst(snapshot, contextBefore: prefix)
 
         XCTAssertEqual(state.anchorSuffix.count, DictationRevisionPlanner.maximumAnchorLength)
-        XCTAssertEqual(state.anchorSuffix, String((prefix + "final").suffix(64)))
+        XCTAssertEqual(state.anchorSuffix, String(prefix.suffix(64)))
+        XCTAssertEqual(state.insertedText, "finaldraft")
     }
 
     func testPlannerRejectsUnavailableContextAndChangedSelection() throws {
@@ -660,6 +668,7 @@ final class DictationHandoffTests: XCTestCase {
         XCTAssertEqual(receipt.revisionState.documentIdentifier, state.documentIdentifier)
         XCTAssertTrue(receipt.revisionState.finalizedSegments.isEmpty)
         XCTAssertEqual(receipt.revisionState.volatileText, "")
+        XCTAssertEqual(receipt.revisionState.insertedText, "")
         XCTAssertEqual(receipt.revisionState.anchorSuffix, "")
         XCTAssertNil(receipt.revisionState.contextAfterInput)
     }

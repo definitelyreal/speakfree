@@ -59,6 +59,7 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
     private var dictationRevisionState: DictationRevisionState?
     private var dictationPollTimer: DispatchSourceTimer?
     private var dictationReadInFlight = false
+    private var dictationPacer = DictationRevisionPacer()
 #if DEBUG
     private var dictationUITestResetToken: String?
 #endif
@@ -66,11 +67,7 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
     override func viewDidLoad() {
         super.viewDidLoad()
         logger.notice("Keyboard controller loaded")
-        // Keep Apple's system Dictation available as a reliable fallback. SpeakFree's red relay
-        // key claims an already-running local session; it cannot itself access the microphone.
-        // Suppressing the system-owned button left users with no dictation at all while the local
-        // models were downloading, unavailable, or recovering from a failure.
-        hasDictationKey = false
+        suppressSystemDictationControl()
         view.backgroundColor = KeyboardPalette.background
         surface.delegate = self
         candidateBar.onSelect = { [weak self] index in self?.acceptCandidate(at: index) }
@@ -102,6 +99,9 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         logger.notice("Keyboard became visible")
+        // Reasserted on every appearance: a system-owned dictation control must never appear
+        // beside SpeakFree's relay key, where a tap would hand the user to another recognizer.
+        suppressSystemDictationControl()
         startDictationPolling()
     }
 
@@ -577,6 +577,16 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
         }
     }
 
+    /// The keyboard extension has no microphone and cannot launch an app, so a system-owned
+    /// dictation control here would hand the user to whatever recognizer iOS routes it to — which
+    /// is exactly the "it opened some other dictation app" report. SpeakFree therefore never
+    /// requests one; its own relay key is a distinctly branded key that only inserts text.
+    private func suppressSystemDictationControl() {
+        // UIKit's name is counterintuitive: YES means the custom keyboard supplies its own
+        // dictation control, so UIKit disables the separate system-owned dictation key.
+        hasDictationKey = true
+    }
+
     private func startDictationPolling() {
         guard dictationPollTimer == nil else { return }
         pollDictationSnapshot()
@@ -632,7 +642,7 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
     private func receiveDictationSnapshot(_ snapshot: DictationSnapshot?) {
         guard let snapshot, isFreshForKeyboardHandoff(snapshot) else {
             dictationSnapshot = nil
-            dictationRevisionState = nil
+            forgetDictationOwnership()
             surface.dictationAvailable = false
             return
         }
@@ -642,185 +652,155 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
         surface.dictationAvailable = true
 
         if sessionChanged {
+            dictationPacer.reset()
             switch restoreClaim(for: snapshot, allowRecoveryEdit: false) {
-            case .none:
-                dictationRevisionState = nil
             case .restored(let state):
                 dictationRevisionState = state
+            case .none, .claimedInAnotherDocument:
+                // A transcript existing is never permission to edit this field. Ownership starts
+                // only where the user tapped the relay key.
+                dictationRevisionState = nil
             case .ambiguous:
                 dictationRevisionState = nil
-                candidateBar.setStatus("Dictation claim needs recovery in its original field")
+                candidateBar.setStatus("SpeakFree relay needs a fresh tap in its original field")
             }
         }
 
         guard let state = dictationRevisionState else {
-            if candidates.isEmpty {
-                let preview = snapshot.renderedText.isEmpty
-                    ? "Dictation listening — tap 🎙 to insert"
-                    : "🎙 " + String(snapshot.renderedText.suffix(48))
-                candidateBar.setStatus(preview)
-            }
+            if candidates.isEmpty { candidateBar.setStatus(relayIdleStatus(for: snapshot)) }
             return
         }
         guard snapshot.revision > state.appliedRevision else { return }
-        if snapshot.phase == .active {
-            applyDictation(snapshot, from: state)
+        // Mid-utterance revisions are paced so the host is not relaid out on every 125 ms poll.
+        // Nothing is lost: `state.appliedRevision` is untouched, so the next poll re-offers the
+        // newest snapshot. Terminal revisions bypass pacing and land immediately.
+        guard dictationPacer.admit(phase: snapshot.phase, at: Date()) == .apply else {
+            if candidates.isEmpty { candidateBar.setStatus(livePreviewStatus(for: snapshot)) }
             return
         }
         applyDictation(snapshot, from: state)
     }
 
+    /// The relay key's only job is to insert the transcript the user can already see. Every path
+    /// out of this method either edits the document or leaves a specific, readable status — a tap
+    /// must never look like a dead key.
     private func claimOrAdvanceDictation() {
         // Some hosts transiently balance the input controller's appearance callbacks while the
         // keyboard remains onscreen. An explicit claim must keep its relay alive through the
         // terminal revision even if an earlier viewWillDisappear stopped the idle poller.
         startDictationPolling()
-        guard traitContext == .standard || traitContext == .search else {
-            candidateBar.setStatus("Dictation inserts into standard text fields")
-            return
-        }
-        guard dictationSnapshotStore != nil, dictationClaimStore != nil else {
-            candidateBar.setStatus("Dictation relay unavailable in this build")
+        let snapshot = dictationSnapshot.flatMap { isFreshForKeyboardHandoff($0) ? $0 : nil }
+        let action = DictationRelayTapPlanner.plan(DictationRelayTapRequest(
+            fieldAcceptsDictation: traitContext == .standard || traitContext == .search,
+            relayStorageAvailable: dictationSnapshotStore != nil && dictationClaimStore != nil,
+            freshSnapshot: snapshot,
+            hasSelection: textDocumentProxy.selectedText?.isEmpty == false,
+            resolveOwnership: { [weak self] snapshot in
+                self?.currentDictationOwnership(for: snapshot) ?? .unverifiable
+            }
+        ))
+        if action == .explainRelayUnavailable {
             logger.error("Dictation claim rejected because relay storage is unavailable")
-            return
         }
-        guard let snapshot = dictationSnapshot, isFreshForKeyboardHandoff(snapshot) else {
-            candidateBar.setStatus("Start Dictation in the SpeakFree app first")
-            return
-        }
-
-        if snapshot.phase == .active {
-            claimDictationPreview(snapshot)
-            return
-        }
-
-        switch restoreClaim(for: snapshot, allowRecoveryEdit: true) {
-        case .restored(let restored):
-            dictationRevisionState = restored
-            guard snapshot.revision > restored.appliedRevision else {
-                candidateBar.setStatus("This dictation is already inserted here")
-                return
-            }
-            applyDictation(snapshot, from: restored)
-        case .ambiguous:
-            dictationRevisionState = nil
-            candidateBar.setStatus("This dictation was claimed elsewhere or its edit is ambiguous")
-        case .none:
-            applyDictation(snapshot, from: nil)
+        switch action {
+        case .insertFresh:
+            guard let snapshot else { return }
+            forgetDictationOwnership()
+            applyDictation(snapshot, from: nil, userInitiated: true)
+        case .revise(let state):
+            guard let snapshot else { return }
+            dictationRevisionState = state
+            applyDictation(snapshot, from: state, userInitiated: true)
+        default:
+            candidateBar.setStatus(action.explanation ?? "SpeakFree")
         }
     }
 
-    /// The EOU recognizer revises its complete hypothesis. Showing that hypothesis in the
-    /// candidate bar gives immediate feedback without repeatedly deleting an ever-growing host
-    /// suffix. The independent batch result is inserted once when the session terminalizes.
-    private func claimDictationPreview(_ snapshot: DictationSnapshot) {
-        let documentID = textDocumentProxy.documentIdentifier.uuidString
+    private func currentDictationOwnership(
+        for snapshot: DictationSnapshot
+    ) -> DictationRelayOwnership {
         switch restoreClaim(for: snapshot, allowRecoveryEdit: true) {
-        case .ambiguous:
-            candidateBar.setStatus("This dictation was claimed elsewhere or needs recovery")
-        case .restored(let state):
-            guard state.documentIdentifier == documentID else {
-                candidateBar.setStatus("This dictation is already claimed in another field")
-                return
-            }
-            if snapshot.revision > state.appliedRevision {
-                applyDictation(snapshot, from: state)
-            } else {
-                candidateBar.setStatus(previewStatus(for: snapshot))
-            }
-        case .none:
-            guard textDocumentProxy.selectedText?.isEmpty != false else {
-                candidateBar.setStatus("Place the cursor in an empty selection and try again")
-                return
-            }
-            // Insert the current local hypothesis immediately. The revision planner owns only
-            // this suffix and safely replaces it as Parakeet improves its result. Previously the
-            // red key merely changed a label and left the host field empty until Stop, which was
-            // indistinguishable from a broken dictation key on a physical device.
-            applyDictation(snapshot, from: nil)
+        case .none: return .unclaimed
+        case .restored(let state): return .claimedHere(state)
+        case .claimedInAnotherDocument: return .claimedInAnotherDocument
+        case .ambiguous: return .unverifiable
         }
     }
 
-    private func previewStatus(for snapshot: DictationSnapshot) -> String {
-        snapshot.renderedText.isEmpty
-            ? "Dictation listening…"
-            : "🎙 " + String(snapshot.renderedText.suffix(48))
+    private func relayIdleStatus(for snapshot: DictationSnapshot) -> String {
+        let preview = formattedDictationPreview(for: snapshot)
+        return preview.isEmpty
+            ? "SpeakFree is listening — tap SF to insert here"
+            : "SF · " + String(preview.suffix(40)) + " — tap SF"
+    }
+
+    private func livePreviewStatus(for snapshot: DictationSnapshot) -> String {
+        let preview = formattedDictationPreview(for: snapshot)
+        return preview.isEmpty
+            ? "SpeakFree is listening…"
+            : "SF · " + String(preview.suffix(48))
+    }
+
+    private func formattedDictationPreview(for snapshot: DictationSnapshot) -> String {
+        DictationTextFormatter.format(
+            snapshot.renderedText,
+            contextBeforeInput: dictationRevisionState?.anchorSuffix
+                ?? textDocumentProxy.documentContextBeforeInput
+                ?? "",
+            capitalization: dictationCapitalizationPolicy
+        )
     }
 
     private func applyDictation(
         _ snapshot: DictationSnapshot,
-        from state: DictationRevisionState?
+        from state: DictationRevisionState?,
+        userInitiated: Bool = false
     ) {
         if developerLoggingEnabled {
             logger.debug(
                 "Applying dictation session=\(snapshot.sessionID.uuidString, privacy: .private(mask: .hash)) revision=\(snapshot.revision, privacy: .public) phase=\(snapshot.phase.rawValue, privacy: .public) text=\(snapshot.renderedText, privacy: .private(mask: .hash))"
             )
         }
+        let isTerminal = snapshot.phase != .active
         do {
-            // First validate a terminal revision against the exact raw history already inserted.
-            // Formatting the snapshot before this proof changes finalized segment text and makes
-            // a valid live claim look like a finalized-history regression.
-            if snapshot.phase != .active, let state {
-                let rawDecision = try DictationRevisionPlanner.plan(
-                    snapshot: snapshot,
-                    in: currentDictationDocumentContext,
-                    from: state
-                )
-                switch rawDecision {
-                case .reject:
-                    dictationRevisionState = nil
-                    candidateBar.setStatus("Cursor changed — tap 🎙 to claim the latest text")
-                    return
-                case .apply(_, let nextState), .advanceWithoutEdit(let nextState):
-                    let previouslyInserted = state.finalizedSegments.map(\.text).joined()
-                        + state.volatileText
-                    let formattingContext = contextBeforeOwnedDictation(
-                        currentContext: textDocumentProxy.documentContextBeforeInput ?? "",
-                        previouslyInserted: previouslyInserted,
-                        state: state
-                    )
-                    let formatted = formattedTerminalSnapshot(
-                        snapshot,
-                        contextBeforeInput: formattingContext
-                    ).renderedText
-                    try applyDictationTransaction(
-                        TypingEdit(
-                            deleteBackwardCount: previouslyInserted.count,
-                            insertion: formatted
-                        ),
-                        nextState: nextState,
-                        isTerminal: true
-                    )
-                    return
-                }
-            }
-
-            let snapshot = formattedTerminalSnapshot(
-                snapshot,
-                contextBeforeInput: textDocumentProxy.documentContextBeforeInput ?? ""
-            )
+            // The planner formats and diffs in one step: sentence casing is decided against the
+            // host-owned prefix captured at claim time, so the very first partial is already
+            // capitalized and every later revision is a minimal, cursor-local edit against the
+            // text the user can see — not a delete-and-retype of the whole hypothesis.
             let decision = try DictationRevisionPlanner.plan(
                 snapshot: snapshot,
                 in: currentDictationDocumentContext,
-                from: state
+                from: state,
+                capitalization: dictationCapitalizationPolicy
             )
             switch decision {
             case .apply(let edit, let nextState):
-                try applyDictationTransaction(
-                    edit,
-                    nextState: nextState,
-                    isTerminal: snapshot.phase != .active
-                )
+                try applyDictationTransaction(edit, nextState: nextState, isTerminal: isTerminal)
             case .advanceWithoutEdit(let nextState):
-                acceptDictationState(nextState, isTerminal: snapshot.phase != .active)
+                acceptDictationState(nextState, isTerminal: isTerminal)
+                if userInitiated, nextState.insertedText.isEmpty {
+                    candidateBar.setStatus("SpeakFree is listening — nothing to insert yet")
+                }
             case .reject:
-                dictationRevisionState = nil
-                candidateBar.setStatus("Cursor changed — tap 🎙 to claim the latest text")
+                forgetDictationOwnership()
+                // A failed ownership proof may mean the user edited or moved within text that
+                // SpeakFree previously inserted. Re-inserting the full transcript here could
+                // duplicate or corrupt it, even after an explicit tap, so fail closed.
+                candidateBar.setStatus(
+                    userInitiated
+                        ? "SpeakFree can't verify the last insert — move the cursor, then tap SF"
+                        : "Cursor moved — tap SF to insert SpeakFree text here"
+                )
             }
         } catch {
-            dictationRevisionState = nil
-            candidateBar.setStatus("Dictation update unavailable")
+            forgetDictationOwnership()
+            candidateBar.setStatus("SpeakFree relay update unavailable")
         }
+    }
+
+    private func forgetDictationOwnership() {
+        dictationRevisionState = nil
+        dictationPacer.reset()
     }
 
     private var developerLoggingEnabled: Bool {
@@ -829,57 +809,16 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
         ) == true
     }
 
-    private func formattedTerminalSnapshot(
-        _ snapshot: DictationSnapshot,
-        contextBeforeInput: String
-    ) -> DictationSnapshot {
-        guard snapshot.phase != .active else { return snapshot }
-        let policy: DictationCapitalizationPolicy
+    /// Casing follows the host field's own text-input traits, and UIKit reports `nil` for fields
+    /// that never customized them — those behave as sentence case, exactly like the system keyboard.
+    private var dictationCapitalizationPolicy: DictationCapitalizationPolicy {
         switch textDocumentProxy.autocapitalizationType ?? .sentences {
-        case .none: policy = .none
-        case .words: policy = .words
-        case .allCharacters: policy = .allCharacters
-        case .sentences: policy = .sentences
-        @unknown default: policy = .sentences
+        case .none: return .none
+        case .words: return .words
+        case .allCharacters: return .allCharacters
+        case .sentences: return .sentences
+        @unknown default: return .sentences
         }
-        let formatted = DictationTextFormatter.format(
-            snapshot.renderedText,
-            contextBeforeInput: contextBeforeInput,
-            capitalization: policy
-        )
-        guard formatted != snapshot.renderedText else { return snapshot }
-        return DictationSnapshot(
-            schemaVersion: snapshot.schemaVersion,
-            sessionID: snapshot.sessionID,
-            revision: snapshot.revision,
-            createdAt: snapshot.createdAt,
-            updatedAt: snapshot.updatedAt,
-            phase: snapshot.phase,
-            finalizedSegments: formatted.isEmpty
-                ? []
-                : [DictationSegment(id: "formatted-final", text: formatted)],
-            volatileSegments: []
-        )
-    }
-
-    /// Returns the host-owned prefix rather than the current context, which still contains the
-    /// lowercase live hypothesis. Feeding that owned suffix to sentence detection made an empty
-    /// field look mid-sentence and preserved a lowercase terminal result.
-    private func contextBeforeOwnedDictation(
-        currentContext: String,
-        previouslyInserted: String,
-        state: DictationRevisionState
-    ) -> String {
-        if currentContext.hasSuffix(previouslyInserted) {
-            return String(currentContext.dropLast(previouslyInserted.count))
-        }
-        let finalized = state.finalizedSegments.map(\.text).joined()
-        if state.anchorSuffix.hasSuffix(finalized) {
-            return String(state.anchorSuffix.dropLast(finalized.count))
-        }
-        // The planner already proved the cursor-local edit safe, but UIKit may truncate long
-        // before-context. Preserve the available anchor instead of inventing a sentence boundary.
-        return state.anchorSuffix
     }
 
     private var currentDictationDocumentContext: DictationDocumentContext {
@@ -894,10 +833,21 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
         )
     }
 
+    private func dictationStatus(for state: DictationRevisionState, isTerminal: Bool) -> String {
+        if isTerminal {
+            return state.insertedText.isEmpty
+                ? "SpeakFree dictation finished"
+                : "Inserted by SpeakFree"
+        }
+        return state.volatileText.isEmpty
+            ? "SpeakFree relay caught up"
+            : "🎙 " + String(state.volatileText.suffix(48))
+    }
+
     private func acceptDictationState(_ state: DictationRevisionState, isTerminal: Bool) {
         dictationRevisionState = state
         candidates = []
-        candidateBar.setStatus(state.volatileText.isEmpty ? "Dictation caught up" : state.volatileText)
+        candidateBar.setStatus(dictationStatus(for: state, isTerminal: isTerminal))
         guard let claimStore = dictationClaimStore else { return }
         let receipt = DictationClaimReceipt(
             revisionState: state,
@@ -928,9 +878,7 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
         apply(edit)
         dictationRevisionState = nextState
         candidates = []
-        candidateBar.setStatus(
-            nextState.volatileText.isEmpty ? "Dictation caught up" : nextState.volatileText
-        )
+        candidateBar.setStatus(dictationStatus(for: nextState, isTerminal: isTerminal))
         // If this atomic write fails, the pending receipt remains and is reconciled next launch.
         try? claimStore.write(DictationClaimReceipt(
             revisionState: nextState,
@@ -952,7 +900,9 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
         guard let receipt else { return .none }
         guard receipt.revisionState.sessionID == snapshot.sessionID else { return .none }
         guard receipt.revisionState.documentIdentifier
-                == textDocumentProxy.documentIdentifier.uuidString else { return .ambiguous }
+                == textDocumentProxy.documentIdentifier.uuidString else {
+            return .claimedInAnotherDocument
+        }
         guard receipt.phase == .pending else { return .restored(receipt.revisionState) }
         guard let edit = receipt.plannedEdit,
               let originalBefore = receipt.contextBeforeInput,
@@ -1054,6 +1004,9 @@ final class KeyboardViewController: UIInputViewController, KeyboardSurfaceViewDe
 private enum DictationClaimRestoreResult {
     case none
     case restored(DictationRevisionState)
+    /// A live receipt for this session belongs to a different host field. Passive polling must not
+    /// touch this field; an explicit relay tap re-anchors the claim here without editing the other.
+    case claimedInAnotherDocument
     case ambiguous
 }
 

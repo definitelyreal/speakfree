@@ -2,7 +2,7 @@
 
 import Foundation
 
-public enum DictationCapitalizationPolicy: Sendable {
+public enum DictationCapitalizationPolicy: String, Equatable, Sendable {
     case none
     case sentences
     case words
