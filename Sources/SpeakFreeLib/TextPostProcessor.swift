@@ -359,7 +359,49 @@ public struct TextPostProcessor {
         }
         result = capitalizeAfterSentenceEnd(result)
 
+        // 9. Lowercase a stranded capital left after a spoken-comma conversion. The
+        // comma-homophone rules above CONSUME a preceding engine period and emit ","
+        // ("tomorrow. Comment. Any chance" → "tomorrow, Any chance"), but the word the
+        // engine capitalized after that period stays capitalized, producing a mid-sentence
+        // capital after a comma ("Great, So when", "opinion, But now", "not sure, What").
+        // `commaBeforeCapitalToPeriod` (step 1) already guarantees no ENGINE ", Capital"
+        // survives to here, so every ", Capital" is one a later substitution introduced.
+        // Only a CLOSED set of discourse/function words — which are never proper nouns — is
+        // lowercased, so a genuine proper noun after a converted comma ("him, Mark was
+        // there") is untouched. Corpus Jul-Aug 2026: ~81 stranded capitals, 0 legit
+        // casualties in the closed set.
+        result = lowercaseStrandedCapitalAfterComma(result)
+
         return result
+    }
+
+    /// Closed set of discourse/function words the engine routinely capitalizes as a
+    /// segment opener but which are never proper nouns — so a capitalized form directly
+    /// after a comma is always a stranded capital from a spoken-comma conversion.
+    private static let strandedCommaWords =
+        "So|But|And|Or|Yeah|Yes|No|Well|Okay|Then|Also|Because|However|What|When|Where"
+        + "|Which|Who|How|You|We|They|It|This|That|If|Any|Now|Here|There|Just"
+
+    /// Lowercase a capitalized function word immediately following ", " (see step 9).
+    private static func lowercaseStrandedCapitalAfterComma(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: ",(\\s+)(\(strandedCommaWords))\\b", options: []) else { return text }
+        let mutable = NSMutableString(string: text)
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        for match in matches.reversed() {
+            let wordRange = match.range(at: 2)
+            guard let swiftRange = Range(wordRange, in: text) else { continue }
+            let word = text[swiftRange]
+            // "It"/"If" double as titles (the film "It", the poem "If"). Used as an appositive
+            // title they are wrapped by a following comma ("my favorite film, It, still scares
+            // me"); a discourse continuation ("..., It was") is never immediately followed by a
+            // comma. Skip the lowercase only for that title signature — keeps the common real
+            // correction, drops the rare proper-noun casualty (VERIFY 2026-08-18).
+            if word == "It" || word == "If", text[swiftRange.upperBound...].first == "," { continue }
+            let lowered = word.lowercased()
+            mutable.replaceCharacters(in: wordRange, with: lowered)
+        }
+        return mutable as String
     }
 
     /// Replace a trailing comma (ignoring trailing whitespace) with a period.
@@ -521,7 +563,12 @@ public struct TextPostProcessor {
         // (?<![A-Z]) — skip when the dot follows a single uppercase letter, which is
         //            typically an acronym end ("U.S.A. next" / "Subs.S.A. essay").
         //            Capitalizing would turn the next common word into a fake sentence.
-        guard let regex = try? NSRegularExpression(pattern: "(?<!\\.)(?<![A-Z])([.!?])\\s+(\\w)", options: []) else { return text }
+        // (?<![aApP]\.[mM]) — skip the trailing dot of a meridiem abbreviation ("5 p.m.
+        //            today" must not become "5 p.m. Today"). In dictation "p.m."/"a.m." is
+        //            almost always mid-sentence (a time), so the following word continues
+        //            the sentence. Accepted tradeoff: a genuine sentence break right after
+        //            "…p.m." is left lowercase — far rarer than the continuation.
+        guard let regex = try? NSRegularExpression(pattern: "(?<!\\.)(?<![A-Z])(?<![aApP]\\.[mM])([.!?])\\s+(\\w)", options: []) else { return text }
         let mutable = NSMutableString(string: text)
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
         // Process in reverse so ranges stay valid
@@ -859,11 +906,13 @@ public struct TextPostProcessor {
         var result = text
         // (?<!\d) skips a period/comma between digits ("4.30", "30,000") so decimals
         // and thousands separators aren't split into "4. 30".
-        // (?![A-Z]\.) skips when the next char is an uppercase letter that's itself
-        // followed by another dot — i.e. a single-letter acronym chain ("U.S.A.",
-        // "Subs.S.A.I"). Keeps acronyms compact instead of shattering them into
-        // "U. S. A.".
-        guard let regex = try? NSRegularExpression(pattern: "(?<!\\d)([.,?!:;])(?![A-Z]\\.)(\\w)", options: []) else { return result }
+        // (?![A-Za-z]\.) skips when the next char is a letter that's itself followed by
+        // another dot — a single-letter abbreviation chain. Case-insensitive so it covers
+        // BOTH uppercase acronyms ("U.S.A.", "Subs.S.A.I") and lowercase abbreviations
+        // ("p.m.", "a.m.", "e.g.", "i.e."). Before this it was `[A-Z]` only, so "5 p.m."
+        // was shattered into "5 p. m." and then capitalized to "p. M." (corpus Jul-Aug 2026:
+        // 17 of 20 meridiem times corrupted). Keeps abbreviations compact.
+        guard let regex = try? NSRegularExpression(pattern: "(?<!\\d)([.,?!:;])(?![A-Za-z]\\.)(\\w)", options: []) else { return result }
         result = regex.stringByReplacingMatches(
             in: result,
             range: NSRange(result.startIndex..., in: result),

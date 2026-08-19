@@ -357,7 +357,7 @@ public class Transcriber {
         // Try engine first if we have samples
         if let samples = samples, !samples.isEmpty {
             do {
-                result = try await transcribeWithEngine(samples: samples, prompt: prompt)
+                result = try await transcribeWithEngineRecoveringEmpty(samples: samples, prompt: prompt)
             } catch {
                 // CLI fallback is whisper-only; other engines rethrow.
                 if engine.engineID == "whisper" {
@@ -403,6 +403,39 @@ public class Transcriber {
             return ""
         }
         return cleaned
+    }
+
+    /// Retry budget when the in-process engine returns EMPTY text on audio that carries genuine
+    /// voiced speech. FluidAudio's Parakeet ANE decode intermittently yields an empty result on
+    /// real dictation: the recordings corpus (2026-08) holds 250+ empty-drops, and re-running the
+    /// exact same audio recovers coherent multi-second sentences. Proven on rec-2026-07-14-115522,
+    /// an 11.7 s take dropped at record time that transcribes in full on replay ("Another thing
+    /// that can happen is sometimes we will push a meeting..."), with whisper corroborating real
+    /// speech in that and other dropped takes. An empty return is otherwise silently discarded, so
+    /// a bounded, voiced-speech-gated retry only ever recovers loss: worst case it re-returns empty
+    /// and the take is dropped exactly as before. Each retry gets a fresh decoder state (the engine
+    /// builds one per call), which is what lets a transient bad decode clear.
+    static let maxEmptyRetriesOnVoicedSpeech = 2
+
+    /// Wrap the in-process engine call: on an EMPTY result over audio that contains voiced human
+    /// speech, retry up to `maxEmptyRetriesOnVoicedSpeech` times. Gated on `hasVoicedSpeech` so an
+    /// accidental silent key-tap (no harmonic pitch structure) still fast-paths to empty with no
+    /// added latency. Non-empty results and true-silence returns are untouched.
+    private func transcribeWithEngineRecoveringEmpty(samples: [Float], prompt: String?) async throws -> String {
+        var text = try await transcribeWithEngine(samples: samples, prompt: prompt)
+        guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              Self.audioEvidence(in: samples).hasVoicedSpeech else { return text }
+        for attempt in 1...Self.maxEmptyRetriesOnVoicedSpeech {
+            DiagnosticLogger.shared.log(
+                "Transcriber: engine returned empty on voiced speech, retry \(attempt)/\(Self.maxEmptyRetriesOnVoicedSpeech)")
+            text = try await transcribeWithEngine(samples: samples, prompt: prompt)
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                DiagnosticLogger.shared.log(
+                    "Transcriber: empty-result retry \(attempt) recovered \(text.count) chars")
+                break
+            }
+        }
+        return text
     }
 
     private func transcribeWithEngine(samples: [Float], prompt: String?) async throws -> String {

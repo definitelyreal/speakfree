@@ -70,7 +70,15 @@ class TextInserter {
     static func shouldPrependSpace(contextBefore text: String?) -> Bool {
         guard let text = text, !text.isEmpty else { return false }
         let lastChar = text.last!
-        return !lastChar.isWhitespace && !lastChar.isNewline
+        if lastChar.isWhitespace || lastChar.isNewline { return false }
+        // A boundary that legitimately carries no space (open brackets, quotes, hyphen/slash
+        // compounds, @#$ etc.) must NOT get a space prepended — otherwise dictating right after
+        // "(" or a hyphen produced "( word" / "word- next". This mirrors `spacingDiagnosis`'s
+        // `noSpaceExpectedAfter` so the DECISION and the DIAGNOSIS share one definition of
+        // "no space belongs here" (2026-08-18: the two disagreed — every punct-preceded seam in
+        // the corpus logs got a space prepended, then diagnosed `ok`, hiding the defect).
+        if noSpaceExpectedAfter.contains(lastChar) { return false }
+        return true
     }
 
     /// What actually happened at the seam between the text already in the field and the text
@@ -94,10 +102,13 @@ class TextInserter {
     }
 
     /// Characters after which no space belongs, so an immediately-following word is correct
-    /// rather than a defect. Open brackets and quotes attach to what follows; a hyphen or slash
-    /// is a compound join.
+    /// rather than a defect. Open brackets and curly OPEN quotes attach to what follows; a hyphen
+    /// or slash is a compound join. Straight `"` and `'` are deliberately EXCLUDED: one character
+    /// serves as both open and close, and closers cluster right after sentence-final punctuation
+    /// (`."`, `dogs'`) where the next dictation is a new sentence that needs the space — so we
+    /// keep the space there rather than join `."Then` / `dogs'bones` (VERIFY 2026-08-18).
     private static let noSpaceExpectedAfter: Set<Character> = [
-        "(", "[", "{", "<", "\"", "'", "“", "‘", "-", "–", "—", "/", "\\", "@", "#", "$", "*", "_", "~", "`",
+        "(", "[", "{", "<", "“", "‘", "-", "–", "—", "/", "\\", "@", "#", "$", "*", "_", "~", "`",
     ]
 
     /// Pure seam verdict. `insertText` is the FINAL string handed to the inserter, i.e. the
@@ -201,7 +212,10 @@ class TextInserter {
             // range.location is a UTF-16 offset — convert via the utf16 view (AX-E).
             guard let before = TextInserter.textBeforeUTF16Offset(fullText, range.location),
                   let charBefore = before.last else { semaphore.signal(); return }
+            // Same no-space-boundary rule as the precomputed `shouldPrependSpace(contextBefore:)`
+            // path, so the live-AX fallback and the off-main precompute agree (2026-08-18).
             result = !charBefore.isWhitespace && !charBefore.isNewline
+                && !TextInserter.noSpaceExpectedAfter.contains(charBefore)
             semaphore.signal()
         }
 
