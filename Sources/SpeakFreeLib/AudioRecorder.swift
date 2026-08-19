@@ -157,6 +157,11 @@ class AudioRecorder {
     /// finding-2 comment at the bind site). Reset on any successful or pin-free build.
     private var consecutiveBindFailures = 0
     static let bindRetryCap = 3
+    /// Delay before re-attempting a pin bind that returned `kAudioHardwareIllegalOperationError`
+    /// ('nope'). That failure is transient and clusters immediately after wake-from-sleep, when
+    /// coreaudiod is still re-initializing the device and rejects the CurrentDevice set. Give it
+    /// room to settle rather than living on the fallback device for the rest of the session.
+    static let bindRetryDelaySeconds: TimeInterval = 2.0
 
     // MARK: - Effective capture device (default-pin rule, 2026-08-12)
 
@@ -758,6 +763,31 @@ class AudioRecorder {
         scheduleReinstallDebounced()
     }
 
+    /// Bounded, delayed rebuild after a pin bind that failed while the device was present
+    /// (`kAudioHardwareIllegalOperationError`). Unlike `scheduleFormatRetry`, this can't wait
+    /// for a device-list event: a post-wake bind failure produces no such event, so without
+    /// this the engine would capture from the fallback device (possibly AirPods) for the rest
+    /// of the session. Bounded by `bindRetryCap` and self-cancelling — any later successful
+    /// bind resets `consecutiveBindFailures`, and the fire-time guard no-ops if the pin is
+    /// already bound or was cleared. Runs on main (startEngine's thread); reinstallTap's own
+    /// `isRebuilding` guard is clear by the time this fires.
+    private func scheduleBindRetry() {
+        guard consecutiveBindFailures <= Self.bindRetryCap else {
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: pin bind still failing after \(Self.bindRetryCap) retries — staying on system default")
+            return
+        }
+        let attempt = consecutiveBindFailures
+        DiagnosticLogger.shared.log(
+            "AudioRecorder: pin bind failed (coreaudiod not ready) — scheduling rebuild retry \(attempt) in \(Self.bindRetryDelaySeconds)s")
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.bindRetryDelaySeconds) { [weak self] in
+            guard let self = self else { return }
+            // A later build may already have bound the pin, or the pin was cleared — nothing to do.
+            guard self.effectivePinNow() != nil, self.boundDeviceID == nil else { return }
+            self.reinstallTap()
+        }
+    }
+
     /// Internal: create and start the audio engine regardless of preBufferEnabled.
     private func startEngine() {
         guard Thread.isMainThread else {
@@ -783,6 +813,10 @@ class AudioRecorder {
         // STARTS: a binding retained for an engine that never came up would compare equal
         // on the next device-list change and suppress the rebuild that would fix it.
         var boundDevice: AudioInputDevice?
+        // True when the pinned device WAS present but the CurrentDevice set failed (as
+        // opposed to the device being absent). Only this case warrants the timed rebuild
+        // retry — an absent device is already recovered by the device-list listener.
+        var pinBindFailed = false
         if let uid = effectivePin {
             if let dev = AudioDeviceCatalog.cachedDevice(withUID: uid), let unit = inputNode.audioUnit {
                 var deviceID = dev.id
@@ -796,7 +830,7 @@ class AudioRecorder {
                 // retained: nothing of ours is bound to it, and the next device-list
                 // change should try again rather than compare against a bind that never
                 // happened.
-                if status == noErr { boundDevice = dev }
+                if status == noErr { boundDevice = dev } else { pinBindFailed = true }
             } else {
                 DiagnosticLogger.shared.log(
                     "AudioRecorder: pinned device \(uid) not present — using system default")
@@ -897,6 +931,12 @@ class AudioRecorder {
                 consecutiveBindFailures = 0
             } else {
                 consecutiveBindFailures += 1
+                // A present-but-unbindable pin ('nope', transient post-wake) leaves the
+                // engine on the system default — which after wake may be AirPods, the exact
+                // silent wrong-mic capture the built-in pin exists to prevent. Retry the
+                // rebuild once coreaudiod has settled; an absent device is left to the
+                // device-list listener instead.
+                if pinBindFailed { scheduleBindRetry() }
             }
             if let dev = boundDevice { startBoundDeviceWatch(deviceID: dev.id) }
             print("AudioRecorder: audio engine started")

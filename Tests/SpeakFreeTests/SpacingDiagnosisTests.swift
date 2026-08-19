@@ -50,12 +50,22 @@ final class SpacingDiagnosisTests: XCTestCase {
         XCTAssertEqual(diagnose("Send this ", "tomorrow"), .ok)
     }
 
-    /// Opening brackets and quotes attach to what follows — not a defect.
+    /// Opening brackets and curly-open quotes attach to what follows — not a defect. Straight
+    /// `"`/`'` are excluded: one glyph is both open and close, and closers (`."`, `dogs'`) cluster
+    /// after sentence-final punctuation where a space belongs, so they diagnose as missingSpace
+    /// rather than ok (VERIFY 2026-08-18).
     func test_ok_afterOpeningBracketOrQuote() {
-        for opener in ["(", "[", "\"", "“", "-", "/"] {
+        for opener in ["(", "[", "“", "-", "/"] {
             XCTAssertEqual(diagnose("text \(opener)", "inner"), .ok,
                            "no space belongs after \(opener)")
         }
+    }
+
+    /// Straight quote / apostrophe are ambiguous open-vs-close; default to expecting a space so
+    /// closing-quote seams (`"stop."` + `Then`) do not join.
+    func test_missingSpace_afterStraightQuoteOrApostrophe() {
+        XCTAssertEqual(diagnose("text \"", "inner"), .missingSpace)
+        XCTAssertEqual(diagnose("dogs'", "bones"), .missingSpace)
     }
 
     // MARK: - Blind is its own verdict, never silently "ok"

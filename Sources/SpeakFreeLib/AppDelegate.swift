@@ -1299,7 +1299,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             // Generation-guarded: a stale capture from a previous recording is dropped.
-            DiagnosticLogger.shared.log("captureFocusedElement: context source=\(contextSource) len=\(capturedContext?.count ?? 0)")
+            // When source=none, say WHY the live read produced nothing: an AX-opaque /
+            // Chromium-class app has its live read deliberately skipped (context can only
+            // come from the remembered insertion tail), which is a very different state from
+            // a native app whose AX read was attempted and came back empty. Without this
+            // distinction the "source=none len=0" line reads as "AX is failing" when the read
+            // never ran (2026-08-18 bug hunt was misdirected by exactly this ambiguity).
+            let noneReason = contextSource == "none"
+                ? (avoidLiveWindowContext
+                    ? " (liveAX skipped: AX-opaque/Chromium-class \(frontBundle ?? "?"))"
+                    : " (liveAX attempted, empty)")
+                : ""
+            DiagnosticLogger.shared.log("captureFocusedElement: context source=\(contextSource) len=\(capturedContext?.count ?? 0)\(noneReason)")
             self?.focusCapture.publish((capturedElement, capturedContext), token: token)
         }
     }
