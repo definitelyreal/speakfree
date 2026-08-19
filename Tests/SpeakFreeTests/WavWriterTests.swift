@@ -121,4 +121,70 @@ final class WavWriterTests: XCTestCase {
         let f = try AVAudioFile(forReading: orphan)
         XCTAssertEqual(Double(f.length), 4.0 * 16_000, accuracy: 2)
     }
+
+    // MARK: - Archive recovery from memory (2026-08-14)
+    // The empty-recording bug: crash-safety streaming write skipped, wav left header-only while
+    // the in-memory buffer held real audio. stopRecording rewrites from memory as a backstop.
+
+    func test_recoverArchive_rewritesHeaderOnlyWavFromMemory() throws {
+        let url = dir.appendingPathComponent("empty.wav")
+        // Header-only: open + close with no append, exactly the observed 44-byte failure.
+        let w = try WavWriter(url: url)
+        w.close()
+        let before = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        XCTAssertLessThanOrEqual(before, 100, "precondition: header-only file")
+
+        let samples = sine(2.0)   // 32000 samples of real audio
+        AudioRecorder.recoverArchiveIfHeaderOnly(url: url, samples: samples)
+
+        let f = try AVAudioFile(forReading: url)
+        XCTAssertEqual(Double(f.length), 2.0 * 16_000, accuracy: 4,
+                       "wav must be rewritten to hold the in-memory audio")
+    }
+
+    func test_recoverArchive_leavesAValidRecordingUntouched() throws {
+        let url = dir.appendingPathComponent("full.wav")
+        let samples = sine(2.0)
+        let w = try WavWriter(url: url)
+        try w.append(samples)
+        w.close()
+        let before = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+
+        AudioRecorder.recoverArchiveIfHeaderOnly(url: url, samples: samples)
+
+        let after = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        XCTAssertEqual(after, before, "a valid, full recording must never be rewritten")
+    }
+
+    func test_recoverArchive_skipsSubSecondTaps() throws {
+        let url = dir.appendingPathComponent("tap.wav")
+        let w = try WavWriter(url: url)
+        w.close()
+        let before = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+
+        AudioRecorder.recoverArchiveIfHeaderOnly(url: url, samples: sine(0.4))  // < 1s
+
+        let after = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        XCTAssertEqual(after, before, "sub-second taps are not worth recovering and must be skipped")
+    }
+
+
+    /// Adversarial review F3/F7: a recording that lost only part of its audio (real PCM on disk,
+    /// but short) must NOT be rewritten from memory — the guard is header-only, not "half size" —
+    /// because a rewrite that failed mid-way (disk full) could otherwise destroy the partial audio.
+    func test_recoverArchive_doesNotClobberPartiallyWrittenAudio() throws {
+        let url = dir.appendingPathComponent("partial.wav")
+        let w = try WavWriter(url: url)
+        try w.append(sine(1.0))   // 16000 samples of REAL audio already on disk
+        w.close()
+        let before = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        XCTAssertGreaterThan(before, 64, "precondition: real audio present, not header-only")
+
+        // Memory claims a longer take, but the on-disk file holds real audio and must be left alone.
+        AudioRecorder.recoverArchiveIfHeaderOnly(url: url, samples: sine(2.0))
+
+        let after = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        XCTAssertEqual(after, before, "a partially-written recording must never be clobbered")
+    }
+
 }
