@@ -273,6 +273,15 @@ final class AudioResilienceTests: XCTestCase {
             deviceIsBluetooth: true))
     }
 
+    func testBluetoothInputRateAboveNominalIsStillStale() {
+        // The other direction IS the stale trap even on Bluetooth: 2026-08-19 17:56 EDT,
+        // a unit stuck on 48 kHz against a 24 kHz AirPods nominal captured 16 s of
+        // structurally garbled audio (Parakeet and whisper both returned nothing).
+        XCTAssertFalse(AudioRecorder.isCaptureFormatUsable(
+            engineRate: 48000, engineChannels: 1, deviceRate: 24000, deviceChannels: 1,
+            deviceIsBluetooth: true))
+    }
+
     func testBluetoothZeroFormatIsStillRejected() {
         // The SCO-negotiation race (zero rate/channels) must stay fatal even on BT —
         // installTap on it throws and libggml's terminate hook turns that into SIGABRT.
