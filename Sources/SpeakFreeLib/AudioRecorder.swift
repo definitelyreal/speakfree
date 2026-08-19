@@ -307,19 +307,25 @@ class AudioRecorder {
     /// tap installed with it never receives a frame (the 2026-07-22 dead-air outage).
     /// Hardware values are optional because an unreadable device must not veto capture.
     ///
-    /// The rate cross-check is skipped for Bluetooth devices: their nominal rate reflects
-    /// the OUTPUT (A2DP) side, while the mic path legitimately runs lower (AirPods Pro
-    /// deliver 24 kHz input against a 48 kHz nominal). Treating that split as stale made
+    /// The rate cross-check is DIRECTIONAL for Bluetooth devices: the nominal rate can
+    /// reflect the OUTPUT (A2DP) side while the mic path legitimately runs lower (AirPods
+    /// Pro deliver 24 kHz input against a 48 kHz nominal — treating that as stale made
     /// every pin-to-AirPods start fail with "the microphone couldn't be used" until the
-    /// retry budget ran out (2026-08-19 airplane logs, 14:19 and 15:35 EDT).
+    /// retry budget ran out; 2026-08-19 airplane logs, 14:19 and 15:35 EDT). But an engine
+    /// rate ABOVE the device's nominal is still the stale trap even on Bluetooth: the same
+    /// evening (17:56 EDT) a unit stuck on 48 kHz against a 24 kHz AirPods nominal captured
+    /// 16 s of structurally garbled audio that transcribed as nothing.
     static func isCaptureFormatUsable(
         engineRate: Double, engineChannels: UInt32, deviceRate: Double?, deviceChannels: Int?,
         deviceIsBluetooth: Bool = false
     ) -> Bool {
         guard engineRate > 0, engineChannels > 0 else { return false }
-        if !deviceIsBluetooth,
-           let deviceRate = deviceRate, deviceRate > 0, abs(engineRate - deviceRate) > 1.0 {
-            return false
+        if let deviceRate = deviceRate, deviceRate > 0 {
+            if deviceIsBluetooth {
+                if engineRate > deviceRate + 1.0 { return false }
+            } else if abs(engineRate - deviceRate) > 1.0 {
+                return false
+            }
         }
         if let deviceChannels = deviceChannels, deviceChannels > 0,
            Int(engineChannels) > deviceChannels {
