@@ -71,9 +71,41 @@ class WhisperEngine: TranscriptionEngine {
         if let e = thrownError { throw e }
     }
 
+    /// ggml ≥ 0.10 (Homebrew, dev builds) ships its compute backends (CPU/Metal/BLAS) as
+    /// runtime-loaded plugins in libexec/*.so; unless `ggml_backend_load_all()` runs first,
+    /// the backend registry is EMPTY and `whisper_init_*` hard-aborts inside
+    /// `GGML_ASSERT(device)` — the 2026-08-19 crash loop (two SIGABRTs at model load).
+    /// Resolved via dlsym so builds against the vendored ggml 0.9.x release dylibs (which
+    /// register their backends statically and may lack the symbol) need no link-time change.
+    /// Returns false only when the registry is introspectable AND provably empty.
+    static func computeBackendsAvailable() -> Bool {
+        struct Once {
+            static let result: Bool = {
+                let main = dlopen(nil, RTLD_NOW)
+                if let sym = dlsym(main, "ggml_backend_load_all") {
+                    unsafeBitCast(sym, to: (@convention(c) () -> Void).self)()
+                }
+                if let sym = dlsym(main, "ggml_backend_dev_count") {
+                    return unsafeBitCast(sym, to: (@convention(c) () -> Int).self)() > 0
+                }
+                return true  // registry not introspectable — static-backend build
+            }()
+        }
+        return Once.result
+    }
+
     private func loadModelLocked(path: String) throws {
         // Don't reload if same model is already loaded
         if let loaded = loadedModelPath, loaded == path, context != nil { return }
+
+        // A guarded throw here surfaces as a failed dictation; letting whisper_init see an
+        // empty backend registry is a process abort (and a crash loop while the engine
+        // setting stays "whisper").
+        guard Self.computeBackendsAvailable() else {
+            DiagnosticLogger.shared.log(
+                "WhisperEngine: no ggml compute backends available — refusing to init (would abort)")
+            throw WhisperEngineError.noComputeBackends
+        }
 
         // Unload any existing model first
         if context != nil { unloadModelLocked() }
@@ -655,6 +687,7 @@ enum WhisperEngineError: LocalizedError {
     case modelLoadFailed(String)
     case modelNotLoaded
     case transcriptionFailed
+    case noComputeBackends
 
     var errorDescription: String? {
         switch self {
@@ -664,6 +697,8 @@ enum WhisperEngineError: LocalizedError {
             return "No model loaded. Call loadModel() first."
         case .transcriptionFailed:
             return "Transcription failed"
+        case .noComputeBackends:
+            return "Whisper's compute backends (CPU/Metal) failed to load"
         }
     }
 }
