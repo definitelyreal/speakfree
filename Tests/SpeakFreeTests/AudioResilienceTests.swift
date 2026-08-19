@@ -259,6 +259,40 @@ final class AudioResilienceTests: XCTestCase {
             engineRate: 24000, engineChannels: 1, deviceRate: 48000, deviceChannels: 1))
     }
 
+    func testBluetoothInputRateBelowNominalIsUsable() {
+        // AirPods Pro mic runs at 24 kHz while the device's nominal rate (the A2DP
+        // output side) reads 48 kHz. Rejecting that split as "stale" made every
+        // pin-to-AirPods start fail (2026-08-19 airplane logs: "the microphone
+        // couldn't be used", recovering only after the retry budget ran out).
+        XCTAssertTrue(AudioRecorder.isCaptureFormatUsable(
+            engineRate: 24000, engineChannels: 1, deviceRate: 48000, deviceChannels: 1,
+            deviceIsBluetooth: true))
+        // SCO narrowband/wideband variants are equally legitimate on BT.
+        XCTAssertTrue(AudioRecorder.isCaptureFormatUsable(
+            engineRate: 16000, engineChannels: 1, deviceRate: 48000, deviceChannels: 1,
+            deviceIsBluetooth: true))
+    }
+
+    func testBluetoothZeroFormatIsStillRejected() {
+        // The SCO-negotiation race (zero rate/channels) must stay fatal even on BT —
+        // installTap on it throws and libggml's terminate hook turns that into SIGABRT.
+        XCTAssertFalse(AudioRecorder.isCaptureFormatUsable(
+            engineRate: 0, engineChannels: 1, deviceRate: 48000, deviceChannels: 1,
+            deviceIsBluetooth: true))
+        XCTAssertFalse(AudioRecorder.isCaptureFormatUsable(
+            engineRate: 24000, engineChannels: 0, deviceRate: 48000, deviceChannels: 1,
+            deviceIsBluetooth: true))
+    }
+
+    func testNonBluetoothStaleFormatIsStillRejected() {
+        // The original 2026-07-22 dead-air trap: built-in mic re-bound but the unit
+        // still answers with the previous AirPods 24 kHz description. The Bluetooth
+        // exemption must not weaken this.
+        XCTAssertFalse(AudioRecorder.isCaptureFormatUsable(
+            engineRate: 24000, engineChannels: 1, deviceRate: 48000, deviceChannels: 1,
+            deviceIsBluetooth: false))
+    }
+
     func testEngineAskingForMoreChannelsThanTheDeviceHasIsRejected() {
         XCTAssertFalse(AudioRecorder.isCaptureFormatUsable(
             engineRate: 48000, engineChannels: 2, deviceRate: 48000, deviceChannels: 1))

@@ -306,11 +306,19 @@ class AudioRecorder {
     /// the input unit can keep reporting the PREVIOUS device's stream description, and a
     /// tap installed with it never receives a frame (the 2026-07-22 dead-air outage).
     /// Hardware values are optional because an unreadable device must not veto capture.
+    ///
+    /// The rate cross-check is skipped for Bluetooth devices: their nominal rate reflects
+    /// the OUTPUT (A2DP) side, while the mic path legitimately runs lower (AirPods Pro
+    /// deliver 24 kHz input against a 48 kHz nominal). Treating that split as stale made
+    /// every pin-to-AirPods start fail with "the microphone couldn't be used" until the
+    /// retry budget ran out (2026-08-19 airplane logs, 14:19 and 15:35 EDT).
     static func isCaptureFormatUsable(
-        engineRate: Double, engineChannels: UInt32, deviceRate: Double?, deviceChannels: Int?
+        engineRate: Double, engineChannels: UInt32, deviceRate: Double?, deviceChannels: Int?,
+        deviceIsBluetooth: Bool = false
     ) -> Bool {
         guard engineRate > 0, engineChannels > 0 else { return false }
-        if let deviceRate = deviceRate, deviceRate > 0, abs(engineRate - deviceRate) > 1.0 {
+        if !deviceIsBluetooth,
+           let deviceRate = deviceRate, deviceRate > 0, abs(engineRate - deviceRate) > 1.0 {
             return false
         }
         if let deviceChannels = deviceChannels, deviceChannels > 0,
@@ -867,7 +875,8 @@ class AudioRecorder {
         if let dev = boundDevice,
            !Self.isCaptureFormatUsable(
                 engineRate: inputFormat.sampleRate, engineChannels: inputFormat.channelCount,
-                deviceRate: dev.nominalSampleRate, deviceChannels: dev.inputChannels) {
+                deviceRate: dev.nominalSampleRate, deviceChannels: dev.inputChannels,
+                deviceIsBluetooth: dev.isBluetooth) {
             let detail = "input format \(inputFormat.sampleRate)Hz/\(inputFormat.channelCount)ch"
                 + " disagrees with \(dev.name) hardware"
                 + " (\(dev.nominalSampleRate)Hz/\(dev.inputChannels)ch) — stale unit format"
