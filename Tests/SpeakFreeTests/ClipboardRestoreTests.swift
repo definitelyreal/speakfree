@@ -134,4 +134,63 @@ final class ClipboardRestoreTests: XCTestCase {
         XCTAssertEqual(pb.string(forType: .string), "USER-ORIGINAL-CLIPBOARD",
                        "after restore, the user's original clipboard content must be back")
     }
+
+    // MARK: - Backstop-only restore redesign (2026-08-14, post adversarial review)
+
+    func test_backstopDelay_electronAndRemoteAreLong_nativeIsShort() {
+        // Electron/remote must be long enough that a slow app reads the paste BEFORE restore.
+        // (Not asserting an empirical consume latency — that is validated by the paste logs, not
+        // by a constant compared to itself.)
+        XCTAssertEqual(TextInserter.restoreBackstopDelay(route: .electron),
+                       TextInserter.electronClipboardRestoreDelay)
+        XCTAssertEqual(TextInserter.restoreBackstopDelay(route: .remote),
+                       TextInserter.remoteClipboardRestoreDelay)
+        XCTAssertEqual(TextInserter.restoreBackstopDelay(route: .native),
+                       TextInserter.localClipboardRestoreDelay)
+        XCTAssertGreaterThan(TextInserter.restoreBackstopDelay(route: .electron),
+                             TextInserter.restoreBackstopDelay(route: .native))
+    }
+
+    /// Saved-original staleness (adversarial review F2): reuse the pending snapshot ONLY while our
+    /// own write is still live. If the user copied something (changeCount moved) — no Command press
+    /// needed — the snapshot is stale and must be re-taken so their fresh copy is what we restore.
+    func test_shouldReusePendingSnapshot_onlyWhenOurWriteIsStillLive() {
+        // No pending restore → always snapshot fresh.
+        XCTAssertFalse(TextInserter.shouldReusePendingSnapshot(
+            pendingWrittenChangeCount: nil, currentChangeCount: 5))
+        // Pending and clipboard unchanged since our write → reuse the true original.
+        XCTAssertTrue(TextInserter.shouldReusePendingSnapshot(
+            pendingWrittenChangeCount: 7, currentChangeCount: 7))
+        // Pending but the user copied since (changeCount advanced) → snapshot is stale, re-take.
+        XCTAssertFalse(TextInserter.shouldReusePendingSnapshot(
+            pendingWrittenChangeCount: 7, currentChangeCount: 9),
+            "a user copy between dictations must not be clobbered by a stale snapshot")
+    }
+
+    /// Real save→overwrite→restore round-trip on a scratch pasteboard, exercising the restore
+    /// decision the backstop uses (no timers): restore fires only when our write is still live.
+    func test_restoreRoundTrip_restoresOriginalOnlyWhenWriteStillLive() {
+        let pb = makeScratchPasteboard()
+        let inserter = TextInserter()
+        pb.clearContents()
+        pb.setString("USER ORIGINAL", forType: .string)
+        let saved = inserter.savePasteboardForTest(pb)
+
+        let written = TextInserter.writeTransientString("dictation", to: pb)
+        XCTAssertEqual(pb.string(forType: .string), "dictation")
+
+        // Nobody else touched it → restore.
+        if TextInserter.shouldRestoreClipboard(currentChangeCount: pb.changeCount,
+                                               writtenChangeCount: written) {
+            inserter.restorePasteboardForTest(pb, items: saved)
+        }
+        XCTAssertEqual(pb.string(forType: .string), "USER ORIGINAL")
+
+        // Now simulate the user copying AFTER our write → restore must be skipped.
+        let written2 = TextInserter.writeTransientString("dictation2", to: pb)
+        pb.clearContents(); pb.setString("USER COPIED THIS", forType: .string)
+        XCTAssertFalse(TextInserter.shouldRestoreClipboard(currentChangeCount: pb.changeCount,
+                                                           writtenChangeCount: written2))
+    }
+
 }

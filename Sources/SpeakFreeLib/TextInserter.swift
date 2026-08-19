@@ -52,6 +52,36 @@ class TextInserter {
     /// (which can block a headless runner), so the focus-moved guard (AX-C) is reachable in the suite.
     var directAXInsert: ((AXUIElement, String) -> Bool)?
 
+    // MARK: - Clipboard restore after a dictation paste (2026-08-14)
+    //
+    // A dictation paste borrows the clipboard: write the text, Cmd+V, then hand the user's
+    // clipboard back. The old fixed 0.3s restore was too short for a busy Electron app (Codex
+    // mid-agent-run) to read the pasteboard first, dropping ~1-4% of pastes. This uses a per-app
+    // backstop timer instead: long (3s) on Electron/remote where consumption can lag, short (0.3s)
+    // on native where Cmd+V is synchronous.
+    //
+    // Design note: an earlier version added a "restore on the user's next Command press" trigger to
+    // make the backstop feel instant. Three independent adversarial reviews (2026-08-14) killed it:
+    // a Command press (Cmd+Tab, Cmd+C, not just Cmd+V) between the paste and the app's actual read
+    // restores the clipboard out from under the still-unconsumed paste, causing the app to paste the
+    // user's PRIOR clipboard (possibly sensitive) into the target — worse than a drop. There is no
+    // way to know the app has consumed, so early restore is never safe. Backstop only.
+
+    /// What to hand back and the guard that says it is still safe to. `savedItems` is the user's
+    /// clipboard from BEFORE the first un-restored dictation paste (never re-snapshotted while a
+    /// restore is pending AND the clipboard is still our text, or a rapid second dictation would
+    /// save dictation-1's text as the "original"). `writtenChangeCount` tracks the LATEST write.
+    struct PendingClipboardRestore {
+        let savedItems: [[(NSPasteboard.PasteboardType, Data)]]
+        var writtenChangeCount: Int
+    }
+
+    /// Which restore policy the frontmost app gets.
+    enum PasteRoute: String { case remote, electron, native }
+
+    private var pendingRestore: PendingClipboardRestore?
+    private var pendingBackstop: DispatchWorkItem?
+
     /// Pure check: should a space be prepended given the text ALREADY captured before
     /// the cursor at record-start?
     ///
@@ -694,6 +724,35 @@ class TextInserter {
     /// sending Cmd+V and the remote client still needs time to synchronize the clipboard.
     static let remoteClipboardRestoreDelay: TimeInterval = 3.0
 
+    /// Electron/contenteditable backstop. Long because a busy Electron app (Codex mid-agent-run)
+    /// can take far longer than 0.3s to read the pasteboard, and the backstop must not restore
+    /// before the app has consumed our paste. Matches the remote path's value for the same race.
+    /// (Clipboard SIZE is NOT used to shorten this: the residency exposes only the small dictation
+    /// text, peak memory is bounded by `maxRestorableClipboardBytes`, and shortening it for large
+    /// clipboards reintroduced the drop for the documented 4.6MB-image-in-Codex case.)
+    static let electronClipboardRestoreDelay: TimeInterval = 3.0
+
+    /// Pure backstop-delay policy (unit-tested): the ceiling on how long the dictation text lingers
+    /// on the clipboard before the user's own content is returned.
+    static func restoreBackstopDelay(route: PasteRoute) -> TimeInterval {
+        switch route {
+        case .remote: return remoteClipboardRestoreDelay
+        case .native: return localClipboardRestoreDelay
+        case .electron: return electronClipboardRestoreDelay
+        }
+    }
+
+    /// Pure saved-original decision (unit-tested). Reuse the pending snapshot ONLY while our own
+    /// last write is still the live clipboard — then the live clipboard is the dictation text and
+    /// re-snapshotting would save THAT as the "original". If anything else wrote since (the user
+    /// copied via right-click/pbcopy/a button — no Command press needed), the snapshot is stale:
+    /// re-snapshot so the user's fresh copy becomes what we restore, and so the size cap measures it.
+    static func shouldReusePendingSnapshot(pendingWrittenChangeCount: Int?,
+                                           currentChangeCount: Int) -> Bool {
+        guard let pending = pendingWrittenChangeCount else { return false }
+        return pending == currentChangeCount
+    }
+
     static func prefersClipboardPaste(bundleID: String) -> Bool {
         let normalizedBundleID = bundleID.lowercased()
         if clipboardPasteApps.contains(where: { $0.lowercased() == normalizedBundleID }) {
@@ -917,14 +976,25 @@ class TextInserter {
     ///
     /// Transient marking: writes org.nspasteboard.TransientType + ConcealedType so
     /// clipboard managers (Maccy, Raycast, Paste) skip recording the dictated text.
+    /// All pending-restore state (pendingRestore, pendingBackstop) is touched only from the main
+    /// thread — every production caller reaches here on main (finalize/reprocess/secure-input/
+    /// focus-settle) and the backstop closure is main-dispatched. The precondition turns a future
+    /// off-main caller (e.g. FinalizePipeline.run with a real inserter) into a crash instead of a
+    /// silent data race on the shared state.
     private func pasteViaClipboard(_ text: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
         let pasteboard = self.pasteboard
+        let route: PasteRoute = isRemoteDesktopFrontmost() ? .remote
+            : (shouldUseClipboardPaste() ? .electron : .native)
 
-        // Save FIRST: one materialization serves both the size check and the restore
-        // snapshot. Measuring separately via item.data(forType:) read every payload
-        // twice — with the 16 MB cap that's up to ~32 MB of main-thread copying at
-        // insert time for a large image clipboard.
-        let savedItems = savePasteboard(pasteboard)
+        // Saved-original: reuse the pending snapshot ONLY while our last dictation write is still
+        // the live clipboard (else re-snapshotting would save that dictation's text). If anything
+        // else wrote since — the user copied via right-click/pbcopy/a Copy button, no Command press
+        // — the pending snapshot is stale, so re-snapshot the user's fresh copy instead.
+        let reuse = TextInserter.shouldReusePendingSnapshot(
+            pendingWrittenChangeCount: pendingRestore?.writtenChangeCount,
+            currentChangeCount: pasteboard.changeCount)
+        let savedItems = reuse ? pendingRestore!.savedItems : savePasteboard(pasteboard)
         let clipboardByteSize = savedItems.reduce(0) { total, item in
             total + item.reduce(0) { $0 + $1.1.count }
         }
@@ -939,29 +1009,42 @@ class TextInserter {
 
         // Write the dictated text (transient/concealed-marked) and snapshot changeCount AFTER the
         // write. A `clearContents()` + `writeObjects()` sequence advances `changeCount` by exactly
-        // ONE generation (clearContents bumps it; the subsequent write stays in that same
-        // generation), NOT two. The previous `+2` guard was therefore never satisfied, so the
-        // user's clipboard was NEVER restored after a paste insertion. Comparing against the
-        // post-write count (equality, the same pattern `secureInputClipboardFallback` uses) makes
-        // the restore fire when nothing else touched the clipboard, and skips it if the user or
-        // another app wrote in the meantime.
+        // ONE generation, so the restore guard compares against THIS returned value (equality).
         let writtenChangeCount = TextInserter.writeTransientString(text, to: pasteboard)
 
         simulatePaste()
 
-        // Restore after the target app has had time to consume the paste.
-        // Remote desktop paste is delayed 400ms + needs clipboard sync to remote,
-        // so give it extra time before restoring.
-        let restoreDelay = isRemoteDesktopFrontmost()
-            ? Self.remoteClipboardRestoreDelay : Self.localClipboardRestoreDelay
-        DispatchQueue.main.asyncAfter(deadline: .now() + restoreDelay) {
-            // Only restore if OUR write is still the live clipboard content. If changeCount moved
-            // past our write, the user or another app put something on the clipboard — leave it.
-            if TextInserter.shouldRestoreClipboard(currentChangeCount: pasteboard.changeCount,
-                                                   writtenChangeCount: writtenChangeCount) {
-                self.restorePasteboard(pasteboard, items: savedItems)
-            }
+        pendingRestore = PendingClipboardRestore(savedItems: savedItems,
+                                                 writtenChangeCount: writtenChangeCount)
+        let delay = TextInserter.restoreBackstopDelay(route: route)
+        DiagnosticLogger.shared.log(
+            "TextInserter: clipboard paste route=\(route.rawValue) len=\(text.count) "
+            + "clip=\(clipboardByteSize / 1024)KB backstop=\(String(format: "%.1f", delay))s")
+        armRestoreBackstop(pasteboard: pasteboard, delay: delay)
+    }
+
+    private func armRestoreBackstop(pasteboard: NSPasteboard, delay: TimeInterval) {
+        pendingBackstop?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.performPendingRestore(pasteboard: pasteboard)
         }
+        pendingBackstop = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Restore the saved clipboard (once) when the backstop fires, and log the outcome. Restores
+    /// only if OUR latest write is still live; if the user or another app wrote in the meantime,
+    /// their content is left alone.
+    private func performPendingRestore(pasteboard: NSPasteboard) {
+        pendingBackstop = nil
+        guard let pending = pendingRestore else { return }
+        pendingRestore = nil
+        let restored = TextInserter.shouldRestoreClipboard(
+            currentChangeCount: pasteboard.changeCount, writtenChangeCount: pending.writtenChangeCount)
+        if restored {
+            restorePasteboard(pasteboard, items: pending.savedItems)
+        }
+        DiagnosticLogger.shared.log("TextInserter: clipboard restore restored=\(restored)")
     }
 
     private func copyToClipboard(_ text: String) {

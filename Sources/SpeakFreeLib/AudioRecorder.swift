@@ -1211,6 +1211,39 @@ class AudioRecorder {
         }
     }
 
+    /// If the crash-safety wav came out HEADER-ONLY while we captured real audio, rewrite it from
+    /// the in-memory buffer. Two deliberate safeguards (adversarial review, 2026-08-14):
+    ///   * Guard is header-only (≤64B), NOT "half expected". The observed bug is always exactly the
+    ///     44-byte header (audioFile nil for the take's buffers). A file that lost only its second
+    ///     half (a mid-take streaming failure) still holds real audio we must NOT clobber.
+    ///   * Write to a sibling temp file, then atomically replace. A rewrite that fails (disk full is
+    ///     a plausible *correlated* cause) leaves the original file exactly as it was, never worse.
+    /// Skips sub-second takes (taps not worth recovering; avoids log noise). s16 mono @ 16 kHz.
+    static let archiveRecoveryMinSamples = 16_000            // 1.0s
+    static let archiveHeaderOnlyMaxBytes = 64               // a real wav has ≥1 buffer of PCM
+    static func recoverArchiveIfHeaderOnly(url: URL, samples: [Float]) {
+        guard samples.count >= archiveRecoveryMinSamples else { return }
+        let byteSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard byteSize <= archiveHeaderOnlyMaxBytes else { return }
+        DiagnosticLogger.shared.log(
+            "AudioRecorder: archive wav is header-only (\(byteSize)B) for \(samples.count) samples "
+            + "— rewriting from memory")
+        let tmp = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).recover-\(UUID().uuidString).tmp")
+        do {
+            let writer = try WavWriter(url: tmp)
+            try writer.append(samples)
+            writer.close()
+            // Atomic replace: the original is only removed once the temp is fully written.
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+            DiagnosticLogger.shared.log("AudioRecorder: archive rewrite OK (\(samples.count) samples)")
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: archive rewrite FAILED — \(error.localizedDescription)")
+        }
+    }
+
     func stopRecording() -> (url: URL, samples: [Float])? {
         // Atomically flip back to pre-roll mode
         stateLock.lock()
@@ -1225,6 +1258,15 @@ class AudioRecorder {
             self.audioFile = nil
             samples = self.pcmSamples
             self.pcmSamples = []
+            // Archive-integrity backstop (2026-08-14): 13 real dictations were found archived as
+            // 44-byte header-only wavs — correct transcript, no audio — because the crash-safety
+            // streaming write was skipped (audioFile nil for the take's buffers) while the
+            // in-memory buffer filled normally. No write error was ever thrown, so it was silent.
+            // We hold the full samples here, so if the on-disk wav came out header-only, rewrite it
+            // from memory. Still on writeQueue (WavWriter's single-queue contract); audioFile is nil.
+            if let url = self.currentOutputURL {
+                AudioRecorder.recoverArchiveIfHeaderOnly(url: url, samples: samples)
+            }
         }
 
         let duration = String(format: "%.1f", Double(samples.count) / 16000.0)
