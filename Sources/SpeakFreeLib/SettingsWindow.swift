@@ -14,6 +14,16 @@ class SettingsWindowController: NSWindowController {
     }
 
     static func show(viewModel: SettingsViewModel) {
+        let openStart = CFAbsoluteTimeGetCurrent()
+        defer {
+            // Michael 2026-08-20: "going to the settings menu now has a solid pause."
+            // Stage-timed so a recurrence names its culprit instead of needing a profiler.
+            let total = CFAbsoluteTimeGetCurrent() - openStart
+            if total >= 0.1 {
+                DiagnosticLogger.shared.log(String(
+                    format: "Settings: slow open — %.2fs from click to window", total))
+            }
+        }
         // PR-B: the view model is long-lived and cached by AppDelegate. If the recordings
         // notice (or anything else) changed config on disk while the window was closed, the
         // cached view model holds a stale snapshot whose next save would overlay it back.
@@ -443,10 +453,18 @@ struct SettingsView: View {
     }
 
     private func refreshRecordingsFolderState() {
-        // M2: read the cached count so opening Settings no longer rescans a 22k-file corpus on the
-        // main thread (finding 9). The cache is kept live by finishRecording/deleteAll/prune.
-        storedRecordingCount = RecordingStore.cachedRecordingCount()
-        recordingsFolderHasAudio = storedRecordingCount > 0
+        // M2 + 2026-08-20: the count cache is COLD on the first Settings open each launch,
+        // and cachedRecordingCount() then live-scans the recordings dir on the CALLING
+        // thread — ~250ms over today's 61k files, on main, inside the window's first
+        // render (Michael: "going to the settings menu now has a solid pause"). Hop the
+        // read to a background queue; warm-cache refreshes still come back instantly.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let count = RecordingStore.cachedRecordingCount()
+            DispatchQueue.main.async {
+                storedRecordingCount = count
+                recordingsFolderHasAudio = count > 0
+            }
+        }
     }
 
     /// Consistent label width across ALL Grid sections.
