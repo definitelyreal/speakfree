@@ -379,7 +379,7 @@ public class Transcriber {
         }
 
         // Strip non-speech characters whisper sometimes outputs (bullets, arrows, etc.)
-        let cleaned = result.replacingOccurrences(of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
+        var cleaned = result.replacingOccurrences(of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
 
         let evidence = Self.audioEvidence(in: samples ?? [])
         if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -388,6 +388,43 @@ public class Transcriber {
                 format: "Transcriber: speech-energy-present but model-empty "
                     + "(%.2fs, peak-window-rms %.3f, speech-windows %d)",
                 evidence.durationSeconds, evidence.peakWindowRMS, evidence.speechWindowCount))
+            // ACTIVE whisper rescue (2026-08-20): Parakeet (post empty-retries) produced
+            // nothing on audio with sustained speech — the take is otherwise LOST, so a
+            // slower second opinion is strictly better than silence. Corpus evidence:
+            // whisper-large-v3-turbo recovered coherent text from takes Parakeet zeroed
+            // (2026-08-19 airplane forensics; 56 empty-sentinel takes in the corpus).
+            // Guarded on the whisper model actually being on disk; failure keeps empty.
+            if engine.engineID != "whisper", Self.modelExists(modelSize: "large-v3-turbo"),
+               let rescued = try? transcribeWithCLI(audioURL: audioURL, prompt: prompt),
+               !rescued.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                DiagnosticLogger.shared.log(
+                    "Transcriber: whisper rescue recovered \(rescued.count) chars from an empty take")
+                cleaned = rescued.replacingOccurrences(
+                    of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
+            }
+        } else if engine.engineID != "whisper",
+                  let conf = engine.lastDiagnostics?.aggregateConfidence,
+                  conf < Self.whisperShadowConfidenceThreshold, conf > 0.15,
+                  Self.modelExists(modelSize: "large-v3-turbo") {
+            // SHADOW second opinion (2026-08-20): the take reads as suspect (corpus:
+            // clean takes score >=0.94, garbled-but-fluent 0.73-0.83) but replacing text
+            // automatically isn't yet earned — so whisper runs in the background, writes
+            // a .whisper.txt sidecar beside the recording, and logs agreement. Never
+            // blocks or changes what the user gets; the sidecars are the tuning corpus
+            // for an eventual active low-confidence swap.
+            let parakeetText = cleaned
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self = self,
+                      let shadow = try? self.transcribeWithCLI(audioURL: audioURL, prompt: prompt)
+                else { return }
+                let sidecar = audioURL.deletingPathExtension().appendingPathExtension("whisper.txt")
+                try? shadow.write(to: sidecar, atomically: true, encoding: .utf8)
+                let agree = TextPipeline.normalizedForComparison(shadow)
+                    == TextPipeline.normalizedForComparison(parakeetText)
+                DiagnosticLogger.shared.log(String(
+                    format: "Transcriber: shadow whisper on low-confidence take (%.2f) — %@ (%d vs %d chars)",
+                    conf, agree ? "agrees" : "DIFFERS", shadow.count, parakeetText.count))
+            }
         }
 
         // Filter known hallucinations from all engines + the CLI path
@@ -416,6 +453,13 @@ public class Transcriber {
     /// and the take is dropped exactly as before. Each retry gets a fresh decoder state (the engine
     /// builds one per call), which is what lets a transient bad decode clear.
     static let maxEmptyRetriesOnVoicedSpeech = 2
+
+    /// Aggregate-confidence bound under which a background whisper "shadow" pass runs on a
+    /// Parakeet take. Corpus (1,055 takes with diagnostics, 2026-08-20): clean takes score
+    /// p25 = 0.945 / median 0.966, the known garbled-but-fluent failures score 0.73–0.83,
+    /// and conf < 0.92 selects 8.8% of takes — wide enough to collect tuning data, cheap
+    /// enough to run as a background CLI call. The shadow NEVER alters inserted text.
+    static let whisperShadowConfidenceThreshold: Float = 0.92
 
     /// Wrap the in-process engine call: on an EMPTY result over audio that contains voiced human
     /// speech, retry up to `maxEmptyRetriesOnVoicedSpeech` times. Gated on `hasVoicedSpeech` so an

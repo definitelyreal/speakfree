@@ -285,6 +285,19 @@ public enum TextPipeline {
     ///
     /// `TextPostProcessor`'s spoken-newline substitution still runs downstream, so a genuinely
     /// spoken "new line"/"new paragraph" still produces a `\n`/`\n\n` AFTER this collapse.
+    /// Case-, punctuation-, and whitespace-insensitive form for engine-agreement checks
+    /// (the whisper shadow pass): two transcripts that differ only in capitalization or
+    /// punctuation are the same dictation for quality-triage purposes.
+    public static func normalizedForComparison(_ text: String) -> String {
+        // Apostrophes are removed (not split on) so contractions stay one token —
+        // "let's" and "lets" are the same dictation, "let s" is not a word.
+        text.lowercased()
+            .replacingOccurrences(of: "['’]", with: "", options: .regularExpression)
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
     public static func collapseSegmentNewlines(_ raw: String) -> String {
         raw.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
