@@ -380,9 +380,99 @@ public enum OverlayEmergence {
         return pow(g, waveformGamma)
     }
 
+    // MARK: - Ambient-adaptive speech gate (recalibrated 2026-08-19, full corpus)
+    //
+    // The 2026-08-12 gate above is ABSOLUTE (fires at ~0.0067 RMS), calibrated on 15
+    // quiet-room dictations. Measured against the full corpus (14,605 recordings,
+    // corpus_levels analysis, 2026-08-19), that absolute gate instant-fires on ambient
+    // noise alone in 97% of medium environments (floor 0.005–0.02 RMS) and 100% of
+    // very loud ones (airplane cabin, floor ≥ 0.08) — Michael's report: "jumps to the
+    // record icon when I speak in a quiet room, but immediately in a loud one."
+    //
+    // Corpus tuning ranges (frame-RMS, fraction of full scale):
+    //   environment (floor)     share    speech p90 / floor (median, p10)
+    //   quiet    < 0.005        67.7%        16.1x, 4.8x
+    //   medium   0.005–0.02     30.9%         3.6x, 2.0x
+    //   loud     0.02–0.08       1.0%         2.7x, 1.9x
+    //   v. loud  > 0.08          0.3%         1.6x, 1.5x   (≈5 dB SNR — barely separable)
+    //
+    // Rule: onset threshold = max(absolute 0.0067, 1.5x the live noise-floor estimate).
+    // 1.5x (+3.5 dB) clears the p10 speaker level in medium/loud rooms while staying
+    // under median speech everywhere; in quiet rooms the absolute term dominates, so
+    // behavior there is IDENTICAL to the 2026-08-12 calibration. The floor estimate
+    // seeds from the first tick and tracks fast-down / slow-up, so speech during the
+    // seed window inflates it only briefly (corpus: first-500ms median is 1.10x the
+    // file's true floor, p90 1.66x).
+
+    /// Absolute onset threshold in raw-RMS terms — the 2026-08-12 quiet-room gate
+    /// (gated audioLevel 0.25 back-converted: 0.03 + 0.15 * 0.25^(1/0.6) ≈ 0.0067 RMS).
+    public static let onsetAbsoluteRMS: CGFloat = 0.0067
+    /// Speech must exceed the ambient floor estimate by this ratio (+3.5 dB).
+    public static let onsetFloorRatio: CGFloat = 1.5
+    /// Waveform bar zero point never drops below the quiet-room room-tone ceiling
+    /// (0.03 currentLevel * 0.15 = 0.0045 RMS).
+    public static let waveformFloorMinRMS: CGFloat = 0.0045
+    /// Waveform span in RMS terms for quiet rooms (0.15 currentLevel * 0.15).
+    public static let waveformSpanMinRMS: CGFloat = 0.0225
+    /// In loud rooms the span grows with the floor so bars keep headroom instead of
+    /// pegging solid on ambient noise (2.5x floor ≈ the corpus loud-room speech band).
+    public static let waveformSpanFloorRatio: CGFloat = 2.5
+    /// Per-tick multiplicative rise of the floor estimate (30 Hz ticks → ≈16%/s), and
+    /// the fast blend toward any quieter tick. Slow-up keeps sustained speech from
+    /// absorbing into the floor; fast-down recovers quickly once the room quiets.
+    public static let floorRisePerTick: CGFloat = 1.005
+    public static let floorFallBlend: CGFloat = 0.5
+
+    /// Ambient-adaptive replacement for the fixed `waveformLevel` + `SpeechOnsetDetector`
+    /// pair. Fed raw (unclipped) frame RMS once per tick; maintains the noise-floor
+    /// estimate, produces the 0…1 waveform amplitude, and latches speech onset the
+    /// moment `onsetHoldTicks` consecutive ticks clear the adaptive threshold.
+    public struct AdaptiveSpeechGate {
+        public private(set) var noiseFloor: CGFloat = 0
+        public private(set) var onsetFired = false
+        private var run = 0
+        private var seeded = false
+        public init() {}
+
+        public var onsetThresholdRMS: CGFloat {
+            max(OverlayEmergence.onsetAbsoluteRMS, OverlayEmergence.onsetFloorRatio * noiseFloor)
+        }
+
+        /// Consume one tick of raw RMS. Returns the 0…1 waveform amplitude; check
+        /// `onsetFired` for the latched emergence trigger.
+        public mutating func update(rms rawRMS: CGFloat) -> CGFloat {
+            let rms = max(0, rawRMS)
+            if !seeded {
+                noiseFloor = rms
+                seeded = true
+            } else if rms < noiseFloor {
+                noiseFloor += (rms - noiseFloor) * OverlayEmergence.floorFallBlend
+            } else {
+                noiseFloor = min(noiseFloor * OverlayEmergence.floorRisePerTick, rms)
+            }
+
+            if !onsetFired {
+                if rms > onsetThresholdRMS {
+                    run += 1
+                    if run >= OverlayEmergence.onsetHoldTicks { onsetFired = true }
+                } else {
+                    run = 0
+                }
+            }
+
+            let floor = max(OverlayEmergence.waveformFloorMinRMS, noiseFloor)
+            let span = max(OverlayEmergence.waveformSpanMinRMS,
+                           OverlayEmergence.waveformSpanFloorRatio * noiseFloor)
+            let g = clamp01((rms - floor) / span)
+            return pow(g, OverlayEmergence.waveformGamma)
+        }
+    }
+
     /// Latching speech-onset detector. Fed the gated `audioLevel` once per animation
     /// tick; fires the moment `onsetHoldTicks` consecutive ticks clear
     /// `onsetThreshold`, and then stays fired (the emergence is a one-way door).
+    /// Superseded by `AdaptiveSpeechGate` for the live overlay (2026-08-19); kept for
+    /// the preview path and as the quiet-room reference behavior.
     public struct SpeechOnsetDetector {
         private var run = 0
         public private(set) var fired = false

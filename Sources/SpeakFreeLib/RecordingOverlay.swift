@@ -627,16 +627,17 @@ class RecordingOverlay {
             if self.frameCount % stateEvery == 0 {
                 view.tick += 1
                 if let recorder = self.recorder {
-                    let raw = CGFloat(recorder.currentLevel)
-                    // Recalibrated gate (2026-08-12): the old `max(raw-0.08,0)/0.92`
-                    // never cleared room tone on Michael's quiet mic, so the record
-                    // stayed a static dot and the bars stayed flat. `waveformLevel`
-                    // and the onset threshold are measured against his real
-                    // recordings (see OverlayEmergence). The onset detector needs two
-                    // consecutive ticks above threshold, so a lone breath spike can't
-                    // latch the emergence.
-                    view.audioLevel = OverlayEmergence.waveformLevel(currentLevel: raw)
-                    if !view.heardSpeech && view.onsetDetector.update(audioLevel: view.audioLevel) {
+                    // Ambient-adaptive gate (2026-08-19, full-corpus recalibration): the
+                    // 2026-08-12 absolute gate instant-fired on ambient noise alone in any
+                    // non-quiet room (airplane cabin: record icon jumped immediately).
+                    // The gate tracks the live noise floor from raw unclipped RMS and
+                    // requires speech to clear max(quiet-room absolute, 1.5x floor); in
+                    // quiet rooms the absolute term dominates, so behavior there is
+                    // unchanged from the 08-12 calibration. Two consecutive ticks above
+                    // threshold, so a lone breath spike can't latch the emergence.
+                    let rms = CGFloat(recorder.currentRMS)
+                    view.audioLevel = view.speechGate.update(rms: rms)
+                    if !view.heardSpeech && view.speechGate.onsetFired {
                         view.heardSpeech = true
                         view.speechStartedAt = Date()
                     }
@@ -645,8 +646,9 @@ class RecordingOverlay {
                     // magnitudes only, never transcript content. Off by default.
                     if RecordingOverlay.levelDebugEnabled {
                         print(String(format:
-                            "overlay-level: currentLevel %.3f audioLevel %.3f heardSpeech %@",
-                            raw, view.audioLevel, view.heardSpeech ? "Y" : "n"))
+                            "overlay-level: rms %.4f floor %.4f thr %.4f audioLevel %.3f heardSpeech %@",
+                            rms, view.speechGate.noiseFloor, view.speechGate.onsetThresholdRMS,
+                            view.audioLevel, view.heardSpeech ? "Y" : "n"))
                     }
                 }
                 // The per-bar waveform state used to advance inside drawBars, which
@@ -739,8 +741,14 @@ class OverlayContentView: NSView {
         usesEmergenceEntry(style: style) && state == .transcribing
     }
     var audioLevel: CGFloat = 0
-    /// Latching speech-onset detector for the emergence trigger (recalibrated
-    /// 2026-08-12). Fresh per show() because show() builds a new content view.
+    /// Ambient-adaptive speech gate for the waveform amplitude + emergence trigger
+    /// (recalibrated 2026-08-19 against the full corpus). Fresh per show() because
+    /// show() builds a new content view, so the noise-floor estimate re-seeds from
+    /// the current environment every recording.
+    var speechGate = OverlayEmergence.AdaptiveSpeechGate()
+    /// Fixed-threshold detector for the PREVIEW path only: the preview simulator emits
+    /// a synthetic 0…1 envelope in audioLevel space (no raw RMS exists there). The live
+    /// path uses `speechGate` on the unclipped mic RMS instead.
     var onsetDetector = OverlayEmergence.SpeechOnsetDetector()
     /// Adaptive ring/outline colour sampled from the backdrop at show(); nil keeps
     /// the locked white ring (the fail-safe default).

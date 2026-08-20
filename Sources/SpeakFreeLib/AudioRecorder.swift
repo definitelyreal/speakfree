@@ -17,6 +17,11 @@ class AudioRecorder {
     /// Current RMS audio level (0.0–1.0), updated from the audio tap.
     private(set) var currentLevel: Float = 0
 
+    /// Raw, unclipped frame RMS (fraction of full scale) from the same tap. The overlay's
+    /// adaptive speech gate needs this because `currentLevel` clips at 0.15 RMS — below the
+    /// ambient floor of a loud room, where the clipped value pins at 1.0 for noise alone.
+    private(set) var currentRMS: Float = 0
+
     /// Timestamp of last audio buffer received — used by health check to detect dead engines.
     /// Buffer-health state, guarded by its own lock (codex review #8: the bare `Date`
     /// was written on the audio thread and read from main — a real data race once the
@@ -986,6 +991,11 @@ class AudioRecorder {
         }
         let rms = sqrtf(sum / Float(max(count, 1)))
         self.currentLevel = min(rms / 0.15, 1.0)
+        // Raw, unclipped RMS for the adaptive overlay gate: currentLevel saturates at
+        // 0.15 RMS, which is BELOW the ambient floor of a loud environment (airplane
+        // cabin ≈ 0.14–0.18), so the clipped signal cannot separate speech from noise
+        // there at all (2026-08-19 corpus recalibration).
+        self.currentRMS = rms
 
         // Track buffer arrival + level for the health checks (locked: read from main)
         bufferHealthLock.lock()
