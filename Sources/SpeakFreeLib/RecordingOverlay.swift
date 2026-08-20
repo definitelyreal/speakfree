@@ -259,7 +259,14 @@ class RecordingOverlay {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let snap = RecordingOverlay.captureBackdrop(
                 belowWindow: CGWindowID(windowNumber), cocoaFrame: cocoaFrame,
-                primaryHeight: primaryHeight) else { return }
+                primaryHeight: primaryHeight) else {
+                // Was a silent return — which hid that on machines without Screen
+                // Recording permission the pixel-sampled outline NEVER engaged
+                // (2026-08-19). The appearance-based fallback set at show() stays.
+                DiagnosticLogger.shared.log(
+                    "Overlay: backdrop sample failed (Screen Recording permission?) — using appearance-based outline")
+                return
+            }
             DispatchQueue.main.async {
                 guard let self = self, self.showGeneration == expectedGeneration,
                       let view = self.contentView else { return }
@@ -413,6 +420,16 @@ class RecordingOverlay {
         // record outline (DEFECT 4) and the static frosted-blur backdrop (Michael
         // 2026-08-12). Only for the emergence entry; fails safe to the locked look.
         if emergence && !avoidsLiveWindowContext {
+            // System-appearance fallback FIRST (Michael 2026-08-19: the circle should
+            // be dark on a light screen and light on a dark one). The pixel sample
+            // needs Screen Recording permission and CGWindowListCreateImage is
+            // obsoleted on modern macOS, so on a denied/failed grab the old fail-safe
+            // left the ring locked-white forever — on a light screen that made the
+            // 08-12 adaptive outline invisible in practice. Appearance is a coarse
+            // but always-available proxy; the real sample still overrides it below.
+            let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            view.adaptiveOutline = isDark ? OverlayEmergence.outlineLight
+                                          : OverlayEmergence.outlineDark
             sampleBackdrop(windowNumber: win.windowNumber, cocoaFrame: frame,
                            for: showGeneration)
         }
