@@ -394,13 +394,21 @@ public class Transcriber {
             // whisper-large-v3-turbo recovered coherent text from takes Parakeet zeroed
             // (2026-08-19 airplane forensics; 56 empty-sentinel takes in the corpus).
             // Guarded on the whisper model actually being on disk; failure keeps empty.
-            if engine.engineID != "whisper", Self.modelExists(modelSize: "large-v3-turbo"),
-               let rescued = try? transcribeWithCLI(audioURL: audioURL, prompt: prompt),
-               !rescued.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                DiagnosticLogger.shared.log(
-                    "Transcriber: whisper rescue recovered \(rescued.count) chars from an empty take")
-                cleaned = rescued.replacingOccurrences(
-                    of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
+            if engine.engineID != "whisper", Self.modelExists(modelSize: "large-v3-turbo") {
+                do {
+                    let rescued = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
+                                                        modelOverride: "large-v3-turbo")
+                    if !rescued.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        DiagnosticLogger.shared.log(
+                            "Transcriber: whisper rescue recovered \(rescued.count) chars from an empty take")
+                        cleaned = rescued.replacingOccurrences(
+                            of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
+                    }
+                } catch {
+                    // A failed rescue must say so — a silent catch hid the modelID bug above.
+                    DiagnosticLogger.shared.log(
+                        "Transcriber: whisper rescue failed (\(error.localizedDescription))")
+                }
             }
         } else if engine.engineID != "whisper",
                   let conf = engine.lastDiagnostics?.aggregateConfidence,
@@ -414,9 +422,19 @@ public class Transcriber {
             // for an eventual active low-confidence swap.
             let parakeetText = cleaned
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                guard let self = self,
-                      let shadow = try? self.transcribeWithCLI(audioURL: audioURL, prompt: prompt)
-                else { return }
+                guard let self = self else { return }
+                let shadow: String
+                do {
+                    shadow = try self.transcribeWithCLI(audioURL: audioURL, prompt: prompt,
+                                                        modelOverride: "large-v3-turbo")
+                } catch {
+                    // A failed shadow must say so — a silent guard hid the modelID bug
+                    // (2026-08-20: every shadow threw modelNotFound("parakeet-tdt-0.6b-v2")
+                    // and left no trace).
+                    DiagnosticLogger.shared.log(
+                        "Transcriber: shadow whisper failed (\(error.localizedDescription))")
+                    return
+                }
                 let sidecar = audioURL.deletingPathExtension().appendingPathExtension("whisper.txt")
                 try? shadow.write(to: sidecar, atomically: true, encoding: .utf8)
                 let agree = TextPipeline.normalizedForComparison(shadow)
@@ -522,13 +540,19 @@ public class Transcriber {
         )
     }
 
-    private func transcribeWithCLI(audioURL: URL, prompt: String? = nil) throws -> String {
+    /// `modelOverride` exists for the rescue/shadow paths: under the Parakeet engine,
+    /// `modelID` is a Parakeet id ("parakeet-tdt-0.6b-v2") and resolving it as a ggml
+    /// file can only throw — which is exactly how the 2026-08-20 shadow pass silently
+    /// never fired (take 135106 "Caramore Kaima", conf 0.911, no sidecar, no log).
+    private func transcribeWithCLI(audioURL: URL, prompt: String? = nil,
+                                   modelOverride: String? = nil) throws -> String {
         guard let whisperPath = Transcriber.findWhisperBinary() else {
             throw TranscriberError.whisperNotFound
         }
 
-        guard let modelPath = Transcriber.findModel(modelSize: modelID) else {
-            throw TranscriberError.modelNotFound(modelID)
+        let cliModel = modelOverride ?? modelID
+        guard let modelPath = Transcriber.findModel(modelSize: cliModel) else {
+            throw TranscriberError.modelNotFound(cliModel)
         }
 
         let process = Process()
