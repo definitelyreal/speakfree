@@ -629,3 +629,78 @@ final class OverlayEmergenceTests: XCTestCase {
         XCTAssertGreaterThan(E.backdropBlurRadius, 0)
     }
 }
+
+// MARK: - Ambient-adaptive speech gate (2026-08-19 full-corpus recalibration)
+
+final class AdaptiveSpeechGateTests: XCTestCase {
+    typealias Gate = OverlayEmergence.AdaptiveSpeechGate
+
+    /// Quiet room: floor ~0.003 RMS keeps the ABSOLUTE threshold in charge, so speech
+    /// at quiet-room levels (~0.02 RMS) latches after exactly onsetHoldTicks — the
+    /// 2026-08-12 behavior (corpus check: fire time identical in 94% of quiet files).
+    func testQuietRoomFiresOnSpeechLikeTheAbsoluteGate() {
+        var g = Gate()
+        for _ in 0..<30 { _ = g.update(rms: 0.003) }  // 1s room tone
+        XCTAssertFalse(g.onsetFired, "room tone must not latch")
+        XCTAssertEqual(g.onsetThresholdRMS, OverlayEmergence.onsetAbsoluteRMS,
+                       "quiet floor stays under the absolute threshold")
+        _ = g.update(rms: 0.02)
+        XCTAssertFalse(g.onsetFired, "one tick is a breath spike, not onset")
+        _ = g.update(rms: 0.02)
+        XCTAssertTrue(g.onsetFired, "two ticks of quiet-room speech latch")
+    }
+
+    /// Airplane cabin: ambient ~0.15 RMS pegged the old clipped-level gate instantly.
+    /// The adaptive threshold rises to 1.5x floor, so steady cabin noise never latches
+    /// while louder speech above it still does.
+    func testLoudRoomAmbientDoesNotLatchButSpeechDoes() {
+        var g = Gate()
+        for _ in 0..<60 { _ = g.update(rms: 0.15) }  // 2s of cabin roar
+        XCTAssertFalse(g.onsetFired, "steady ambient noise must not latch the emergence")
+        XCTAssertGreaterThan(g.onsetThresholdRMS, 0.15, "threshold sits above the ambient floor")
+        for _ in 0..<2 { _ = g.update(rms: 0.30) }   // voice over the roar (~2x floor)
+        XCTAssertTrue(g.onsetFired, "speech clearing 1.5x floor latches")
+    }
+
+    /// Sustained speech must not absorb into the floor estimate: the floor rises at
+    /// most 0.5%/tick, so 10s of continuous speech at 10x floor cannot drag the
+    /// threshold above the speech level.
+    func testSustainedSpeechDoesNotAbsorbIntoTheFloor() {
+        var g = Gate()
+        for _ in 0..<30 { _ = g.update(rms: 0.003) }
+        for _ in 0..<300 { _ = g.update(rms: 0.03) }  // 10s of speech
+        XCTAssertLessThan(g.onsetThresholdRMS, 0.03,
+                          "threshold must stay below ongoing speech after 10s")
+    }
+
+    /// Fast-down floor tracking: after a loud seed (speech during the seed window,
+    /// corpus p90: lead is 1.66x the true floor), a quieter room recovers the floor
+    /// estimate within a few ticks rather than minutes.
+    func testFloorRecoversQuicklyDownward() {
+        var g = Gate()
+        _ = g.update(rms: 0.05)                       // seeded hot
+        for _ in 0..<10 { _ = g.update(rms: 0.003) }  // 330ms of true room tone
+        XCTAssertLessThan(g.noiseFloor, 0.004, "floor blends down fast")
+    }
+
+    /// The latch is a one-way door, matching the old detector's contract.
+    func testOnsetLatchIsOneWay() {
+        var g = Gate()
+        for _ in 0..<5 { _ = g.update(rms: 0.001) }
+        for _ in 0..<2 { _ = g.update(rms: 0.02) }
+        XCTAssertTrue(g.onsetFired)
+        for _ in 0..<30 { _ = g.update(rms: 0.0005) }
+        XCTAssertTrue(g.onsetFired, "silence after onset must not unlatch")
+    }
+
+    /// Waveform headroom in loud rooms: ambient renders near-zero bars, speech
+    /// renders visible bars, and nothing pegs solid on noise alone.
+    func testWaveformKeepsHeadroomInLoudRooms() {
+        var g = Gate()
+        var ambientLevel: CGFloat = 0
+        for _ in 0..<60 { ambientLevel = g.update(rms: 0.15) }
+        XCTAssertLessThan(ambientLevel, 0.15, "ambient noise renders (near-)flat bars")
+        let speechLevel = g.update(rms: 0.35)
+        XCTAssertGreaterThan(speechLevel, 0.5, "speech over the roar renders tall bars")
+    }
+}
