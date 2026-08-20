@@ -115,10 +115,15 @@ private struct ModelInfo: Identifiable, Hashable {
     let memory: String
     let speed: String
     let isRecommended: Bool
+    let isDownloaded: Bool
 
     var label: String {
-        let base = "\(id) (\(memory), \(speed) load)"
-        return isRecommended ? "\(base) \u{2014} Recommended" : base
+        var base = "\(id) (\(memory), \(speed) load)"
+        if isRecommended { base += " \u{2014} Recommended" }
+        // Michael 2026-08-19: un-downloaded models must be visibly different in the
+        // dropdown, so picking one is a knowing "this will download" choice.
+        if !isDownloaded { base += "  (Not Downloaded)" }
+        return base
     }
 }
 
@@ -127,11 +132,13 @@ private struct ModelInfo: Identifiable, Hashable {
 private func availableModels(language: String) -> [ModelInfo] {
     let recommendedBase = EngineCatalog.recommendedWhisperBase()
     return EngineCatalog.whisperModels.map { model in
-        ModelInfo(
-            id: model.id(forLanguage: language),
+        let id = model.id(forLanguage: language)
+        return ModelInfo(
+            id: id,
             memory: model.memoryDescription,
             speed: model.loadTimeDescription,
-            isRecommended: model.base == recommendedBase
+            isRecommended: model.base == recommendedBase,
+            isDownloaded: Transcriber.modelExists(modelSize: id)
         )
     }
 }
@@ -799,6 +806,11 @@ struct SettingsView: View {
                                             Text(model.label)
                                                 .lineLimit(1)
                                                 .truncationMode(.tail)
+                                                // Grey the row for models not on disk. macOS
+                                                // menu pickers honor foregroundColor on the
+                                                // dropdown rows; the "(Not Downloaded)" label
+                                                // suffix carries the state where they don't.
+                                                .foregroundColor(model.isDownloaded ? .primary : .secondary)
                                                 .tag(model.id)
                                         }
                                     }

@@ -57,7 +57,14 @@ struct EnginePickerView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Picker("", selection: $viewModel.parakeetModel) {
                                 ForEach(EngineCatalog.parakeetModels, id: \.id) { model in
-                                    Text("\(model.displayName) (\(model.sizeDescription))").tag(model.id)
+                                    // Un-downloaded models are greyed and labeled, so
+                                    // picking one is a knowing "this will download"
+                                    // choice (Michael 2026-08-19).
+                                    let downloaded = ParakeetModelManager.shared.isModelDownloaded(model.id)
+                                    Text("\(model.displayName) (\(model.sizeDescription))"
+                                         + (downloaded ? "" : "  (Not Downloaded)"))
+                                        .foregroundColor(downloaded ? .primary : .secondary)
+                                        .tag(model.id)
                                 }
                             }
                             .pickerStyle(.menu)
