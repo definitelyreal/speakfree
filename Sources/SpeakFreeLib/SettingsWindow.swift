@@ -423,6 +423,9 @@ struct SettingsView: View {
     /// flips, and after an in-app delete.
     @State private var recordingsFolderHasAudio = false
     @State private var storedRecordingCount = 0
+    /// Hand-travel units: false = miles (default), true = kilometers. Click the stats line
+    /// to flip (Michael 2026-08-20).
+    @State private var statsMetricUnits = false
     @State private var showDeleteRecordingsSheet = false
 
     /// Microphone pin (moved here from the menu, Michael 2026-08-14). "" = the built-in
@@ -594,15 +597,29 @@ struct SettingsView: View {
         ZStack {
             ScrollView {
                 VStack(spacing: 20) {
-                // Keystrokes lead — they are COUNTED, not modelled (Michael 2026-07-26: report
-                // hands saved as the headline, time honest-ranged). Saved time is an estimate
-                // bracketed across typing speeds and now reads as a range so it stops implying
-                // a precision it never had.
-                Text("\(UsageStats.shared.totalDictations) dictations, \(UsageStats.shared.keystrokesDescription) keystrokes avoided (roughly \(UsageStats.shared.timeSavedDescription) of typing)")
-                    .font(.callout)
-                    .foregroundColor(.primary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 4)
+                // Two-line format (Michael 2026-08-20). Line 1 = counted facts (dictations,
+                // words, time spoken). Line 2 = savings: keystrokes are COUNTED; time keeps
+                // the honest range across typing speeds (2026-07-26 ruling); hand-travel
+                // distance uses a stated 2 cm/keystroke assumption. Clicking the stats
+                // flips the distance between miles and kilometers.
+                VStack(spacing: 2) {
+                    Text("\(UsageStats.shared.totalDictations.formatted()) dictations   "
+                         + "\(UsageStats.shared.totalWords.formatted()) words   "
+                         + "\(UsageStats.formatDaysHoursMinutes(UsageStats.shared.totalAudioSeconds)) total")
+                        .font(.callout)
+                        .foregroundColor(.primary)
+                    Text("You saved \(UsageStats.shared.keystrokesDescription) keystrokes, "
+                         + "\(UsageStats.shared.timeSavedDescription), and "
+                         + (statsMetricUnits ? UsageStats.shared.handTravelMetricDescription
+                                             : UsageStats.shared.handTravelImperialDescription))
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 4)
+                .contentShape(Rectangle())
+                .onTapGesture { statsMetricUnits.toggle() }
+                .help("Click to switch between miles and kilometers")
                 // -- GENERAL -----------------------------------------------
                 GroupBox("General") {
                     VStack(alignment: .leading, spacing: 14) {

@@ -122,6 +122,47 @@ class UsageStats {
         return "\(low)-\(high)"
     }
 
+    // MARK: - Two-line stats display (Michael 2026-08-20)
+
+    /// Words ≈ characters / 5 (the standard WPM convention; the corpus does not store
+    /// per-dictation word counts).
+    var totalWords: Int { data.totalCharacters / 5 }
+
+    /// "2 days 3 hours 12 minutes" — leading zero units dropped, minutes floor.
+    static func formatDaysHoursMinutes(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        let days = total / 86_400
+        let hours = (total % 86_400) / 3600
+        let minutes = (total % 3600) / 60
+        var parts: [String] = []
+        if days > 0 { parts.append("\(days) day\(days == 1 ? "" : "s")") }
+        if hours > 0 { parts.append("\(hours) hour\(hours == 1 ? "" : "s")") }
+        parts.append("\(minutes) minute\(minutes == 1 ? "" : "s")")
+        return parts.joined(separator: " ")
+    }
+
+    /// Hand travel avoided: metres a typist's fingers would have moved to type the
+    /// dictated characters. 2 cm per keystroke — the ~19 mm key pitch plus per-stroke
+    /// vertical travel; deliberately a round, stated assumption rather than a modelled
+    /// one (same honesty rule as the typing-speed bracket above).
+    static let handTravelMetresPerKeystroke = 0.02
+    var handTravelMetres: Double { Double(data.totalCharacters) * Self.handTravelMetresPerKeystroke }
+
+    /// Imperial: feet under a mile, then miles ("0.6 miles", "12 miles").
+    var handTravelImperialDescription: String {
+        let feet = handTravelMetres * 3.28084
+        if feet < 5280 { return "\(Int(feet)) feet" }
+        let miles = feet / 5280
+        return String(format: miles < 10 ? "%.1f miles" : "%.0f miles", miles)
+    }
+
+    /// Metric: metres under a kilometre, then kilometres.
+    var handTravelMetricDescription: String {
+        if handTravelMetres < 1000 { return "\(Int(handTravelMetres)) meters" }
+        let km = handTravelMetres / 1000
+        return String(format: km < 10 ? "%.1f kilometers" : "%.0f kilometers", km)
+    }
+
     /// Formatted keystroke count
     var keystrokesDescription: String {
         let chars = data.totalCharacters
