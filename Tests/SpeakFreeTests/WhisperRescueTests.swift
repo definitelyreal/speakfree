@@ -50,3 +50,19 @@ final class SecondOpinionTierTests: XCTestCase {
         XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: nil), Transcriber.SecondOpinionTier.none)
     }
 }
+
+// MARK: - Stats display helpers (Michael 2026-08-20 two-line format)
+
+final class UsageStatsDisplayTests: XCTestCase {
+    func testDaysHoursMinutesFormatting() {
+        XCTAssertEqual(UsageStats.formatDaysHoursMinutes(59), "0 minutes")
+        XCTAssertEqual(UsageStats.formatDaysHoursMinutes(3_660), "1 hour 1 minute")
+        XCTAssertEqual(UsageStats.formatDaysHoursMinutes(90_000), "1 day 1 hour 0 minutes")
+    }
+
+    func testHandTravelAssumption() {
+        // 2 cm per keystroke: 1M keystrokes = 20 km ≈ 12.4 miles. The constant is the
+        // stated assumption; this pins it so a silent change shows up in review.
+        XCTAssertEqual(UsageStats.handTravelMetresPerKeystroke, 0.02)
+    }
+}
