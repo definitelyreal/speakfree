@@ -60,6 +60,20 @@ public enum HallucinationFilterTuning {
 }
 
 public class Transcriber {
+    enum SecondOpinionStatus: Equatable {
+        case rechecking
+        case failed
+
+        var message: String {
+            switch self {
+            case .rechecking:
+                return "Rechecking with whisper…"
+            case .failed:
+                return "Nothing transcribed (too noisy)"
+            }
+        }
+    }
+
     struct AudioEvidence: Equatable {
         let durationSeconds: Double
         let peakWindowRMS: Float
@@ -89,6 +103,7 @@ public class Transcriber {
     let modelID: String
     private let language: String
     public var suppressAutoPunctuation: Bool = false
+    var onSecondOpinionStatus: ((SecondOpinionStatus) -> Void)?
 
     // MARK: - Engine lifecycle passthroughs (used by AppDelegate)
 
@@ -353,6 +368,7 @@ public class Transcriber {
     /// Falls back to CLI (whisper only) if the engine fails or samples are not provided.
     public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil) async throws -> String {
         let result: String
+        var secondOpinionAttempted = false
 
         // Try engine first if we have samples
         if let samples = samples, !samples.isEmpty {
@@ -395,6 +411,8 @@ public class Transcriber {
             // (2026-08-19 airplane forensics; 56 empty-sentinel takes in the corpus).
             // Guarded on the whisper model actually being on disk; failure keeps empty.
             if engine.engineID != "whisper", Self.modelExists(modelSize: "large-v3-turbo") {
+                secondOpinionAttempted = true
+                onSecondOpinionStatus?(.rechecking)
                 do {
                     let rescued = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
                                                         modelOverride: "large-v3-turbo")
@@ -423,6 +441,8 @@ public class Transcriber {
             // synchronous shot and replaces ONLY when materially longer (>=2x words) and
             // under the 20s confabulation cap. Everything else is shadow-only.
             let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
+            secondOpinionAttempted = true
+            onSecondOpinionStatus?(.rechecking)
             do {
                 let swap = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
                                                  modelOverride: "large-v3-turbo")
@@ -496,7 +516,14 @@ public class Transcriber {
                 return cleaned
             }
             print("Transcriber: filtered hallucination: \"\(cleaned)\"")
+            if secondOpinionAttempted {
+                onSecondOpinionStatus?(.failed)
+            }
             return ""
+        }
+        if secondOpinionAttempted,
+           cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            onSecondOpinionStatus?(.failed)
         }
         return cleaned
     }

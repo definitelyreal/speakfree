@@ -485,6 +485,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         let engine = EngineFactory.make(config: config)
         transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
+        wireSecondOpinionStatus(for: transcriber)
         activeEngineID = engineID
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
         DiagnosticLogger.shared.log("Model loaded: \(modelID) (engine: \(engineID))")
@@ -818,6 +819,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         let engine = EngineFactory.make(config: config)
         transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
+        wireSecondOpinionStatus(for: transcriber)
         activeEngineID = effectiveEngineID
 
         // Unload the previous engine off the main thread (async unload); ARC drops `old` after.
@@ -843,6 +845,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         reloadHotkeyAndSettings()
         print("Config reloaded: hotkey=\(KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)) model=\(modelID) engine=\(effectiveEngineID)")
+    }
+
+    private func wireSecondOpinionStatus(for transcriber: Transcriber) {
+        transcriber.onSecondOpinionStatus = { [weak self] status in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                switch status {
+                case .rechecking:
+                    self.recordingOverlay.updateStreamingText(status.message)
+                case .failed:
+                    self.recordingOverlay.lingerWithMessageThenHide(status.message)
+                }
+            }
+        }
     }
 
     /// Warm up the Parakeet model in the background at launch / engine switch so the

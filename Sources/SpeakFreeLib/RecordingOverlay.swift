@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-08-21
 import AppKit
 import CoreImage
 
@@ -147,6 +148,7 @@ class RecordingOverlay {
     private var animationTimer: Timer?
     private var contentView: OverlayContentView?
     private weak var recorder: AudioRecorder?
+    private var isLingeringMessage = false
 
     /// Visual variant for the prominent banner (config overlayStyle 1-5).
     var style: Int = 1
@@ -331,6 +333,7 @@ class RecordingOverlay {
     func show(state: OverlayState, recorder: AudioRecorder? = nil, autoHideError: Bool = true) {
         // Hard kill any existing window (no animation)
         showGeneration &+= 1
+        isLingeringMessage = false
         animationTimer?.invalidate()
         animationTimer = nil
         window?.orderOut(nil)
@@ -495,18 +498,16 @@ class RecordingOverlay {
     func updateStreamingText(_ text: String) {
         guard let view = contentView, let win = window, let screen = resolvedTargetScreen() else { return }
 
-        // DEFECT 2 (2026-08-12): live streaming preview is on by default, so during
-        // the emergence recording this used to resize and reposition the centered
-        // emergence window into the OLD streaming-text pill (a small pill anchored at
-        // the bottom of the screen when empty, a wide centered pill once text
-        // arrived) — the "jump down to the small size at the bottom" Michael saw. The
-        // locked emergence shows its own live waveform and draws NO streaming text
-        // (drawProminentBanner returns before the text path), so the geometry change
-        // was pure corruption. Ignore streaming text entirely while the emergence
-        // entry owns the window; update(.transcribing) still exits it normally.
+        // DEFECT 2 (2026-08-12): streaming updates must NEVER resize/reposition the
+        // emergence window during RECORDING — doing so caused the "jump down to the
+        // small pill at the bottom" corruption. Preserved. The 2026-08-21 change is
+        // narrower: during the TRANSCRIBING hold only, a rescue status line ("Rechecking
+        // with whisper…") may replace the held card, centered, spinner-marked.
         if OverlayContentView.emergenceSuppressesStreamingText(style: style,
                                                                state: view.overlayState) {
-            return
+            guard view.overlayState == .transcribing else { return }
+            view.prominent = false
+            win.hasShadow = true
         }
 
         // Only grow the text, never shrink — prevents flickering from re-processing
@@ -539,6 +540,21 @@ class RecordingOverlay {
         }
 
         view.needsDisplay = true
+    }
+
+    func lingerWithMessageThenHide(_ message: String, duration: TimeInterval = 2.5) {
+        updateStreamingText(message)
+        guard let view = contentView else { return }
+        isLingeringMessage = true
+        view.showsTranscribingSpinner = false
+        view.needsDisplay = true
+        let generation = showGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            guard let self = self, self.showGeneration == generation,
+                  self.isLingeringMessage else { return }
+            self.isLingeringMessage = false
+            self.hide()
+        }
     }
 
     /// Clear streaming text (called when recording stops).
@@ -583,6 +599,7 @@ class RecordingOverlay {
     }
 
     func hide() {
+        guard !isLingeringMessage else { return }
         // Invalidate any pending banner glide/auto-hide timers from the current show().
         showGeneration &+= 1
         // Drop the cached screen so the next recording re-resolves (display may have
@@ -732,11 +749,8 @@ class OverlayContentView: NSView {
     /// The old style-5 comet is preserved below as an unreachable `case 6`.
     static func usesEmergenceEntry(style: Int) -> Bool { style == 5 }
 
-    /// DEFECT 2 (2026-08-12): while the emergence entry owns the recording window it
-    /// renders its own live waveform and shows NO streaming text, so a streaming
-    /// update must not resize or reposition the window. True only for the emergence
-    /// style while still in the recording phase; `.transcribing` (post-release) is
-    /// allowed through so the overlay exits normally. Pure, so the rule is testable.
+    /// Prevents ordinary streaming layout from moving the emergence window. The
+    /// transcribing caller may replace it with a centered status pill.
     static func emergenceSuppressesStreamingText(
         style: Int, state: RecordingOverlay.OverlayState) -> Bool {
         // Recording AND transcribing (inline review 2026-08-12): a cold model load
@@ -777,6 +791,7 @@ class OverlayContentView: NSView {
     @objc dynamic var borderWidth: CGFloat = 0
     var hideContents = false
     var streamingText: String = ""
+    var showsTranscribingSpinner = true
 
     // Layout constants — visualization is 2x the original size
     private static let barCount = 16
@@ -838,7 +853,18 @@ class OverlayContentView: NSView {
         let baseWidth = hPadding * 2 + barsWidth
         let baseHeight = vPadding * 2 + dotSize
 
-        if streamingText.isEmpty || state == .transcribing {
+        if state == .transcribing {
+            guard !streamingText.isEmpty else {
+                return NSSize(width: baseWidth, height: baseHeight)
+            }
+            let textWidth = ceil((streamingText as NSString).size(withAttributes: [
+                .font: streamingTextFont,
+            ]).width)
+            return NSSize(width: max(baseWidth, min(400, textWidth + 76)),
+                          height: max(baseHeight, 48))
+        }
+
+        if streamingText.isEmpty {
             return NSSize(width: baseWidth, height: baseHeight)
         }
 
@@ -983,8 +1009,21 @@ class OverlayContentView: NSView {
         let hasText = !streamingText.isEmpty && !isTranscribing
 
         if isTranscribing {
-            // No bars during transcribing — only centered spinner
-            drawSpinner(ctx: ctx, rect: rect)
+            if streamingText.isEmpty {
+                drawSpinner(ctx: ctx, rect: rect)
+            } else {
+                let indicatorWidth: CGFloat = showsTranscribingSpinner ? 48 : 12
+                if showsTranscribingSpinner {
+                    drawSpinner(ctx: ctx, rect: NSRect(
+                        x: rect.minX + 8, y: rect.minY,
+                        width: indicatorWidth, height: rect.height))
+                }
+                drawTranscribingText(in: NSRect(
+                    x: rect.minX + indicatorWidth,
+                    y: rect.minY,
+                    width: rect.width - indicatorWidth - 12,
+                    height: rect.height))
+            }
         } else if hasText {
             // Bars compressed to top of the expanded pill
             let barsRect = NSRect(
@@ -1682,6 +1721,16 @@ class OverlayContentView: NSView {
             ctx.addLine(to: CGPoint(x: x2, y: y2))
             ctx.strokePath()
         }
+    }
+
+    private func drawTranscribingText(in rect: NSRect) {
+        let text = NSAttributedString(string: streamingText, attributes: [
+            .font: Self.streamingTextFont,
+            .foregroundColor: NSColor.white.withAlphaComponent(0.9),
+        ])
+        let size = text.size()
+        text.draw(at: NSPoint(x: rect.minX,
+                              y: rect.midY - size.height / 2))
     }
 
     private func drawStreamingText(ctx: CGContext, rect: NSRect) {
