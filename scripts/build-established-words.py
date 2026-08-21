@@ -33,7 +33,20 @@ try:
     dictionary = {w.strip().lower() for w in open("/usr/share/dict/words")}
 except OSError:
     dictionary = set()
-est = sorted(w for w, c in counts.items() if c >= THRESHOLD and w not in dictionary)
+# Never establish a known MISHEAR: curated aliases are by definition wrong surface
+# forms (Codex review 2026-08-21 — establishing "rorlik" would permanently block the
+# rorlik->Rohrlich rescue it exists to enable).
+aliases = set()
+import json
+cv = os.path.expanduser("~/.config/speakfree/custom-vocabulary.json")
+try:
+    for t in json.load(open(cv)).get("terms", []):
+        for a in t.get("aliases") or []:
+            aliases.add(re.sub(r"[^a-z']", "", a.lower()))
+except (OSError, ValueError):
+    pass
+est = sorted(w for w, c in counts.items()
+             if c >= THRESHOLD and w not in dictionary and w not in aliases)
 out = os.path.expanduser("~/.config/speakfree/established-words.txt")
 with open(out, "w") as fh:
     fh.write("# Established personal vocabulary — auto-generated, do not hand-edit.\n")

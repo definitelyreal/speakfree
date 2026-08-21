@@ -309,3 +309,31 @@ final class ProperNounGuardTests: XCTestCase {
         XCTAssertFalse(VocabularyBoost.isProperNounShaped("LLMs"))
     }
 }
+
+// MARK: - Sentence-boundary classification (Codex review 2026-08-21 fixes)
+
+final class EndsSentenceTests: XCTestCase {
+    func testPlainTerminatorsEndSentences() {
+        XCTAssertTrue(VocabularyBoost.endsSentence("Done."))
+        XCTAssertTrue(VocabularyBoost.endsSentence("really?"))
+        XCTAssertTrue(VocabularyBoost.endsSentence("go!"))
+        XCTAssertTrue(VocabularyBoost.endsSentence("wait…"))
+    }
+
+    func testClosingQuotesAndBracketsAfterTerminatorStillEnd() {
+        XCTAssertTrue(VocabularyBoost.endsSentence("Done.\""))
+        XCTAssertTrue(VocabularyBoost.endsSentence("Done.)"))
+    }
+
+    func testDottedAbbreviationsDoNotEndSentences() {
+        // The review's bypass case: 'Dr. Indicin' must keep the proper-noun veto armed.
+        XCTAssertFalse(VocabularyBoost.endsSentence("Dr."))
+        XCTAssertFalse(VocabularyBoost.endsSentence("vs."))
+        XCTAssertFalse(VocabularyBoost.endsSentence("e.g."))
+    }
+
+    func testOrdinaryWordsAndCommasDoNot() {
+        XCTAssertFalse(VocabularyBoost.endsSentence("hello"))
+        XCTAssertFalse(VocabularyBoost.endsSentence("hello,"))
+    }
+}
