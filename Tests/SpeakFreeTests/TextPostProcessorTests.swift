@@ -1106,3 +1106,73 @@ final class TextPostProcessorTests: XCTestCase {
             "End the sentence with a.")
     }
 }
+
+// MARK: - Phoneme-mined garble repairs (2026-08-20, build/26-08-20-punctuation-phonemes)
+
+final class PhonemeMinedGarbleTests: XCTestCase {
+
+    // R1: new non-word comma-family members (kaima/gama/kamo), same positional gates
+    // as komma/kana/kanna/kama. "kima" is deliberately ABSENT: it stays Karma's alias.
+    func testNewNonWordCommaGarblesConvert() {
+        // hybrid: true — the production path for both Automatic & Spoken and Spoken Only.
+        XCTAssertEqual(TextPostProcessor.process("in that band. Kaima so they are right", hybrid: true),
+                       "in that band, so they are right")
+        // "kamo" deliberately excluded: it is a vocative nickname in the corpus
+        // ("…media moment. Kamo. I think you'd have…" — CorpusTests fixture).
+        XCTAssertEqual(TextPostProcessor.process("adjust the level, gama then export", hybrid: true),
+                       "adjust the level, then export")
+    }
+
+    // R4: exclamation tail garbles "marks"/"park" collapse like marker/market.
+    func testExclamationTailGarblesConvert() {
+        // "marks" (plural) is deliberately NOT converted: plural punctuation nouns are
+        // literal content per the 2026-08-05 ruling (PluralPunctuationNounTests).
+        XCTAssertEqual(TextPostProcessor.process("so excited exclamation park"),
+                       "so excited!")
+    }
+
+    // R5: "explanation mark" is a head-garble of "exclamation mark" — FINAL position only.
+    func testExplanationMarkFinalConverts() {
+        XCTAssertEqual(TextPostProcessor.process("can't wait to see you explanation mark"),
+                       "can't wait to see you!")
+    }
+
+    func testExplanationMarkMidSentenceSurvives() {
+        XCTAssertEqual(TextPostProcessor.process("his explanation marks a turning point in the debate"),
+                       "his explanation marks a turning point in the debate")
+    }
+
+    // R6: clipped "exclaim" at utterance end.
+    func testExclaimFinalConverts() {
+        XCTAssertEqual(TextPostProcessor.process("Come by tomorrow, exclaim"),
+                       "Come by tomorrow!")
+    }
+
+    func testExclaimMidSentenceSurvives() {
+        XCTAssertEqual(TextPostProcessor.process("they exclaim loudly whenever the team scores"),
+                       "they exclaim loudly whenever the team scores")
+    }
+
+    // R7: "question work" tail garble — final position only.
+    func testQuestionWorkFinalConverts() {
+        XCTAssertEqual(TextPostProcessor.process("Are you in town this Thursday question work"),
+                       "Are you in town this Thursday?")
+    }
+
+    func testQuestionWorkMidSentenceSurvives() {
+        XCTAssertEqual(TextPostProcessor.process("we need to make the question work for everyone"),
+                       "we need to make the question work for everyone")
+    }
+
+    // R8: ", appeared." final = spoken "period" (a comma directly before a bare verb
+    // is not grammatical prose).
+    func testCommaAppearedFinalConverts() {
+        XCTAssertEqual(TextPostProcessor.process("I will send it over tomorrow, appeared"),
+                       "I will send it over tomorrow.")
+    }
+
+    func testAppearedMidSentenceSurvives() {
+        XCTAssertEqual(TextPostProcessor.process("the message appeared on my screen right away"),
+                       "the message appeared on my screen right away")
+    }
+}
