@@ -77,7 +77,7 @@ public struct TextPostProcessor {
         // family (komma/kana/kanna/kama) can never be legitimate prose, so guarding them
         // would just leave visible garbles ("…note. Kama usage varies" — round 3).
         ("[.;]\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("[.;]\\s*(?:komma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("[.;]\\s*(?:komma|kana|kanna|kama|kaima|gama)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("[.;]\\s*(?:kamala|karma)[.,!?;:]", ","),
         // comment/common joined the family 2026-07-29 (Michael: "bad commas"). Parakeet hears
         // spoken "comma" as these two often enough to show up 6 times in one day. They are REAL
@@ -98,7 +98,7 @@ public struct TextPostProcessor {
             + "(?:[ ,]+(?:really|very|so|pretty|totally|awesome|good|great|cool))*)"
             + "[ ,]+(?:comment|common|coma)[.,!?;:](?=\\s|$)", "$1,"),
         ("(?<=[,!?:])\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama|kaima|gama)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:kamala|karma)[.,!?;:]", ","),
         ("(?<=[,!?:])\\s*(?:comment|common|coma)[.,!?;:]", ","),
         // Sentence-medial comment/common (2026-08-14, Michael: "yes" to looser conversion).
@@ -213,7 +213,7 @@ public struct TextPostProcessor {
         // "…or at least, every six months" — which Michael approved ("Yes I want it on"), since
         // the engine's pause-split was never a real sentence boundary.
         result = text.replacingOccurrences(
-            of: "([A-Za-z]{3,})\\. (?!(?:period|comma|kama|coma|kamala|karma|dot|question|exclamation|new|newline)\\b)([a-z])",
+            of: "([A-Za-z]{3,})\\. (?!(?:period|comma|kama|kaima|gama|coma|kamala|karma|dot|question|exclamation|new|newline)\\b)([a-z])",
             with: "$1, $2",
             options: .regularExpression)
 
@@ -346,7 +346,7 @@ public struct TextPostProcessor {
         // that was" must survive); a bare "Exclamation." converts only when it is
         // the dictation's final token (the observed split-mangle position).
         if let re = try? NSRegularExpression(
-            pattern: "[ ,.]*\\bexclamation[ .]+mark(?:er|et)?\\b[.!]*|[ ,.]*\\bexclamation\\.?\\s*$",
+            pattern: "[ ,.]*\\bexclamation[ .]+(?:mark(?:er|et)?|park)\\b[.!]*|[ ,.]*\\bexclamation\\.?\\s*$",
             options: [.caseInsensitive]) {
             let ns = NSMutableString(string: result)
             let matches = re.matches(in: result, range: NSRange(location: 0, length: ns.length))
@@ -357,6 +357,29 @@ public struct TextPostProcessor {
                                                          options: .regularExpression)
                 .trimmingCharacters(in: .whitespaces)
         }
+        // Phoneme-mined final-position garbles (2026-08-20, build/26-08-20-punctuation-
+        // phonemes/FINDINGS.md). All FINAL-position only: each surface form is plausible
+        // prose mid-sentence ("make the question work", "his explanation marks a shift"),
+        // but as the dictation's last token after real content it is command-shaped.
+        // R5: "explanation mark" — head garble of "exclamation mark" (3 corpus hits).
+        result = result.replacingOccurrences(
+            of: "[ ,.]*\\bexplanation[ .]+mark\\b[.!]*\\s*$", with: "!",
+            options: [.regularExpression, .caseInsensitive])
+        // R6: "exclaim" / "exclaim mark" — clipped command (3 corpus hits: "Come by
+        // tomorrow, exclaim.").
+        result = result.replacingOccurrences(
+            of: "[ ,.]*\\bexclaim(?:[ .]+mark)?\\b[.!]*\\s*$", with: "!",
+            options: [.regularExpression, .caseInsensitive])
+        // R7: "question work" — tail garble of "question mark" (punct-gated, final only).
+        result = result.replacingOccurrences(
+            of: "[ ,.]*\\bquestion\\s+work\\b[.!?]*\\s*$", with: "?",
+            options: [.regularExpression, .caseInsensitive])
+        // R8: ", appeared." — spoken "period" heard as "appeared" after an engine comma
+        // (a comma directly before a bare verb is not grammatical prose, so the shape is
+        // safe to claim in final position).
+        result = result.replacingOccurrences(
+            of: ",\\s+appeared[.]?\\s*$", with: ".",
+            options: [.regularExpression, .caseInsensitive])
         result = capitalizeAfterSentenceEnd(result)
 
         // 9. Lowercase a stranded capital left after a spoken-comma conversion. The
