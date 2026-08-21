@@ -66,3 +66,35 @@ final class UsageStatsDisplayTests: XCTestCase {
         XCTAssertEqual(UsageStats.handTravelMetresPerKeystroke, 0.02)
     }
 }
+
+// MARK: - Active-swap vetoes (2026-08-21 adjudication of 64 mixed-band takes)
+
+final class ActiveSwapVetoTests: XCTestCase {
+    func testLongTakeIsVetoed() {
+        XCTAssertNotNil(Transcriber.activeSwapVeto(
+            parakeet: "some text", whisper: "other text", durationSeconds: 25))
+    }
+
+    func testWhisperLosingCommandWordsIsVetoed() {
+        // Adjudication row 19E56FFF: whisper normalized spoken "comma" away.
+        XCTAssertNotNil(Transcriber.activeSwapVeto(
+            parakeet: "mark what you need comma then send it",
+            whisper: "mark what you need, then send it",
+            durationSeconds: 8))
+    }
+
+    func testWhisperLosingProtectedTermIsVetoed() {
+        // Adjudication row 1FD7F685: Fable -> "favorable", Codex -> "codecs".
+        XCTAssertNotNil(Transcriber.activeSwapVeto(
+            parakeet: "use the Fable credits in Codex",
+            whisper: "use the favorable credits in codecs",
+            durationSeconds: 8))
+    }
+
+    func testCleanShortSwapIsAllowed() {
+        XCTAssertNil(Transcriber.activeSwapVeto(
+            parakeet: "Okay climb up I will go to my lab at this fear",
+            whisper: "Okay, so I'm in an airplane and I switched my input to AirPods",
+            durationSeconds: 15))
+    }
+}

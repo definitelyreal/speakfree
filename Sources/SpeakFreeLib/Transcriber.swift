@@ -421,7 +421,15 @@ public class Transcriber {
             do {
                 let swap = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
                                                  modelOverride: "large-v3-turbo")
-                if !swap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let duration = Double((samples ?? []).count) / 16_000.0
+                if let veto = Self.activeSwapVeto(parakeet: cleaned, whisper: swap,
+                                                  durationSeconds: duration) {
+                    DiagnosticLogger.shared.log(String(
+                        format: "Transcriber: active swap VETOED (%.2f) — %@; keeping Parakeet, whisper to sidecar",
+                        conf, veto))
+                    let sidecar = audioURL.deletingPathExtension().appendingPathExtension("whisper.txt")
+                    try? swap.write(to: sidecar, atomically: true, encoding: .utf8)
+                } else if !swap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let sidecar = audioURL.deletingPathExtension().appendingPathExtension("parakeet.txt")
                     try? cleaned.write(to: sidecar, atomically: true, encoding: .utf8)
                     DiagnosticLogger.shared.log(String(
@@ -521,6 +529,50 @@ public class Transcriber {
         if conf < whisperActiveSwapConfidenceThreshold { return .activeSwap }
         if conf < whisperShadowConfidenceThreshold { return .shadow }
         return .none
+    }
+
+    /// Literal spoken-punctuation command words. In the 64-take mixed-band adjudication
+    /// (2026-08-21) whisper's dominant failure was OVER-NORMALIZING these to glyphs or
+    /// garbling them ("Gamma", "Conlon") — a candidate that lost command words is almost
+    /// always whisper error, never Parakeet error.
+    private static let commandWordPattern =
+        "\\b(?:comma|period|question mark|exclamation (?:mark|point)|new line|new paragraph)\\b"
+
+    /// Names whisper drifted on in the adjudication (clod/Koda/favorable/codecs). A swap
+    /// candidate that LOSES one of these while Parakeet had it is rejected.
+    /// TODO: derive from vocabulary.txt so user terms are covered automatically.
+    static let swapProtectedTerms = [
+        "Claude", "Codex", "Fable", "Opus", "Parakeet", "speakfree",
+        "Anthropic", "Karma", "Zander", "Airtable", "Premiere",
+    ]
+
+    /// Whisper's confabulation risk concentrates on long takes (both BOTH_BAD rows in the
+    /// adjudication were >39s whisper inventions). Above this, swap downgrades to shadow.
+    static let swapMaxDurationSeconds: Double = 20
+
+    /// Veto an active swap candidate. Returns the reason (for the log) or nil to allow.
+    /// Derived from the 2026-08-21 adjudication of all 64 archived mixed-band takes:
+    /// whisper wins only specific failure shapes, so the swap must refuse the shapes
+    /// where whisper is the danger.
+    static func activeSwapVeto(parakeet: String, whisper: String,
+                               durationSeconds: Double) -> String? {
+        if durationSeconds > swapMaxDurationSeconds {
+            return "take >\(Int(swapMaxDurationSeconds))s — whisper confabulation risk"
+        }
+        func commandCount(_ s: String) -> Int {
+            (try? NSRegularExpression(pattern: commandWordPattern, options: .caseInsensitive))
+                .map { $0.numberOfMatches(in: s, range: NSRange(s.startIndex..., in: s)) } ?? 0
+        }
+        if commandCount(whisper) < commandCount(parakeet) {
+            return "whisper lost spoken punctuation commands"
+        }
+        for term in swapProtectedTerms {
+            if parakeet.localizedCaseInsensitiveContains(term),
+               !whisper.localizedCaseInsensitiveContains(term) {
+                return "whisper lost protected term '\(term)'"
+            }
+        }
+        return nil
     }
 
     /// Wrap the in-process engine call: on an EMPTY result over audio that contains voiced human
