@@ -77,7 +77,7 @@ public struct TextPostProcessor {
         // family (komma/kana/kanna/kama) can never be legitimate prose, so guarding them
         // would just leave visible garbles ("…note. Kama usage varies" — round 3).
         ("[.;]\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("[.;]\\s*(?:komma|kana|kanna|kama|kaima|gama)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("[.;]\\s*(?:komma|kana|kanna|kama|kaima|gama|kalma|katma|kanga|comam|comlette)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("[.;]\\s*(?:kamala|karma)[.,!?;:]", ","),
         // comment/common joined the family 2026-07-29 (Michael: "bad commas"). Parakeet hears
         // spoken "comma" as these two often enough to show up 6 times in one day. They are REAL
@@ -98,7 +98,7 @@ public struct TextPostProcessor {
             + "(?:[ ,]+(?:really|very|so|pretty|totally|awesome|good|great|cool))*)"
             + "[ ,]+(?:comment|common|coma)[.,!?;:](?=\\s|$)", "$1,"),
         ("(?<=[,!?:])\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama|kaima|gama)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama|kaima|gama|kalma|katma|kanga|comam|comlette)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:kamala|karma)[.,!?;:]", ","),
         ("(?<=[,!?:])\\s*(?:comment|common|coma)[.,!?;:]", ","),
         // Sentence-medial comment/common (2026-08-14, Michael: "yes" to looser conversion).
@@ -357,6 +357,34 @@ public struct TextPostProcessor {
                                                          options: .regularExpression)
                 .trimmingCharacters(in: .whitespaces)
         }
+        // Wide-sweep garbles (2026-08-20, build/26-08-20-punctuation-phonemes/WIDE-SWEEP.md;
+        // every rule corpus-simulated at 0 false positives before shipping).
+        // "Quark" = FUSED "question mark" — the sweep's biggest find (29 occurrences, 27
+        // directly after the engine's own "?" or ".", zero prose uses). The engine's
+        // punctuation is consumed; the user's spoken question mark wins.
+        result = result.replacingOccurrences(
+            of: "[?.]\\s*quark\\b[.,!?;:]*", with: "?",
+            options: [.regularExpression, .caseInsensitive])
+        // "Colin" = "colon" when punctuated on BOTH sides ("two thoughts, Colin. One is…").
+        // Greeting-position guard keeps a real Colin addressable: "Hi Colin," survives.
+        result = result.replacingOccurrences(
+            of: "(?<!\\b(?:hi|hey|hello|dear|thanks|yo)[ ,])[.,;]\\s*colin[.,:]\\s*", with: ": ",
+            options: [.regularExpression, .caseInsensitive])
+        // "questioner" / "question marked" / "question marker" / "kushma" — question-mark
+        // garbles, gated to punctuation-adjacent or final position.
+        result = result.replacingOccurrences(
+            of: "[?.,]\\s*(?:questioner|question\\s+mark(?:ed|er)|kushma)\\b[.,!?;:]*(?=\\s|$)", with: "?",
+            options: [.regularExpression, .caseInsensitive])
+        result = result.replacingOccurrences(
+            of: "\\s+(?:questioner|question\\s+mark(?:ed|er)|kushma)[.!?]*\\s*$", with: "?",
+            options: [.regularExpression, .caseInsensitive])
+        // "periods" directly after punctuation = spoken "period" (the plural NOUN is
+        // protected by requiring the preceding punctuation break; "my periods" or "time
+        // periods" carry no break).
+        result = result.replacingOccurrences(
+            of: "[.,]\\s*periods\\b[.,!?;:]*(?=\\s|$)", with: ".",
+            options: [.regularExpression, .caseInsensitive])
+
         // Phoneme-mined final-position garbles (2026-08-20, build/26-08-20-punctuation-
         // phonemes/FINDINGS.md). All FINAL-position only: each surface form is plausible
         // prose mid-sentence ("make the question work", "his explanation marks a shift"),
