@@ -264,3 +264,48 @@ final class VocabularyBoostTests: XCTestCase {
         XCTAssertEqual(specs.map { $0.text }, ["Rohrlich", "Gaubert", "EC2"])
     }
 }
+
+// MARK: - Proper-noun-shape guard + established words (2026-08-21)
+
+final class ProperNounGuardTests: XCTestCase {
+    private func term(_ text: String, aliases: [String] = []) -> CustomVocabularyTerm {
+        CustomVocabularyTerm(text: text, aliases: aliases)
+    }
+    
+
+    func testMidUtteranceCapitalizedTokenIsVetoed() {
+        // The August damage shape: 'Cloudflare.' mid-sentence rescored to 'Claude Code'.
+        XCTAssertNotNil(VocabularyBoost.vetoReason(
+            originalSpan: ["Cloudflare."], term: term("Claude Code"), sentenceInitial: false))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(
+            originalSpan: ["Indicin."], term: term("LinkedIn"),
+            sentenceInitial: false))
+    }
+
+    func testSentenceInitialCapitalIsNotVetoedByShape() {
+        // 'Clod.' opening an utterance is an ordinary auto-capital; the clod->Claude
+        // curation path must keep working. (It may veto for OTHER reasons; assert the
+        // reason is not the proper-noun shape.)
+        let reason = VocabularyBoost.vetoReason(
+            originalSpan: ["Clod"], term: term("Claude"),
+            sentenceInitial: true)
+        XCTAssertFalse(reason?.contains("proper-noun-shaped") ?? false)
+    }
+
+    func testLowercaseGarbleStillEligibleMidUtterance() {
+        // 'nanjo' (lowercase garble) mid-sentence: shape guard must not fire; if a veto
+        // occurs it must come from another rule.
+        let reason = VocabularyBoost.vetoReason(
+            originalSpan: ["nanjo"], term: term("Ninja"),
+            sentenceInitial: false)
+        XCTAssertFalse(reason?.contains("proper-noun-shaped") ?? false)
+    }
+
+    func testProperNounShapePredicate() {
+        XCTAssertTrue(VocabularyBoost.isProperNounShaped("Cloudflare"))
+        XCTAssertTrue(VocabularyBoost.isProperNounShaped("Kodish,"))
+        XCTAssertFalse(VocabularyBoost.isProperNounShaped("cloudflare"))
+        XCTAssertFalse(VocabularyBoost.isProperNounShaped("eBPF"), "acronym guard's territory")
+        XCTAssertFalse(VocabularyBoost.isProperNounShaped("LLMs"))
+    }
+}
