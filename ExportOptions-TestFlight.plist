@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ai-processed:unverified · session:01a00cac-80fe-7e81-ad7f-32c2599da24d · 2026-08-17 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>destination</key>
+    <string>export</string>
+    <key>manageAppVersionAndBuildNumber</key>
+    <false/>
+    <key>method</key>
+    <string>app-store-connect</string>
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>com.speakfree.keyboard</key>
+        <string>SpeakFree App AppStore 20260817 v3</string>
+        <key>com.speakfree.keyboard.dictation-widget</key>
+        <string>SpeakFree Widget AppStore 20260817 v3</string>
+        <key>com.speakfree.keyboard.extension</key>
+        <string>SpeakFree Keyboard AppStore 20260817 v3</string>
+    </dict>
+    <key>signingCertificate</key>
+    <string>Apple Distribution</string>
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>stripSwiftSymbols</key>
+    <true/>
+    <key>teamID</key>
+    <string>AZ53Y7V4UZ</string>
+    <key>uploadSymbols</key>
+    <true/>
+</dict>
+</plist>
