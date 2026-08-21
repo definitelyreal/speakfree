@@ -451,5 +451,12 @@
   "mode": "hybrid",
   "input": "I watched The Matrix last night.",
   "expected": "I watched The Matrix last night."
+ },
+ {
+  "name": "sentence-initial-The-stays-capital",
+  "note": "Michael's question 2026-08-21: a real sentence-initial 'The' (after '. ' or at the very start) must STAY capitalized; only a mid-CLAUSE 'The' is lowercased. Both appear in this one input.",
+  "mode": "hybrid",
+  "input": "We shipped it. The team is happy, and from The start it worked.",
+  "expected": "We shipped it. The team is happy, and from the start it worked."
  }
 ]
