@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-08-21
 import XCTest
 @testable import SpeakFreeLib
 
@@ -5,6 +6,24 @@ import XCTest
 /// (2026-08-20 confidence-fallback lane). The full rescue path needs live models;
 /// these pin the pure decision pieces.
 final class WhisperRescueTests: XCTestCase {
+    func testSecondOpinionStatusMessages() {
+        XCTAssertEqual(
+            Transcriber.SecondOpinionStatus.rechecking.message,
+            "Rechecking with whisper…")
+        XCTAssertEqual(
+            Transcriber.SecondOpinionStatus.failed.message,
+            "Nothing transcribed (too noisy)")
+    }
+
+    func testTranscribingStatusExpandsSpinnerPill() {
+        let idleSize = OverlayContentView.pillSize(for: .transcribing)
+        let statusSize = OverlayContentView.pillSize(
+            for: .transcribing,
+            streamingText: Transcriber.SecondOpinionStatus.rechecking.message)
+        XCTAssertGreaterThan(statusSize.width, idleSize.width)
+        XCTAssertGreaterThanOrEqual(statusSize.height, idleSize.height)
+    }
+
     func testShadowThresholdSitsBetweenGarbledAndCleanBands() {
         // Corpus bands (2026-08-20, 1,055 takes): garbled-but-fluent 0.73–0.83,
         // clean p25 = 0.945. The threshold must catch the former and skip the latter.
