@@ -48,6 +48,14 @@ public class DiagnosticLogger {
         logFile = file
         log("Session started — \(Bundle.main.bundleIdentifier ?? "unknown") v\(SpeakFree.version)")
         log("Machine: \(ProcessInfo.processInfo.operatingSystemVersionString), RAM: \(ProcessInfo.processInfo.physicalMemory / (1024*1024*1024))GB")
+        // Exact build identity (Michael 2026-08-20: four same-version fleet builds shipped
+        // in one day and forensics couldn't tell which one a log line came from). Stamped
+        // by bundle-app.sh; absent on bare CLI builds, which say so instead of guessing.
+        let info = Bundle.main.infoDictionary
+        let commit = info?["SFBuildCommit"] as? String ?? "unstamped"
+        let built = info?["SFBuildDate"] as? String ?? "unstamped"
+        let channel = info?["SFBuildChannel"] as? String ?? "dev"
+        log("Build: commit \(commit), built \(built), channel \(channel)")
     }
 
     /// Delete session logs older than `days`. Beta builds log every session by default,

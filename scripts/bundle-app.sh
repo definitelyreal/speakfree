@@ -28,6 +28,12 @@ if [ -d "$SPARKLE_FW" ]; then
     cp -a "$SPARKLE_FW" "$APP_DIR/Contents/Frameworks/"
 fi
 
+# Build identity for the session log: git commit + build time, so "v1.7.1" in a
+# forensics trail resolves to an exact tree state (2026-08-20: four same-version
+# fleet builds shipped in one day and the logs couldn't tell them apart).
+BUILD_COMMIT=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
 cat > "$APP_DIR/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -45,6 +51,10 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
     <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>
+    <key>SFBuildCommit</key>
+    <string>${BUILD_COMMIT}</string>
+    <key>SFBuildDate</key>
+    <string>${BUILD_DATE}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>

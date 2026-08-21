@@ -314,6 +314,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         DiagnosticLogger.shared.setup()
         DiagnosticLogger.shared.log("Setup started")
         config = Config.load()
+        // One-line effective-config snapshot (Michael 2026-08-20: forensics need the
+        // settings a session actually ran with, not a guess from the current file).
+        var cfgParts: [String] = []
+        cfgParts.append("engine=" + (config.engine ?? "whisper"))
+        cfgParts.append("model=" + config.modelSize)
+        cfgParts.append("parakeetModel=" + (config.parakeetModel ?? "-"))
+        cfgParts.append("input=" + (config.inputDeviceUID ?? "system-default"))
+        cfgParts.append("punctuation=\(config.effectivePunctuationMode)")
+        cfgParts.append("streaming=\(config.streamingEnabled?.value ?? true)")
+        cfgParts.append("preBuffer=\(config.preBuffer?.value ?? true)")
+        cfgParts.append("keepLoaded=" + (config.keepModelLoaded ?? "auto"))
+        cfgParts.append("saveRecordings=\(config.saveRecordings?.value ?? false)")
+        cfgParts.append("screenContext=\(config.screenContext?.value ?? false)")
+        cfgParts.append("language=" + config.language)
+        DiagnosticLogger.shared.log("Config: " + cfgParts.joined(separator: " "))
 
         // Start Sparkle from the real launch path only (see updaterController's
         // comment — starting it at construction deadlocked the test suite).
