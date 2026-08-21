@@ -20,7 +20,8 @@
 //      construction, and untouched text (including whitespace) is preserved verbatim.
 //   2. GUARDED: every proposed replacement passes a veto chain before it is applied
 //      (spoken-punctuation exemption, acronym guard, digit guard, curated-alias
-//      override, length-loss/gain bounds, real-word guard, unmatched-region veto).
+//      override, length-loss/gain bounds, real-word guard [system dictionary +
+//      established personal words], proper-noun-shape veto, unmatched-region veto).
 //      Vetoed spans revert to the batch text.
 //
 // Hardened 2026-07-22 after a 39-finding Codex adversarial review; the accepted
@@ -205,8 +206,25 @@ public enum VocabularyBoost {
         return set
     }()
 
+    /// Established PERSONAL vocabulary (2026-08-21): words the user has dictated ≥3
+    /// times that the system dictionary does not know (brands, tools, people). The
+    /// August damage — 'Cloudflare.'→'Claude Code', 'instacart'→'Instagram' — got past
+    /// the real-word guard precisely because brands are not dictionary words. Generated
+    /// by scripts/build-established-words.py; absent file = empty set (guard unchanged).
+    private static let establishedWords: Set<String> = {
+        let url = Config.configDir.appendingPathComponent("established-words.txt")
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        var set = Set<String>()
+        for line in raw.split(separator: "\n") {
+            let w = line.trimmingCharacters(in: .whitespaces).lowercased()
+            if !w.isEmpty, !w.hasPrefix("#") { set.insert(w) }
+        }
+        return set
+    }()
+
     private static func inDictionary(_ w: String) -> Bool {
         guard !w.isEmpty else { return false }
+        if establishedWords.contains(w) { return true }
         // Primary: the system spell checker — the same guard production's
         // GlossaryCorrector uses (proven per-dictation in FinalizePipeline). It knows
         // modern compounds web2 lacks ('timeline', 'email', 'workflow', …).
@@ -250,11 +268,27 @@ public enum VocabularyBoost {
 
     // MARK: - The guard chain
 
+    /// A capitalized token mid-utterance is the batch decoder asserting a PROPER NOUN it
+    /// recognized (Cloudflare, Instacart, Kodish=garbled-but-capitalized). Overwriting one
+    /// on acoustic evidence alone is the 2026-08 damage class that got past the dictionary
+    /// real-word guard (brands aren't dictionary words). Sentence-initial capitals carry
+    /// no such signal (everything is capitalized there), so the veto needs position.
+    static func isProperNounShaped(_ raw: String) -> Bool {
+        let core = trimPunctuation(raw)
+        guard let first = core.first, first.isUppercase else { return false }
+        // All-caps/mixed acronyms have their own guard; single-capital shape only.
+        return core.dropFirst().allSatisfy { !$0.isUppercase }
+    }
+
     /// Apply the guard chain to one proposed replacement.
     /// Returns nil when accepted, else the veto reason.
+    /// `sentenceInitial`: the span starts the utterance or follows sentence punctuation —
+    /// capitals there are automatic, so the proper-noun veto (6.5) stands down. Defaults
+    /// true (lenient) so callers without position context keep the pre-08-21 behavior.
     static func vetoReason(
         originalSpan: [String],
-        term: CustomVocabularyTerm
+        term: CustomVocabularyTerm,
+        sentenceInitial: Bool = true
     ) -> String? {
         let normWords = originalSpan.map { normalize($0) }.filter { !$0.isEmpty }
         guard !normWords.isEmpty else { return "empty-span" }
@@ -319,6 +353,14 @@ public enum VocabularyBoost {
         //    compounds go through curated aliases ("pebble bed" → Pebblebed). [CX14]
         if let real = originalSpan.first(where: { isRealEnglishWord($0) }) {
             return "real-word '\(real)' in span '\(originalSpan.joined(separator: " "))'"
+        }
+
+        // 6.5 Proper-noun-shape guard (2026-08-21) — a mid-utterance capitalized token is
+        //     decoder-recognized name evidence the dictionary guard cannot see
+        //     ('Cloudflare.'→'Claude Code', 'Indicin.'→'LinkedIn'). Curated aliases
+        //     never reach this chain, so "Hey Kama,"→Karma-style curation is unaffected.
+        if !sentenceInitial, let noun = originalSpan.first(where: { isProperNounShaped($0) }) {
+            return "proper-noun-shaped '\(noun)' mid-utterance"
         }
 
         return nil
@@ -596,7 +638,15 @@ public enum VocabularyBoost {
 
             let veto: String?
             if let term {
-                veto = vetoReason(originalSpan: origSpan, term: term)
+                // Sentence-initial = span starts the utterance, or the token before it
+                // ends with sentence punctuation (capitals are automatic there).
+                let start = region.originalRange.lowerBound
+                let sentenceInitial = start == 0
+                    || originalWords[start - 1].hasSuffix(".")
+                    || originalWords[start - 1].hasSuffix("!")
+                    || originalWords[start - 1].hasSuffix("?")
+                veto = vetoReason(originalSpan: origSpan, term: term,
+                                  sentenceInitial: sentenceInitial)
             } else {
                 veto = "replacement is not a vocabulary term"
             }
