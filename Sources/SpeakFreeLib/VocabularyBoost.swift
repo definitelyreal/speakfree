@@ -215,7 +215,8 @@ public enum VocabularyBoost {
         let url = Config.configDir.appendingPathComponent("established-words.txt")
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return [] }
         var set = Set<String>()
-        for line in raw.split(separator: "\n") {
+        // whereSeparator handles CRLF (a single "\r\n" grapheme never matches "\n").
+        for line in raw.split(whereSeparator: { $0.isNewline }) {
             let w = line.trimmingCharacters(in: .whitespaces).lowercased()
             if !w.isEmpty, !w.hasPrefix("#") { set.insert(w) }
         }
@@ -225,6 +226,11 @@ public enum VocabularyBoost {
     private static func inDictionary(_ w: String) -> Bool {
         guard !w.isEmpty else { return false }
         if establishedWords.contains(w) { return true }
+        // Inflections/possessives of established words (Codex review 2026-08-21:
+        // "instacart's" normalizes to "instacarts" and reopened the hole).
+        for suffix in ["s", "es", "ed", "ing"] where w.hasSuffix(suffix) {
+            if establishedWords.contains(String(w.dropLast(suffix.count))) { return true }
+        }
         // Primary: the system spell checker — the same guard production's
         // GlossaryCorrector uses (proven per-dictation in FinalizePipeline). It knows
         // modern compounds web2 lacks ('timeline', 'email', 'workflow', …).
@@ -278,6 +284,25 @@ public enum VocabularyBoost {
         guard let first = core.first, first.isUppercase else { return false }
         // All-caps/mixed acronyms have their own guard; single-capital shape only.
         return core.dropFirst().allSatisfy { !$0.isUppercase }
+    }
+
+    /// Does this token end a sentence, so the NEXT token's capital is automatic?
+    /// (Codex review 2026-08-21.) Two corrections over the naive hasSuffix(".") check:
+    /// closing quotes/brackets after the terminator still end a sentence ('Done."',
+    /// 'Done.)', ellipsis), and a dotted ABBREVIATION does not ("Dr.", "vs.", "e.g." —
+    /// the token after "Dr." is mid-sentence, which is exactly where the proper-noun
+    /// veto must stay armed: 'Dr. Indicin' was the review's bypass case).
+    static func endsSentence(_ token: String) -> Bool {
+        // Letters-only core so "e.g." and "i.e." compare as "eg"/"ie".
+        let core = token.lowercased().filter { $0.isLetter }
+        let abbreviations: Set<String> = ["dr", "mr", "mrs", "ms", "st", "vs", "etc",
+                                          "eg", "ie", "no", "jr", "sr", "prof"]
+        if token.hasSuffix(".") || token.contains(".") {
+            if abbreviations.contains(core) { return false }
+        }
+        // Trailing run may include quotes/brackets after the terminator.
+        let trailer = token.reversed().prefix { !$0.isLetter && !$0.isNumber }
+        return trailer.contains { ".!?…".contains($0) }
     }
 
     /// Apply the guard chain to one proposed replacement.
@@ -638,13 +663,9 @@ public enum VocabularyBoost {
 
             let veto: String?
             if let term {
-                // Sentence-initial = span starts the utterance, or the token before it
-                // ends with sentence punctuation (capitals are automatic there).
                 let start = region.originalRange.lowerBound
                 let sentenceInitial = start == 0
-                    || originalWords[start - 1].hasSuffix(".")
-                    || originalWords[start - 1].hasSuffix("!")
-                    || originalWords[start - 1].hasSuffix("?")
+                    || Self.endsSentence(originalWords[start - 1])
                 veto = vetoReason(originalSpan: origSpan, term: term,
                                   sentenceInitial: sentenceInitial)
             } else {
