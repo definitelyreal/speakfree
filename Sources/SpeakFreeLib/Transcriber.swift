@@ -411,39 +411,45 @@ public class Transcriber {
                 }
             }
         } else if engine.engineID != "whisper",
-                  Self.secondOpinionTier(aggregateConfidence: engine.lastDiagnostics?.aggregateConfidence) == .activeSwap,
+                  Self.sparseRescueEligible(
+                      parakeetWordCount: cleaned.split(separator: " ").count,
+                      durationSeconds: Double((samples ?? []).count) / 16_000.0),
                   Self.modelExists(modelSize: "large-v3-turbo") {
-            // ACTIVE swap (Michael 2026-08-20): the take is in the known word-salad band.
-            // Whisper runs SYNCHRONOUSLY and, when it returns real text, its transcript
-            // is inserted instead. Parakeet's version is preserved in a .parakeet.txt
-            // sidecar and the swap is logged loudly; a whisper failure keeps Parakeet.
+            // SPARSE rescue (revised 2026-08-21): the confidence-triggered active swap
+            // was WITHDRAWN same-day — the 23-take active-band adjudication measured it
+            // helping 30% and harming 43%, and no veto set separated the two. What the
+            // data does support: when Parakeet returned drastically fewer words than the
+            // audio carries (<0.5 words/sec, the dropped-sentence shape), whisper gets a
+            // synchronous shot and replaces ONLY when materially longer (>=2x words) and
+            // under the 20s confabulation cap. Everything else is shadow-only.
             let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
             do {
                 let swap = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
                                                  modelOverride: "large-v3-turbo")
                 let duration = Double((samples ?? []).count) / 16_000.0
-                if let veto = Self.activeSwapVeto(parakeet: cleaned, whisper: swap,
-                                                  durationSeconds: duration) {
-                    DiagnosticLogger.shared.log(String(
-                        format: "Transcriber: active swap VETOED (%.2f) — %@; keeping Parakeet, whisper to sidecar",
-                        conf, veto))
-                    let sidecar = audioURL.deletingPathExtension().appendingPathExtension("whisper.txt")
-                    try? swap.write(to: sidecar, atomically: true, encoding: .utf8)
-                } else if !swap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let pWords = cleaned.split(separator: " ").count
+                let wWords = swap.split(separator: " ").count
+                if duration <= Self.swapMaxDurationSeconds,
+                   Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords),
+                   Self.activeSwapVeto(parakeet: cleaned, whisper: swap,
+                                       durationSeconds: duration) == nil {
                     let sidecar = audioURL.deletingPathExtension().appendingPathExtension("parakeet.txt")
                     try? cleaned.write(to: sidecar, atomically: true, encoding: .utf8)
                     DiagnosticLogger.shared.log(String(
-                        format: "Transcriber: ACTIVE whisper swap on low-confidence take (%.2f) — %d chars replace %d",
-                        conf, swap.count, cleaned.count))
+                        format: "Transcriber: SPARSE whisper rescue (%.2f) — %d words replace %d over %.1fs",
+                        conf, wWords, pWords, duration))
                     cleaned = swap.replacingOccurrences(
                         of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
                 } else {
                     DiagnosticLogger.shared.log(String(
-                        format: "Transcriber: active-swap whisper returned empty — keeping Parakeet (%.2f)", conf))
+                        format: "Transcriber: sparse rescue declined (%.2f, %d vs %d words) — whisper to sidecar",
+                        conf, wWords, pWords))
+                    let sidecar = audioURL.deletingPathExtension().appendingPathExtension("whisper.txt")
+                    try? swap.write(to: sidecar, atomically: true, encoding: .utf8)
                 }
             } catch {
                 DiagnosticLogger.shared.log(
-                    "Transcriber: active-swap whisper failed (\(error.localizedDescription)) — keeping Parakeet")
+                    "Transcriber: sparse-rescue whisper failed (\(error.localizedDescription)) — keeping Parakeet")
             }
         } else if engine.engineID != "whisper",
                   Self.secondOpinionTier(aggregateConfidence: engine.lastDiagnostics?.aggregateConfidence) == .shadow,
@@ -523,12 +529,30 @@ public class Transcriber {
 
     /// Pure decision for what the whisper second opinion does on a non-empty Parakeet
     /// take. Split out so the tiers are unit-testable without live engines.
-    enum SecondOpinionTier: Equatable { case none, shadow, activeSwap }
+    ///
+    /// REVISED 2026-08-21 (23-take active-band adjudication): a confidence-triggered
+    /// swap in 0.5–0.85 helps 30% and HARMS 43% — near coin-flip, net negative — and
+    /// no text-feature veto set separates the two (the mixed-band train/test showed the
+    /// same). So confidence alone NEVER triggers a swap any more; every sub-0.92 take
+    /// is shadow-only, and replacement is reserved for the two shapes the data actually
+    /// supports: the empty rescue, and the sparse rescue below.
+    enum SecondOpinionTier: Equatable { case none, shadow }
     static func secondOpinionTier(aggregateConfidence conf: Float?) -> SecondOpinionTier {
         guard let conf = conf, conf > 0.15 else { return .none }  // 0.1 = empty sentinel, handled by rescue
-        if conf < whisperActiveSwapConfidenceThreshold { return .activeSwap }
         if conf < whisperShadowConfidenceThreshold { return .shadow }
         return .none
+    }
+
+    /// Sparse rescue: Parakeet returned drastically fewer words than the audio carries
+    /// (< 0.5 words/sec — the dropped-sentence failure shape both adjudications endorsed).
+    /// Whisper's candidate must be materially longer (≥ 2×) to replace, so a whisper
+    /// collapse ("Oh!") can never displace a short-but-real Parakeet take, and the
+    /// >20s confabulation cap still applies at the call site.
+    static func sparseRescueEligible(parakeetWordCount: Int, durationSeconds: Double) -> Bool {
+        durationSeconds >= 5 && Double(parakeetWordCount) / max(durationSeconds, 0.1) < 0.5
+    }
+    static func sparseRescueAccepts(parakeetWordCount: Int, whisperWordCount: Int) -> Bool {
+        whisperWordCount >= 2 * max(parakeetWordCount, 1)
     }
 
     /// Literal spoken-punctuation command words. In the 64-take mixed-band adjudication

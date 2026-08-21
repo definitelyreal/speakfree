@@ -27,16 +27,27 @@ final class WhisperRescueTests: XCTestCase {
 // MARK: - Active-swap tiers (Michael approved the swap 2026-08-20)
 
 final class SecondOpinionTierTests: XCTestCase {
-    func testWordSaladBandActivelySwaps() {
-        // Every known garbled take scored 0.73–0.83 (airplane forensics + corpus).
-        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.73), .activeSwap)
-        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.83), .activeSwap)
-        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.849), .activeSwap)
-    }
-
-    func testMixedBandStaysShadowOnly() {
+    func testConfidenceAloneNeverSwaps() {
+        // Revised 2026-08-21: the 23-take active-band adjudication measured the
+        // confidence-triggered swap helping 30% and harming 43% — withdrawn. Every
+        // sub-0.92 confidence is shadow-only now; replacement is empty/sparse rescue.
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.73), .shadow)
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.83), .shadow)
         XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.85), .shadow)
         XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.91), .shadow)
+    }
+
+    func testSparseRescueGates() {
+        // The dropped-sentence shape: 14.7s of audio, 6 words out.
+        XCTAssertTrue(Transcriber.sparseRescueEligible(parakeetWordCount: 6, durationSeconds: 14.7))
+        // Normal speech density is never "sparse".
+        XCTAssertFalse(Transcriber.sparseRescueEligible(parakeetWordCount: 30, durationSeconds: 15))
+        // Short takes are excluded — 2 words in 3s is a normal quick command.
+        XCTAssertFalse(Transcriber.sparseRescueEligible(parakeetWordCount: 2, durationSeconds: 3))
+        // Adjudication row 0048940D: whisper collapsed to "Oh!" — a SHORTER candidate
+        // must never replace (this row was PARAKEET_BETTER).
+        XCTAssertFalse(Transcriber.sparseRescueAccepts(parakeetWordCount: 6, whisperWordCount: 1))
+        XCTAssertTrue(Transcriber.sparseRescueAccepts(parakeetWordCount: 6, whisperWordCount: 14))
     }
 
     func testCleanTakesGetNoSecondOpinion() {
