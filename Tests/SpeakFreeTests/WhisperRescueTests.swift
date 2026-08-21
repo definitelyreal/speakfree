@@ -23,3 +23,30 @@ final class WhisperRescueTests: XCTestCase {
             "real word substitutions must still differ")
     }
 }
+
+// MARK: - Active-swap tiers (Michael approved the swap 2026-08-20)
+
+final class SecondOpinionTierTests: XCTestCase {
+    func testWordSaladBandActivelySwaps() {
+        // Every known garbled take scored 0.73–0.83 (airplane forensics + corpus).
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.73), .activeSwap)
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.83), .activeSwap)
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.849), .activeSwap)
+    }
+
+    func testMixedBandStaysShadowOnly() {
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.85), .shadow)
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.91), .shadow)
+    }
+
+    func testCleanTakesGetNoSecondOpinion() {
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.92), Transcriber.SecondOpinionTier.none)
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.97), Transcriber.SecondOpinionTier.none)
+    }
+
+    func testEmptySentinelAndMissingConfidenceAreNotSwapped() {
+        // 0.1 is the engine's empty sentinel — the empty-rescue path owns it.
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: 0.1), Transcriber.SecondOpinionTier.none)
+        XCTAssertEqual(Transcriber.secondOpinionTier(aggregateConfidence: nil), Transcriber.SecondOpinionTier.none)
+    }
+}
