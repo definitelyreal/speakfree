@@ -1176,3 +1176,53 @@ final class PhonemeMinedGarbleTests: XCTestCase {
                        "the message appeared on my screen right away")
     }
 }
+
+// MARK: - Wide-sweep garble repairs (2026-08-20, WIDE-SWEEP.md; all 0-FP corpus-simulated)
+
+final class WideSweepGarbleTests: XCTestCase {
+    func testQuarkIsFusedQuestionMark() {
+        XCTAssertEqual(TextPostProcessor.process("Are you in town Thursday? Quark", hybrid: true),
+                       "Are you in town Thursday?")
+        XCTAssertEqual(TextPostProcessor.process("Did that land well. Quark. Let me know", hybrid: true),
+                       "Did that land well? Let me know")
+    }
+
+    func testQuarkAsProseNeedsPunctuationBefore() {
+        XCTAssertEqual(TextPostProcessor.process("the quark is a subatomic particle", hybrid: true),
+                       "the quark is a subatomic particle")
+    }
+
+    func testColinBothSidesPunctuatedIsColon() {
+        XCTAssertEqual(TextPostProcessor.process("I have two thoughts, Colin. One is timing", hybrid: true),
+                       "I have two thoughts: One is timing")
+    }
+
+    func testGreetingColinSurvives() {
+        XCTAssertEqual(TextPostProcessor.process("Hi Colin, are you around later", hybrid: true),
+                       "Hi Colin, are you around later")
+    }
+
+    func testQuestionerAndKushmaConvert() {
+        XCTAssertEqual(TextPostProcessor.process("was that too much questioner", hybrid: true),
+                       "was that too much?")
+        XCTAssertEqual(TextPostProcessor.process("can you make it kushma", hybrid: true),
+                       "can you make it?")
+    }
+
+    func testPeriodsAfterPunctuationIsSpokenPeriod() {
+        XCTAssertEqual(TextPostProcessor.process("send it over tonight. periods Thanks again", hybrid: true),
+                       "send it over tonight. Thanks again")
+    }
+
+    func testPluralPeriodsAsNounSurvives() {
+        XCTAssertEqual(TextPostProcessor.process("we compared three time periods in the study", hybrid: true),
+                       "we compared three time periods in the study")
+    }
+
+    func testNewCommaFamilyMembersConvert() {
+        XCTAssertEqual(TextPostProcessor.process("that works. Katma let's plan on it", hybrid: true),
+                       "that works, let's plan on it")
+        XCTAssertEqual(TextPostProcessor.process("sounds good, comlette see you then", hybrid: true),
+                       "sounds good, see you then")
+    }
+}
