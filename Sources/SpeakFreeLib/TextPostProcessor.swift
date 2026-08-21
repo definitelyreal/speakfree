@@ -235,10 +235,18 @@ public struct TextPostProcessor {
         // utterance (which becomes "," after substitution) is not undone.
         result = trailingCommaToPeriod(result)
 
-        // 1. Convert whisper's auto-commas before capitals to periods,
-        // before spoken punctuation replaces words like "comma" with literal commas.
-        // This way, user-intentional commas (from saying "comma") won't be overridden.
-        result = commaBeforeCapitalToPeriod(result)
+        // 1. (removed 2026-08-21) The old `commaBeforeCapitalToPeriod` rule converted
+        // every engine ", Capital" → ". Capital" (a Whisper-era heuristic: Whisper spammed
+        // commas where it meant periods). On Parakeet — the default engine, 15,283 of 15,313
+        // labeled recordings — that premise is false: Parakeet's comma-before-a-capital is
+        // almost always CORRECT (a name, a list, an appositive, a quoted clause). Corpus
+        // audit: the rule fired 312 times and was WRONG in 100% of them — it split
+        // "…meetings, Slack, and my email", "…for me, Jen, and Paul", "…make decisions,
+        // Fable should…" into fake sentences, and turned "Hello, Michael" into "Hello.
+        // Michael" (a documented false positive). The 30 Whisper recordings never triggered
+        // it. Removing it stops corrupting good output. The legitimate residual case — an
+        // engine stray-capital directly after a comma ("Great, So when") — is still handled,
+        // correctly and proper-noun-safely, by `lowercaseStrandedCapitalAfterComma` (step 9).
 
         // 2. Replace unambiguous spoken punctuation words (always safe)
         for (pattern, replacement) in alwaysReplace {
@@ -440,13 +448,21 @@ public struct TextPostProcessor {
         // ("tomorrow. Comment. Any chance" → "tomorrow, Any chance"), but the word the
         // engine capitalized after that period stays capitalized, producing a mid-sentence
         // capital after a comma ("Great, So when", "opinion, But now", "not sure, What").
-        // `commaBeforeCapitalToPeriod` (step 1) already guarantees no ENGINE ", Capital"
-        // survives to here, so every ", Capital" is one a later substitution introduced.
-        // Only a CLOSED set of discourse/function words — which are never proper nouns — is
-        // lowercased, so a genuine proper noun after a converted comma ("him, Mark was
-        // there") is untouched. Corpus Jul-Aug 2026: ~81 stranded capitals, 0 legit
-        // casualties in the closed set.
+        // Since the step-1 comma→period rule was removed (2026-08-21), this pass ALSO sees
+        // engine-native ", Capital" — which it handles correctly: only a CLOSED set of
+        // discourse/function words (never proper nouns) is lowercased, so an engine comma
+        // before a name or a list ("him, Mark was there", "meetings, Slack, and email") is
+        // left exactly as the engine — correctly — punctuated it. Corpus Jul-Aug 2026: ~81
+        // stranded capitals, 0 legit casualties in the closed set.
         result = lowercaseStrandedCapitalAfterComma(result)
+
+        // 10. Lowercase a mid-CLAUSE spurious capital the engine emitted on a function word
+        // that can never begin a sentence (Parakeet, 2026-08-21: "block something from The
+        // large pool", "points of The clips", "I want To make it"). Distinct from step 9:
+        // this fires between two words (not after a comma), and only for never-openers — so
+        // it can't mistake a missing-period boundary ("…in response to that. Are you able…")
+        // for a stray capital, the way lowercasing And/But/So/Then/Are would.
+        result = lowercaseSpuriousMidClauseCapital(result)
 
         return result
     }
@@ -476,6 +492,49 @@ public struct TextPostProcessor {
             if word == "It" || word == "If", text[swiftRange.upperBound...].first == "," { continue }
             let lowered = word.lowercased()
             mutable.replaceCharacters(in: wordRange, with: lowered)
+        }
+        return mutable as String
+    }
+
+    /// Function words that can NEVER begin an English sentence. A mid-clause Titlecase
+    /// occurrence of one of these is always the engine's spurious capital — unlike
+    /// And/But/So/Then/Are/Would (which DO open sentences, so a mid-clause capital there is
+    /// often a missing period, not a stray capital). Deliberately EXCLUDES single letters
+    /// ("A"/"B" option labels), month/name homographs, and auxiliaries that open yes/no
+    /// questions. Corpus-simulated (15k Parakeet raws, 2026-08-21): 40 firings, 0 false
+    /// positives (the lone borderline case was already-malformed input).
+    private static let neverSentenceOpeners: Set<String> = [
+        "the", "of", "to", "for", "with", "by", "from", "into", "onto", "at", "in",
+        "on", "an", "as", "than", "about", "above", "below", "upon", "per", "via",
+        "among", "amongst", "between", "during", "within", "without", "toward",
+        "towards", "versus",
+    ]
+
+    /// Lowercase a Titlecase never-opener that sits mid-CLAUSE — preceded by a letter or
+    /// comma (so NOT after `. ! ? : ;` and not at the start) — unless the FOLLOWING word is
+    /// also capitalized, which protects a proper noun or title ("watched The Matrix", "in
+    /// The MailChimp"). See step 10. `[A-Z][a-z]+` requires a lowercase tail, so single
+    /// letters ("A") and all-caps ("THE"/acronyms) are never touched.
+    private static func lowercaseSpuriousMidClauseCapital(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: "[A-Za-z,]\\s+([A-Z][a-z]+)\\b", options: []) else { return text }
+        let ns = text as NSString
+        let mutable = NSMutableString(string: text)
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        for match in matches.reversed() {
+            let wordRange = match.range(at: 1)
+            let word = ns.substring(with: wordRange)
+            guard neverSentenceOpeners.contains(word.lowercased()) else { continue }
+            // Peek at the next non-space character: if it starts an uppercase word, treat
+            // this as a proper noun / title ("The Matrix") and leave the capital alone.
+            var idx = wordRange.location + wordRange.length
+            while idx < ns.length, ns.character(at: idx) == 0x20 { idx += 1 }
+            if idx < ns.length,
+               let scalar = Unicode.Scalar(ns.character(at: idx)),
+               CharacterSet.uppercaseLetters.contains(scalar) {
+                continue
+            }
+            mutable.replaceCharacters(in: wordRange, with: word.lowercased())
         }
         return mutable as String
     }
@@ -608,27 +667,6 @@ public struct TextPostProcessor {
         }
 
         return result
-    }
-
-    /// Convert comma+capital → period+capital. Whisper sometimes punctuates sentence
-    /// breaks with comma instead of period.
-    /// Skip the standalone pronoun "I": "It's crazy, I don't understand" is almost
-    /// always one comma-clause, not two sentences. (If you do want a sentence break
-    /// before "I", use the period spoken word.)
-    private static func commaBeforeCapitalToPeriod(_ text: String) -> String {
-        // Match ", " + capital, but skip standalone "I" (followed by space, apostrophe,
-        // or end of string). Other capitals stay aggressive.
-        guard let regex = try? NSRegularExpression(
-            pattern: ",\\s+(I(?=\\s|'|$)|[A-HJ-Z])",
-            options: []) else { return text }
-        let mutable = NSMutableString(string: text)
-        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
-        for match in matches.reversed() {
-            let captured = (text as NSString).substring(with: match.range(at: 1))
-            if captured == "I" { continue } // skip ", I" — see comment above
-            mutable.replaceCharacters(in: match.range, with: ". \(captured)")
-        }
-        return mutable as String
     }
 
     /// Capitalize the first letter after sentence-ending punctuation.

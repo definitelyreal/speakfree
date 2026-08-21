@@ -1,10 +1,10 @@
 [
  {
-  "name": "comma-before-capital-sentence-boundary",
-  "note": "Whisper auto-punctuates sentence boundaries with comma+capital. Should become period.",
+  "name": "comma-before-capital-keeps-comma",
+  "note": "2026-08-21: the old commaBeforeCapitalToPeriod rule was removed (100% wrong on Parakeet). An engine comma before a discourse-word capital is now kept as a comma; step 9 only lowercases the stray capital ('We' -> 'we'). A real sentence break is dictated with the spoken word 'period'.",
   "mode": "hybrid",
   "input": "I went to the store, We had fun",
-  "expected": "I went to the store. We had fun"
+  "expected": "I went to the store, we had fun"
  },
  {
   "name": "comma-spam-five-words",
@@ -62,11 +62,11 @@
   "expected": "Are you sure?"
  },
  {
-  "name": "known-limitation-comma-before-name",
-  "note": "Aggressive comma→period rule converts 'Hello, Michael' to 'Hello. Michael' (false positive). Documented tradeoff per v1.2.10 design choice.",
+  "name": "comma-before-name-keeps-comma",
+  "note": "2026-08-21: was a documented FALSE POSITIVE — the old comma->period rule turned the vocative 'Hello, Michael' into 'Hello. Michael'. Removing that rule fixes it; 'Michael' is a proper noun so step 9 leaves it untouched and the comma stays.",
   "mode": "hybrid",
   "input": "Hello, Michael",
-  "expected": "Hello. Michael"
+  "expected": "Hello, Michael"
  },
  {
   "name": "abbreviation-period-stays",
@@ -181,10 +181,10 @@
  },
  {
   "name": "real-ellipsis-trailing-2026-06-11",
-  "note": "Live capture: utterance ended on a trail-off pause; '...' must become '.'. 'Kamo' is an upstream comma-homophone — logged in the ledger, not fixable here. Source: recording-2026-06-11-103153-9940B078.",
+  "note": "Live capture: utterance ended on a trail-off pause; '...' must become '.'. 'Kamo' is an upstream comma-homophone — logged in the ledger, not fixable here. Source: recording-2026-06-11-103153-9940B078. 2026-08-21: with the comma->period rule removed, Parakeet's own comma before 'Kamo' is now correctly KEPT (was wrongly split to '. Kamo'); the ellipsis->period fix this case guards is unchanged.",
   "mode": "hybrid",
   "input": "We are planning a screening in DC for America's 250th birthday as a media moment, Kamo. I think you'd have a lot of...",
-  "expected": "We are planning a screening in DC for America's 250th birthday as a media moment. Kamo. I think you'd have a lot of."
+  "expected": "We are planning a screening in DC for America's 250th birthday as a media moment, Kamo. I think you'd have a lot of."
  },
  {
   "name": "real-ellipsis-midsentence-spoken-comma-2026-06-11",
@@ -416,5 +416,40 @@
   "mode": "hybrid",
   "input": "He was screened. Colon cancer runs in the family.",
   "expected": "He was screened. Colon cancer runs in the family."
+ },
+ {
+  "name": "comma-before-proper-noun-not-split-2026-08-21",
+  "note": "Live report 2026-08-21 (recording F0CBD48F). Parakeet correctly put a comma before the proper noun 'Fable'; the old comma->period rule wrongly split it to '. Fable'. Now the comma is kept and 'Fable' stays capitalized.",
+  "mode": "hybrid",
+  "input": "Even if you make decisions, Fable should double-check them.",
+  "expected": "Even if you make decisions, Fable should double-check them."
+ },
+ {
+  "name": "comma-list-of-names-not-split",
+  "note": "The removed rule split every list/appositive after a capitalized word. A comma-separated list of proper nouns must survive intact.",
+  "mode": "hybrid",
+  "input": "It's all in Fireflies, our Zoom meetings, Slack, and my email.",
+  "expected": "It's all in Fireflies, our Zoom meetings, Slack, and my email."
+ },
+ {
+  "name": "mid-clause-The-lowercased-2026-08-21",
+  "note": "Live report 2026-08-21 (recording FDA00E73). Parakeet emitted a spurious mid-clause capital: 'from The large pool'. A never-opener capital mid-clause is lowercased.",
+  "mode": "hybrid",
+  "input": "We don't want to block something from The large pool of credits.",
+  "expected": "We don't want to block something from the large pool of credits."
+ },
+ {
+  "name": "mid-clause-of-The-clips-lowercased",
+  "note": "Second instance of the same class from the corpus: 'points of The clips' -> 'of the clips'.",
+  "mode": "hybrid",
+  "input": "Looking at the in and out points of The clips in the timeline.",
+  "expected": "Looking at the in and out points of the clips in the timeline."
+ },
+ {
+  "name": "mid-clause-capital-title-protected",
+  "note": "The mid-clause lowercasing must NOT touch a title: 'The' before a capitalized word (proper noun) is left alone.",
+  "mode": "hybrid",
+  "input": "I watched The Matrix last night.",
+  "expected": "I watched The Matrix last night."
  }
 ]
