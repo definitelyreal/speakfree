@@ -411,8 +411,34 @@ public class Transcriber {
                 }
             }
         } else if engine.engineID != "whisper",
-                  let conf = engine.lastDiagnostics?.aggregateConfidence,
-                  conf < Self.whisperShadowConfidenceThreshold, conf > 0.15,
+                  Self.secondOpinionTier(aggregateConfidence: engine.lastDiagnostics?.aggregateConfidence) == .activeSwap,
+                  Self.modelExists(modelSize: "large-v3-turbo") {
+            // ACTIVE swap (Michael 2026-08-20): the take is in the known word-salad band.
+            // Whisper runs SYNCHRONOUSLY and, when it returns real text, its transcript
+            // is inserted instead. Parakeet's version is preserved in a .parakeet.txt
+            // sidecar and the swap is logged loudly; a whisper failure keeps Parakeet.
+            let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
+            do {
+                let swap = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
+                                                 modelOverride: "large-v3-turbo")
+                if !swap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let sidecar = audioURL.deletingPathExtension().appendingPathExtension("parakeet.txt")
+                    try? cleaned.write(to: sidecar, atomically: true, encoding: .utf8)
+                    DiagnosticLogger.shared.log(String(
+                        format: "Transcriber: ACTIVE whisper swap on low-confidence take (%.2f) — %d chars replace %d",
+                        conf, swap.count, cleaned.count))
+                    cleaned = swap.replacingOccurrences(
+                        of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
+                } else {
+                    DiagnosticLogger.shared.log(String(
+                        format: "Transcriber: active-swap whisper returned empty — keeping Parakeet (%.2f)", conf))
+                }
+            } catch {
+                DiagnosticLogger.shared.log(
+                    "Transcriber: active-swap whisper failed (\(error.localizedDescription)) — keeping Parakeet")
+            }
+        } else if engine.engineID != "whisper",
+                  Self.secondOpinionTier(aggregateConfidence: engine.lastDiagnostics?.aggregateConfidence) == .shadow,
                   Self.modelExists(modelSize: "large-v3-turbo") {
             // SHADOW second opinion (2026-08-20): the take reads as suspect (corpus:
             // clean takes score >=0.94, garbled-but-fluent 0.73-0.83) but replacing text
@@ -421,6 +447,7 @@ public class Transcriber {
             // blocks or changes what the user gets; the sidecars are the tuning corpus
             // for an eventual active low-confidence swap.
             let parakeetText = cleaned
+            let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 guard let self = self else { return }
                 let shadow: String
@@ -478,6 +505,23 @@ public class Transcriber {
     /// and conf < 0.92 selects 8.8% of takes — wide enough to collect tuning data, cheap
     /// enough to run as a background CLI call. The shadow NEVER alters inserted text.
     static let whisperShadowConfidenceThreshold: Float = 0.92
+
+    /// Below this bound the take is presumed garbled and whisper's transcript REPLACES
+    /// Parakeet's (Michael approved the active swap 2026-08-20). The band is deliberately
+    /// well under the shadow bound: every known word-salad take scored 0.73–0.83, while
+    /// 0.85–0.92 is a mixed band that stays observe-only until the sidecar corpus proves
+    /// it. Cost: one synchronous whisper-CLI call (~1.1–1.6 s) on ~2–3% of takes.
+    static let whisperActiveSwapConfidenceThreshold: Float = 0.85
+
+    /// Pure decision for what the whisper second opinion does on a non-empty Parakeet
+    /// take. Split out so the tiers are unit-testable without live engines.
+    enum SecondOpinionTier: Equatable { case none, shadow, activeSwap }
+    static func secondOpinionTier(aggregateConfidence conf: Float?) -> SecondOpinionTier {
+        guard let conf = conf, conf > 0.15 else { return .none }  // 0.1 = empty sentinel, handled by rescue
+        if conf < whisperActiveSwapConfidenceThreshold { return .activeSwap }
+        if conf < whisperShadowConfidenceThreshold { return .shadow }
+        return .none
+    }
 
     /// Wrap the in-process engine call: on an EMPTY result over audio that contains voiced human
     /// speech, retry up to `maxEmptyRetriesOnVoicedSpeech` times. Gated on `hasVoicedSpeech` so an
