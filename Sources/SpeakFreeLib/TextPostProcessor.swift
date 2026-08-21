@@ -384,6 +384,31 @@ public struct TextPostProcessor {
         result = result.replacingOccurrences(
             of: "[.,]\\s*periods\\b[.,!?;:]*(?=\\s|$)", with: ".",
             options: [.regularExpression, .caseInsensitive])
+        // Michael-approved 2026-08-21 (WIDE-SWEEP MICHAEL-DECIDES rows, "yes on them"):
+        // "quarter" directly after the engine's own "?" and final = spoken "question mark"
+        // (real word, so the gate is the tightest observed shape: after-? + final).
+        result = result.replacingOccurrences(
+            of: "\\?\\s*quarter[.!?]*\\s*$", with: "?",
+            options: [.regularExpression, .caseInsensitive])
+        // "question marks" with punctuation before AND a trailing ? — the engine already
+        // half-converted, so the plural here is the command, not the protected noun
+        // (which appears mid-prose with a determiner: "the people with question marks" —
+        // no punctuation break before, no trailing ?, so the 08-05 plural ruling holds).
+        result = result.replacingOccurrences(
+            of: "[.,]\\s*question\\s+marks\\?+\\s*$", with: "?",
+            options: [.regularExpression, .caseInsensitive])
+        // tama/fama/pama both-sides-punctuated = spoken comma (plausible nicknames, so
+        // both-sides only — the vocative shape "Hey Tama," has no punctuation before).
+        result = result.replacingOccurrences(
+            of: "[.;,]\\s*(?:tama|fama|pama)[.,;]\\s*", with: ", ",
+            options: [.regularExpression, .caseInsensitive])
+        // "combo" / "pierre" both-sides-punctuated at utterance end = spoken comma/period.
+        result = result.replacingOccurrences(
+            of: "[.,;]\\s*combo[.,;]?\\s*$", with: ",",
+            options: [.regularExpression, .caseInsensitive])
+        result = result.replacingOccurrences(
+            of: "[.,;]\\s*pierre[.,;]?\\s*$", with: ".",
+            options: [.regularExpression, .caseInsensitive])
 
         // Phoneme-mined final-position garbles (2026-08-20, build/26-08-20-punctuation-
         // phonemes/FINDINGS.md). All FINAL-position only: each surface form is plausible

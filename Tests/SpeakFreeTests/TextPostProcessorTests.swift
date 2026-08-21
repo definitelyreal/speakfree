@@ -1226,3 +1226,51 @@ final class WideSweepGarbleTests: XCTestCase {
                        "sounds good, see you then")
     }
 }
+
+// MARK: - Michael-approved held rules (2026-08-21 "yes on them")
+
+final class ApprovedHeldRuleTests: XCTestCase {
+    func testQuarterAfterQuestionMarkFinalConverts() {
+        XCTAssertEqual(TextPostProcessor.process("Are you around Thursday? Quarter", hybrid: true),
+                       "Are you around Thursday?")
+    }
+
+    func testQuarterAsProseSurvives() {
+        XCTAssertEqual(TextPostProcessor.process("it starts at a quarter past nine", hybrid: true),
+                       "it starts at a quarter past nine")
+        XCTAssertEqual(TextPostProcessor.process("revenue grew last quarter", hybrid: true),
+                       "revenue grew last quarter")
+    }
+
+    func testHalfConvertedPluralQuestionMarksConverts() {
+        XCTAssertEqual(TextPostProcessor.process("did you see my note. question marks?", hybrid: true),
+                       "did you see my note?")
+    }
+
+    func testPluralQuestionMarksNounStillProtected() {
+        XCTAssertEqual(TextPostProcessor.process("the people with question marks over their heads", hybrid: true),
+                       "the people with question marks over their heads")
+    }
+
+    func testTamaFamaPamaBothSidesConvert() {
+        XCTAssertEqual(TextPostProcessor.process("sounds great. Tama. see you then", hybrid: true),
+                       "sounds great, see you then")
+    }
+
+    func testTamaVocativeSurvives() {
+        XCTAssertEqual(TextPostProcessor.process("Hey Tama, are you around", hybrid: true),
+                       "Hey Tama, are you around")
+    }
+
+    func testComboAndPierreFinalConvert() {
+        XCTAssertEqual(TextPostProcessor.process("we can do both, combo", hybrid: true),
+                       "we can do both,")
+        XCTAssertEqual(TextPostProcessor.process("I will send it tonight, pierre", hybrid: true),
+                       "I will send it tonight.")
+    }
+
+    func testComboMidSentenceSurvives() {
+        XCTAssertEqual(TextPostProcessor.process("order the combo meal for me", hybrid: true),
+                       "order the combo meal for me")
+    }
+}
