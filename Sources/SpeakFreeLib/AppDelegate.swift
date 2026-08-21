@@ -924,6 +924,41 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         DiagnosticLogger.shared.log("Microphone selector: \(uid ?? "system default")")
     }
 
+    // MARK: - AirPods Dictation Mode (Michael 2026-08-21)
+
+    /// The first connected Bluetooth input device, if any (AirPods-class).
+    public func connectedBluetoothInput() -> AudioInputDevice? {
+        AudioDeviceCatalog.cachedInputDevices.first { $0.isBluetooth }
+    }
+
+    /// Whether the current pin IS the connected Bluetooth mic (menu checkmark state).
+    public func dictationModeActive() -> Bool {
+        guard let bt = connectedBluetoothInput() else { return false }
+        return config?.inputDeviceUID == bt.uid
+    }
+
+    /// Toggle: ON pins the Bluetooth mic (remembering the previous pin for restore);
+    /// OFF restores whatever was pinned before the mode engaged. A deliberate, labeled
+    /// tradeoff — best mic quality in noise, output drops to call quality while on.
+    public func toggleDictationMode() {
+        guard let bt = connectedBluetoothInput() else { return }
+        var updated = Config.load()
+        if dictationModeActive() {
+            let restore = updated.preDictationModeInputUID
+            updated.preDictationModeInputUID = nil
+            try? updated.save()
+            config?.preDictationModeInputUID = nil
+            DiagnosticLogger.shared.log("Dictation Mode: OFF — restoring input \(restore ?? "system default")")
+            selectInputDevice(uid: restore)
+        } else {
+            updated.preDictationModeInputUID = updated.inputDeviceUID
+            try? updated.save()
+            config?.preDictationModeInputUID = config?.inputDeviceUID
+            DiagnosticLogger.shared.log("Dictation Mode: ON — pinning \(bt.name)")
+            selectInputDevice(uid: bt.uid)
+        }
+    }
+
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
     private func reloadHotkeyAndSettings() {
         // Routing must be settled before pre-buffer can start an absent engine.

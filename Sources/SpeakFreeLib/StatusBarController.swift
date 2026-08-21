@@ -203,6 +203,27 @@ class StatusBarController: NSObject, NSMenuDelegate {
         // longer earns its menu space. The Settings picker carries the degradation notice
         // the menu never had room for.
 
+        // AirPods Dictation Mode (Michael 2026-08-21) — the one mic control that earns
+        // menu space: a labeled MODE, not a silent default. Shown only while a Bluetooth
+        // input is connected. Checkmark = the Bluetooth mic is the active pin. The
+        // tooltip carries the honest tradeoff the 08-14 removal note asked for.
+        if let delegate = NSApplication.shared.delegate as? AppDelegate,
+           let bt = delegate.connectedBluetoothInput() {
+            let dictTarget = MenuItemTarget {
+                (NSApplication.shared.delegate as? AppDelegate)?.toggleDictationMode()
+            }
+            menuItemTargets.append(dictTarget)
+            let dictItem = NSMenuItem(title: "Dictation Mode (\(bt.name))",
+                                      action: #selector(MenuItemTarget.invoke),
+                                      keyEquivalent: "")
+            dictItem.target = dictTarget
+            dictItem.state = delegate.dictationModeActive() ? .on : .off
+            dictItem.toolTip = "Best dictation quality in noisy rooms — uses the \(bt.name) "
+                + "microphone. Audio output drops to call quality while on."
+            menu.addItem(dictItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
         // Settings — opens the SwiftUI Settings window (first after title)
         let settingsTarget = MenuItemTarget {
             guard let delegate = NSApplication.shared.delegate as? AppDelegate else { return }

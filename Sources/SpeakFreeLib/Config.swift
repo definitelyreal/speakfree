@@ -31,6 +31,10 @@ public struct Config: Codable {
     public var keepModelLoaded: String?  // "auto", "always", "off" — nil = "auto"
     public var diagnosticLogging: FlexBool?  // nil = default (off for production, on for beta)
     public var streamingEnabled: FlexBool?  // nil = default (true) — show live preview while recording
+    /// The input pin to restore when AirPods Dictation Mode turns OFF (Michael 2026-08-21:
+    /// a deliberate, labeled mode — "if you want good quality, use dictation mode" — instead
+    /// of a silent default change; output drops to call quality while it is on).
+    public var preDictationModeInputUID: String?
     // T2.3 — kill-switch for reusing the last streaming partial on short utterances (skip the
     // redundant final inference when release lands <300ms after the last streaming pass and the
     // recording barely grew). nil = default (true). Set false to always run the final pass.
