@@ -57,12 +57,24 @@ final class SecondOpinionTierTests: XCTestCase {
     }
 
     func testSparseRescueGates() {
-        // The dropped-sentence shape: 14.7s of audio, 6 words out.
-        XCTAssertTrue(Transcriber.sparseRescueEligible(parakeetWordCount: 6, durationSeconds: 14.7))
+        // The dropped-sentence shape: 14.7s of audio that is ALL speech, 6 words out.
+        XCTAssertTrue(Transcriber.sparseRescueEligible(
+            parakeetWordCount: 6, durationSeconds: 14.7, speechDurationSeconds: 14.7))
         // Normal speech density is never "sparse".
-        XCTAssertFalse(Transcriber.sparseRescueEligible(parakeetWordCount: 30, durationSeconds: 15))
+        XCTAssertFalse(Transcriber.sparseRescueEligible(
+            parakeetWordCount: 30, durationSeconds: 15, speechDurationSeconds: 15))
         // Short takes are excluded — 2 words in 3s is a normal quick command.
-        XCTAssertFalse(Transcriber.sparseRescueEligible(parakeetWordCount: 2, durationSeconds: 3))
+        XCTAssertFalse(Transcriber.sparseRescueEligible(
+            parakeetWordCount: 2, durationSeconds: 3, speechDurationSeconds: 3))
+        // Regression (rec-2026-08-21-172840): 6 words in a 19s take that carried only
+        // 2.5s of actual speech (16.5s silence, 0.98 conf). Density against speech is
+        // 2.4 words/s — a clean short utterance, NOT a dropped sentence. Must not rescue.
+        XCTAssertFalse(Transcriber.sparseRescueEligible(
+            parakeetWordCount: 6, durationSeconds: 19, speechDurationSeconds: 2.49))
+        // A near-empty take (0 Parakeet words) stays eligible regardless of speech length,
+        // so the empty-recovery catches (both historical accepts were 0-word) are preserved.
+        XCTAssertTrue(Transcriber.sparseRescueEligible(
+            parakeetWordCount: 0, durationSeconds: 12, speechDurationSeconds: 1.0))
         // Adjudication row 0048940D: whisper collapsed to "Oh!" — a SHORTER candidate
         // must never replace (this row was PARAKEET_BETTER).
         XCTAssertFalse(Transcriber.sparseRescueAccepts(parakeetWordCount: 6, whisperWordCount: 1))
