@@ -431,7 +431,9 @@ public class Transcriber {
         } else if engine.engineID != "whisper",
                   Self.sparseRescueEligible(
                       parakeetWordCount: cleaned.split(separator: " ").count,
-                      durationSeconds: Double((samples ?? []).count) / 16_000.0),
+                      durationSeconds: Double((samples ?? []).count) / 16_000.0,
+                      speechDurationSeconds: Double(evidence.speechWindowCount)
+                          * Double(Self.audioEvidenceWindowSize) / Self.audioEvidenceSampleRate),
                   Self.modelExists(modelSize: "large-v3-turbo") {
             // SPARSE rescue (revised 2026-08-21): the confidence-triggered active swap
             // was WITHDRAWN same-day — the 23-take active-band adjudication measured it
@@ -570,13 +572,23 @@ public class Transcriber {
         return .none
     }
 
-    /// Sparse rescue: Parakeet returned drastically fewer words than the audio carries
-    /// (< 0.5 words/sec — the dropped-sentence failure shape both adjudications endorsed).
-    /// Whisper's candidate must be materially longer (≥ 2×) to replace, so a whisper
-    /// collapse ("Oh!") can never displace a short-but-real Parakeet take, and the
-    /// >20s confabulation cap still applies at the call site.
-    static func sparseRescueEligible(parakeetWordCount: Int, durationSeconds: Double) -> Bool {
-        durationSeconds >= 5 && Double(parakeetWordCount) / max(durationSeconds, 0.1) < 0.5
+    /// Sparse rescue: Parakeet returned drastically fewer words than the *speech* in the take
+    /// carries (< 0.5 words per second of ACTUAL speech — the dropped-sentence failure shape).
+    /// Density is measured against speech-seconds, not wall-clock: a short phrase inside a long,
+    /// mostly-silent recording is not sparse and must not pull a whisper recheck. Concretely,
+    /// 2026-08-21 rec-172840 was 6 words over 2.5 s of speech in a 19 s take (0.98 conf) — a
+    /// clean short utterance the old wall-clock ratio (6/19 = 0.32) wrongly flagged; against
+    /// speech (6/2.5 = 2.4) it is obviously not sparse. The wall-clock `>= 5` floor STAYS so a
+    /// near-empty take (0 Parakeet words) is still eligible for recovery regardless of how little
+    /// speech it carries — both historical accepted rescues were 0-word takes. Whisper's candidate
+    /// must be materially longer (≥ 2×) to replace, so a whisper collapse ("Oh!") can never
+    /// displace a short-but-real Parakeet take, and the >20s confabulation cap applies at the call
+    /// site.
+    static func sparseRescueEligible(parakeetWordCount: Int,
+                                     durationSeconds: Double,
+                                     speechDurationSeconds: Double) -> Bool {
+        durationSeconds >= 5
+            && Double(parakeetWordCount) / max(speechDurationSeconds, 0.1) < 0.5
     }
     static func sparseRescueAccepts(parakeetWordCount: Int, whisperWordCount: Int) -> Bool {
         whisperWordCount >= 2 * max(parakeetWordCount, 1)
@@ -591,10 +603,13 @@ public class Transcriber {
 
     /// Names whisper drifted on in the adjudication (clod/Koda/favorable/codecs). A swap
     /// candidate that LOSES one of these while Parakeet had it is rejected.
+    /// "Karma" was removed 2026-08-21: there is no such person (the vocab term was mined
+    /// from mishears of a real name), so protecting Parakeet's "Karma" outputs only
+    /// blocked whisper from fixing them.
     /// TODO: derive from vocabulary.txt so user terms are covered automatically.
     static let swapProtectedTerms = [
         "Claude", "Codex", "Fable", "Opus", "Parakeet", "speakfree",
-        "Anthropic", "Karma", "Zander", "Airtable", "Premiere",
+        "Anthropic", "Zander", "Airtable", "Premiere",
     ]
 
     /// Whisper's confabulation risk concentrates on long takes (both BOTH_BAD rows in the
