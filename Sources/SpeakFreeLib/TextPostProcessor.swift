@@ -98,7 +98,7 @@ public struct TextPostProcessor {
             + "(?:[ ,]+(?:really|very|so|pretty|totally|awesome|good|great|cool))*)"
             + "[ ,]+(?:comment|common|coma)[.,!?;:](?=\\s|$)", "$1,"),
         ("(?<=[,!?:])\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama|kaima|gama|kalma|katma|kanga|comam|comlette)(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama|kaima|gama|kalma|katma|kanga|comam|comlette|ka\\s+ma)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:kamala|karma)[.,!?;:]", ","),
         ("(?<=[,!?:])\\s*(?:comment|common|coma)[.,!?;:]", ","),
         // Sentence-medial comment/common (2026-08-14, Michael: "yes" to looser conversion).
