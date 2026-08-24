@@ -366,14 +366,16 @@ public class Transcriber {
 
     /// Transcribe using the in-process engine (fast, model stays loaded).
     /// Falls back to CLI (whisper only) if the engine fails or samples are not provided.
-    public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil) async throws -> String {
+    public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil,
+                           punctuationMode: PunctuationMode = .off) async throws -> String {
         let result: String
         var secondOpinionAttempted = false
 
         // Try engine first if we have samples
         if let samples = samples, !samples.isEmpty {
             do {
-                result = try await transcribeWithEngineRecoveringEmpty(samples: samples, prompt: prompt)
+                result = try await transcribeWithEngineRecoveringEmpty(
+                    samples: samples, prompt: prompt, punctuationMode: punctuationMode)
             } catch {
                 // CLI fallback is whisper-only; other engines rethrow.
                 if engine.engineID == "whisper" {
@@ -645,14 +647,17 @@ public class Transcriber {
     /// speech, retry up to `maxEmptyRetriesOnVoicedSpeech` times. Gated on `hasVoicedSpeech` so an
     /// accidental silent key-tap (no harmonic pitch structure) still fast-paths to empty with no
     /// added latency. Non-empty results and true-silence returns are untouched.
-    private func transcribeWithEngineRecoveringEmpty(samples: [Float], prompt: String?) async throws -> String {
-        var text = try await transcribeWithEngine(samples: samples, prompt: prompt)
+    private func transcribeWithEngineRecoveringEmpty(samples: [Float], prompt: String?,
+                                                      punctuationMode: PunctuationMode) async throws -> String {
+        var text = try await transcribeWithEngine(
+            samples: samples, prompt: prompt, punctuationMode: punctuationMode)
         guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               Self.audioEvidence(in: samples).hasVoicedSpeech else { return text }
         for attempt in 1...Self.maxEmptyRetriesOnVoicedSpeech {
             DiagnosticLogger.shared.log(
                 "Transcriber: engine returned empty on voiced speech, retry \(attempt)/\(Self.maxEmptyRetriesOnVoicedSpeech)")
-            text = try await transcribeWithEngine(samples: samples, prompt: prompt)
+            text = try await transcribeWithEngine(
+                samples: samples, prompt: prompt, punctuationMode: punctuationMode)
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 DiagnosticLogger.shared.log(
                     "Transcriber: empty-result retry \(attempt) recovered \(text.count) chars")
@@ -662,7 +667,8 @@ public class Transcriber {
         return text
     }
 
-    private func transcribeWithEngine(samples: [Float], prompt: String?) async throws -> String {
+    private func transcribeWithEngine(samples: [Float], prompt: String?,
+                                      punctuationMode: PunctuationMode) async throws -> String {
         // Ensure model is loaded (engine resolves its own on-disk/cache location)
         if !engine.isLoaded {
             try await engine.loadModel(modelID: modelID)
@@ -670,12 +676,17 @@ public class Transcriber {
 
         let suppressRegex = suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
 
-        let raw = try await engine.transcribe(
-            samples: samples,
-            language: language,
-            prompt: prompt,
-            suppressRegex: suppressRegex
-        )
+        let raw: String
+        if let confidenceCorrectingEngine = engine as? ConfidencePunctuationCorrectingEngine {
+            raw = try await confidenceCorrectingEngine.transcribe(
+                samples: samples, language: language, prompt: prompt,
+                suppressRegex: suppressRegex,
+                enablePunctuationCommandCorrection: punctuationMode != .off)
+        } else {
+            raw = try await engine.transcribe(
+                samples: samples, language: language, prompt: prompt,
+                suppressRegex: suppressRegex)
+        }
 
         // Clean up output same way as CLI. Whisper emits one line per acoustic segment;
         // join them with a SPACE, not "\n" — a multi-segment split is not a user break.

@@ -2024,7 +2024,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     reuseDecision: reuseDecision
                 ) {
                     try await transcriber.transcribe(
-                        audioURL: audioURL, samples: samples, prompt: prompt)
+                        audioURL: audioURL, samples: samples, prompt: prompt,
+                        punctuationMode: mode)
                 }
                 if reusedPartial {
                     DiagnosticLogger.shared.log(
