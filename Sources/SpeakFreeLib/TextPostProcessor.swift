@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-08-24
 import Foundation
 
 public struct TextPostProcessor {
@@ -14,6 +15,19 @@ public struct TextPostProcessor {
         "(?<!\\b(?:didn['’]t|don['’]t|doesn['’]t|can['’]t|cannot|couldn['’]t|won['’]t|wouldn['’]t"
         + "|shouldn['’]t|hasn['’]t|haven['’]t|isn['’]t|wasn['’]t|weren['’]t|not|never)\\s)"
 
+    // A determiner or explicit mention marker makes a multi-word punctuation phrase a noun:
+    // "the question mark", "the word question mark". Spoken commands after a clause boundary
+    // are unaffected because the immediately preceding character is punctuation, not this set.
+    private static let notAfterLiteralNounMarker =
+        "(?<!\\b(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their|word|said)\\s)"
+    private static let notAfterLiteralNounModifier =
+        "(?<!\\b(?:red|large|small|literal|actual|visible|single|double|first|second|another)\\s)"
+    private static let notAfterModifiedLiteralNounMarker =
+        "(?<!\\b(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their)"
+        + "\\s[A-Za-z][A-Za-z'’-]{0,29}\\s)"
+    private static let questionPhraseNotUsedAsNoun =
+        "(?!\\s+(?:as|is|means|symbol|character|noun|usage|use|uses|placement|rule|rules)\\b)"
+
     // Unambiguous: these phrases are almost never used as regular words in speech.
     // Always safe to replace regardless of context (except right after a negation).
     private static var alwaysReplace: [(pattern: String, replacement: String)] {[
@@ -24,11 +38,11 @@ public struct TextPostProcessor {
         // in the singular, so the plural is essentially always the literal noun. If someone really
         // does dictate two question marks, the cost is a visible word to delete by hand — which is
         // the direction this file always errs, per the 2026-07-26 "prefer the loud useless one".
-        ("\(ws)\(notAfterNegation)question mark\(we)", "?"),
-        ("\(ws)\(notAfterNegation)exclamation mark\(we)", "!"),
-        ("\(ws)\(notAfterNegation)exclamation point\(we)", "!"),
-        ("\(ws)\(notAfterNegation)semicolon\(we)", ";"),
-        ("\(ws)\(notAfterNegation)semi colon\(we)", ";"),
+        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)\(notAfterLiteralNounModifier)\(notAfterModifiedLiteralNounMarker)question mark\(questionPhraseNotUsedAsNoun)\(we)", "?"),
+        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)\(notAfterLiteralNounModifier)\(notAfterModifiedLiteralNounMarker)exclamation mark\(we)", "!"),
+        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)\(notAfterLiteralNounModifier)\(notAfterModifiedLiteralNounMarker)exclamation point\(we)", "!"),
+        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)semicolon\(we)", ";"),
+        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)semi colon\(we)", ";"),
         // Ellipsis removed — whisper generates "..." from pauses causing false positives
         ("\(ws)\(notAfterNegation)full stop\(we)", "."),
         ("\(ws)\(notAfterNegation)open quote\(we)", "\""),
@@ -77,8 +91,8 @@ public struct TextPostProcessor {
         // family (komma/kana/kanna/kama) can never be legitimate prose, so guarding them
         // would just leave visible garbles ("…note. Kama usage varies" — round 3).
         ("[.;]\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("[.;]\\s*(?:komma|kana|kanna|kama|kaima|gama|kalma|katma|kanga|comam|comlette)(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("[.;]\\s*(?:kamala|karma)[.,!?;:]", ","),
+        ("[.;]\\s*(?:komma|kamma|kana|kanna|kama|kaima|kalma|katma|comam|comlette|(?-i:gama|kanga))(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("[.;]\\s*(?:kamala|karma|(?-i:gama|kanga))[.,!?;:]", ","),
         // comment/common joined the family 2026-07-29 (Michael: "bad commas"). Parakeet hears
         // spoken "comma" as these two often enough to show up 6 times in one day. They are REAL
         // words, so they take the kamala/karma treatment — punctuation required on BOTH sides —
@@ -98,8 +112,8 @@ public struct TextPostProcessor {
             + "(?:[ ,]+(?:really|very|so|pretty|totally|awesome|good|great|cool))*)"
             + "[ ,]+(?:comment|common|coma)[.,!?;:](?=\\s|$)", "$1,"),
         ("(?<=[,!?:])\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama|kaima|gama|kalma|katma|kanga|comam|comlette|ka\\s+ma)(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("(?<=[,!?:])\\s*(?:kamala|karma)[.,!?;:]", ","),
+        ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama|kaima|kalma|katma|comam|comlette|ka\\s+ma|(?-i:gama|kanga))(?:[.,!?;:]|(?=\\s|$))", ","),
+        ("(?<=[,!?:])\\s*(?:kamala|karma|(?-i:gama|kanga))[.,!?;:]", ","),
         ("(?<=[,!?:])\\s*(?:comment|common|coma)[.,!?;:]", ","),
         // Sentence-medial comment/common (2026-08-14, Michael: "yes" to looser conversion).
         // Parakeet's dominant comma garble in running speech carries NO adjacent punctuation
@@ -223,6 +237,16 @@ public struct TextPostProcessor {
         // quotes first; the existing rules then handle the now-unquoted command.
         result = stripQuotesAroundCommandWords(result)
 
+        // Parakeet article insertion (2026-08-22 labeled clip 29): the speaker said
+        // "Like, comma, what else..." and the decoder produced "Like a comma, what else...".
+        // Keep this narrower than a generic "a comma" rewrite: require the exact discourse
+        // marker plus punctuation plus a closed clause-starter set. Utterance-final
+        // "Like a comma" is handled by convertStandaloneAmbiguous below.
+        result = result.replacingOccurrences(
+            of: "(?i)(^|[.!?]\\s+)(like)\\s+a\\s+comma[.,](?=\\s+(?:what|and|but|so|then|whether|if|when|where|which|who|how|i|we|you|they|he|she|it)\\b)",
+            with: "$1$2,",
+            options: .regularExpression)
+
         // 0.5. Collapse whisper's comma spam FIRST. If we let comma→period run first,
         // any capitalized word inside the spam ("I'd", "Claude") becomes a sentence
         // break, leaving "Hey hey. I'd. Claude do some research..." instead of
@@ -249,6 +273,11 @@ public struct TextPostProcessor {
         // correctly and proper-noun-safely, by `lowercaseStrandedCapitalAfterComma` (step 9).
 
         // 2. Replace unambiguous spoken punctuation words (always safe)
+        // Preserve the established interrogative command while the general noun guards below
+        // protect demonstrative + modifier phrases such as "that bright question mark".
+        result = result.replacingOccurrences(
+            of: "(?i)^(.*\\b(?:is|was) that right)\\s+question mark[.!]?\\s*$",
+            with: "$1?", options: .regularExpression)
         for (pattern, replacement) in alwaysReplace {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
             result = regex.stringByReplacingMatches(
@@ -353,8 +382,18 @@ public struct TextPostProcessor {
         // Guard shape: the mark-word is REQUIRED mid-text ("what an exclamation
         // that was" must survive); a bare "Exclamation." converts only when it is
         // the dictation's final token (the observed split-mangle position).
+        let literalExclamationPrefix =
+            "(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their|word|said"
+            + "|red|large|small|literal|actual|visible|single|double|first|second|another)"
+        let modifiedLiteralExclamationPrefix =
+            "(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their)"
+            + "\\s[A-Za-z][A-Za-z'’-]{0,29}"
+        let commandPrefix = "(?:^|[,.]\\s*|(?<!\\b\(literalExclamationPrefix))"
+            + "(?<!\\b\(modifiedLiteralExclamationPrefix))\\s+)"
         if let re = try? NSRegularExpression(
-            pattern: "[ ,.]*\\bexclamation[ .]+(?:mark(?:er|et)?|park)\\b[.!]*|[ ,.]*\\bexclamation\\.?\\s*$",
+            pattern: commandPrefix
+                + "\\bexclamation[ .]+(?:mark(?:er|et)?|park)\\b[.!]*"
+                + "|" + commandPrefix + "\\bexclamation\\.?\\s*$",
             options: [.caseInsensitive]) {
             let ns = NSMutableString(string: result)
             let matches = re.matches(in: result, range: NSRange(location: 0, length: ns.length))
@@ -789,10 +828,15 @@ public struct TextPostProcessor {
         let ambiguousWords: [(word: String, replacement: String, skipBefore: Set<String>,
                               literalPreceders: Set<String>, guarded: Bool)] = [
             ("comma", ",", ["separated", "delimited", "splice", "operator", "issue", "issues", "problem", "problems", "key", "question", "thing", "things", "usage", "placement", "rule", "rules", "character"],
-             ["oxford", "serial", "trailing", "inverted"], true),
+             ["oxford", "serial", "trailing", "inverted", "word", "said"], true),
             ("komma", ",", [], [], false),
+            ("kamma", ",", [], [], false),
             ("kana", ",", [], [], false),
             ("kanna", ",", [], [], false),
+            ("kalma", ",", [], [], false),
+            ("katma", ",", [], [], false),
+            ("comam", ",", [], [], false),
+            ("comlette", ",", [], [], false),
             // skipBefore also carries the menstrual "period <noun>" collocations
             // (period cramps/pain/tracker/…): a menstrual noun directly after "period"
             // is unambiguously the noun sense. These only fire when the noun is ADJACENT
@@ -809,11 +853,11 @@ public struct TextPostProcessor {
               "cramps", "cramp", "pain", "tracker", "tracking", "symptoms", "flow"],
              ["transition", "grace", "grading", "trial", "notice", "probationary", "probation",
               "incubation", "menstrual", "cooling-off", "billing", "waiting",
-              "recovery"], true),
+              "recovery", "word", "said"], true),
             ("colon", ":", ["cancer", "surgery", "cleanse", "polyp"],
-             ["sigmoid", "transverse", "ascending", "descending"], true),
-            ("dash", " —", ["of", "board", "cam"], [], true),
-            ("hyphen", "-", ["ated", "ation"], [], true),
+             ["sigmoid", "transverse", "ascending", "descending", "word", "said"], true),
+            ("dash", " —", ["of", "board", "cam"], ["word", "said"], true),
+            ("hyphen", "-", ["ated", "ation"], ["word", "said"], true),
         ]
 
         for (word, replacement, skipBefore, literalPreceders, guarded) in ambiguousWords {
@@ -872,6 +916,17 @@ public struct TextPostProcessor {
                             !($0.isLetter || $0 == "'" || $0 == "’" || $0 == "-")
                         })
                         .map(String.init)
+                    // A copular/reporting phrase before an article marks literal noun usage:
+                    // "it should have been a comma" and "I said it was a period". This is
+                    // intentionally narrower than the generic article guard so the documented
+                    // Parakeet insertions "hover over a period" / "Like a comma" still correct.
+                    if ["a", "an"].contains(precedingWord) {
+                        let nounIntroducers: Set<String> = [
+                            "be", "been", "being", "is", "was", "were", "means", "called",
+                            "named", "said", "word",
+                        ]
+                        if nounIntroducers.contains(priorWords.dropLast().last ?? "") { continue }
+                    }
                     // Menstrual-verb gate (runs FIRST so it beats the utterance-final drops
                     // below). "having/getting/missed/skipped/tracking <a|an|her|his> period" is
                     // the menstrual noun and must be protected in every position: "having her."
@@ -926,12 +981,42 @@ public struct TextPostProcessor {
                 // user's spoken word wins ("comma." → "," not ",.", "period?" → "." not ".?").
                 let trailing = result[range.upperBound...]
                 let punctSet: Set<Character> = [".", ",", "!", "?", ";", ":"]
+                var replacementRange = range
+                if guarded {
+                    let before = result[..<range.lowerBound]
+                    let beforeTrimmed = before.reversed().drop(while: { $0.isWhitespace }).reversed()
+                    let precedingWord = String(
+                        beforeTrimmed.reversed()
+                            .prefix(while: { $0.isLetter || $0 == "'" || $0 == "’" })
+                            .reversed()
+                    ).lowercased()
+                    let beforeArticle = beforeTrimmed.dropLast(precedingWord.count)
+                        .reversed().drop(while: { $0.isWhitespace }).reversed()
+                    let articleIntroducer = String(
+                        beforeArticle.reversed()
+                            .prefix(while: { $0.isLetter || $0 == "'" || $0 == "’" })
+                            .reversed()
+                    ).lowercased()
+                    // Drop only the two corpus-established Parakeet article insertions.
+                    // Other command-demo forms intentionally keep the historical output
+                    // ("end with a period" -> "end with a.") to avoid changing the calibrated
+                    // article/noun tradeoff beyond the evidence supplied for this feature.
+                    if (precedingWord == "a" || precedingWord == "an"),
+                       ["over", "like"].contains(articleIntroducer) {
+                        let beforeSlice = result[..<range.lowerBound]
+                        if let articleEnd = beforeSlice.lastIndex(where: { !$0.isWhitespace }) {
+                            let articleStart = result.index(articleEnd,
+                                                            offsetBy: -(precedingWord.count - 1))
+                            replacementRange = articleStart..<range.upperBound
+                        }
+                    }
+                }
                 if let firstNonWS = trailing.first(where: { !$0.isWhitespace }), punctSet.contains(firstNonWS) {
                     let endIdx = trailing.firstIndex(of: firstNonWS)!
-                    let extendedRange = range.lowerBound..<result.index(after: endIdx)
+                    let extendedRange = replacementRange.lowerBound..<result.index(after: endIdx)
                     result.replaceSubrange(extendedRange, with: replacement)
                 } else {
-                    result.replaceSubrange(range, with: replacement)
+                    result.replaceSubrange(replacementRange, with: replacement)
                 }
             }
         }

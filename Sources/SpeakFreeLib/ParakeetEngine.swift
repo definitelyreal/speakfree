@@ -1,6 +1,14 @@
+// ai-suggestion:unverified · session:unknown · 2026-08-24
 import Foundation
 import FluidAudio
 import CoreML
+
+/// Optional engine capability used by Transcriber to carry the resolved user mode without
+/// overloading a lossy ASR prompt or changing every transcription backend's public contract.
+protocol ConfidencePunctuationCorrectingEngine: TranscriptionEngine {
+    func transcribe(samples: [Float], language: String, prompt: String?, suppressRegex: String?,
+                    enablePunctuationCommandCorrection: Bool) async throws -> String
+}
 
 /// Wraps FluidAudio's Parakeet TDT ASR for in-process transcription on the Apple Neural Engine.
 ///
@@ -18,7 +26,7 @@ import CoreML
 /// never both build a manager (load is single-flight via a stored in-progress `Task`). The outer
 /// class is a thin facade that delegates to `Core` and maintains an NSLock-guarded `isLoaded`
 /// mirror for the synchronous protocol getter.
-public final class ParakeetEngine: TranscriptionEngine {
+public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCorrectingEngine {
 
     // MARK: - Audio constraints
 
@@ -193,6 +201,285 @@ public final class ParakeetEngine: TranscriptionEngine {
     /// and of BPE word-boundary markers in raw token pieces.
     private static func normalizedWordKey(_ s: String) -> String {
         String(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+    }
+
+    // MARK: - Confidence-guided punctuation-command correction
+
+    /// The result stays inspectable so corpus tests can prove which acoustic token caused an edit.
+    /// Production logs only these bounded token-level decisions, never the full transcript.
+    struct PunctuationCommandCorrection: Equatable {
+        let original: String
+        let replacement: String
+        let confidence: Float
+        let takeMedian: Float
+        let gapBefore: TimeInterval
+        let startTime: TimeInterval
+    }
+
+    struct PunctuationCommandCorrectionResult: Equatable {
+        let text: String
+        let corrections: [PunctuationCommandCorrection]
+    }
+
+    /// A collision word must be both an acoustic outlier and command-shaped. The absolute ceiling
+    /// prevents a merely relative dip in an otherwise weak take from rewriting real English; the
+    /// ratio catches the observed 0.381-in-a-1.0-median garbles that a fixed 0.3 threshold misses.
+    static let punctuationCommandAbsoluteConfidenceCeiling: Float = 0.60
+    static let punctuationCommandMedianRatioCeiling: Float = 0.65
+    static let punctuationCommandPauseSeconds: TimeInterval = 0.20
+
+    private struct ConfidenceWord {
+        let surface: String
+        let startTime: TimeInterval
+        let endTime: TimeInterval
+        let confidence: Float
+    }
+
+    private static let punctuationCollisionLexicon: [String: String] = [
+        // comma -- every entry here is a real-word collision; non-word spellings stay in
+        // TextPostProcessor where they do not need acoustic confidence.
+        "gamma": ",", "coma": ",", "comment": ",", "common": ",",
+        "come": ",", "comes": ",", "coming": ",", "count": ",",
+        // period
+        "paired": ".", "pierre": ".",
+        // question mark
+        "questioner": "?", "questionnaire": "?",
+        // colon
+        "column": ":", "cologne": ":",
+    ]
+
+    /// Real-word meanings that stay literal even when the recognizer also emits a pause or
+    /// sentence boundary. These are deliberately phrase-level fences for corpus-observed and
+    /// user-specified collisions, not a general language model hidden inside the corrector.
+    private static let punctuationCollisionFollowingWordGuards: [String: Set<String>] = [
+        "gamma": ["correction", "ray", "rays", "radiation"],
+        "paired": ["the", "with", "sock", "socks", "sample", "samples", "test", "tests"],
+        "count": ["the", "on", "up", "down", "vote", "votes"],
+        "common": ["sense", "law", "knowledge", "practice", "mistake", "mistakes",
+                   "issue", "issues", "problem", "problems", "ground"],
+        "comment": ["on", "about"],
+        "questioner": ["asked", "asks", "said", "says"],
+        "questionnaire": ["response", "responses", "result", "results", "survey", "data"],
+        "pierre": ["arrived", "went", "said", "says", "is", "was"],
+        "cologne": ["smells", "scent", "bottle", "brand"],
+        "come": ["on", "up"], "comes": ["on", "up"], "coming": ["on", "up"],
+    ]
+    private static let punctuationCollisionPrecedingWordGuards: [String: Set<String>] = [
+        "column": ["first", "second", "third", "fourth", "last", "next", "left", "right"],
+    ]
+
+    /// Convert only confidence-qualified real-word homophones. Literal command words and safe
+    /// non-word garbles are deliberately absent: TextPostProcessor owns those without confidence.
+    static func correctingPunctuationCommandHomophones(
+        text: String, timings: [TokenTiming]?
+    ) -> PunctuationCommandCorrectionResult {
+        guard let timings, !timings.isEmpty, !text.isEmpty else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+
+        let timingWords = punctuationConfidenceWords(from: timings)
+        guard !timingWords.isEmpty else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+
+        let tokenized = VocabularyBoost.tokenizePreservingGaps(text)
+        let originalWords = tokenized.words
+        var words = originalWords
+        var gaps = tokenized.gaps
+        let textKeys = originalWords.map(normalizedWordKey)
+        let alignment = alignTimingWords(timingWords, to: textKeys)
+        // Tail/pad stripping happens before this pass, while FluidAudio timings still describe
+        // the pre-strip decode. Base the take median only on words that survived into `text` so a
+        // stripped synthetic tail cannot make a real token look like an outlier.
+        let alignedTimingIndices = timingWords.indices.filter { alignment[$0] != nil }
+        guard !alignedTimingIndices.isEmpty else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+        let sorted = alignedTimingIndices.map { timingWords[$0].confidence }.sorted()
+        let median: Float = sorted.count.isMultiple(of: 2)
+            ? (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
+            : sorted[sorted.count / 2]
+        guard median > 0 else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+        let hasConfidenceQualifiedCollision = alignedTimingIndices.contains { timingIndex in
+            let word = timingWords[timingIndex]
+            let key = normalizedWordKey(word.surface)
+            return punctuationCollisionLexicon[key] != nil
+                && word.confidence < punctuationCommandAbsoluteConfidenceCeiling
+                && word.confidence / median < punctuationCommandMedianRatioCeiling
+        }
+        guard hasConfidenceQualifiedCollision else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+
+        let clauseMarks: Set<Character> = [".", ",", "!", "?", ";", ":"]
+        let closingMarks: Set<Character> = ["\"", "'", "’", "”", ")", "]", "}"]
+        func hasTrailingClauseMark(_ word: String) -> Bool {
+            guard let last = word.reversed().first(where: { !closingMarks.contains($0) }) else {
+                return false
+            }
+            return clauseMarks.contains(last)
+        }
+        var deletedWordIndices = Set<Int>()
+        var corrections: [PunctuationCommandCorrection] = []
+
+        for timingIndex in timingWords.indices {
+            let timingWord = timingWords[timingIndex]
+            let key = normalizedWordKey(timingWord.surface)
+            guard let replacement = punctuationCollisionLexicon[key],
+                  let textIndex = alignment[timingIndex],
+                  timingWord.confidence < punctuationCommandAbsoluteConfidenceCeiling,
+                  timingWord.confidence / median < punctuationCommandMedianRatioCeiling else { continue }
+
+            let gapBefore = timingIndex > 0
+                ? max(0, timingWord.startTime - timingWords[timingIndex - 1].endTime) : 0
+            let paused = gapBefore >= punctuationCommandPauseSeconds
+            let previousIndex = textIndex > 0 ? textIndex - 1 : nil
+            let previousKey = previousIndex.map { normalizedWordKey(originalWords[$0]) } ?? ""
+            let nextKey = textIndex + 1 < originalWords.count
+                ? normalizedWordKey(originalWords[textIndex + 1]) : ""
+            if punctuationCollisionFollowingWordGuards[key]?.contains(nextKey) == true { continue }
+            if punctuationCollisionPrecedingWordGuards[key]?.contains(previousKey) == true { continue }
+            if key == "column", nextKey.count == 1 { continue }
+
+            let candidatePunctuated = hasTrailingClauseMark(originalWords[textIndex])
+            // A grammatical determiner/possessive normally makes the collision a noun. Allow only
+            // article shapes that are themselves ungrammatical: "an" before this consonant
+            // lexicon, or utterance-final "a paired." (the adjective cannot stand as that noun).
+            // Broad a/that + punctuation exceptions corrupt ordinary "a comment, which..." prose.
+            let articleBefore = previousKey == "a" || previousKey == "an"
+            let strongInsertedArticleShape = previousKey == "an"
+                || (previousKey == "a" && key == "paired" && candidatePunctuated
+                    && nextKey.isEmpty)
+            if articleBefore && !strongInsertedArticleShape { continue }
+            let hardLiteralNounMarker: Set<String> = [
+                "the", "my", "your", "his", "her", "its", "our", "their",
+            ]
+            if hardLiteralNounMarker.contains(previousKey) { continue }
+            let demonstrativeMarker: Set<String> = ["this", "that", "these", "those"]
+            let studyGammaCommandShape = key == "gamma" && previousKey == "this"
+                && candidatePunctuated && ["whether", "if"].contains(nextKey)
+            if demonstrativeMarker.contains(previousKey),
+               !studyGammaCommandShape { continue }
+            let articleInsertion = strongInsertedArticleShape
+            let clauseBoundary = previousIndex.map { hasTrailingClauseMark(originalWords[$0]) } ?? false
+            guard paused || clauseBoundary || articleInsertion else { continue }
+
+            // "come" is the dominant collision family. One generic slot signal is not enough:
+            // require two independent shape signals, with punctuation on the candidate itself
+            // counting as the observed isolated-command signature ("Sure, come, I'd...").
+            if key == "come" || key == "comes" || key == "coming" {
+                let strength = [paused, clauseBoundary, articleInsertion, candidatePunctuated]
+                    .filter { $0 }.count
+                guard strength >= 2 else { continue }
+            }
+
+            // Spoken punctuation outranks the engine's auto-punctuation at the boundary.
+            if clauseBoundary, let previousIndex {
+                var closingSuffix = ""
+                while let last = words[previousIndex].last, closingMarks.contains(last) {
+                    closingSuffix.insert(last, at: closingSuffix.startIndex)
+                    words[previousIndex].removeLast()
+                }
+                while let last = words[previousIndex].last, clauseMarks.contains(last) {
+                    words[previousIndex].removeLast()
+                }
+                words[previousIndex] += closingSuffix
+            }
+            if articleInsertion, let previousIndex {
+                deletedWordIndices.insert(previousIndex)
+                gaps[previousIndex] = ""
+                gaps[previousIndex + 1] = ""
+            }
+            gaps[textIndex] = ""
+            words[textIndex] = replacement
+            corrections.append(PunctuationCommandCorrection(
+                original: timingWord.surface, replacement: replacement,
+                confidence: timingWord.confidence, takeMedian: median, gapBefore: gapBefore,
+                startTime: timingWord.startTime))
+        }
+
+        guard !corrections.isEmpty else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+        var corrected = gaps[0]
+        for index in words.indices {
+            if !deletedWordIndices.contains(index) { corrected += words[index] }
+            corrected += gaps[index + 1]
+        }
+        return PunctuationCommandCorrectionResult(text: corrected, corrections: corrections)
+    }
+
+    private static func punctuationConfidenceWords(from timings: [TokenTiming]) -> [ConfidenceWord] {
+        var words: [ConfidenceWord] = []
+        var surface = ""
+        var start: TimeInterval = 0
+        var end: TimeInterval = 0
+        var lexicalConfidences: [Float] = []
+
+        func flush() {
+            guard !normalizedWordKey(surface).isEmpty, !lexicalConfidences.isEmpty else { return }
+            words.append(ConfidenceWord(
+                surface: surface, startTime: start, endTime: end,
+                confidence: lexicalConfidences.min() ?? 1))
+        }
+
+        for timing in timings {
+            let raw = timing.token
+            guard !raw.isEmpty, raw != "<blank>", raw != "<pad>" else { continue }
+            let startsWord = raw.first == "▁" || raw.first?.isWhitespace == true
+            if startsWord, !surface.isEmpty {
+                flush(); surface = ""; lexicalConfidences = []
+            }
+            let piece = String(raw.drop(while: { $0 == "▁" || $0.isWhitespace }))
+            guard !piece.isEmpty else { continue }
+            if surface.isEmpty { start = timing.startTime }
+            surface += piece
+            end = timing.endTime
+            if piece.unicodeScalars.contains(where: { CharacterSet.alphanumerics.contains($0) }) {
+                lexicalConfidences.append(timing.confidence)
+            }
+        }
+        flush()
+        return words
+    }
+
+    /// LCS word alignment. Vocabulary boosting may change unrelated words, so timing and final-
+    /// text indices are not assumed equal; a candidate is edited only when its original normalized
+    /// word still participates in the monotonic alignment. The cap keeps malformed huge results
+    /// from turning this bounded correction pass into an unbounded quadratic allocation.
+    private static func alignTimingWords(
+        _ timingWords: [ConfidenceWord], to textKeys: [String]
+    ) -> [Int: Int] {
+        let timingKeys = timingWords.map { normalizedWordKey($0.surface) }
+        let n = timingKeys.count, m = textKeys.count
+        guard n <= VocabularyBoost.maxBoostWords, m <= VocabularyBoost.maxBoostWords else {
+            return [:]
+        }
+        var lengths = Array(repeating: Array(repeating: 0, count: m + 1), count: n + 1)
+        if n > 0, m > 0 {
+            for i in stride(from: n - 1, through: 0, by: -1) {
+                for j in stride(from: m - 1, through: 0, by: -1) {
+                    lengths[i][j] = timingKeys[i] == textKeys[j]
+                        ? lengths[i + 1][j + 1] + 1
+                        : max(lengths[i + 1][j], lengths[i][j + 1])
+                }
+            }
+        }
+        var result: [Int: Int] = [:]
+        var i = 0, j = 0
+        while i < n, j < m {
+            if !timingKeys[i].isEmpty, timingKeys[i] == textKeys[j] {
+                result[i] = j
+                i += 1; j += 1
+            } else if lengths[i + 1][j] >= lengths[i][j + 1] {
+                i += 1
+            } else {
+                j += 1
+            }
+        }
+        return result
     }
 
     // MARK: - Core (owns all mutable model state)
@@ -422,7 +709,8 @@ public final class ParakeetEngine: TranscriptionEngine {
 
         // MARK: Transcribe
 
-        func transcribe(samples: [Float], language: String) async throws -> String {
+        func transcribe(samples: [Float], language: String,
+                        enablePunctuationCommandCorrection: Bool) async throws -> String {
             // Gate on `tearingDown` BEFORE bumping `active` so no transcribe begins once a teardown
             // (unload or model-replacing load) has started. This is what lets the drain loop finish.
             guard let mgr = manager, let modelID = loadedModelID, !tearingDown else {
@@ -553,6 +841,19 @@ public final class ParakeetEngine: TranscriptionEngine {
                     format: "ParakeetEngine: stripped pad hallucination (%d chars past %.2fs)",
                     text.count - stripped.count, Double(speechSamples.count) / 16_000.0))
             }
+            let punctuationCorrection = enablePunctuationCommandCorrection
+                ? ParakeetEngine.correctingPunctuationCommandHomophones(
+                    text: stripped, timings: result.tokenTimings)
+                : PunctuationCommandCorrectionResult(text: stripped, corrections: [])
+            if !punctuationCorrection.corrections.isEmpty {
+                DiagnosticLogger.shared.log(
+                    "ParakeetEngine: confidence-guided punctuation corrected "
+                        + punctuationCorrection.corrections.map {
+                            String(format: "'%@'→'%@' (%.3f/%.3f, gap %.2fs)",
+                                   $0.original, $0.replacement, $0.confidence,
+                                   $0.takeMedian, $0.gapBefore)
+                        }.joined(separator: ", "))
+            }
             let minConfidence = result.tokenTimings?.map(\.confidence).min()
             let uncertain = result.confidence < 0.5 || (minConfidence.map { $0 < 0.3 } ?? false)
             onDiagnostics(TranscriptionDiagnostics(
@@ -566,7 +867,7 @@ public final class ParakeetEngine: TranscriptionEngine {
                     format: "ParakeetEngine: uncertain take (aggregate %.3f, min-token %.3f)",
                     result.confidence, minConfidence ?? -1))
             }
-            return stripped
+            return punctuationCorrection.text
         }
 
         // MARK: Unload
@@ -683,8 +984,9 @@ public final class ParakeetEngine: TranscriptionEngine {
 
     // MARK: - Transcription
 
-    /// Transcribe `[Float]` 16 kHz mono samples. `prompt` and `suppressRegex` are ignored —
-    /// Parakeet has no equivalent of whisper's initial prompt / token-suppression knobs.
+    /// Transcribe `[Float]` 16 kHz mono samples. Parakeet has no ASR equivalent of whisper's
+    /// prompt / token suppression, but their spoken-punctuation mode signal gates the confidence
+    /// corrector so Off mode remains byte-faithful to Parakeet's lexical output.
     ///
     /// - Parameter language: short language code ("en", "fr", …) or "auto". The hint is only
     ///   forwarded to FluidAudio for v3 (multilingual); v2 is English-only and ignores it.
@@ -692,7 +994,22 @@ public final class ParakeetEngine: TranscriptionEngine {
                            language: String,
                            prompt: String?,
                            suppressRegex: String?) async throws -> String {
-        try await core.transcribe(samples: samples, language: language)
+        try await transcribe(
+            samples: samples, language: language, prompt: prompt,
+            suppressRegex: suppressRegex, enablePunctuationCommandCorrection: false)
+    }
+
+    /// Transcriber's Parakeet-specific path carries the resolved punctuation mode explicitly.
+    /// Keeping it separate from the ASR prompt matters because prompt-budget truncation can remove
+    /// the spoken-punctuation instruction while the user's mode is still Hybrid.
+    func transcribe(samples: [Float],
+                    language: String,
+                    prompt: String?,
+                    suppressRegex: String?,
+                    enablePunctuationCommandCorrection: Bool) async throws -> String {
+        try await core.transcribe(
+            samples: samples, language: language,
+            enablePunctuationCommandCorrection: enablePunctuationCommandCorrection)
     }
 
     /// Parakeet (batch `AsrManager`) does not support live preview. Streaming would require
