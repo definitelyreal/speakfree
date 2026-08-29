@@ -559,6 +559,101 @@ public enum OverlayEmergence {
         return out
     }
 
+    // MARK: - Rescue status line: text + cymatics dots (Michael 2026-08-22)
+    //
+    // While a whisper rescue runs, the transcribing card carries a centered status
+    // line ("Garbled audio. Trying Whisper…"). Michael asked for "little dots
+    // emanating from the text, like sand cymatics driven by speech": a few grains
+    // that appear on the text line, drift outward above or below it, and settle
+    // away. Same vocabulary as the locked entry (lilac ink, easeOutQuint, a 30Hz
+    // tick clock) and deliberately calm, so it reads as the card breathing, never
+    // as the live waveform. Lives ONLY in the transcribing status phase; nothing
+    // here touches recording-phase geometry (DEFECT 2).
+    //
+    // Everything is a deterministic function of the tick, so the whole treatment
+    // is unit-testable and renders identically in the offscreen harness.
+
+    /// Status text colour: off-white, brighter than the old white @ 0.9 but not pure
+    /// white (Michael 2026-08-22).
+    public static let statusTextRGB: RGB = (0.97, 0.97, 0.98)
+    public static let statusTextAlpha: CGFloat = 0.96
+
+    /// Grains alive at once. Seven is "a few": always two or three visible, never a swarm.
+    public static let statusDotCount = 7
+    /// One grain's life, in 30Hz ticks (2.4s): born on the text line, drifts out, gone.
+    public static let statusDotPeriodTicks = 72
+    /// Peak grain opacity. Calm: under the live waveform's weight.
+    public static let statusDotMaxAlpha: CGFloat = 0.55
+    /// Grain radius in points at birth; it shrinks to ~60% as it settles.
+    public static let statusDotRadius: CGFloat = 1.6
+
+    /// One grain, in normalised text-relative space: `x` runs -1…1 along the text
+    /// span, `y` runs -1…1 where 0 is the text line and the sign picks above/below
+    /// (the renderer maps |y| onto the room between the text and the card edge).
+    /// `scale` is the radius multiplier (1 at birth).
+    public struct StatusDot: Equatable {
+        public let x: CGFloat
+        public let y: CGFloat
+        public let alpha: CGFloat
+        public let scale: CGFloat
+    }
+
+    /// Life position of grain `index` at `tick`: `phase` 0…1 through its current
+    /// life, `cycle` which life it is on. Grains are evenly staggered, so at any
+    /// tick the population spans the whole life cycle.
+    public static func statusDotPhase(tick: Int, index: Int,
+                                      count: Int = statusDotCount,
+                                      period: Int = statusDotPeriodTicks) -> (phase: CGFloat, cycle: Int) {
+        let n = max(1, count)
+        let p = max(1, period)
+        let shifted = tick + (index % n) * p / n
+        var cycle = shifted / p
+        var rem = shifted % p
+        if rem < 0 { rem += p; cycle -= 1 }   // negative ticks wrap, never NaN
+        return (CGFloat(rem) / CGFloat(p), cycle)
+    }
+
+    /// A grain at `phase` of life `cycle`. Each rebirth lands at a new spot along
+    /// the text (golden-ratio spacing, so no two consecutive grains sit together)
+    /// and alternates above/below. The outward drift is easeOutQuint: a quick
+    /// departure from the text, then a slow settle, which is the sand-on-a-plate
+    /// read. Alpha fades in over the first 15% and out over the last 60%, so a
+    /// grain never pops in or out.
+    public static func statusDot(phase: CGFloat, cycle: Int, index: Int,
+                                 count: Int = statusDotCount) -> StatusDot {
+        let p = clamp01(phase)
+        let n = max(1, count)
+        let life = index + cycle * n
+        // Golden-ratio sequence across the text span, re-centred to -1…1 and kept
+        // a little inside the ends so grains never sit past the last glyph.
+        let golden: CGFloat = 0.6180339887
+        var u = (CGFloat(life) * golden).truncatingRemainder(dividingBy: 1)
+        if u < 0 { u += 1 }
+        let x0 = (u * 2 - 1) * 0.9
+        // Gentle lateral settle, a few percent of the span; its sign and the
+        // above/below side alternate on different cadences so they never lock step.
+        let swaySign: CGFloat = ((life / 2) % 2 == 0) ? 1 : -1
+        let sway = swaySign * 0.05 * sin(p * .pi)
+        let up: CGFloat = (life % 2 == 0) ? 1 : -1
+        let travel = easeOutQuint(p)
+        let fadeIn = smoothstep(p / 0.15)
+        let fadeOut = 1 - smoothstep((p - 0.4) / 0.6)
+        return StatusDot(
+            x: max(-1, min(1, x0 + sway)),
+            y: up * travel,
+            alpha: statusDotMaxAlpha * fadeIn * fadeOut,
+            scale: lerp(1, 0.6, p)
+        )
+    }
+
+    /// The whole grain population at `tick` (the overlay's 30Hz state tick).
+    public static func statusDots(tick: Int, count: Int = statusDotCount) -> [StatusDot] {
+        (0..<max(0, count)).map { i in
+            let (phase, cycle) = statusDotPhase(tick: tick, index: i, count: count)
+            return statusDot(phase: phase, cycle: cycle, index: i, count: count)
+        }
+    }
+
     // MARK: - Adaptive outline contrast (2026-08-12)
     //
     // "if the screen behind it is bright, it should be a black outline around the

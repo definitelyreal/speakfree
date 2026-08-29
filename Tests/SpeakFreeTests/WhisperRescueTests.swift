@@ -6,22 +6,82 @@ import XCTest
 /// (2026-08-20 confidence-fallback lane). The full rescue path needs live models;
 /// these pin the pure decision pieces.
 final class WhisperRescueTests: XCTestCase {
+    typealias Status = Transcriber.SecondOpinionStatus
+
+    /// Michael's copy rule (2026-08-22): two sentences, the first says what the audio
+    /// contained, the second the action or outcome.
     func testSecondOpinionStatusMessages() {
-        XCTAssertEqual(
-            Transcriber.SecondOpinionStatus.rechecking.message,
-            "Rechecking with whisper…")
-        XCTAssertEqual(
-            Transcriber.SecondOpinionStatus.failed.message,
-            "Nothing transcribed (too noisy)")
+        XCTAssertEqual(Status.rechecking(.garbled).message, "Garbled audio. Trying Whisper…")
+        XCTAssertEqual(Status.rechecking(.silence).message, "Silence. Trying Whisper…")
+        XCTAssertEqual(Status.failed(.garbled).message, "Garbled audio. Whisper found nothing.")
+        XCTAssertEqual(Status.failed(.silence).message, "Silence. Nothing to transcribe.")
+    }
+
+    func testStatusCopyHasNoEmDashesAndOpensWithTheAudioSentence() {
+        let all: [Status] = [.rechecking(.garbled), .rechecking(.silence),
+                             .failed(.garbled), .failed(.silence)]
+        for status in all {
+            XCTAssertFalse(status.message.contains("—"), "no em-dashes in UI copy: \(status.message)")
+            XCTAssertFalse(status.message.contains("–"), "no en-dashes either: \(status.message)")
+            let sentences = status.message.split(separator: ".", omittingEmptySubsequences: true)
+            XCTAssertGreaterThanOrEqual(sentences.count, 2, "two-part voice: \(status.message)")
+        }
+        XCTAssertTrue(Status.rechecking(.garbled).message.hasPrefix(Status.AudioDescriptor.garbled.sentence))
+        XCTAssertTrue(Status.failed(.silence).message.hasPrefix(Status.AudioDescriptor.silence.sentence))
+    }
+
+    /// `RecordingOverlay.updateStreamingText` only ever GROWS the text (shorter
+    /// updates are dropped as stale re-processing). The failure line replaces the
+    /// "trying" line through that same path, so for each descriptor it must be at
+    /// least as long, or the failure would never show.
+    func testFailureLineIsNeverShorterThanTheTryingLine() {
+        for audio in [Status.AudioDescriptor.garbled, .silence] {
+            XCTAssertGreaterThanOrEqual(
+                Status.failed(audio).message.count, Status.rechecking(audio).message.count,
+                "failure copy for \(audio) would be dropped by the grow-only rule")
+        }
+    }
+
+    /// Descriptor selection from the take's evidence: any sustained or voiced speech
+    /// energy is "garbled" (the model had something to work with); otherwise the take
+    /// reads as silence. Pure, so the copy decision is pinned without a rescue run.
+    func testAudioDescriptorFollowsTheEvidence() {
+        func evidence(peak: Float, windows: Int, voiced: Bool) -> Transcriber.AudioEvidence {
+            Transcriber.AudioEvidence(durationSeconds: 4, peakWindowRMS: peak,
+                                      speechWindowCount: windows, noiseFloorRMS: 0.002,
+                                      hasVoicedSpeech: voiced)
+        }
+        // Sustained energy (peak >= 0.04 across >= 3 windows): garbled.
+        XCTAssertEqual(Transcriber.audioDescriptor(for: evidence(peak: 0.08, windows: 12, voiced: false)), .garbled)
+        // Below the sustained bar but a voiced pitch was found: still garbled.
+        XCTAssertEqual(Transcriber.audioDescriptor(for: evidence(peak: 0.02, windows: 1, voiced: true)), .garbled)
+        // Dead quiet: silence.
+        XCTAssertEqual(Transcriber.audioDescriptor(for: evidence(peak: 0.001, windows: 0, voiced: false)), .silence)
+        // A lone unvoiced burst (one energetic window, no pitch) is a click, not speech.
+        XCTAssertEqual(Transcriber.audioDescriptor(for: evidence(peak: 0.09, windows: 1, voiced: false)), .silence)
     }
 
     func testTranscribingStatusExpandsSpinnerPill() {
         let idleSize = OverlayContentView.pillSize(for: .transcribing)
         let statusSize = OverlayContentView.pillSize(
             for: .transcribing,
-            streamingText: Transcriber.SecondOpinionStatus.rechecking.message)
+            streamingText: Status.rechecking(.garbled).message)
         XCTAssertGreaterThan(statusSize.width, idleSize.width)
         XCTAssertGreaterThanOrEqual(statusSize.height, idleSize.height)
+    }
+
+    /// The text centres because the pill reserves the SAME room on both sides of it
+    /// (spinner + gap on the left, mirrored on the right), and the status card is
+    /// tall enough to give the cymatics grains a band above and below the line.
+    func testStatusPillReservesSymmetricSideRoomAndGrainBands() {
+        let message = Status.rechecking(.garbled).message
+        let textWidth = ceil((message as NSString).size(withAttributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .regular),
+        ]).width)
+        let size = OverlayContentView.pillSize(for: .transcribing, streamingText: message)
+        XCTAssertEqual(size.width, textWidth + OverlayContentView.statusSidePad * 2, accuracy: 0.5)
+        XCTAssertEqual(size.height, OverlayContentView.statusHeight, accuracy: 1e-9)
+        XCTAssertGreaterThan(OverlayContentView.statusHeight, 48, "room for grains above/below a 13pt line")
     }
 
     func testShadowThresholdSitsBetweenGarbledAndCleanBands() {

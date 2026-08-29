@@ -8,6 +8,24 @@ SIGN_ID="Developer ID Application: Michael Morgenstern (AZ53Y7V4UZ)"
 ENTITLEMENTS="$(dirname "$0")/speakfree.entitlements"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Fork policy (2026-08-21): releases are cut from main or a release/X.Y.Z branch.
+# release/* carries only regression fixes cherry-picked from main; main keeps
+# experimenting. On a release branch the version in its name must match
+# Version.swift so a mis-bumped branch can never ship under the wrong number.
+CURRENT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)
+case "$CURRENT_BRANCH" in
+    main) ;;
+    release/*)
+        BRANCH_VERSION="${CURRENT_BRANCH#release/}"
+        if [ "$BRANCH_VERSION" != "$VERSION" ]; then
+            echo "FATAL: on $CURRENT_BRANCH but Version.swift says $VERSION." >&2
+            exit 1
+        fi ;;
+    *)
+        echo "FATAL: build.sh must run from main or release/* (currently on '$CURRENT_BRANCH')." >&2
+        exit 1 ;;
+esac
+
 # Vendored whisper.cpp + ggml binaries. Pinning to a known-good version
 # (libwhisper 1.8.3 + ggml 0.9.5) avoids depending on transient brew state —
 # specifically, brew's whisper-cpp 1.8.4 is ABI-incompatible with current ggml
@@ -246,7 +264,8 @@ sleep 1
 pkill -9 -x speakfree 2>/dev/null || true
 sleep 1
 echo "Installing to /Applications..."
-rm -rf /Applications/speakfree.app
+# Trash, never replace in place (project rule: in-place replacement corrupts TCC state).
+/usr/bin/trash /Applications/speakfree.app 2>/dev/null || rm -rf /Applications/speakfree.app
 cp -a "$APP" /Applications/
 
 # Create a DRAFT GitHub release and upload the DMG.

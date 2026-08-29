@@ -755,8 +755,8 @@ struct SettingsView: View {
 
                         if storedRecordingCount > 0 {
                             HStack(spacing: 4) {
-                                Text("You have \(storedRecordingCount) recordings and their "
-                                     + "transcripts stored on your computer.")
+                                Text("Your corpus: \(storedRecordingCount) recordings and "
+                                     + "transcripts, stored only on this Mac.")
                                     .font(.footnote)
                                     .foregroundColor(.secondary)
                                 Button("Click here to delete") { showDeleteRecordingsSheet = true }

@@ -370,8 +370,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
 
-        // Recordings apology notice (2026-07-14): saving shipped on-by-default through
-        // v1.7.1; the notice lets users keep or delete what accumulated. Returns every
+        // Recordings notice (2026-07-14; corpus framing 2026-08-21): saving shipped
+        // on-by-default through v1.7.1; the notice lets users keep or delete what
+        // accumulated. Returns every
         // launch (and every few hours, below) until resolved. Dev machines are exempt —
         // the corpus there is intentional.
         switch DevMode.isActive
@@ -1119,7 +1120,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.show(viewModel: settingsViewModel!)
     }
 
-    /// Present the recordings apology notice. Main-only. A dismissal without a
+    /// Present the recordings notice. Main-only. A dismissal without a
     /// keep/delete decision re-arms it a few hours out; a decision (persisted by the
     /// controller) reloads config so the dialog's toggle takes effect immediately.
     private func showRecordingsNotice() {

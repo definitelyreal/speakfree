@@ -38,6 +38,14 @@ open /Applications/speakfree.app
 sleep 4
 pgrep -f "speakfree.app/Contents/MacOS/speakfree" >/dev/null && echo "M3 RUNNING"
 
+# Release-fork window (2026-08-21): M3 is the dogfood for the release/X.Y.Z branch
+# while M5/M1 may keep running main. M3_ONLY=1 stops here so a release-branch
+# build never overwrites the experimental builds on the remotes.
+if [ "${M3_ONLY:-0}" = "1" ]; then
+    echo "== M3_ONLY=1: skipping M5/M1 (release-branch dogfood) =="
+    exit 0
+fi
+
 echo "== vendored bundle for remotes =="
 rm -rf speakfree-fleet.app
 cp -R speakfree.app speakfree-fleet.app
