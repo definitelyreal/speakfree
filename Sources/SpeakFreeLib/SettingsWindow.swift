@@ -623,8 +623,11 @@ struct SettingsView: View {
                 // -- GENERAL -----------------------------------------------
                 GroupBox("General") {
                     VStack(alignment: .leading, spacing: 14) {
+                        // The Globe-key suppression is noticeable on any TAP-driven mode (Toggle and
+                        // Edit both tap fn), where macOS would otherwise fire the emoji drawer — not
+                        // in Hold. See HotkeyAdvice.
                         if HotkeyAdvice.suppressesGlobeKeyAction(keyCode: viewModel.hotkeyKeyCode,
-                                                                 toggleMode: viewModel.toggleMode) {
+                                                                 toggleMode: viewModel.keyMode != .hold) {
                             globeKeyBanner
                         }
 
@@ -655,14 +658,15 @@ struct SettingsView: View {
                                     .pickerStyle(.menu)
                                     .labelsHidden()
 
-                                    Picker("", selection: $viewModel.toggleMode) {
-                                        Text("Hold").tag(false)
-                                        Text("Toggle").tag(true)
+                                    Picker("", selection: $viewModel.keyMode) {
+                                        Text("Hold").tag(KeyMode.hold)
+                                        Text("Toggle").tag(KeyMode.toggle)
+                                        Text("Edit").tag(KeyMode.edit)
                                     }
                                     .pickerStyle(.segmented)
                                     .controlSize(.small)
                                     .labelsHidden()
-                                    .frame(width: 100)
+                                    .frame(width: 150)
                                 }
                             }
 
@@ -1037,7 +1041,7 @@ struct SettingsView: View {
                 viewModel.save()
             }
         }
-        .onChange(of: viewModel.toggleMode) { _ in viewModel.save() }
+        .onChange(of: viewModel.keyMode) { _ in viewModel.save() }
         .onChange(of: viewModel.modelSize) { newModel in
             viewModel.save()
             checkPendingDownload()

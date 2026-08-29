@@ -16,6 +16,11 @@ public struct Config: Codable {
     // 30 in Settings still sticks.
     public var maxRecordingsUserConfirmed: Bool?
     public var toggleMode: FlexBool?
+    /// Key Mode as a three-way enum (hold/toggle/edit), 2026-08-28. nil = legacy config that only
+    /// has `toggleMode` — resolve through `effectiveKeyMode` (KeyMode.swift), which keeps historical
+    /// behavior. Settings writes BOTH keyMode AND a synced `toggleMode` so a downgrade to a
+    /// keyMode-unaware build still reads the right Hold/Toggle. JSON key: "keyMode".
+    public var keyMode: KeyMode?
     public var screenContext: FlexBool?
     /// Recording banner visual variant 1-5 (2026-07-25 design shotgun); nil = 1.
     public var overlayStyle: Int?
