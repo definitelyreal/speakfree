@@ -27,6 +27,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// .meta.json so the edit-feedback batch can find the final artifact to diff.
     private var recordingTargetBundleID: String?
 
+    // MARK: - Edit Mode seams (Phase 2 wires these; nil/false in Phase 1 = no behavior change)
+    //
+    /// Set at record-start by the edit session (Phase 2) so finalize knows this segment belongs to an
+    /// open edit session. nil for every hold/toggle dictation, which then resolves to
+    /// FinalizeDestination.insertImmediately — byte-identical to pre-Edit-Mode.
+    var pendingEditFinalizeTarget: (sessionID: UUID, segmentID: UUID)?
+    /// Delivers a finalized edit segment to the open session INSTEAD of inserting it (C1).
+    var editFinalizeSink: ((EditFinalizePayload) -> Void)?
+    /// True while an edit session window is open — extends the config-reload defer (MAP §8).
+    var editSessionOpenProbe: (() -> Bool)?
+    /// Routes an Edit-mode fn-tap through the EditSessionController (Phase 2). nil = fall back to
+    /// toggle semantics so keyMode:"edit" still dictates before the controller exists.
+    var editHotkeyRouter: (() -> Void)?
+
     // Clean up whisper model before exit to prevent ggml Metal assertion crash.
     // The crash happens in __cxa_finalize_ranges when ggml tries to free Metal
     // residency sets that are still active during static destructor cleanup.
@@ -738,9 +752,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // full reload once (performPendingConfigReloadIfNeeded), reloading fresh Config.load()
         // state from disk. This is reached from settings save, notice callbacks, and mic select —
         // all correctly get the same defer-if-pressed semantics.
-        if isPressed {
+        // Defer the whole reload while a dictation is in flight OR while an edit session is open
+        // (MAP §8): swapping the transcriber/hotkey or flipping Key Mode under an open session would
+        // strand its segments and change the hotkey out from under it. Every dictation-end path (and
+        // Phase 2's session-close path) re-runs the reload once via performPendingConfigReloadIfNeeded.
+        if isPressed || (editSessionOpenProbe?() ?? false) {
             pendingConfigReload = true
-            DiagnosticLogger.shared.log("Config: reload deferred — dictation in flight")
+            DiagnosticLogger.shared.log("Config: reload deferred — dictation or edit session in flight")
             return
         }
 
@@ -1160,30 +1178,48 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleKeyDown() {
         guard isReady, !isTerminating else { return }
 
-        let isToggle = config.toggleMode?.value ?? false
-
-        if isToggle {
+        // Resolve Key Mode through the one shared property (KeyMode.swift), never a site-local
+        // `config.toggleMode?.value ?? false` — that is exactly the drift `effectiveKeyMode` and
+        // `effectivePunctuationMode` exist to prevent.
+        switch config.effectiveKeyMode {
+        case .hold:
+            guard !isPressed else { return }
+            handleRecordingStart()
+        case .toggle:
             if isPressed {
                 handleRecordingStop()
             } else {
                 handleRecordingStart()
             }
-        } else {
-            guard !isPressed else { return }
-            handleRecordingStart()
+        case .edit:
+            // Phase 2 owns the EditSessionController: the window, the fn-tap reducer routing
+            // (EditKeyReducer), and the finalize-destination target. Until it is wired, route the
+            // tap through the same toggle semantics so a manually-set keyMode:"edit" config still
+            // dictates rather than bricking the hotkey. The FinalizeDestination seam keeps edit
+            // finalization off the direct-insert path only once a target is captured (nil today).
+            if let router = editHotkeyRouter {
+                router()
+            } else if isPressed {
+                handleRecordingStop()
+            } else {
+                handleRecordingStart()
+            }
         }
     }
 
     private func handleKeyUp() {
-        let isToggle = config.toggleMode?.value ?? false
-        if isToggle { return }
-
-        handleRecordingStop()
-
-        // L1: the key was released via the still-installed old hotkey manager (the reload was
-        // deferred while held) and isPressed is now false — safe to apply any deferred config
-        // reload in full (transcriber swap + hotkey rebuild + settings).
-        performPendingConfigReloadIfNeeded()
+        // Toggle and Edit are tap-driven: the key-up is ignored (the tap already started/stopped in
+        // handleKeyDown). Only Hold stops on release.
+        switch config.effectiveKeyMode {
+        case .toggle, .edit:
+            return
+        case .hold:
+            handleRecordingStop()
+            // L1: the key was released via the still-installed old hotkey manager (the reload was
+            // deferred while held) and isPressed is now false — safe to apply any deferred config
+            // reload in full (transcriber swap + hotkey rebuild + settings).
+            performPendingConfigReloadIfNeeded()
+        }
     }
 
     private func showAccessibilityAlert() {
@@ -1945,6 +1981,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let metaEngine = activeEngineID
         let metaDevice = recorder.currentCaptureDeviceName()
         let metaTargetApp = recordingTargetBundleID
+        // C1: snapshot the edit-session target (nil for hold/toggle) on main before the async Task,
+        // so the finalize destination is decided from the target captured at record-start, never
+        // re-derived. Always nil in Phase 1 (no EditSessionController yet) → insertImmediately.
+        let editTarget = pendingEditFinalizeTarget
 
         // Snapshot the transcriber on main BEFORE crossing into the async Task. A settings
         // change mid-finalize (reloadConfig) can swap self.transcriber out from under us; the
@@ -2035,35 +2075,50 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 let text = TextPipeline.run(
                     makeInput(primaryRaw, samples.count),
                     precomputedPrompt: .some(prompt)).finalText
+                let meta = RecordingStore.RecordingMeta(
+                    appVersion: SpeakFree.version,
+                    engine: metaEngine,
+                    model: transcriber.modelID,
+                    inputDevice: metaDevice,
+                    date: ISO8601DateFormatter().string(from: Date()),
+                    durationSeconds: Double(samples.count) / 16_000.0,
+                    transcriptChars: text.count,
+                    targetApp: metaTargetApp,
+                    transcriptionDiagnostics: transcriber.lastDiagnostics
+                )
                 RecordingStore.finishRecording(
-                    audioURL: audioURL, keep: keepRecording, raw: primaryRaw, text: text,
-                    meta: RecordingStore.RecordingMeta(
-                        appVersion: SpeakFree.version,
-                        engine: metaEngine,
-                        model: transcriber.modelID,
-                        inputDevice: metaDevice,
-                        date: ISO8601DateFormatter().string(from: Date()),
-                        durationSeconds: Double(samples.count) / 16_000.0,
-                        transcriptChars: text.count,
-                        targetApp: metaTargetApp,
-                        transcriptionDiagnostics: transcriber.lastDiagnostics
-                    ))
+                    audioURL: audioURL, keep: keepRecording, raw: primaryRaw, text: text, meta: meta)
                 RecordingStore.clearSentinel()
                 if keepRecording && maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
                 }
-                DispatchQueue.main.async {
-                    if keepRecording {
-                        self.statusBar.noteFinishedRecording(url: audioURL, text: text)
+                // C1 finalize destination: hold/toggle insert immediately (today's path, unchanged);
+                // an edit segment is delivered to its session and CANNOT reach the inserter.
+                switch FinalizeDestination.resolve(editTarget: editTarget) {
+                case .returnToEditSession(let sessionID, let segmentID):
+                    let payload = EditFinalizePayload(
+                        sessionID: sessionID, segmentID: segmentID, raw: primaryRaw,
+                        pipelineText: text, audioURL: audioURL, meta: meta)
+                    DispatchQueue.main.async {
+                        // No presentFinalizedText, no TextInserter, no focus recapture — the session
+                        // owns the segment from here.
+                        self.statusBar.state = .idle
+                        self.editFinalizeSink?(payload)
                     }
-                    self.presentFinalizedText(
-                        text,
-                        sampleCount: samples.count,
-                        stopTime: stopTime,
-                        prependSpace: capturedPrependSpace,
-                        contextBefore: capturedInputText,
-                        element: capturedElement
-                    )
+                case .insertImmediately:
+                    DispatchQueue.main.async {
+                        if keepRecording {
+                            self.statusBar.noteFinishedRecording(url: audioURL, text: text)
+                        }
+                        self.presentFinalizedText(
+                            text,
+                            sampleCount: samples.count,
+                            stopTime: stopTime,
+                            prependSpace: capturedPrependSpace,
+                            contextBefore: capturedInputText,
+                            element: capturedElement
+                        )
+                    }
                 }
             } catch {
                 RecordingStore.clearSentinel()
