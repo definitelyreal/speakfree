@@ -2,7 +2,7 @@
 import XCTest
 @testable import SpeakFreeLib
 
-/// Recordings privacy (2026-07-14): saving is opt-in, and the apology notice governs
+/// Recordings privacy (2026-07-14): saving is opt-in, and the recordings notice governs
 /// what happens to files that accumulated while saving was accidentally on-by-default.
 final class RecordingsNoticeTests: XCTestCase {
 
@@ -168,6 +168,29 @@ final class RecordingsNoticeTests: XCTestCase {
             atPath: RecordingStore.recordingsDir.path)) ?? []
         XCTAssertTrue(contents.isEmpty,
                       "with saving off, a finished dictation must leave zero files; found \(contents)")
+    }
+
+    // MARK: - Copy
+
+    func testNoticeCopyHasNoEmDashes() {
+        // UI copy rule (2026-08-21 reframe): no em-dashes anywhere the user reads.
+        let all = [
+            NoticeCopy.header, NoticeCopy.noteLabel, NoticeCopy.note, NoticeCopy.turnedOff,
+            NoticeCopy.toggleLabel, NoticeCopy.deleteLeadIn, NoticeCopy.deleteLinkText,
+            NoticeCopy.deleteLeadOut, NoticeCopy.openFolderLabel, NoticeCopy.continueKeepLabel,
+            NoticeCopy.continueLabel, NoticeCopy.confirmTitle, NoticeCopy.confirmDataNote,
+            NoticeCopy.confirmQuestion, NoticeCopy.confirmBody(fileCount: 3, folder: "/x"),
+        ]
+        for s in all {
+            XCTAssertFalse(s.contains("\u{2014}"), "em-dash in notice copy: \(s)")
+        }
+    }
+
+    func testNoticeCopyLeadsWithTheCorpusNotTheApology() {
+        // The header is the first thing read: it must frame the archive as the user's
+        // asset, not as something done to them (Michael, 2026-08-21).
+        XCTAssertTrue(NoticeCopy.header.lowercased().contains("corpus"))
+        XCTAssertFalse(NoticeCopy.header.lowercased().contains("we were"))
     }
 
     // MARK: - Config round-trip

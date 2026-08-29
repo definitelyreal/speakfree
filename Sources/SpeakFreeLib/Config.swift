@@ -52,9 +52,9 @@ public struct Config: Codable {
     // sidecars is OPT-IN. nil/false = nothing persists — the wav is deleted once the
     // dictation finalizes and no sidecars are written. Saving was accidentally
     // on-by-default for every user through v1.7.1 (it was meant as a dev-machine
-    // debugging corpus); the apology notice below tells users and lets them choose.
+    // debugging corpus); the recordings notice below tells users and lets them choose.
     public var saveRecordings: FlexBool?
-    // Resolution of the recordings apology notice: "keep" | "delete" | "none-found".
+    // Resolution of the recordings notice: "keep" | "delete" | "none-found".
     // nil = undecided — the notice returns every launch and every few hours until the
     // user chooses. Never shown again once set.
     public var recordingsNoticeDecision: String?

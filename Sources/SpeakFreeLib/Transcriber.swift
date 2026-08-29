@@ -61,17 +61,44 @@ public enum HallucinationFilterTuning {
 
 public class Transcriber {
     enum SecondOpinionStatus: Equatable {
-        case rechecking
-        case failed
+        /// What the audio contained, as far as the evidence can tell. Michael's copy
+        /// rule (2026-08-22): the status line is two sentences, the first describing
+        /// the audio, the second the action or outcome. This is the first sentence.
+        enum AudioDescriptor: Equatable {
+            /// Sustained or voiced speech energy, but the model got nothing usable.
+            case garbled
+            /// No sustained speech energy and no voiced pitch: the take reads as silence.
+            case silence
 
-        var message: String {
-            switch self {
-            case .rechecking:
-                return "Rechecking with whisper…"
-            case .failed:
-                return "Nothing transcribed (too noisy)"
+            var sentence: String {
+                switch self {
+                case .garbled: return "Garbled audio."
+                case .silence: return "Silence."
+                }
             }
         }
+
+        case rechecking(AudioDescriptor)
+        case failed(AudioDescriptor)
+
+        /// Full status line. No em-dashes in UI copy (Michael's standing rule).
+        var message: String {
+            switch self {
+            case .rechecking(let audio):
+                return "\(audio.sentence) Trying Whisper…"
+            case .failed(.garbled):
+                return "Garbled audio. Whisper found nothing."
+            case .failed(.silence):
+                return "Silence. Nothing to transcribe."
+            }
+        }
+    }
+
+    /// Pick the status line's audio descriptor from the take's evidence. Pure, so the
+    /// copy decision is unit-tested without a rescue run; the overlay never sees the
+    /// evidence itself (Transcriber stays UI-agnostic, the callback carries the enum).
+    static func audioDescriptor(for evidence: AudioEvidence) -> SecondOpinionStatus.AudioDescriptor {
+        (evidence.hasSustainedSpeechEnergy || evidence.hasVoicedSpeech) ? .garbled : .silence
     }
 
     struct AudioEvidence: Equatable {
@@ -369,7 +396,9 @@ public class Transcriber {
     public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil,
                            punctuationMode: PunctuationMode = .off) async throws -> String {
         let result: String
-        var secondOpinionAttempted = false
+        // Set when a rescue fires; carries the descriptor so the failure line can keep
+        // the same first sentence the "trying" line opened with.
+        var secondOpinionAudio: SecondOpinionStatus.AudioDescriptor?
 
         // Try engine first if we have samples
         if let samples = samples, !samples.isEmpty {
@@ -413,8 +442,9 @@ public class Transcriber {
             // (2026-08-19 airplane forensics; 56 empty-sentinel takes in the corpus).
             // Guarded on the whisper model actually being on disk; failure keeps empty.
             if engine.engineID != "whisper", Self.modelExists(modelSize: "large-v3-turbo") {
-                secondOpinionAttempted = true
-                onSecondOpinionStatus?(.rechecking)
+                let audio = Self.audioDescriptor(for: evidence)
+                secondOpinionAudio = audio
+                onSecondOpinionStatus?(.rechecking(audio))
                 do {
                     let rescued = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
                                                         modelOverride: "large-v3-turbo")
@@ -445,8 +475,9 @@ public class Transcriber {
             // synchronous shot and replaces ONLY when materially longer (>=2x words) and
             // under the 20s confabulation cap. Everything else is shadow-only.
             let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
-            secondOpinionAttempted = true
-            onSecondOpinionStatus?(.rechecking)
+            let audio = Self.audioDescriptor(for: evidence)
+            secondOpinionAudio = audio
+            onSecondOpinionStatus?(.rechecking(audio))
             do {
                 let swap = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
                                                  modelOverride: "large-v3-turbo")
@@ -520,14 +551,14 @@ public class Transcriber {
                 return cleaned
             }
             print("Transcriber: filtered hallucination: \"\(cleaned)\"")
-            if secondOpinionAttempted {
-                onSecondOpinionStatus?(.failed)
+            if let audio = secondOpinionAudio {
+                onSecondOpinionStatus?(.failed(audio))
             }
             return ""
         }
-        if secondOpinionAttempted,
+        if let audio = secondOpinionAudio,
            cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            onSecondOpinionStatus?(.failed)
+            onSecondOpinionStatus?(.failed(audio))
         }
         return cleaned
     }

@@ -704,3 +704,107 @@ final class AdaptiveSpeechGateTests: XCTestCase {
         XCTAssertGreaterThan(speechLevel, 0.5, "speech over the roar renders tall bars")
     }
 }
+
+// MARK: - Rescue status line: cymatics grains + text brightness (Michael 2026-08-22)
+
+final class RescueStatusCymaticsTests: XCTestCase {
+    typealias E = OverlayEmergence
+
+    /// The status text is brighter than the old white @ 0.9 but NOT pure white: an
+    /// off-white with a touch of blue, at ~0.96 alpha.
+    func testStatusTextIsBrighterButNotPureWhite() {
+        let c = E.statusTextRGB
+        for channel in [c.r, c.g, c.b] {
+            XCTAssertGreaterThanOrEqual(channel, 0.95, "off-white, not grey")
+            XCTAssertLessThan(channel, 1, "not pure white")
+        }
+        XCTAssertGreaterThan(E.statusTextAlpha, 0.9, "brighter than the 0.9 it shipped at")
+        XCTAssertLessThan(E.statusTextAlpha, 1, "never pure, fully opaque white")
+    }
+
+    /// "A few dots": the population is small, every grain stays inside the
+    /// normalised text box, and opacity never exceeds the calm cap. Checked across
+    /// several full loops, including negative ticks (phase wrap, never NaN).
+    func testGrainsAreFewBoundedAndCalm() {
+        XCTAssertLessThanOrEqual(E.statusDotCount, 9, "a few grains, not a swarm")
+        XCTAssertLessThan(E.statusDotMaxAlpha, E.barAlpha, "calmer than the locked bar weight")
+        for tick in -80...(E.statusDotPeriodTicks * E.statusDotCount + 40) {
+            let dots = E.statusDots(tick: tick)
+            XCTAssertEqual(dots.count, E.statusDotCount)
+            for d in dots {
+                for v in [d.x, d.y, d.alpha, d.scale] { XCTAssertFalse(v.isNaN) }
+                XCTAssertGreaterThanOrEqual(d.x, -1)
+                XCTAssertLessThanOrEqual(d.x, 1)
+                XCTAssertGreaterThanOrEqual(d.y, -1)
+                XCTAssertLessThanOrEqual(d.y, 1)
+                XCTAssertGreaterThanOrEqual(d.alpha, 0)
+                XCTAssertLessThanOrEqual(d.alpha, E.statusDotMaxAlpha + 1e-9)
+                XCTAssertGreaterThan(d.scale, 0.5)
+                XCTAssertLessThanOrEqual(d.scale, 1)
+            }
+        }
+    }
+
+    /// Emanating from the text: a grain is born ON the line (|y| = 0), moves
+    /// outward monotonically through its life, and never comes back.
+    func testGrainsDriftOutwardFromTheTextLine() {
+        for index in 0..<E.statusDotCount {
+            var last: CGFloat = -1
+            for step in 0...100 {
+                let d = E.statusDot(phase: CGFloat(step) / 100, cycle: 3, index: index)
+                XCTAssertGreaterThanOrEqual(abs(d.y), last - 1e-9, "grain \(index) drifted back toward the text")
+                last = abs(d.y)
+            }
+            XCTAssertEqual(abs(E.statusDot(phase: 0, cycle: 3, index: index).y), 0, accuracy: 1e-9, "born on the line")
+            XCTAssertEqual(abs(E.statusDot(phase: 1, cycle: 3, index: index).y), 1, accuracy: 1e-9, "settles at the edge")
+        }
+    }
+
+    /// No pops: a grain fades in from nothing and is gone again by the end of its
+    /// life, peaking in between. The quick-out easing means most of the travel
+    /// happens early (sand leaving the plate), then it settles.
+    func testGrainsFadeInAndOutWithoutPopping() {
+        let birth = E.statusDot(phase: 0, cycle: 0, index: 0)
+        let mid = E.statusDot(phase: 0.3, cycle: 0, index: 0)
+        let death = E.statusDot(phase: 0.999, cycle: 0, index: 0)
+        XCTAssertEqual(birth.alpha, 0, accuracy: 1e-9)
+        XCTAssertEqual(mid.alpha, E.statusDotMaxAlpha, accuracy: 1e-6, "fully in by 30%")
+        XCTAssertLessThan(death.alpha, 0.01, "gone before it is recycled")
+        XCTAssertGreaterThan(abs(mid.y), 0.8, "easeOutQuint: most of the drift is early")
+    }
+
+    /// The population is staggered so something is always visible, and every
+    /// rebirth lands somewhere new (no grain ever re-spawns on its last spot).
+    func testPopulationIsStaggeredAndRebirthsMove() {
+        for tick in stride(from: 0, to: E.statusDotPeriodTicks * 2, by: 3) {
+            let visible = E.statusDots(tick: tick).filter { $0.alpha > 0.2 }.count
+            XCTAssertGreaterThanOrEqual(visible, 2, "tick \(tick): the card should never look empty")
+            XCTAssertLessThanOrEqual(visible, E.statusDotCount - 1, "tick \(tick): never all at once")
+        }
+        for index in 0..<E.statusDotCount {
+            let a = E.statusDot(phase: 0.5, cycle: 0, index: index)
+            let b = E.statusDot(phase: 0.5, cycle: 1, index: index)
+            XCTAssertGreaterThan(abs(a.x - b.x), 0.1, "grain \(index) re-spawned in place")
+            XCTAssertNotEqual(a.y.sign, b.y.sign, "consecutive lives alternate above/below")
+        }
+    }
+
+    /// Time handling: phase advances one tick at a time, wraps cleanly at the
+    /// period, and the stagger spreads the grains evenly through the cycle.
+    func testPhaseClockWrapsAndStaggersEvenly() {
+        let p = E.statusDotPeriodTicks
+        XCTAssertEqual(E.statusDotPhase(tick: 0, index: 0).phase, 0, accuracy: 1e-9)
+        XCTAssertEqual(E.statusDotPhase(tick: p - 1, index: 0).phase, CGFloat(p - 1) / CGFloat(p), accuracy: 1e-9)
+        XCTAssertEqual(E.statusDotPhase(tick: p, index: 0).phase, 0, accuracy: 1e-9)
+        XCTAssertEqual(E.statusDotPhase(tick: p, index: 0).cycle, 1)
+        XCTAssertEqual(E.statusDotPhase(tick: -1, index: 0).cycle, -1, "negative ticks wrap into the previous life")
+        // Grain i starts i/count of a period ahead of grain 0.
+        let phases = (0..<E.statusDotCount).map { E.statusDotPhase(tick: 0, index: $0).phase }
+        for i in 1..<phases.count {
+            XCTAssertGreaterThan(phases[i], phases[i - 1], "stagger must be monotonic across the population")
+        }
+        XCTAssertLessThan(phases.last!, 1)
+        // Same tick, same grains: deterministic, so the offscreen harness renders stills.
+        XCTAssertEqual(E.statusDots(tick: 137), E.statusDots(tick: 137))
+    }
+}

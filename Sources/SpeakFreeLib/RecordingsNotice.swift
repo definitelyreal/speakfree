@@ -2,7 +2,8 @@
 import AppKit
 import SwiftUI
 
-/// The recordings notice (Michael, 2026-07-14; copy revised same day).
+/// The recordings notice (Michael, 2026-07-14; copy revised same day; reframed
+/// 2026-08-21).
 ///
 /// Through v1.7.1 every dictation's audio and transcript were saved to disk by
 /// default — a dev-machine debugging setting that accidentally shipped to everyone.
@@ -11,6 +12,11 @@ import SwiftUI
 /// open the folder and delete manually, or use the in-app delete confirmation.
 /// It returns every launch and every few hours until acknowledged; once resolved
 /// it never shows again.
+///
+/// Framing (Michael, 2026-08-21): the archive is a GIFT, not a confession. The copy
+/// leads with what a corpus of the user's own speech can do for them (accuracy
+/// replay, correction mining, personal vocabulary) and keeps the transparency line,
+/// with delete/opt-out still one obvious click.
 public enum RecordingsNotice {
 
     public enum LaunchAction: Equatable {
@@ -51,24 +57,27 @@ public enum RecordingsNotice {
     }
 }
 
-// MARK: - Copy (Michael's words)
+// MARK: - Copy (Michael's words; 2026-08-21 corpus-as-gift draft awaiting his edit)
 
 enum NoticeCopy {
-    static let header = "We were saving local recordings on your device. It's off now."
+    static let header = "You have a corpus of your own speech on this Mac. Here is what it can do."
     static let noteLabel = "A note from Michael:"
     static let note = """
-    Speakfree has a dev mode feature that saves local recordings, which I use to \
-    improve it. It wasn't supposed to be on for everyone, but it was. I'm committed \
-    to privacy and transparency, so I wanted to let you know rather than silently \
-    delete them.
+    Speakfree has been saving your dictations locally: the audio plus what it typed. \
+    I use my own archive constantly. I replay every change to speakfree against \
+    thousands of my past dictations, find the words it keeps getting wrong for me, \
+    and teach it my vocabulary. Yours is the raw material for the same thing: \
+    speakfree learning how you actually talk, on your Mac and nowhere else. Saving \
+    was meant to be a developer setting, not the default, so I'd rather tell you \
+    it's here and let you choose than quietly delete it.
     """
-    static let turnedOff = "It's turned off now. Change the behavior here or in settings:"
+    static let turnedOff = "Saving new dictations is off unless you turn it on. Keep building your corpus here or in Settings:"
     static let toggleLabel = "Save recordings and transcripts"
-    static let deleteLeadIn = "We can "
-    static let deleteLinkText = "delete them for you"
-    static let deleteLeadOut = ", but I suggest you do it yourself for safety:"
+    static let deleteLeadIn = "Rather not? We can "
+    static let deleteLinkText = "delete everything"
+    static let deleteLeadOut = ", or do it yourself from the folder:"
     static let openFolderLabel = "Open Recordings / Transcripts Folder…"
-    static let continueKeepLabel = "Continue without deleting »"
+    static let continueKeepLabel = "Keep my recordings »"
     static let continueLabel = "Continue »"
 
     static let confirmTitle = "Delete your recordings and transcripts"
@@ -160,7 +169,7 @@ struct RecordingsNoticeView: View {
     @State private var saveToggle = false
     @State private var showDeleteConfirm = false
     /// Deleting (in-app) or opening the folder flips the continue button from
-    /// "Continue without deleting »" to plain "Continue »" — the qualifier only
+    /// "Keep my recordings »" to plain "Continue »" — the qualifier only
     /// makes sense while doing nothing is still the choice being made.
     @State private var didDelete = false
     @State private var tookAction = false
@@ -195,7 +204,7 @@ struct RecordingsNoticeView: View {
                     .accessibilityIdentifier("save-recordings-toggle")
                     .onChange(of: saveToggle) { newValue in onToggle(newValue) }
 
-                // "We can [delete them for you], but I suggest you do it yourself for safety:"
+                // "Rather not? We can [delete everything], or do it yourself from the folder:"
                 HStack(spacing: 0) {
                     Text(NoticeCopy.deleteLeadIn)
                     Button(NoticeCopy.deleteLinkText) { showDeleteConfirm = true }
