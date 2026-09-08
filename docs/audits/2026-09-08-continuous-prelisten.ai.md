@@ -44,6 +44,14 @@ The MacBook's saved input preference was Automatic at verification, and AirPods 
 
 At the next live check around 13:42 PDT, PID 91829 remained present but used 0% CPU. Ark's log records successful model loading at 12:36:32 after 790.17 seconds and successful warm-up after 790.2 seconds. This supersedes the outstanding termination instruction above: stopping the now-idle compiler is no longer necessary. No agent termination attempt succeeded.
 
+### Noah Bluetooth connection follow-up
+
+Noah's Bluetooth logs around 13:41–13:44 show repeated AirPods service-connection requests timing out after approximately 21 seconds. The AirPods were remembered but absent from CoreAudio. Ark and Studio's `system_profiler` reports showed the same AirPods connected; their legacy IOBluetooth APIs over SSH reported no connection, so remote disconnection could not be confirmed and device contention remains a hypothesis.
+
+Michael closed/reopened the case beside Noah. SpeakFree was stopped gracefully for an isolation test. Noah's Bluetooth power was cycled; its daemon restarted and actual power state initially disagreed with System Settings. Installed Homebrew `blueutil` and used its power/connect commands to restore a reported baseband connection. System Settings exposed AirPods settings and an output candidate, but attempted output selection did not complete and CoreAudio still lacked an AirPods device. This remained true with SpeakFree closed; it does not prove what initially caused the Bluetooth failure.
+
+SpeakFree was relaunched at 13:53:12 and completed model warm-up in 0.2 seconds with healthy built-in pre-listening. Bluetooth was on and the baseband link reported connected at the latest check. Full AirPods audio readiness remains unresolved; Michael was asked to put the earbuds in his ears for the next check. System Settings was left at Sound with the AirPods output candidate visible. Original pairings and user microphone preferences were retained. Technical evidence: `/tmp/speakfree-noah-bluetooth.log`, `/tmp/speakfree-bluetooth-power.log`, `/tmp/speakfree-noah-reconnect.log`, and `/tmp/speakfree-noah-route-retry.log`.
+
 ## Evidence and trust
 
 Sources are current code, XCTest output, direct hardware-check output, technical app logs, Michael's recording review, and live process listings. Earlier AI audit conclusions were treated as unverified leads. This report remains AI-unverified; automated tests and the bounded hardware exercise do not replace broader real-world validation.
