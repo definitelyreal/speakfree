@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import AppKit
 import SwiftUI
 
@@ -661,12 +662,16 @@ struct SettingsView: View {
                                     Picker("", selection: $viewModel.keyMode) {
                                         Text("Hold").tag(KeyMode.hold)
                                         Text("Toggle").tag(KeyMode.toggle)
-                                        Text("Edit").tag(KeyMode.edit)
+                                        // Phase 1 has no edit window yet. Preserve existing
+                                        // configs honestly without advertising a missing feature.
+                                        if viewModel.keyMode == .edit {
+                                            Text("Toggle (Edit unavailable)").tag(KeyMode.edit)
+                                        }
                                     }
                                     .pickerStyle(.segmented)
                                     .controlSize(.small)
                                     .labelsHidden()
-                                    .frame(width: 150)
+                                    .frame(width: viewModel.keyMode == .edit ? 260 : 150)
                                 }
                             }
 

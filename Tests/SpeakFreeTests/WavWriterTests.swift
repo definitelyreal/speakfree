@@ -1,3 +1,4 @@
+// ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 // Crash-safe wav writing + orphan recovery (2026-07-25). The load-bearing contracts:
 //   * a WavWriter file is READABLE (correct sizes) after every ~5s header patch, even
 //     if the process dies without close() — the AVAudioFile total-loss failure mode;
@@ -9,6 +10,27 @@ import AVFoundation
 @testable import SpeakFreeLib
 
 final class WavWriterTests: XCTestCase {
+
+    func testPCMEncodingClampsAndUsesLittleEndian() {
+        XCTAssertEqual(WavWriter.pcmData([-2, -1, -0.5, 0, 0.5, 1, 2]),
+                       Data([1, 128, 1, 128, 0, 192, 0, 0, 0, 64, 255, 127, 255, 127]))
+        XCTAssertEqual(WavWriter.pcmData([]), Data())
+    }
+
+    func testPCMEncodingReplacesNonFiniteSamplesWithSilence() {
+        XCTAssertEqual(WavWriter.pcmData([.nan, .infinity, -.infinity]), Data(repeating: 0, count: 6))
+    }
+
+    func testOptimizedEncodingPreservesQuantizationAcrossFullSignalRange() {
+        // Compare every s16 step, including half-steps, against the previous encoder.
+        let samples = (-65_534...65_534).map { Float($0) / 65_534 }
+        var reference = Data(capacity: samples.count * 2)
+        for sample in samples {
+            var value = Int16((max(-1, min(1, sample)) * 32767).rounded()).littleEndian
+            withUnsafeBytes(of: &value) { reference.append(contentsOf: $0) }
+        }
+        XCTAssertEqual(WavWriter.pcmData(samples), reference)
+    }
 
     private var dir: URL!
 

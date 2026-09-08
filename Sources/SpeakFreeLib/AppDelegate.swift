@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import AppKit
 import ApplicationServices
 import AVFoundation
@@ -508,8 +508,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Apply routing BEFORE enabling pre-buffer. Assigning preBufferEnabled=true
         // starts the engine immediately; doing that first briefly opens the system
         // default route and then races the route-triggered rebuild at launch.
-        recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
-        recorder.preBufferEnabled = config.preBuffer?.value ?? true
+        let inputDeviceUID = config.inputDeviceUID
+        let preBufferEnabled = config.preBuffer?.value ?? true
+        DispatchQueue.main.async { [weak self] in
+            self?.recorder.setPinnedInputDevice(uid: inputDeviceUID)
+            self?.recorder.preBufferEnabled = preBufferEnabled
+        }
 
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"

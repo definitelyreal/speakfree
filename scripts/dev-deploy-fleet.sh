@@ -1,4 +1,5 @@
 #!/bin/bash
+# ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 # Claude · 2026-07-22 · Session: dba44e2d-9a1a-4b83-b219-a922d882cf7f
 # Deploy the current dev build to the whole dogfood fleet:
 #   M3 (this Mac, Homebrew libwhisper) + M5 (movie@STUDIO_TAILSCALE_HOST) + M1 (ark)
@@ -32,7 +33,12 @@ for _ in $(seq 1 360); do
     sleep 0.5
 done
 pkill -9 -f "speakfree.app/Contents/MacOS/speakfree" 2>/dev/null || true
-/usr/bin/trash /Applications/speakfree.app 2>/dev/null || true
+if [ -e /Applications/speakfree.app ] || [ -L /Applications/speakfree.app ]; then
+    /usr/bin/trash /Applications/speakfree.app
+fi
+# Never let a failed Trash operation turn cp into an in-place bundle replacement.
+[ ! -e /Applications/speakfree.app ] && [ ! -L /Applications/speakfree.app ] \
+    || { echo "FATAL: old app still exists; refusing to overwrite it" >&2; exit 1; }
 cp -R speakfree.app /Applications/speakfree.app
 open /Applications/speakfree.app
 sleep 4
@@ -76,13 +82,18 @@ for REMOTE in "${REMOTES[@]}"; do
     scp -o BatchMode=yes /tmp/speakfree-fleet.tgz "$REMOTE":/tmp/speakfree-new.tgz
     # shellcheck disable=SC2029
     ssh -o BatchMode=yes "$REMOTE" '
+        set -eu
         pkill -f "speakfree.app/Contents/MacOS/speakfree" || true
         for _ in $(seq 1 360); do
             pgrep -f "speakfree.app/Contents/MacOS/speakfree" >/dev/null || break
             sleep 0.5
         done
         pkill -9 -f "speakfree.app/Contents/MacOS/speakfree" 2>/dev/null || true
-        mv /Applications/speakfree.app ~/.Trash/speakfree-old-$(date +%H%M%S).app 2>/dev/null || true
+        if [ -e /Applications/speakfree.app ] || [ -L /Applications/speakfree.app ]; then
+            mv /Applications/speakfree.app ~/.Trash/speakfree-old-$(date +%Y%m%d-%H%M%S)-$$.app
+        fi
+        [ ! -e /Applications/speakfree.app ] && [ ! -L /Applications/speakfree.app ] \
+            || { echo "FATAL: old app still exists; refusing to overwrite it" >&2; exit 1; }
         cd /Applications && tar xzf /tmp/speakfree-new.tgz
         mv speakfree-fleet.app speakfree.app
         codesign --verify --deep speakfree.app
