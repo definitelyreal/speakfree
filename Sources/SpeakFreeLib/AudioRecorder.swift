@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import AppKit
 import AudioToolbox
 import AVFoundation
@@ -15,12 +15,19 @@ class AudioRecorder {
     private var pcmSamples: [Float] = []
 
     /// Current RMS audio level (0.0–1.0), updated from the audio tap.
-    private(set) var currentLevel: Float = 0
+    var currentLevel: Float {
+        bufferHealthLock.lock(); defer { bufferHealthLock.unlock() }
+        return min(latestRMS / 0.15, 1.0)
+    }
 
     /// Raw, unclipped frame RMS (fraction of full scale) from the same tap. The overlay's
     /// adaptive speech gate needs this because `currentLevel` clips at 0.15 RMS — below the
     /// ambient floor of a loud room, where the clipped value pins at 1.0 for noise alone.
-    private(set) var currentRMS: Float = 0
+    var currentRMS: Float {
+        bufferHealthLock.lock(); defer { bufferHealthLock.unlock() }
+        return latestRMS
+    }
+    private var latestRMS: Float = 0
 
     /// Timestamp of last audio buffer received — used by health check to detect dead engines.
     /// Buffer-health state, guarded by its own lock (codex review #8: the bare `Date`
@@ -48,21 +55,25 @@ class AudioRecorder {
                 stopBoundDeviceWatch()
                 boundDeviceUID = nil
                 boundDeviceID = nil
-                audioEngine?.inputNode.removeTap(onBus: 0)
-                audioEngine?.stop()
-                releaseEngineOffMain(&audioEngine)
+                pendingReinstall?.cancel()
+                retireEngine(&audioEngine)
             }
         }
     }
 
-    /// Drop the last reference to an engine on a background queue, never on main:
-    /// -[AVAudioEngine dealloc] dispatch_syncs onto its internal queue, and mid-device-change
-    /// that sync can never return — main deadlocked with the overlay stuck on screen
-    /// (observed live 2026-07-17; see reinstallTap's retirement comment).
-    private func releaseEngineOffMain(_ engine: inout AVAudioEngine?) {
-        guard let doomed = engine else { return }
-        engine = nil
-        DispatchQueue.global(qos: .utility).async { _ = doomed }
+    /// All teardown and destruction must stay off main, including failed startup.
+    /// Keep stopped engines alive briefly for late CoreAudio device callbacks.
+    private func retireEngine(_ engine: inout AVAudioEngine?, completion: @escaping () -> Void = {}) {
+        BackgroundDisposal.retire(&engine, linger: 8.0, prepare: { engine in
+            var error: NSError?
+            let stopped = CTryCatch({
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+            }, &error)
+            if !stopped {
+                DiagnosticLogger.shared.log("AudioRecorder: teardown exception — \(error?.localizedDescription ?? "unknown")")
+            }
+        }, completion: completion)
     }
 
     // MARK: - State (synchronized via stateLock)
@@ -92,9 +103,9 @@ class AudioRecorder {
         stopBoundDeviceWatch()
         boundDeviceUID = nil
         boundDeviceID = nil
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        releaseEngineOffMain(&audioEngine)
+        isShutDown = true
+        pendingReinstall?.cancel()
+        retireEngine(&audioEngine)
     }
 
     /// Start the always-on audio engine. Call once on app launch.
@@ -389,54 +400,77 @@ class AudioRecorder {
         // its recursive_mutex during IOUnitConfigurationChanged(). Calling
         // removeTap/stop synchronously here re-enters that lock → deadlock.
         // Defer with a short delay to let the engine finish its internal reconfiguration.
-        deviceChangeObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            guard let self = self, let changedEngine = notification.object as? AVAudioEngine,
-                  changedEngine === self.audioEngine else {
-                return
-            }
-
-            // Device binding itself emits this notification within moments of the
-            // engine build — reacting to it caused the 2026-07-20 self-induced rebuild
-            // loop. But a LATER config change on a pinned engine is genuine (format
-            // renegotiation): its tap is dead until rebuilt. The 2026-07-22 outage was
-            // this exact blanket-ignore — every recording captured 0 samples and
-            // "recovery" rebuilds died the same way. Ignore only the self-induced
-            // window; rebuild on anything after it.
-            if !self.primaryFollowsSystemDefaultNow() {
-                if Date().timeIntervalSince(self.engineBuiltAt) < Self.selfInducedConfigWindowSeconds {
-                    DiagnosticLogger.shared.log(
-                        "AudioRecorder: primary configuration changed just after build — self-induced, keeping engine")
-                    return
-                }
-                DiagnosticLogger.shared.log(
-                    "AudioRecorder: pinned primary configuration changed after settle — rebuilding (stale-tap risk)")
-            } else {
-                DiagnosticLogger.shared.log(
-                    "AudioRecorder: primary audio configuration changed — scheduling tap reinstall")
-            }
-
-            // A pinned built-in engine can still lose its tap when AirPods join/leave.
-            // Deferring this rebuild until key-up guarantees capture loss: the dead tap
-            // cannot resume on its own. Rebuild in place; `_isRecording`, `pcmSamples`,
-            // and the open WavWriter survive the engine swap, so audio after the short
-            // route-settle gap appends to the same take.
-            if self.isRecording {
-                DiagnosticLogger.shared.log(
-                    "AudioRecorder: configuration changed during recording — rebuilding tap in place")
-                self.reinstallTap()
-                return
-            }
-
-            // Debounced: also gives AVAudioEngine time to finish its internal
-            // reconfiguration before teardown (removeTap during
-            // IOUnitConfigurationChanged deadlocks on the engine's recursive_mutex).
-            self.scheduleReinstallDebounced()
+        deviceChangeObserver = Self.observeEngineConfigurationChanges { [weak self] identity in
+            self?.handleEngineConfigurationChange(identity)
         }
 
+        startDefaultInputMonitor()
+    }
+
+    /// Internal seam lets tests post a real engine notification while main is occupied.
+    static func observeEngineConfigurationChanges(
+        center: NotificationCenter = .default,
+        onChange: @escaping (ObjectIdentifier) -> Void
+    ) -> NSObjectProtocol {
+        center.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: nil,
+            queue: nil
+        ) { notification in
+            guard let engine = notification.object as? AVAudioEngine else { return }
+            let identity = ObjectIdentifier(engine)
+            // NotificationCenter's queue:.main delivery is synchronous: the audio engine
+            // can hold its internal lock while waiting for main, which in turn waits for
+            // that lock during start/dealloc. Never make its notification wait for UI work.
+            DispatchQueue.main.async {
+                onChange(identity)
+            }
+        }
+    }
+
+    private func handleEngineConfigurationChange(_ identity: ObjectIdentifier) {
+        guard !isShutDown, let engine = audioEngine,
+              ObjectIdentifier(engine) == identity else { return }
+
+        // Device binding itself emits this notification within moments of the
+        // engine build — reacting to it caused the 2026-07-20 self-induced rebuild
+        // loop. But a LATER config change on a pinned engine is genuine (format
+        // renegotiation): its tap is dead until rebuilt. The 2026-07-22 outage was
+        // this exact blanket-ignore — every recording captured 0 samples and
+        // "recovery" rebuilds died the same way. Ignore only the self-induced
+        // window; rebuild on anything after it.
+        if !self.primaryFollowsSystemDefaultNow() {
+            if Date().timeIntervalSince(self.engineBuiltAt) < Self.selfInducedConfigWindowSeconds {
+                DiagnosticLogger.shared.log(
+                    "AudioRecorder: primary configuration changed just after build — self-induced, keeping engine")
+                return
+            }
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: pinned primary configuration changed after settle — rebuilding (stale-tap risk)")
+        } else {
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: primary audio configuration changed — scheduling tap reinstall")
+        }
+
+        // A pinned built-in engine can still lose its tap when AirPods join/leave.
+        // Deferring this rebuild until key-up guarantees capture loss: the dead tap
+        // cannot resume on its own. Rebuild in place; `_isRecording`, `pcmSamples`,
+        // and the open WavWriter survive the engine swap, so audio after the short
+        // route-settle gap appends to the same take.
+        if self.isRecording {
+            DiagnosticLogger.shared.log(
+                "AudioRecorder: configuration changed during recording — rebuilding tap in place")
+            self.reinstallTap()
+            return
+        }
+
+        // Debounced: also gives AVAudioEngine time to finish its internal
+        // reconfiguration before teardown (removeTap during
+        // IOUnitConfigurationChanged deadlocks on the engine's recursive_mutex).
+        self.scheduleReinstallDebounced()
+    }
+
+    private func startDefaultInputMonitor() {
         // CoreAudio listener — catches Bluetooth handoffs (AirPods switching between
         // devices) that AVAudioEngineConfigurationChange sometimes misses.
         // IMPORTANT: dispatch on a dedicated queue, NOT main — CoreAudio can deadlock
@@ -605,6 +639,7 @@ class AudioRecorder {
 
     private var needsTapReinstall = false
     private var isRebuilding = false
+    private var isShutDown = false
 
     /// When the current engine was built. Config-change notifications inside this
     /// window after a build are the engine's own bind settling (ignoring them
@@ -659,22 +694,6 @@ class AudioRecorder {
         }
     }
 
-    /// Audio engines retired by a device-change teardown, kept alive briefly before release.
-    ///
-    /// AVFoundation installs its own property listener on the input audio unit
-    /// (`AVAudioIOUnit::IOUnitPropertyListener`) and fires it on a private dispatch queue
-    /// when the hardware reconfigures. During an AirPods device-change storm, that callback
-    /// can fire SECONDS after we've torn the engine down — and if the `AVAudioEngine` has
-    /// already deallocated, it messages a freed audio unit → `objc_msgSend` on freed memory
-    /// → `EXC_BAD_ACCESS` (the 2026-06-15 crash). Holding a strong reference past teardown
-    /// keeps the audio unit alive until the OS finishes reconfiguring; we release it after a
-    /// delay that comfortably exceeds the observed ~5 s callback latency. A stopped,
-    /// tap-removed engine costs only its memory, and the `isRebuilding` guard serializes
-    /// teardowns so at most a handful are ever retained at once.
-    private var retiredEngines: [AVAudioEngine] = []
-    private let retiredEnginesLock = NSLock()
-    private static let retiredEngineLingerSeconds: TimeInterval = 8.0
-
     /// Rebuild the audio engine from scratch after a device change.
     /// Tears down the old engine on a background thread to avoid deadlocking
     /// with CoreAudio's internal locks during reconfiguration.
@@ -688,6 +707,7 @@ class AudioRecorder {
             DispatchQueue.main.async { [weak self] in self?.reinstallTap() }
             return
         }
+        guard !isShutDown, preBufferEnabled || isRecording else { return }
         guard !isRebuilding else {
             DiagnosticLogger.shared.log("AudioRecorder: rebuild already in progress — skipping")
             return
@@ -701,58 +721,23 @@ class AudioRecorder {
         boundDeviceUID = nil
         boundDeviceID = nil
 
-        // Capture the old engine and nil out our reference immediately
-        let oldEngine = audioEngine
-        audioEngine = nil
         audioConverter = nil
-
-        // Keep the retired engine alive past teardown (see `retiredEngines`) so a late
-        // AVFoundation IO-unit property-listener callback during the device change can never
-        // message a freed audio unit. Released after the OS settles. reinstallTap() always
-        // runs on main; the lock guards against any future off-main caller regardless.
-        if let oldEngine = oldEngine {
-            retiredEnginesLock.lock()
-            retiredEngines.append(oldEngine)
-            retiredEnginesLock.unlock()
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.retiredEngineLingerSeconds) { [weak self] in
-                guard let self = self else { return }
-                self.retiredEnginesLock.lock()
-                self.retiredEngines.removeAll { $0 === oldEngine }
-                self.retiredEnginesLock.unlock()
-                // NEVER let the last engine reference drop on the main thread:
-                // -[AVAudioEngine dealloc] dispatch_syncs onto the engine's internal
-                // queue, and if that queue is mid-device-change the sync never returns —
-                // main deadlocks with the recording overlay stuck on screen (observed
-                // live 2026-07-17, sampled: dispose → _Block_release → AVAudioEngine
-                // dealloc → _dispatch_sync_f_slow, 4-hour wedge). Handing the reference
-                // to a background queue moves the dealloc (and any wait) off main.
-                DispatchQueue.global(qos: .utility).async { _ = oldEngine }
-            }
-        }
-
-        // Clear stale pre-roll
         stateLock.lock()
         prerollBuffer = []
         stateLock.unlock()
 
-        // Tear down on a background thread — removeTap/stop can deadlock
-        // with CoreAudio's internal locks if called during a device-change callback
-        DispatchQueue.global(qos: .userInitiated).async {
-            if let engine = oldEngine {
-                DiagnosticLogger.shared.log("AudioRecorder: removeTap starting (background thread)")
-                engine.inputNode.removeTap(onBus: 0)
-                engine.stop()
-                DiagnosticLogger.shared.log("AudioRecorder: old engine stopped (retained \(Int(Self.retiredEngineLingerSeconds))s to outlive late device-change callbacks)")
-            }
-
-            // Rebuild on main after CoreAudio settles
+        // Transfer ownership BEFORE scheduling teardown. Failed starts use this same
+        // path; no AVAudioEngine temporary may reach deinit on the main thread.
+        retireEngine(&audioEngine) { [weak self] in
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self = self else { return }
-                DiagnosticLogger.shared.log("AudioRecorder: asyncAfter fired — starting engine rebuild")
-                self.startEngine()
-                self.needsTapReinstall = false
+                guard let self else { return }
                 self.isRebuilding = false
-                DiagnosticLogger.shared.log("AudioRecorder: engine rebuilt for new audio device")
+                guard !self.isShutDown, self.preBufferEnabled || self.isRecording else { return }
+                self.needsTapReinstall = false
+                self.startEngine()
+                DiagnosticLogger.shared.log(self.audioEngine == nil
+                    ? "AudioRecorder: rebuild did not start capture — retry pending"
+                    : "AudioRecorder: engine rebuilt for new audio device")
             }
         }
     }
@@ -813,9 +798,20 @@ class AudioRecorder {
             DispatchQueue.main.async { [weak self] in self?.startEngine() }
             return
         }
-        guard audioEngine == nil else { return }
+        guard !isShutDown, audioEngine == nil else { return }
 
-        let engine = AVAudioEngine()
+        // The inner call owns all temporary engine/node references. Once it returns,
+        // transferring this optional removes the last main-thread reference even on
+        // an invalid/stale format, converter failure, tap exception or start failure.
+        var candidate: AVAudioEngine? = AVAudioEngine()
+        configureAndStartEngine(candidate!)
+        if audioEngine == nil {
+            retireEngine(&candidate)
+        }
+    }
+
+    @inline(never) // Keep temporary ARC references inside this stack frame.
+    private func configureAndStartEngine(_ engine: AVAudioEngine) {
         let inputNode = engine.inputNode
 
         // Apply the microphone pin BEFORE reading the input format — the format below
@@ -900,7 +896,8 @@ class AudioRecorder {
         }
 
         guard let conv = AVAudioConverter(from: inputFormat, to: targetFormat) else {
-            print("AudioRecorder: converter creation failed")
+            DiagnosticLogger.shared.log("AudioRecorder: converter creation failed")
+            scheduleFormatRetry("converter creation failed")
             return
         }
         audioConverter = conv
@@ -920,11 +917,19 @@ class AudioRecorder {
                 "AudioRecorder: installTap raised NSException — "
                 + "\(tapErr?.localizedDescription ?? "unknown"); will retry on next config change"
             )
+            scheduleFormatRetry("tap installation failed")
             return
         }
 
         do {
-            try engine.start()
+            // Swift catch alone cannot intercept AVFoundation's NSExceptions.
+            var exception: NSError?
+            var startError: Error?
+            let started = CTryCatch({
+                do { try engine.start() } catch { startError = error }
+            }, &exception)
+            if let startError { throw startError }
+            if !started { throw exception ?? NSError(domain: "AudioRecorder", code: 1) }
             audioEngine = engine
             // Restart the no-buffers health clock. It was initialized at recorder
             // INIT, so at launch the "no audio buffers for 3s" check fired against an
@@ -961,7 +966,8 @@ class AudioRecorder {
             if let dev = boundDevice { startBoundDeviceWatch(deviceID: dev.id) }
             print("AudioRecorder: audio engine started")
         } catch {
-            print("AudioRecorder: engine start failed: \(error.localizedDescription)")
+            DiagnosticLogger.shared.log("AudioRecorder: engine start failed: \(error.localizedDescription)")
+            scheduleFormatRetry("engine start failed")
         }
     }
 
@@ -990,15 +996,9 @@ class AudioRecorder {
             bufPeak = max(bufPeak, abs(v))
         }
         let rms = sqrtf(sum / Float(max(count, 1)))
-        self.currentLevel = min(rms / 0.15, 1.0)
-        // Raw, unclipped RMS for the adaptive overlay gate: currentLevel saturates at
-        // 0.15 RMS, which is BELOW the ambient floor of a loud environment (airplane
-        // cabin ≈ 0.14–0.18), so the clipped signal cannot separate speech from noise
-        // there at all (2026-08-19 corpus recalibration).
-        self.currentRMS = rms
-
-        // Track buffer arrival + level for the health checks (locked: read from main)
+        // Publish meter and watchdog data under one lock; the overlay reads on main.
         bufferHealthLock.lock()
+        latestRMS = rms
         lastBufferUptime = ProcessInfo.processInfo.systemUptime
         peakSinceCheck = max(peakSinceCheck, bufPeak)
         bufferHealthLock.unlock()
@@ -1118,6 +1118,8 @@ class AudioRecorder {
     // MARK: - Recording
 
     func startRecording(to outputURL: URL) throws {
+        // A repeated start must not truncate the active WAV or replace its recovery URL.
+        guard !isRecording else { return }
         // Sub-phase timing (2026-08-13 perf audit): "Recording start slow" in AppDelegate
         // pins the delay to this whole call but not to a phase inside it. Real dogfood logs
         // showed 1.2-3.7s stalls here on ~25% of takes with no correlated device-list change,
@@ -1149,8 +1151,11 @@ class AudioRecorder {
         recordingGeneration += 1
         let guardGeneration = recordingGeneration
         firstBufferArrived = false
-        stateLock.unlock()
         writeQueue.async { self.wavWriteFailureLogged = false }
+        // Queue pre-roll BEFORE the tap can enqueue live audio. Otherwise the saved
+        // WAV can begin with a live buffer followed by the older half-second of speech.
+        if !preroll.isEmpty { writePrerollToFile(preroll) }
+        stateLock.unlock()
         let stateFlipDoneAt = CFAbsoluteTimeGetCurrent()
 
         print("AudioRecorder: recording started, pre-roll: \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms)")
@@ -1158,10 +1163,6 @@ class AudioRecorder {
         DiagnosticLogger.shared.log("AudioRecorder: recording started, pre-roll \(preroll.count) samples (\(Int(Double(preroll.count) / 16000.0 * 1000))ms), input device: \(device)")
         let logDoneAt = CFAbsoluteTimeGetCurrent()
 
-        // Write pre-roll to WAV file (async, flag is already set so tap writes new audio too)
-        if !preroll.isEmpty {
-            writePrerollToFile(preroll)
-        }
         let engineWasWarm = audioEngine != nil
 
         // If engine isn't running (pre-buffer off), start it now
@@ -1312,9 +1313,10 @@ class AudioRecorder {
 
         // If pre-buffer is off, stop the engine until next recording
         if !preBufferEnabled {
-            audioEngine?.inputNode.removeTap(onBus: 0)
-            audioEngine?.stop()
-            releaseEngineOffMain(&audioEngine)
+            stopBoundDeviceWatch()
+            boundDeviceUID = nil
+            boundDeviceID = nil
+            retireEngine(&audioEngine)
         }
 
         // If a device change happened during recording, reinstall the tap now
