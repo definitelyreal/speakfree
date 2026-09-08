@@ -169,22 +169,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Device catalog cache: the ONLY CoreAudio the main thread ever sees. Refreshes
         // off-main at launch and on device changes; the menu rebuilds from the cache.
-        AudioDeviceCatalog.onCacheRefreshed = { [weak self] in self?.statusBar.buildMenu() }
-        AudioDeviceCatalog.startCache()
-
-        // Multi-device AirPods contention: the detector throttles itself (max one
-        // notice per hour) — surface it visibly when it fires.
-        recorder.onContention = { message in
-            DispatchQueue.main.async {
-                NSApp.activate(ignoringOtherApps: true)
-                let alert = NSAlert()
-                alert.messageText = "AirPods Interference Detected"
-                alert.informativeText = message
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
+        AudioDeviceCatalog.onCacheRefreshed = { [weak self] in
+            self?.recorder.handleDeviceListChanged(AudioDeviceCatalog.cachedInputDevices)
+            self?.statusBar.buildMenu()
+        }
+        recorder.onCaptureStatus = { [weak self] message in
+            guard let self else { return }
+            self.statusBar.captureMessage = message
+            if self.statusBar.state == .recording {
+                self.recordingOverlay.updateStreamingText(message)
             }
         }
+        AudioDeviceCatalog.startCache()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.setup()
@@ -990,7 +986,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Whether the current pin IS the connected Bluetooth mic (menu checkmark state).
     public func dictationModeActive() -> Bool {
         guard let bt = connectedBluetoothInput() else { return false }
-        return config?.inputDeviceUID == bt.uid
+        return config?.inputDeviceUID == nil || config?.inputDeviceUID == bt.uid
     }
 
     /// Toggle: ON pins the Bluetooth mic (remembering the previous pin for restore);
@@ -1001,10 +997,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         var updated = Config.load()
         if dictationModeActive() {
             let restore = updated.preDictationModeInputUID
+                ?? AudioDeviceCatalog.cachedBuiltInInput?.uid
+                ?? AudioDeviceCatalog.cachedInputDevices.first(where: { !$0.isBluetooth && !$0.isVirtual })?.uid
+            guard let restore else { return } // No alternative mic to switch to.
             updated.preDictationModeInputUID = nil
             try? updated.save()
             config?.preDictationModeInputUID = nil
-            DiagnosticLogger.shared.log("Dictation Mode: OFF — restoring input \(restore ?? "system default")")
+            DiagnosticLogger.shared.log("Dictation Mode: OFF — restoring input \(restore)")
             selectInputDevice(uid: restore)
         } else {
             updated.preDictationModeInputUID = updated.inputDeviceUID
