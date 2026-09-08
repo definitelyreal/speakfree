@@ -429,8 +429,8 @@ struct SettingsView: View {
     @State private var statsMetricUnits = false
     @State private var showDeleteRecordingsSheet = false
 
-    /// Microphone pin (moved here from the menu, Michael 2026-08-14). "" = the built-in
-    /// default; any other value is a device UID pinned via AppDelegate.selectInputDevice.
+    /// Empty selection means automatic live routing with independent pre-listening.
+    /// Any device UID is an explicit live microphone choice.
     /// Snapshot of the device list is taken on appear — cache-only reads, same rule as the
     /// menu (live CoreAudio reads on main wedged the app on 2026-07-15).
     @State private var micSelection: String = ""
@@ -438,22 +438,13 @@ struct SettingsView: View {
 
     private var micBuiltInUID: String? { AudioDeviceCatalog.cachedBuiltInInput?.uid }
 
-    private var micDefaultLabel: String {
-        // Honest default label (2026-08-12): with no explicit pick, speakfree captures the
-        // BUILT-IN mic; only a Mac with no built-in input falls back to the system default.
-        if let builtIn = AudioDeviceCatalog.cachedBuiltInInput {
-            return "\(builtIn.name) (default)"
-        }
-        let systemName = AudioDeviceCatalog.cachedDefaultInput?.name ?? "System Default"
-        return "System Default (\(systemName))"
-    }
+    private var micDefaultLabel: String { "Automatic (AirPods for dictation)" }
 
     private func refreshMicState() {
         micDevices = AudioDeviceCatalog.cachedInputDevices
         let pinned = (NSApplication.shared.delegate as? AppDelegate)?.currentInputDeviceUID()
-        // An explicit pin of the built-in mic captures identically to the implicit default,
-        // so both states select the default entry (adversarial review 2026-08-12).
-        micSelection = (pinned == nil || pinned == micBuiltInUID) ? "" : pinned!
+        // Keep an explicit built-in choice distinct from automatic AirPods routing.
+        micSelection = pinned ?? ""
     }
 
     private func refreshRecordingsFolderState() {
@@ -680,7 +671,7 @@ struct SettingsView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Picker("", selection: $micSelection) {
                                         Text(micDefaultLabel).tag("")
-                                        ForEach(micDevices.filter { $0.uid != micBuiltInUID },
+                                        ForEach(micDevices,
                                                 id: \.uid) { device in
                                             Text(device.name).tag(device.uid)
                                         }
@@ -701,9 +692,7 @@ struct SettingsView: View {
                                         (NSApplication.shared.delegate as? AppDelegate)?
                                             .selectInputDevice(uid: newValue.isEmpty ? nil : newValue)
                                     }
-                                    Text("The built-in mic transcribes most reliably. Bluetooth "
-                                         + "mics (AirPods) degrade quality unpredictably, and "
-                                         + "virtual devices (Zoom, Splashtop) can record silence.")
+                                    Text("Automatic preserves pre-listening on the built-in or wired microphone, then uses connected AirPods for dictation. AirPods rest after 30 seconds idle when another microphone is available.")
                                         .font(.footnote)
                                         .foregroundColor(.secondary)
                                         .fixedSize(horizontal: false, vertical: true)
@@ -1258,9 +1247,9 @@ struct SettingsView: View {
 
     private var preBufferRow: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Toggle("Pre-Buffer Audio", isOn: $viewModel.preBuffer)
+            Toggle("Pre-listening", isOn: $viewModel.preBuffer)
                 .toggleStyle(.checkbox)
-            Text("Captures audio before you press the hotkey so no words are lost.")
+            Text("Keeps the previous half-second of audio. The built-in microphone protects the beginning of your thought while AirPods connect.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

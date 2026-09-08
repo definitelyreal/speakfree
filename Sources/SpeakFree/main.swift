@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import AppKit
 import Foundation
 import SpeakFreeLib
@@ -21,6 +22,7 @@ func printUsage() {
         speakfree set-engine <name>  Set the transcription engine (whisper | parakeet)
         speakfree download-parakeet [id]  Download a Parakeet model (default parakeet-tdt-0.6b-v2)
         speakfree status             Show configuration and status
+        speakfree audio-check        Check microphone handover for 12 seconds (saves no audio)
         speakfree --help             Show this help message
 
     HOTKEY EXAMPLES:
@@ -213,6 +215,8 @@ let command = args.count > 1 ? args[1] : nil
 switch command {
 case "start":
     cmdStart()
+case "audio-check":
+    print(AudioCaptureDiagnostics.run())
 case "process":
     guard args.count > 2 else {
         print("Usage: speakfree process <wav>")

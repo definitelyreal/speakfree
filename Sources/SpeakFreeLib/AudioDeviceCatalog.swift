@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 // Claude · 2026-07-14 · Session: c58489fa-5c7d-451c-870d-8f4f5578ed2c
 import CoreAudio
 import Foundation
@@ -16,6 +17,16 @@ public struct AudioInputDevice: Equatable, Sendable {
     public let isBluetooth: Bool
     public let nominalSampleRate: Double
     public let inputChannels: Int
+    public let isVirtual: Bool
+
+    public init(id: AudioDeviceID, uid: String, name: String, isBuiltIn: Bool,
+                isBluetooth: Bool, nominalSampleRate: Double, inputChannels: Int,
+                isVirtual: Bool = false) {
+        self.id = id; self.uid = uid; self.name = name
+        self.isBuiltIn = isBuiltIn; self.isBluetooth = isBluetooth
+        self.nominalSampleRate = nominalSampleRate; self.inputChannels = inputChannels
+        self.isVirtual = isVirtual
+    }
 }
 
 /// CoreAudio input-device enumeration for the microphone selector and the
@@ -80,7 +91,8 @@ public enum AudioDeviceCatalog {
     /// Start the background cache: initial refresh plus listeners for device-list and
     /// default-input changes. Call once, from any thread; never blocks the caller.
     public static func startCache() {
-        refreshQueue.async { refreshCacheNow() }
+        refreshQueue.async {
+        refreshCacheNow()
         var devicesAddr = address(kAudioHardwarePropertyDevices)
         var defaultAddr = address(kAudioHardwarePropertyDefaultInputDevice)
         AudioObjectAddPropertyListenerBlock(
@@ -90,6 +102,7 @@ public enum AudioDeviceCatalog {
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &defaultAddr, refreshQueue) { _, _ in
             refreshCacheNow()
+        }
         }
     }
 
@@ -177,7 +190,8 @@ public enum AudioDeviceCatalog {
                 isBluetooth: transport == kAudioDeviceTransportTypeBluetooth
                     || transport == kAudioDeviceTransportTypeBluetoothLE,
                 nominalSampleRate: nominalSampleRate(of: id),
-                inputChannels: channels)
+                inputChannels: channels,
+                isVirtual: transport == kAudioDeviceTransportTypeVirtual || transport == kAudioDeviceTransportTypeAggregate)
         }
     }
 
