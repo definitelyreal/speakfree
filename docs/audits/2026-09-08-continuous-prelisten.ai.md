@@ -30,7 +30,15 @@ During development Michael reported AirPods switching back to the MacBook. The s
 
 Michael's supplied review is retained in the gitignored `build/2026-09-08-airpods-review/references.ai.md`, preserving tentative words and unknown spans. Clip 3 is a positive control. Clip 2 is reported as slow/static audio, so guessed transcript substitutions would hide a capture problem. A separate doubled-rate diagnostic copy did not yield a trustworthy restoration. Original recordings remain unchanged; no guessed corpus expectations or homophone regex rules were added.
 
-Ark's root-owned `ANECompilerService` PID 91829 was still consuming 100% of one CPU core at the latest check. Michael authorized termination, but SSH sudo required administrator authentication. This system service is separate from SpeakFree's now-completed model warm-up; no attribution of its original cause is established.
+Ark's root-owned `ANECompilerService` PID 91829 was still consuming approximately 100% of one CPU core at the latest check. Michael authorized termination, but SSH sudo required administrator authentication. A subsequent AppleScript administrator request failed immediately with authentication error -60007. No termination succeeded. The service predates this deployment; its original cause is not established.
+
+## Fleet outcome
+
+`bash scripts/dev-deploy-fleet.sh` completed the required trash-then-copy installation on all three Macs. Each installed bundle reports commit `ed96ad8`, passes deep code-signature verification, and is running. All three logged valid built-in pre-listening. Two-second samples showed responsive main event loops. MacBook and Studio completed Parakeet warm-up in 0.2 seconds.
+
+Ark's model did not complete warm-up during verification. Its worker sample is waiting in CoreML's ANE compilation path while the pre-existing compiler service consumes a core. Capture/UI are responsive, but dictation on Ark is not yet ready. The remaining operator action is to stop PID 91829 through Activity Monitor's All Processes view using administrator authentication, then recheck model readiness. Deployment log: `/tmp/speakfree-prelisten-fleet-deploy.log`; local sample: `/tmp/speakfree-prelisten-m3-sample.txt`; remote samples: `/tmp/speakfree-prelisten-sample.txt`.
+
+The MacBook's saved input preference was Automatic at verification, and AirPods were absent from its available input list. It correctly used the built-in microphone. No user microphone preference was overwritten during deployment.
 
 ## Evidence and trust
 
