@@ -40,6 +40,10 @@ Ark's model did not complete warm-up during verification. Its worker sample is w
 
 The MacBook's saved input preference was Automatic at verification, and AirPods were absent from its available input list. It correctly used the built-in microphone. No user microphone preference was overwritten during deployment.
 
+### Later Ark recovery
+
+At the next live check around 13:42 PDT, PID 91829 remained present but used 0% CPU. Ark's log records successful model loading at 12:36:32 after 790.17 seconds and successful warm-up after 790.2 seconds. This supersedes the outstanding termination instruction above: stopping the now-idle compiler is no longer necessary. No agent termination attempt succeeded.
+
 ## Evidence and trust
 
 Sources are current code, XCTest output, direct hardware-check output, technical app logs, Michael's recording review, and live process listings. Earlier AI audit conclusions were treated as unverified leads. This report remains AI-unverified; automated tests and the bounded hardware exercise do not replace broader real-world validation.
