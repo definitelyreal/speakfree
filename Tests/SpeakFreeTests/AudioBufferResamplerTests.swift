@@ -5,7 +5,7 @@ import AVFoundation
 
 final class AudioBufferResamplerTests: XCTestCase {
     func testContinuousSignalAcrossDeviceRatesAndVariableBuffers() throws {
-        for rate in [24_000.0, 44_100.0, 48_000.0] {
+        for rate in [16_000.0, 24_000.0, 44_100.0, 48_000.0] {
             let input = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1))
             let output = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
             let resampler = try XCTUnwrap(AudioBufferResampler(inputFormat: input, outputFormat: output))
