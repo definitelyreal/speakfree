@@ -1,61 +1,116 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import Foundation
 
-public class DiagnosticLogger {
+public final class DiagnosticLogger {
     public static let shared = DiagnosticLogger()
-
+    private let queue = DispatchQueue(label: "com.speakfree.logger", qos: .utility)
+    private let stateLock = NSLock()
+    private var enabled = false
+    private var pendingLines = 0
+    private var droppedLines = 0
+    private let directoryOverride: URL?
+    private let maxFileBytes: Int
+    // Writer-queue-only state.
     private var logFile: URL?
-    private let queue = DispatchQueue(label: "com.speakfree.logger")
+    private var handle: FileHandle?
+    private var bytesWritten = 0
+    private let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 
-    /// Whether logging is active
-    var isEnabled: Bool = false
+    init(logsDirectory: URL? = nil, maxFileBytes: Int = 8 * 1024 * 1024) {
+        self.directoryOverride = logsDirectory
+        self.maxFileBytes = max(1024, maxFileBytes)
+    }
+
+    var isEnabled: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return enabled
+    }
 
     func setup() {
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
-        let config = Config.load()
-
-        // Beta: on by default. Production: on if config says so.
-        isEnabled = isBeta || (config.diagnosticLogging?.value ?? false)
-
-        if isEnabled {
-            startLogging()
-        }
+        setEnabled(isBeta || (Config.load().diagnosticLogging?.value ?? false))
     }
 
-    /// Enable or disable logging at runtime (from settings toggle)
     public func setEnabled(_ enabled: Bool) {
-        isEnabled = enabled
-        if enabled && logFile == nil {
-            startLogging()
+        let directory = directoryOverride ?? Config.configDir.appendingPathComponent("logs")
+        stateLock.lock()
+        self.enabled = enabled
+        // Queue the file transition while holding the same lock as log(), so no
+        // message can overtake enable, disable, or directory changes.
+        queue.async {
+            if enabled {
+                self.startLogging(in: directory)
+            } else {
+                try? self.handle?.close()
+                self.handle = nil
+            }
+        }
+        stateLock.unlock()
+    }
+
+    private func startLogging(in directory: URL) {
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            if logFile?.deletingLastPathComponent().standardizedFileURL.path != directory.standardizedFileURL.path {
+                try? handle?.close()
+                handle = nil
+                Self.pruneOldLogs(in: directory)
+                let date = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+                logFile = directory.appendingPathComponent("speakfree-\(date)-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString.prefix(8)).log")
+                bytesWritten = 0
+                guard let logFile else { return }
+                guard fm.createFile(atPath: logFile.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { return }
+            }
+            guard handle == nil, let logFile else { return }
+            if !fm.fileExists(atPath: logFile.path) {
+                guard fm.createFile(atPath: logFile.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { return }
+            }
+            handle = try FileHandle(forWritingTo: logFile)
+            bytesWritten = Int(try handle!.seekToEnd())
+            let info = Bundle.main.infoDictionary
+            write("Session started — \(Bundle.main.bundleIdentifier ?? "unknown") v\(SpeakFree.version)", at: Date())
+            write("Machine: \(ProcessInfo.processInfo.operatingSystemVersionString), RAM: \(ProcessInfo.processInfo.physicalMemory / (1024*1024*1024))GB", at: Date())
+            write("Build: commit \(info?["SFBuildCommit"] as? String ?? "unstamped"), built \(info?["SFBuildDate"] as? String ?? "unstamped"), channel \(info?["SFBuildChannel"] as? String ?? "dev")", at: Date())
+        } catch {
+            handle = nil
+            fputs("speakfree diagnostic log unavailable: \(error.localizedDescription)\n", stderr)
         }
     }
 
-    private func startLogging() {
-        let fm = FileManager.default
-        let logsDir = Config.configDir.appendingPathComponent("logs")
-        try? fm.createDirectory(at: logsDir, withIntermediateDirectories: true,
-                                attributes: [.posixPermissions: 0o700])
-        // createDirectory attributes only apply on first creation — re-assert for
-        // logs dirs that predate the permission fix.
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: logsDir.path)
-        Self.pruneOldLogs(in: logsDir)
-        let dateStr = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let file = logsDir.appendingPathComponent("speakfree-\(dateStr).log")
-        // Never truncate: production and the streaming variant share this dir, and two
-        // instances starting in the same second would otherwise clobber each other.
-        if !fm.fileExists(atPath: file.path) {
-            fm.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600])
+    private func write(_ message: String, at date: Date) {
+        guard let logFile, let handle else { return }
+        let line = "[\(formatter.string(from: date))] \(message)\n"
+        print(line, terminator: "")
+        do {
+            let data = Data(line.utf8)
+            if bytesWritten > 0 && bytesWritten + data.count > maxFileBytes {
+                try handle.close()
+                self.handle = nil
+                let previous = logFile.deletingPathExtension().appendingPathExtension("previous.log")
+                let older = logFile.deletingPathExtension().appendingPathExtension("older.log")
+                let fm = FileManager.default
+                if fm.fileExists(atPath: older.path) { try fm.removeItem(at: older) }
+                if fm.fileExists(atPath: previous.path) { try fm.moveItem(at: previous, to: older) }
+                try fm.moveItem(at: logFile, to: previous)
+                guard fm.createFile(atPath: logFile.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { return }
+                self.handle = try FileHandle(forWritingTo: logFile)
+                bytesWritten = 0
+            }
+            try self.handle?.write(contentsOf: data)
+            bytesWritten += data.count
+        } catch {
+            try? self.handle?.close()
+            self.handle = nil
+            fputs("speakfree diagnostic write failed: \(error.localizedDescription)\n", stderr)
         }
-        logFile = file
-        log("Session started — \(Bundle.main.bundleIdentifier ?? "unknown") v\(SpeakFree.version)")
-        log("Machine: \(ProcessInfo.processInfo.operatingSystemVersionString), RAM: \(ProcessInfo.processInfo.physicalMemory / (1024*1024*1024))GB")
-        // Exact build identity (Michael 2026-08-20: four same-version fleet builds shipped
-        // in one day and forensics couldn't tell which one a log line came from). Stamped
-        // by bundle-app.sh; absent on bare CLI builds, which say so instead of guessing.
-        let info = Bundle.main.infoDictionary
-        let commit = info?["SFBuildCommit"] as? String ?? "unstamped"
-        let built = info?["SFBuildDate"] as? String ?? "unstamped"
-        let channel = info?["SFBuildChannel"] as? String ?? "dev"
-        log("Build: commit \(commit), built \(built), channel \(channel)")
     }
 
     /// Delete session logs older than `days`. Beta builds log every session by default,
@@ -76,21 +131,30 @@ public class DiagnosticLogger {
     }
 
     func log(_ message: String) {
-        guard isEnabled else { return }
-        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        let line = "[\(timestamp)] \(message)\n"
-        print(line, terminator: "")  // Also print to console
-        queue.async { [weak self] in
-            guard let url = self?.logFile else { return }
-            if let data = line.data(using: .utf8) {
-                if let handle = try? FileHandle(forWritingTo: url) {
-                    handle.seekToEndOfFile()
-                    handle.write(data)
-                    handle.closeFile()
-                } else {
-                    try? data.write(to: url)
-                }
-            }
+        let now = Date()
+        stateLock.lock()
+        guard enabled else { stateLock.unlock(); return }
+        guard pendingLines < 512 else {
+            droppedLines += 1
+            stateLock.unlock()
+            return
         }
+        pendingLines += 1
+        let dropped = droppedLines
+        droppedLines = 0
+        // A pathological error message cannot bypass the per-file or queue cap.
+        let bounded = String(decoding: message.utf8.prefix(min(16_384, maxFileBytes / 4)), as: UTF8.self)
+        queue.async {
+            if dropped > 0 { self.write("Logger: dropped \(dropped) messages while busy", at: now) }
+            self.write(bounded, at: now)
+            self.stateLock.lock()
+            self.pendingLines -= 1
+            self.stateLock.unlock()
+        }
+        stateLock.unlock()
     }
+
+    /// Deterministic test barrier; production logging never waits on disk.
+    func flush() { queue.sync {} }
+    deinit { try? handle?.close() }
 }

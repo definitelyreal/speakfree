@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import Foundation
 import AVFoundation
 
@@ -60,6 +60,7 @@ public enum HallucinationFilterTuning {
 }
 
 public class Transcriber {
+    private static let shadowSlot = DispatchSemaphore(value: 1)
     enum SecondOpinionStatus: Equatable {
         /// What the audio contained, as far as the evidence can tell. Michael's copy
         /// rule (2026-08-22): the status line is two sentences, the first describing
@@ -128,7 +129,7 @@ public class Transcriber {
     /// Model identifier for the active engine (whisper: a size like "large-v3-turbo";
     /// parakeet: "parakeet-tdt-0.6b-v3"). Doubles as the whisper model size for the CLI path.
     let modelID: String
-    private let language: String
+    let language: String
     public var suppressAutoPunctuation: Bool = false
     var onSecondOpinionStatus: ((SecondOpinionStatus) -> Void)?
 
@@ -508,7 +509,8 @@ public class Transcriber {
             }
         } else if engine.engineID != "whisper",
                   Self.secondOpinionTier(aggregateConfidence: engine.lastDiagnostics?.aggregateConfidence) == .shadow,
-                  Self.modelExists(modelSize: "large-v3-turbo") {
+                  Self.modelExists(modelSize: "large-v3-turbo"),
+                  Self.shadowSlot.wait(timeout: .now()) == .success {
             // SHADOW second opinion (2026-08-20): the take reads as suspect (corpus:
             // clean takes score >=0.94, garbled-but-fluent 0.73-0.83) but replacing text
             // automatically isn't yet earned — so whisper runs in the background, writes
@@ -518,11 +520,12 @@ public class Transcriber {
             let parakeetText = cleaned
             let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
             DispatchQueue.global(qos: .utility).async { [weak self] in
+                defer { Self.shadowSlot.signal() }
                 guard let self = self else { return }
                 let shadow: String
                 do {
                     shadow = try self.transcribeWithCLI(audioURL: audioURL, prompt: prompt,
-                                                        modelOverride: "large-v3-turbo")
+                                                        modelOverride: "large-v3-turbo", background: true)
                 } catch {
                     // A failed shadow must say so — a silent guard hid the modelID bug
                     // (2026-08-20: every shadow threw modelNotFound("parakeet-tdt-0.6b-v2")
@@ -749,7 +752,7 @@ public class Transcriber {
     /// file can only throw — which is exactly how the 2026-08-20 shadow pass silently
     /// never fired (take 135106 "Caramore Kaima", conf 0.911, no sidecar, no log).
     private func transcribeWithCLI(audioURL: URL, prompt: String? = nil,
-                                   modelOverride: String? = nil) throws -> String {
+                                   modelOverride: String? = nil, background: Bool = false) throws -> String {
         guard let whisperPath = Transcriber.findWhisperBinary() else {
             throw TranscriberError.whisperNotFound
         }
@@ -759,15 +762,13 @@ public class Transcriber {
             throw TranscriberError.modelNotFound(cliModel)
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: whisperPath)
         var args = [
             "-m", modelPath,
             "-f", audioURL.path,
             "-l", language,
             "--no-timestamps",
             "-nt",
-            "-t", "\(ProcessInfo.processInfo.activeProcessorCount)",
+            "-t", "\(background ? min(2, ProcessInfo.processInfo.activeProcessorCount) : ProcessInfo.processInfo.activeProcessorCount)",
         ]
         // Spoken mode: suppress whisper's auto-punctuation so only spoken words produce symbols
         if suppressAutoPunctuation {
@@ -782,27 +783,14 @@ public class Transcriber {
                 "Transcriber: whisper CLI fallback running promptless — dropped \(prompt.count)-char "
                 + "context prompt (no argv-free prompt path on whisper-cli)")
         }
-        process.arguments = args
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        try process.run()
-
-        let group = DispatchGroup()
-        var stderrData = Data()
-
-        group.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            group.leave()
-        }
-
-        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        group.wait()
-        process.waitUntilExit()
+        let duration = (try? AVAudioFile(forReading: audioURL)).map {
+            Double($0.length) / max(1, $0.processingFormat.sampleRate)
+        } ?? 60
+        let outputResult = try BoundedProcess.run(
+            executable: URL(fileURLWithPath: whisperPath), arguments: args,
+            timeout: Self.cliTimeout(audioDuration: duration, background: background))
+        let data = outputResult.stdout
+        let stderrData = outputResult.stderr
 
         // Whisper outputs one line per acoustic segment with leading spaces. Join with a
         // SPACE, not "\n" — a multi-segment split is not a user break, so it must never
@@ -814,13 +802,20 @@ public class Transcriber {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
 
-        if process.terminationStatus != 0 {
+        if outputResult.status != 0 {
             let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !stderr.isEmpty { fputs("whisper-cpp: \(stderr)\n", Foundation.stderr) }
             throw TranscriberError.transcriptionFailed
         }
 
         return output
+    }
+
+    static func cliTimeout(audioDuration: Double, background: Bool) -> TimeInterval {
+        // Foreground file transcription keeps a duration-aware budget (up to 30 min).
+        // Shadows are disposable diagnostics and must never occupy a worker indefinitely.
+        let duration = audioDuration.isFinite ? max(0, audioDuration) : 60
+        return min(background ? 120 : 1800, max(30, duration * 2 + 15))
     }
 
     public static func findWhisperBinary() -> String? {
