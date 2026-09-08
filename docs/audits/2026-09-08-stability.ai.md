@@ -50,6 +50,8 @@ The Studio process was running and its sampled main thread was servicing the eve
 
 ## Remaining recommendations, in priority order
 
+Follow-up: items 1, 3, 4 and 5, plus model readiness messaging and avoiding unnecessary engine reloads, are now implemented. See [the follow-up audit](2026-09-08-dictation-followup.ai.md) for validation and outstanding choices. The list below preserves the original audit findings.
+
 These are code-review findings and proposals, not independently verified historical crash causes.
 
 1. **Bound Whisper subprocess work.** `Transcriber.transcribeWithCLI` waits for stdout/stderr and exit without a deadline. A hung CLI can strand a foreground rescue or background shadow. It also gives each CLI all logical processors. Add cancellation, a duration-aware timeout, a concurrency limit for shadows, and a conservative thread budget; test with a deliberately stalled child process before changing live behavior.

@@ -206,8 +206,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Injectable executor: tests replace this to simulate a throw without running the full setup.
     /// Production code leaves it nil — `setup()` calls `setupInner()` directly.
     var _setupExecutor: (() throws -> Void)?
+    private let setupGate = SetupGate()
 
     private func setup() {
+        guard setupGate.begin() else { return }
+        defer {
+            // Keep the gate closed until queued UI initialization has finished too.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.setupGate.finish() { self.reloadConfig() }
+            }
+        }
         do {
             if let executor = _setupExecutor {
                 try executor()
@@ -227,10 +236,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
             // Surface a modal alert. Runs on main so we block the setup thread here
             // until the user dismisses — the process stays alive and in the error state.
-            DispatchQueue.main.sync { [weak self] in
-                guard let self else { return }
-                self.showSetupFailureAlert(message: message)
-            }
+            let present = { [weak self] in self?.showSetupFailureAlert(message: message) }
+            if Thread.isMainThread { present() } else { DispatchQueue.main.sync(execute: present) }
         }
     }
 
@@ -503,7 +510,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         wireSecondOpinionStatus(for: transcriber)
         activeEngineID = engineID
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
-        DiagnosticLogger.shared.log("Model loaded: \(modelID) (engine: \(engineID))")
+        DiagnosticLogger.shared.log("Transcriber configured: \(modelID) (engine: \(engineID))")
 
         // Apply routing BEFORE enabling pre-buffer. Assigning preBufferEnabled=true
         // starts the engine immediately; doing that first briefly opens the system
@@ -597,6 +604,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startListening() {
+        hotkeyManager?.stop()
+        tapHealthTimer?.invalidate()
         hotkeyManager = HotkeyManager(
             keyCode: config.hotkey.keyCode,
             modifiers: config.hotkey.modifierFlags
@@ -646,8 +655,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         print("speakfree v\(SpeakFree.version)")
         print("Hotkey: \(hotkeyDesc)")
         print("Model: \(config.modelSize)")
-        print("Ready.")
-        DiagnosticLogger.shared.log("Ready — hotkey=\(hotkeyDesc) model=\(config.modelSize)")
+        let readiness = transcriber.isLoaded ? "Ready" : "Hotkey ready; speech model not loaded yet"
+        print(readiness)
+        DiagnosticLogger.shared.log("\(readiness) — hotkey=\(hotkeyDesc) model=\(transcriber.modelID)")
 
         // Start LocalAPIServer on launch if enabled in config (T1.2).
         syncLocalAPIServerState()
@@ -748,6 +758,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func reloadConfig() {
+        if setupGate.deferReloadIfRunning() { return }
         // L1: never mutate live dictation state mid-utterance. If fn is held (a dictation is in
         // flight), defer the ENTIRE reload — not just the hotkey rebuild — because it also swaps
         // the transcriber (this utterance would finalize on the wrong engine) and flips
@@ -794,7 +805,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         config = Config.load()
 
         // Parakeet: no ggml-on-disk gate (FluidAudio downloads/validates its own cache).
-        // Always rebuild the transcriber so an engine switch takes effect.
+        // Rebuild only when the engine, model, or language changes.
         if effectiveEngineID == "parakeet" {
             // Same transient-window fallback as above — see resolveLegacyParakeetModel.
             let modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
@@ -835,19 +846,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finishReloadConfig(modelID: String) {
-        // Capture the outgoing transcriber so its engine's cleanup runs before we drop it.
-        // Without this, switching engine/model leaks the old engine's loaded model (ANE/Metal
-        // residency) until ARC happens to release it — unload it deterministically instead.
-        let old = transcriber
-
-        let engine = EngineFactory.make(config: config)
-        transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
-        wireSecondOpinionStatus(for: transcriber)
-        activeEngineID = effectiveEngineID
-
-        // Unload the previous engine off the main thread (async unload); ARC drops `old` after.
-        if let old = old {
-            Task { await old.unloadModel() }
+        let needsNewEngine = transcriber == nil || activeEngineID != effectiveEngineID
+            || transcriber.modelID != modelID || transcriber.language != config.language
+        if needsNewEngine {
+            let old = transcriber
+            let engine = EngineFactory.make(config: config)
+            transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
+            wireSecondOpinionStatus(for: transcriber)
+            activeEngineID = effectiveEngineID
+            if let old { Task { await old.unloadModel() } }
         }
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
@@ -864,7 +871,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
         transcriber.startMemoryPressureMonitoring()
-        warmUpEngine(effectiveEngineID)
+        if needsNewEngine { warmUpEngine(effectiveEngineID) }
 
         reloadHotkeyAndSettings()
         print("Config reloaded: hotkey=\(KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)) model=\(modelID) engine=\(effectiveEngineID)")
@@ -888,12 +895,22 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// first dictation isn't a ~15-20s cold ANE load. Parakeet only (Whisper's cold
     /// load is fast and its memory profile differs); no-ops if assets aren't present.
     private func warmUpEngine(_ engineID: String) {
+        guard let t = transcriber else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.transcriber === t else { return }
+            self.statusBar.modelIsLoading = engineID == "parakeet" && !t.isLoaded
+        }
         guard engineID == "parakeet" else { return }
-        let t = transcriber
-        Task.detached(priority: .userInitiated) {
+        Task.detached(priority: .userInitiated) { [weak self] in
             let start = Date()
-            await t?.warmUp()
-            print("Parakeet warm-up finished in \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
+            await t.warmUp()
+            let loaded = t.isLoaded
+            DiagnosticLogger.shared.log("Parakeet warm-up \(loaded ? "ready" : "failed") after \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.transcriber === t else { return }
+                self.statusBar.modelIsLoading = false
+                if !loaded { self.statusBar.modelLoadMessage = "Initial model load failed — dictation will retry" }
+            }
         }
     }
 

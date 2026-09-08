@@ -8,7 +8,6 @@ import Foundation
 
 class AudioRecorder {
     private var audioEngine: AVAudioEngine?
-    private var audioConverter: AVAudioConverter?
     private var audioFile: WavWriter?
     private var currentOutputURL: URL?
     private let writeQueue = DispatchQueue(label: "com.definitelyreal.speakfree.audiowrite")
@@ -721,7 +720,6 @@ class AudioRecorder {
         boundDeviceUID = nil
         boundDeviceID = nil
 
-        audioConverter = nil
         stateLock.lock()
         prerollBuffer = []
         stateLock.unlock()
@@ -895,12 +893,11 @@ class AudioRecorder {
                 "AudioRecorder: \(detail); accepting it anyway — a suspect engine beats no engine")
         }
 
-        guard let conv = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+        guard let resampler = AudioBufferResampler(inputFormat: inputFormat, outputFormat: targetFormat) else {
             DiagnosticLogger.shared.log("AudioRecorder: converter creation failed")
             scheduleFormatRetry("converter creation failed")
             return
         }
-        audioConverter = conv
 
         // Wrap installTap in a try/catch shim — even with the format guard above, AVAudioEngine
         // can still throw on edge-case formats from external devices. Crashing is worse than
@@ -909,7 +906,7 @@ class AudioRecorder {
         let tapOK = CTryCatch({
             inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
                 guard let self = self else { return }
-                self.handleAudioBuffer(buffer, inputFormat: inputFormat, converter: conv)
+                self.handleAudioBuffer(buffer, resampler: resampler)
             }
         }, &tapErr)
         guard tapOK else {
@@ -972,17 +969,8 @@ class AudioRecorder {
     }
 
     /// Single tap callback — handles both pre-roll and recording modes.
-    private func handleAudioBuffer(_ buffer: AVAudioPCMBuffer, inputFormat: AVAudioFormat, converter: AVAudioConverter) {
-        let frameCount = AVAudioFrameCount(Double(buffer.frameLength) * 16000.0 / inputFormat.sampleRate)
-        guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCount) else { return }
-
-        var error: NSError?
-        converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
-            outStatus.pointee = .haveData
-            return buffer
-        }
-
-        guard error == nil, convertedBuffer.frameLength > 0,
+    private func handleAudioBuffer(_ buffer: AVAudioPCMBuffer, resampler: AudioBufferResampler) {
+        guard let convertedBuffer = resampler.convert(buffer),
               let channelData = convertedBuffer.floatChannelData?[0] else { return }
 
         let count = Int(convertedBuffer.frameLength)
