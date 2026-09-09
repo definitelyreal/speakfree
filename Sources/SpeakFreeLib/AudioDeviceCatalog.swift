@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 // Claude · 2026-07-14 · Session: c58489fa-5c7d-451c-870d-8f4f5578ed2c
 import CoreAudio
 import Foundation
@@ -158,13 +158,24 @@ public enum AudioDeviceCatalog {
     ) {
         let oldUIDs = Set(previous.map(\.uid))
         let newUIDs = Set(current.map(\.uid))
+        var internalAdded = 0, internalRemoved = 0
+        func internalAggregate(_ device: AudioInputDevice) -> Bool {
+            device.isVirtual && (device.name.hasPrefix("CADefaultDeviceAggregate-")
+                || device.uid.hasPrefix("CADefaultDeviceAggregate-"))
+        }
         for dev in current where !oldUIDs.contains(dev.uid) {
+            if internalAggregate(dev) { internalAdded += 1; continue }
             DiagnosticLogger.shared.log(
                 "AudioDeviceCatalog: +\(dev.name) [\(transportLabel(dev))] joined")
         }
         for dev in previous where !newUIDs.contains(dev.uid) {
+            if internalAggregate(dev) { internalRemoved += 1; continue }
             DiagnosticLogger.shared.log(
                 "AudioDeviceCatalog: -\(dev.name) [\(transportLabel(dev))] left")
+        }
+        if internalAdded + internalRemoved > 0 {
+            DiagnosticLogger.shared.log(
+                "Audio graph: internal aggregate routing changed (+\(internalAdded)/-\(internalRemoved)); not physical device connections")
         }
     }
 
