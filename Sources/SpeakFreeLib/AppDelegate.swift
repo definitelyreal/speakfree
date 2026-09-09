@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import AppKit
 import ApplicationServices
 import AVFoundation
@@ -704,7 +704,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if issues.isEmpty {
-            DiagnosticLogger.shared.log("Health check (\(context)): all OK")
+            DiagnosticLogger.shared.log("Health check (\(context)): permissions and controls OK; audio recovery checked asynchronously")
         } else {
             DiagnosticLogger.shared.log("Health check (\(context)): ISSUES — \(issues.joined(separator: ", "))")
             print("⚠️ Health check (\(context)): \(issues.joined(separator: ", "))")
@@ -1871,9 +1871,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // kick a rebuild now regardless of how the dictation resolves.
             switch failure {
             case .captureFailed:
-                recorder.ensureAudioHealthy()
+                recorder.recoverFailedCapture()
             case .silent:
-                recorder.ensureAudioHealthy()
+                recorder.recoverFailedCapture()
             default:
                 break
             }

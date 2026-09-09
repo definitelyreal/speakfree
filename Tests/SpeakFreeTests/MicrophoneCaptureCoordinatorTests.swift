@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import XCTest
 @testable import SpeakFreeLib
 
@@ -51,6 +51,53 @@ final class MicrophoneCaptureCoordinatorTests: XCTestCase {
         let routes = MicrophoneCaptureCoordinator.routes(devices: [airPods, builtIn], systemDefault: airPods, pin: builtIn.uid)
         XCTAssertEqual(routes.base, builtIn)
         XCTAssertEqual(routes.preferred, builtIn)
+    }
+
+    func testFailedRecordingActuallyRestartsEvenWhenPacketsAreRecent() {
+        var sessions: [ScriptedCapture] = []
+        var received: [Float] = []
+        let router = MicrophoneCaptureCoordinator(factory: { let s = ScriptedCapture(); sessions.append(s); return s }, samples: { received += $0; _ = $1 }, status: { _ in }, refresh: {})
+        router.configure(devices: [builtIn], systemDefault: builtIn, pin: nil, prelisten: true)
+        router.start(); router.queue.sync {}
+        sessions[0].deliver?(CapturePacket(start: 0, samples: [0]))
+        router.queue.sync {}
+        router.recoverFailedCapture(); router.queue.sync {}
+        XCTAssertTrue(sessions[0].stopped)
+        XCTAssertEqual(sessions.count, 2)
+        sessions[0].deliver?(CapturePacket(start: 1, samples: [999]))
+        sessions[1].deliver?(CapturePacket(start: 1, samples: [0.25]))
+        router.queue.sync {}
+        XCTAssertEqual(received, [0, 0.25])
+        router.stop(); router.queue.sync {}
+    }
+
+    func testZeroFilledAirPodsCannotReplaceWorkingBaseAndAreRetired() {
+        var sessions: [ScriptedCapture] = []
+        var received: [Float] = []
+        let router = MicrophoneCaptureCoordinator(factory: { let s = ScriptedCapture(); sessions.append(s); return s }, samples: { received += $0; _ = $1 }, status: { _ in }, refresh: {})
+        router.configure(devices: [builtIn, airPods], systemDefault: airPods, pin: nil, prelisten: true)
+        router.start(); router.queue.sync { router.setRecording(true) }
+        for i in 0..<10 {
+            sessions[0].deliver?(CapturePacket(start: Double(i) / 10, samples: Array(repeating: 0.25, count: 1600)))
+            sessions[1].deliver?(CapturePacket(start: Double(i) / 10, samples: Array(repeating: 0, count: 1600)))
+            router.queue.sync {}
+        }
+        XCTAssertEqual(received, Array(repeating: 0.25, count: 16000))
+        XCTAssertFalse(sessions[0].stopped)
+        XCTAssertTrue(sessions[1].stopped)
+        router.stop(); router.queue.sync {}
+    }
+
+    func testQuietNonzeroMicrophoneDoesNotTriggerDigitalSilenceRecovery() {
+        var sessions: [ScriptedCapture] = []
+        let router = MicrophoneCaptureCoordinator(factory: { let s = ScriptedCapture(); sessions.append(s); return s }, samples: { _, _ in }, status: { _ in }, refresh: {})
+        router.configure(devices: [builtIn], systemDefault: builtIn, pin: nil, prelisten: true)
+        router.start(); router.queue.sync {}
+        sessions[0].deliver?(CapturePacket(start: 0, samples: Array(repeating: 0.0000001, count: 32000)))
+        router.queue.sync {}
+        XCTAssertFalse(sessions[0].stopped)
+        XCTAssertEqual(sessions.count, 1)
+        router.stop(); router.queue.sync {}
     }
 
     func testAirPodsOnlyMacKeepsPrelistenOnItsAvailableMicrophone() {

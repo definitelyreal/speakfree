@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import AppKit
 import AVFoundation
 import Foundation
@@ -94,6 +94,10 @@ class AudioRecorder {
     }
     func ensureAudioHealthy() { capture.recover() }
     func recoverDeadCaptureDuringRecording() { capture.recover() }
+    func recoverFailedCapture() {
+        capture.queue.async { self.preroll = [] }
+        capture.recoverFailedCapture()
+    }
     func shutdown() { capture.stop() }
 
     func currentCaptureDeviceName() -> String? {

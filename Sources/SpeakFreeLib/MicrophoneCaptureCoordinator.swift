@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import Foundation
 
 /// Control state and sample delivery are serial; hardware workers never run here.
@@ -35,6 +35,7 @@ final class MicrophoneCaptureCoordinator {
         let session: DeviceCapturing
         let started: Double
         var lastPacket: Double?
+        var zeroFrames = 0
     }
 
     init(factory: @escaping () -> DeviceCapturing = { DeviceAudioSession() },
@@ -116,6 +117,20 @@ final class MicrophoneCaptureCoordinator {
         }
     }
 
+    /// A failed take is stronger evidence than recent callbacks: a driver can
+    /// keep supplying perfectly timed buffers containing only zeros.
+    func recoverFailedCapture() {
+        queue.async {
+            guard self.enabled, !self.suspended else { return }
+            DiagnosticLogger.shared.log("Capture: restarting streams after failed recording")
+            for uid in Array(self.sessions.keys) { self.remove(uid) }
+            self.timeline.reset()
+            self.retries = [:]; self.retryAfter = [:]
+            self.refresh()
+            self.reconcile()
+        }
+    }
+
     func suspend() {
         queue.async {
             self.suspended = true
@@ -173,10 +188,24 @@ final class MicrophoneCaptureCoordinator {
 
     private func receive(_ packet: CapturePacket, uid: String, generation: UUID) {
         guard var entry = sessions[uid], entry.generation == generation, enabled else { return }
-        entry.lastPacket = now()
+        guard !packet.samples.isEmpty else { return }
+        let digitalSilence = packet.samples.allSatisfy { $0 == 0 }
+        entry.zeroFrames = digitalSilence ? entry.zeroFrames + packet.samples.count : 0
+        if entry.zeroFrames >= 16_000 {
+            sessions[uid] = entry
+            failed(uid, generation: generation, reason: "Microphone delivered only digital zeros for one second")
+            return
+        }
+        if !digitalSilence { entry.lastPacket = now() }
         sessions[uid] = entry
         // Reset retries only after sustained successful capture, not one stray buffer.
-        if entry.lastPacket! - entry.started > 5 { retries[uid] = 0 }
+        if let lastPacket = entry.lastPacket, !digitalSilence && lastPacket - entry.started > 5 { retries[uid] = 0 }
+        // Never switch away from a working base microphone to a zero-filled
+        // Bluetooth stream during startup or a mute/route failure.
+        if digitalSilence && uid != base?.uid {
+            emit(timeline.useBase(), source: base?.name ?? lastSource)
+            return
+        }
         let samples = uid == base?.uid ? timeline.receiveBase(packet) : timeline.receiveSecondary(packet)
         emit(samples, source: entry.device.name)
         updateStatus()
@@ -214,14 +243,22 @@ final class MicrophoneCaptureCoordinator {
         let message: String
         if !prelisten && !recording { message = "Pre-listening off" }
         else if sessions[base?.uid ?? ""]?.lastPacket == nil && sessions[preferred?.uid ?? ""]?.lastPacket == nil {
-            message = recording ? "Microphone connecting — audio not ready yet" : "Starting pre-listening…"
+            if sessions.isEmpty && retries.values.contains(where: { $0 >= 4 }) {
+                message = "Microphone unavailable — no valid audio; retry when starting dictation"
+            } else {
+                message = recording ? "Microphone connecting — audio not ready yet" : "Starting pre-listening…"
+            }
         }
         else if let pin, !devices.contains(where: { $0.uid == pin }) {
             message = "Selected microphone disconnected — using \(base?.name ?? "available microphone")"
         }
         else if let preferred, preferred.uid != base?.uid {
             if sessions[preferred.uid]?.lastPacket != nil {
-                message = "Using \(preferred.name) · pre-listening protected by \(base?.name ?? "fallback microphone")"
+                if sessions[base?.uid ?? ""]?.lastPacket != nil {
+                    message = "Using \(preferred.name) · pre-listening protected by \(base?.name ?? "fallback microphone")"
+                } else {
+                    message = "Using \(preferred.name) · backup microphone unavailable"
+                }
             } else if recording {
                 message = "Using \(base?.name ?? "fallback microphone") while \(preferred.name) connects…"
             } else {
