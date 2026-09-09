@@ -1,3 +1,4 @@
+// ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import XCTest
 @testable import SpeakFreeLib
 
@@ -20,6 +21,38 @@ final class RecordingStoreTests: XCTestCase {
         Config.configDirOverride = nil
         try? FileManager.default.removeItem(at: scratchDir)
         super.tearDown()
+    }
+
+    func testDeleteReportsFailureWhenDirectoryCannotBeEnumerated() throws {
+        let fm = FileManager.default
+        try fm.removeItem(at: testDir)
+        try Data("not a directory".utf8).write(to: testDir)
+        let result = RecordingStore.deleteAllRecordings()
+        XCTAssertFalse(result.succeeded)
+        XCTAssertTrue(result.enumerationFailed)
+        XCTAssertEqual(try String(contentsOf: testDir), "not a directory")
+    }
+
+    func testDeleteOfAbsentDirectorySucceeds() throws {
+        try FileManager.default.removeItem(at: testDir)
+        XCTAssertTrue(RecordingStore.deleteAllRecordings().succeeded)
+    }
+
+    func testFailedRemovalPreservesFileAndReportsFailureThenCanRetry() throws {
+        let fm = FileManager.default
+        let wav = RecordingStore.newRecordingURL()
+        try Data("synthetic fixture".utf8).write(to: wav)
+        try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: testDir.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: testDir.path) }
+        let failed = RecordingStore.deleteAllRecordings()
+        XCTAssertFalse(failed.succeeded)
+        XCTAssertEqual(failed.failedFiles, 1)
+        XCTAssertTrue(fm.fileExists(atPath: wav.path))
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: testDir.path)
+        let retried = RecordingStore.deleteAllRecordings()
+        XCTAssertTrue(retried.succeeded)
+        XCTAssertEqual(retried.removedFiles, 1)
+        XCTAssertFalse(fm.fileExists(atPath: wav.path))
     }
 
     func testNewRecordingURLCreatesValidPath() {

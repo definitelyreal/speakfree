@@ -1,5 +1,14 @@
 # speakfree — project instructions
 
+<!-- ai-suggestion:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-09 -->
+## Active release lane
+
+This is `codex/release-readiness`, based on the existing app at `1d86b3a`.
+Read [RELEASE-READINESS.ai.md](docs/RELEASE-READINESS.ai.md) before editing or releasing.
+Experimental accuracy/corpus/engine work is in sibling `../speakfree` on
+`codex/accuracy-research`. Keep this release independent; do not merge that branch wholesale.
+<!-- /ai -->
+
 ## Replacing the installed app (MANDATORY)
 
 **Always DELETE the existing `speakfree.app` before copying a new build in. Never copy over / replace it in place.**

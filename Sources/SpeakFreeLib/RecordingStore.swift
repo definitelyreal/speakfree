@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
+// ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import Foundation
 import Darwin
 import AVFoundation
@@ -539,7 +540,21 @@ public class RecordingStore {
         return parseTimestamp(datePart) != nil
     }
 
-    public static func deleteAllRecordings() {
+    public struct DeletionResult: Sendable, Equatable {
+        public let removedFiles: Int
+        public let failedFiles: Int
+        public let enumerationFailed: Bool
+        public var succeeded: Bool { failedFiles == 0 && !enumerationFailed }
+
+        public init(removedFiles: Int = 0, failedFiles: Int = 0, enumerationFailed: Bool = false) {
+            self.removedFiles = removedFiles
+            self.failedFiles = failedFiles
+            self.enumerationFailed = enumerationFailed
+        }
+    }
+
+    @discardableResult
+    public static func deleteAllRecordings() -> DeletionResult {
         mutationLock.lock()
         defer { mutationLock.unlock() }
         // M3 + orphan-sweep safety: enumerate names directly (no per-file sidecar opens) and remove
@@ -548,8 +563,10 @@ public class RecordingStore {
         // human-managed `recording-archive/` folder or a `recording-notes.pdf` survives. Never
         // touches the crash sentinel (it lives in configDir, not recordingsDir).
         let fm = FileManager.default
-        var allRemoved = true
-        if let names = try? fm.contentsOfDirectory(atPath: recordingsDir.path) {
+        var removed = 0
+        var failed = 0
+        do {
+            let names = try fm.contentsOfDirectory(atPath: recordingsDir.path)
             for name in names where isRecordingArtifact(name) {
                 let url = recordingsDir.appendingPathComponent(name)
                 // Regular files only — a directory whose name happens to match is never removed
@@ -558,19 +575,31 @@ public class RecordingStore {
                 guard fm.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else { continue }
                 do {
                     try fm.removeItem(at: url)
+                    removed += 1
                 } catch {
-                    allRemoved = false
+                    failed += 1
                     fputs("Warning: could not remove recording \(url.path): \(error.localizedDescription)\n", stderr)
                 }
             }
+        } catch {
+            let failure = error as NSError
+            // A missing directory is already empty. Permission and other read
+            // failures are not evidence of absence and must never report success.
+            if failure.domain == NSCocoaErrorDomain && failure.code == NSFileReadNoSuchFileError {
+                setCachedCount(0)
+                return DeletionResult()
+            }
+            invalidateCachedCount()
+            return DeletionResult(enumerationFailed: true)
         }
         // M2 / privacy: only zero the cached count when EVERY removal succeeded. A failed removal
         // leaves sensitive wavs on disk — invalidate instead so the next read rescans and Settings
         // keeps showing the survivors rather than reporting zero and hiding the folder controls.
-        if allRemoved {
+        if failed == 0 {
             setCachedCount(0)
         } else {
             invalidateCachedCount()
         }
+        return DeletionResult(removedFiles: removed, failedFiles: failed)
     }
 }
