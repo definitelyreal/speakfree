@@ -5,6 +5,28 @@ September 9 follow-up: [ROUTE-STABILITY.ai.md](ROUTE-STABILITY.ai.md) records th
 Noah/Studio handoffs, removed stale diagnostic poller, and stopped-engine recovery candidate.
 Route stability is now a release gate; deletion correctness alone is insufficient.
 
+September 9 afternoon candidate checkpoint: `a795f6b` is packaged, signature-checked,
+and its CLI loads on Noah, Studio, and Ark. Each Mac has a rollback archive of installed
+`3143a81`. No candidate is installed yet; the current task has requested the final fleet
+rollout approval. Private source/binary/archive hashes and UI observations are in
+`build/release-readiness/a795f6b/candidate-receipt.json`.
+
+The previously blocked deletion UI check now passes on isolated inert previews of the
+candidate's executable payload: cancel; simulated failure alert; acknowledgement returning
+to the confirmation; retry; cancel after failure retaining “Keep my recordings”; and
+simulated success returning with “Continue”. Previews used a scratch recording-count fixture;
+the fixture remained intact. Separate bundle identifiers/signatures change signed bytes, but
+unsigned executable payload hashes match the candidate. This checks UI behavior; actual
+filesystem success/failure/retry remains covered by the earlier real-fixture unit tests.
+Hardware capture/route smoke testing and release CI are still open.
+
+Additional local release checks: all version surfaces agree at 1.7.1. `swiftlint --strict`
+with 0.63.2 reports 28 violations, including vendored iOS code and unchanged existing source;
+none are in the capture/deletion files changed in this lane. Do not report release CI as
+green. Private `a795f6b/{swiftlint.log,lint-findings.json,version-check.log}` retains details
+and per-file comparison to the lane's `1d86b3a` base. Resolve applicable lint failures before
+public release; this does not establish a runtime fault in the prepared hardware-test build.
+
 Michael's September 9 direction: release the existing app once the relevant flow is
 working, while pursuing accuracy/engine development independently. He said “deletion
 flow”; clarification whether this meant dictation is pending in the current task.
@@ -41,15 +63,15 @@ Validation September 9:
 - Commands: `swift test --filter 'RecordingStoreTests|RecordingsNoticeTests|PerfBatchMTests|AdversarialR2PrivacyTests'`.
 - Logs initially `/tmp/speakfree-release-{readiness,deletion}-tests.log`; retain in private
   `build/release-readiness/` before delivery.
-- Still required: live UI success/cancel/failure behavior in an isolated scratch config,
-  exact candidate build/fleet smoke check, and release CI. Unit tests are not the UI gate.
+- UI success/cancel/failure behavior in an isolated scratch config completed at the afternoon
+  checkpoint above. Still required: live capture/route fleet smoke check and release CI.
 
 An inert `notice-preview` bundle was built successfully with unique bundle ID
 `com.definitelyreal.speakfree.delete-preview`. `SPEAKFREE_NOTICE_PREVIEW_FAILURE=1` selects
 a simulated failure result; no actual deletion or config changes occur in preview actions.
 The app reported its dialog open, but CUA `getApp` timed out three times with error -10005,
 including lookup by the observed bundle ID. The preview was terminated; the user's daily
-app remained running. **UI gate remains unverified, not passed.** Preview artifacts and logs
+app remained running. **At that earlier checkpoint the UI gate remained unverified.** Preview artifacts and logs
 are private under `build/release-readiness/`. Continue other release/research work while this
 automation limitation is unresolved; arrange a brief manual check if needed.
 
