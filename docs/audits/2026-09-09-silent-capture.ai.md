@@ -39,4 +39,12 @@ Noah was gracefully restarted at 11:57 as an immediate mitigation while preparin
 
 Full suite: 1,216 tests, three opt-in tests skipped, zero failures. New regressions reproduce recent zero buffers surviving recovery, verify working-base retention under zero-filled AirPods, and distinguish quiet nonzero input from digital zeros. Existing delayed-start, overlap, disconnect, pre-roll, WAV, and resampling coverage remains passing. Log: `/tmp/speakfree-silent-recovery-full-tests.log`.
 
+Optimized release regressions: 30 tests, zero failures (`/tmp/speakfree-silent-release-tests.log`). A signed hardware check emitted 11.192 seconds of audio during 12.044 seconds including startup. The Mac microphone supplied 78,970 nonzero samples, RMS 0.02305; AirPods supplied 100,101 nonzero samples, RMS 0.00329. Both sources contained signal; the status sequence completed base pre-listening, AirPods handover, and return to base. This establishes signal presence, not intended-word accuracy or comparative microphone quality. Result: `/tmp/speakfree-silent-hardware.json`; audio was not archived or transcribed.
+
 This repair addresses a demonstrated recovery regression. The initial reason both streams supplied zeros after waking remains unresolved. The multi-device audio lifecycle and perceived AirPods playback/word quality still need real-use validation; previous AI audit conclusions are leads, not independent ground truth.
+
+## Deployment
+
+Fleet installer completed successfully; all three installed bundles report `3143a81` and pass deep code-signature verification. Main-thread samples show normal event loops. Noah and Studio completed model warm-up in 0.2 seconds; Ark completed in 31.1 seconds. All three reported valid built-in pre-listening under the new zero-aware health check. Studio had another missing-callback interruption at 12:04:04 and recovered at 12:04:05; the broader driver/route instability remains open. Noah's saved input preference at verification was `BuiltInMicrophoneDevice`, which was preserved.
+
+Deployment log: `/tmp/speakfree-silent-fleet-deploy.log`. Samples: `/tmp/speakfree-silent-noah-sample.txt` locally and `/tmp/speakfree-silent-sample.txt` on each remote. The installed build includes the repair; the subsequent audit-only commit does not change its binary.
