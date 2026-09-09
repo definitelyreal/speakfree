@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import AVFoundation
 import AudioToolbox
 import CTryCatch
@@ -14,6 +14,8 @@ protocol DeviceCapturing: AnyObject {
 final class DeviceAudioSession: DeviceCapturing {
     private let worker = DispatchQueue(label: "com.speakfree.devicecapture.\(UUID())", qos: .userInitiated)
     private var engine: AVAudioEngine?
+    private var configurationObserver: NSObjectProtocol?
+    private var reportedConfigurationStop = false // worker only
     private let cancelLock = NSLock()
     private var cancelled = false
     private var isCancelled: Bool { cancelLock.lock(); defer { cancelLock.unlock() }; return cancelled }
@@ -52,6 +54,11 @@ final class DeviceAudioSession: DeviceCapturing {
                            failure: @escaping (String) -> Void) throws {
         let engine = AVAudioEngine()
         self.engine = engine // Failed candidates also stay worker-owned.
+        configurationObserver = Self.observeStoppedEngine(engine, on: worker) { [weak self] in
+            guard let self, !self.isCancelled, !self.reportedConfigurationStop else { return }
+            self.reportedConfigurationStop = true
+            failure("Audio engine stopped after a device configuration change")
+        }
         let input = engine.inputNode
         guard let unit = input.audioUnit else { throw CaptureError.invalid("No input audio unit") }
         var deviceID = device.id
@@ -106,10 +113,30 @@ final class DeviceAudioSession: DeviceCapturing {
     }
 
     private func retire() {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+            self.configurationObserver = nil
+        }
         BackgroundDisposal.retire(&engine, linger: 8, prepare: { engine in
             var exception: NSError?
             _ = CTryCatch({ engine.inputNode.removeTap(onBus: 0); engine.stop() }, &exception)
         })
+    }
+
+    /// Output route changes can stop an engine even with its input pinned to
+    /// the built-in mic. React on its worker instead of waiting 1.5–2.5 seconds
+    /// for missing samples. Apple explicitly forbids teardown in the notification
+    /// callback: its internal audio queue must never wait for driver/UI work.
+    static func observeStoppedEngine(
+        _ engine: AVAudioEngine, center: NotificationCenter = .default,
+        on queue: DispatchQueue, onStopped: @escaping () -> Void
+    ) -> NSObjectProtocol {
+        center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak engine] _ in
+            queue.async { [weak engine] in
+                guard let engine, !engine.isRunning else { return }
+                onStopped()
+            }
+        }
     }
 
     enum CaptureError: LocalizedError {

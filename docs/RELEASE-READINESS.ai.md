@@ -1,6 +1,10 @@
 <!-- ai-processed:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-09 | asof:2026-09-09 -->
 # Existing-code release: start here
 
+September 9 follow-up: [ROUTE-STABILITY.ai.md](ROUTE-STABILITY.ai.md) records the live
+Noah/Studio handoffs, removed stale diagnostic poller, and stopped-engine recovery candidate.
+Route stability is now a release gate; deletion correctness alone is insufficient.
+
 Michael's September 9 direction: release the existing app once the relevant flow is
 working, while pursuing accuracy/engine development independently. He said “deletion
 flow”; clarification whether this meant dictation is pending in the current task.

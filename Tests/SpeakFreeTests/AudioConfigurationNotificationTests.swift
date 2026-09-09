@@ -1,9 +1,52 @@
-// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import AVFoundation
 import XCTest
 @testable import SpeakFreeLib
 
 final class AudioConfigurationNotificationTests: XCTestCase {
+    func testDeviceWorkerReceivesStoppedEngineChangeWithoutBlockingAudioQueue() {
+        let center = NotificationCenter()
+        let engine = AVAudioEngine() // No inputNode or hardware capture.
+        let worker = DispatchQueue(label: "test.capture.configuration")
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        worker.async { entered.signal(); release.wait() }
+        XCTAssertEqual(entered.wait(timeout: .now() + 1), .success)
+        let delivered = expectation(description: "stopped engine delivered after worker unblocks")
+        let observer = DeviceAudioSession.observeStoppedEngine(engine, center: center, on: worker) {
+            dispatchPrecondition(condition: .onQueue(worker))
+            delivered.fulfill()
+        }
+        defer { center.removeObserver(observer) }
+        let posted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            center.post(name: .AVAudioEngineConfigurationChange, object: engine)
+            posted.signal()
+        }
+        let result = posted.wait(timeout: .now() + 1)
+        release.signal()
+        XCTAssertEqual(result, .success, "audio notification must not wait for the worker")
+        wait(for: [delivered], timeout: 2)
+    }
+
+    func testDeviceWorkerIgnoresOtherEnginesAndRemovedObserver() {
+        let center = NotificationCenter()
+        let engine = AVAudioEngine(), otherEngine = AVAudioEngine()
+        let worker = DispatchQueue(label: "test.capture.configuration.filter")
+        var calls = 0
+        let observer = DeviceAudioSession.observeStoppedEngine(engine, center: center, on: worker) { calls += 1 }
+        center.post(name: .AVAudioEngineConfigurationChange, object: otherEngine)
+        worker.sync {}
+        XCTAssertEqual(calls, 0)
+        center.post(name: .AVAudioEngineConfigurationChange, object: engine)
+        worker.sync {}
+        XCTAssertEqual(calls, 1)
+        center.removeObserver(observer)
+        center.post(name: .AVAudioEngineConfigurationChange, object: engine)
+        worker.sync {}
+        XCTAssertEqual(calls, 1)
+    }
+
     func testAudioThreadCanFinishNotificationWhileMainIsBusy() {
         XCTAssertTrue(Thread.isMainThread)
         let center = NotificationCenter()
