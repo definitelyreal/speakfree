@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import AppKit
 import AVFoundation
 
@@ -17,8 +17,14 @@ public enum AudioCaptureDiagnostics {
         }
         let devices = AudioDeviceCatalog.cachedInputDevices
         var counts: [String: Int] = [:]
+        var nonzero: [String: Int] = [:]
+        var energy: [String: Double] = [:]
         var statuses: [String] = []
-        let router = MicrophoneCaptureCoordinator(samples: { samples, source in counts[source, default: 0] += samples.count }, status: { statuses.append($0) })
+        let router = MicrophoneCaptureCoordinator(samples: { samples, source in
+            counts[source, default: 0] += samples.count
+            nonzero[source, default: 0] += samples.filter { $0 != 0 }.count
+            energy[source, default: 0] += samples.reduce(0) { $0 + Double($1) * Double($1) }
+        }, status: { statuses.append($0) })
         router.configure(devices: devices, systemDefault: AudioDeviceCatalog.cachedDefaultInput, pin: nil, prelisten: true)
         router.start()
         let start = Date()
@@ -43,7 +49,9 @@ public enum AudioCaptureDiagnostics {
             result = ["elapsedSeconds": Date().timeIntervalSince(start),
                       "emittedSeconds": Double(counts.values.reduce(0, +)) / 16_000,
                       "samplesBySource": counts, "routeMessages": statuses,
+                      "nonzeroSamplesBySource": nonzero,
                       "availableInputs": devices.map(\.name)]
+            result["rmsBySource"] = Dictionary(uniqueKeysWithValues: counts.map { ($0.key, sqrt((energy[$0.key] ?? 0) / Double(max(1, $0.value)))) })
         }
         let data = try! JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
         return String(decoding: data, as: UTF8.self)
