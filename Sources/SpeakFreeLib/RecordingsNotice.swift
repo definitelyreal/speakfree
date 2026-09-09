@@ -1,4 +1,5 @@
 // Claude · 2026-07-14 · Session: c58489fa-5c7d-451c-870d-8f4f5578ed2c
+// ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import AppKit
 import SwiftUI
 
@@ -164,7 +165,7 @@ struct RecordingsNoticeView: View {
     var onToggle: (Bool) -> Void
     /// Resolves the notice. `didDelete` reports whether the in-app delete ran.
     var onContinue: (Bool) -> Void
-    var deleteAction: () -> Void = { RecordingStore.deleteAllRecordings() }
+    var deleteAction: @Sendable () -> RecordingStore.DeletionResult = { RecordingStore.deleteAllRecordings() }
 
     @State private var saveToggle = false
     @State private var showDeleteConfirm = false
@@ -262,8 +263,11 @@ struct RecordingsNoticeView: View {
 struct DeleteRecordingsConfirmView: View {
     let fileCount: Int
     let folderPath: String
-    var deleteAction: () -> Void = { RecordingStore.deleteAllRecordings() }
+    var deleteAction: @Sendable () -> RecordingStore.DeletionResult = { RecordingStore.deleteAllRecordings() }
     var onDeleted: () -> Void
+
+    @State private var isDeleting = false
+    @State private var showDeleteError = false
 
     @Environment(\.dismiss) private var dismiss
 
@@ -283,26 +287,46 @@ struct DeleteRecordingsConfirmView: View {
             HStack {
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .disabled(isDeleting)
                 Spacer()
                 Button("Open Folder…") {
                     NSWorkspace.shared.activateFileViewerSelecting(
                         [URL(fileURLWithPath: folderPath)])
                 }
                 .accessibilityIdentifier("confirm-open-folder")
-                Button("Delete") {
-                    deleteAction()
-                    dismiss()
-                    onDeleted()
+                Button(isDeleting ? "Deleting…" : "Delete") {
+                    isDeleting = true
+                    // Large archives must not block the main run loop. Only a
+                    // successful result may close the sheet and acknowledge deletion.
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let result = deleteAction()
+                        DispatchQueue.main.async {
+                            isDeleting = false
+                            if result.succeeded {
+                                dismiss()
+                                onDeleted()
+                            } else {
+                                showDeleteError = true
+                            }
+                        }
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .accessibilityIdentifier("confirm-delete")
+                .disabled(isDeleting)
             }
             .padding(.top, 8)
         }
         .padding(20)
         .frame(width: 460)
+        .interactiveDismissDisabled(isDeleting)
+        .alert("Some recordings could not be deleted", isPresented: $showDeleteError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Open the recordings folder to check its permissions and any remaining files, then try again.")
+        }
     }
 }
 
@@ -334,12 +358,18 @@ public enum RecordingsNoticePreview {
     public static func run() {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
+        // Preview-only failure injection exercises the real error sheet without
+        // deleting user files. It has no effect on the running dictation app.
+        let simulateFailure = ProcessInfo.processInfo.environment["SPEAKFREE_NOTICE_PREVIEW_FAILURE"] == "1"
 
         let view = RecordingsNoticeView(
             initialSaveToggle: false,
             onToggle: { print("preview: toggle → \($0) — inert") },
             onContinue: { print("preview: Continue (didDelete=\($0)) — inert") },
-            deleteAction: { print("preview: DELETE clicked — inert, nothing deleted") }
+            deleteAction: {
+                print("preview: DELETE clicked — inert, nothing deleted")
+                return RecordingStore.DeletionResult(failedFiles: simulateFailure ? 1 : 0)
+            }
         )
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
