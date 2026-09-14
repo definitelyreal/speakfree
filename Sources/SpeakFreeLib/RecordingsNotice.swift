@@ -1,5 +1,5 @@
 // Claude · 2026-07-14 · Session: c58489fa-5c7d-451c-870d-8f4f5578ed2c
-// ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
+// ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 import AppKit
 import SwiftUI
 
@@ -450,9 +450,22 @@ public enum RecordingsNoticePreview {
                     recoveryDirectory: nil, trashDirectory: nil, elapsedSeconds: 4.4)
             }
         )
-        let hosting = NSHostingController(rootView: view)
+        let hosting = NSHostingController(rootView: VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("UI TEST — no recordings will be moved")
+                    .font(.headline)
+                Text("Folder buttons open the test folder. This is not the running SpeakFree app.")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor))
+            Divider()
+            view
+        })
         let window = NSWindow(contentViewController: hosting)
-        window.title = "Recordings notice — preview (inert)"
+        window.title = "UI TEST — SpeakFree recordings preview"
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
         window.center()

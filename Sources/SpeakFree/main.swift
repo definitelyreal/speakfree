@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a09da8-0424-7b71-a705-10868c5f46e4 · 2026-09-13
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import AppKit
 import Foundation
@@ -14,6 +15,7 @@ func printUsage() {
 
     USAGE:
         speakfree start              Start the dictation daemon
+        speakfree prepare-update     Wait for quiet and warn before an external update
         speakfree process <wav>      Transcribe a wav file; prints JSON {raw, processed, styled}
         speakfree set-hotkey <key>   Set the push-to-talk hotkey
         speakfree get-hotkey         Show current hotkey
@@ -213,6 +215,8 @@ let args = CommandLine.arguments
 let command = args.count > 1 ? args[1] : nil
 
 switch command {
+case "prepare-update":
+    exit(UpdatePreparation.run(arguments: Array(args.dropFirst(2))))
 case "start":
     cmdStart()
 case "audio-check":

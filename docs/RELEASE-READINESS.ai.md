@@ -1,7 +1,39 @@
 <!-- ai-processed:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-13 | asof:2026-09-13 -->
 # Existing-code release: start here
 
-Current hardware-test candidate, September 13: `66a0e6d` includes the existing deletion
+September 13 evening: Michael authorized installing the updated release-test build on the
+fleet after a fresh full backup and Finder confirmation, then reopening the recordings
+confirmation for a live Trash/speed test. He chose **Trash only**, removing permanent
+deletion from the user-facing flow, with `→ 🗑️`, progress and measured completion time.
+This replaces the earlier install-approval-pending state, but not public-release approval.
+Longer experiments and incomplete fixes remain in research; see sibling research
+`docs/BUILD-PLAN.ai.md`. The old Noah process exited gracefully before the fresh backup.
+Trash backend/UI is committed at `f0c80a9`. The final focused suite passed 116 tests
+with zero failures and exit 0; the optimized build passed in 33.01 seconds. Changed Trash
+source/UI/tests pass strict SwiftLint; this does not clear the pre-existing repository findings.
+Logs: `build/release-readiness/2026-09-13-trash-final-{tests,build}.log`.
+The fresh full snapshot `2026-09-13T211114` contains 74,321 files / 6,950,207,201 content
+bytes, including 18,768 WAV files and all 58 annotations. Full separate extraction matched
+hashes, sizes and modes; source stability passed. Archive SHA256:
+`0bb8d3c1b8fc180fed939ae82a28663f4be5023056ede9d544ccfcb4e0c9354b`.
+Originals and this backup are open in Finder; Michael's inspection checkpoint is pending.
+No new build is installed. The old Noah app is stopped. Fresh installed-app rollback
+archives also exist on every host under `~/Library/Application Support/speakfree/AppBackups/2026-09-13-before-trash-update/`;
+each archived executable matches its still-installed executable. Inert preview processes were closed
+after Michael opened their test-folder link; the preview now has an explicit UI TEST banner.
+
+Michael additionally requires a tone and visible warning before future agent-driven stops,
+no active dictation, and 30 seconds since the last dictation. Release `prepare-update` and guarded fleet installation are implemented. The final
+combined suite passed 129 tests (13 new update-policy/observer regressions); all 17 inert
+deployment tests passed. Changed helper/UI sources and tests pass strict SwiftLint.
+The worker caches directory membership, stats at most 256 recent artifacts per scan,
+parses only new log events, and rejects stale observations. Cancel remains on main.
+The native tone/window still needs observation during the actual guarded update. Build/vendor/transfer before interruption; never
+force-kill to finish deployment. Old-app external observation has an unavoidable race with
+a new Fn press after the final check; do not claim app-coordinated atomic admission.
+
+
+Earlier hardware-test candidate, September 13: `66a0e6d` includes the existing deletion
 and route-recovery fixes plus the selective capture/lifecycle fixes below. Optimized build
 and 153 focused tests passed. The signed vendored bundle passes signature and CLI loading
 on Noah, Studio, and Ark; remote archive/executable hashes match the local candidate.
@@ -99,7 +131,8 @@ Base snapshot: `2026-09-13T202403/`; surviving-file supplement:
 `~/Library/Application Support/speakfree/DeletionBackups/`. Keep all three manifests.
 The original corpus/config snapshot at `2026-09-13T185739/` remains intact. Full restore
 receipts and the process sample persist in research corpus `analyses/2026-09-13-deletion/`.
-Settings responsiveness is pending; no second deletion is requested. The old process's
+Michael confirmed Settings responds, chose Trash only, and requested a second interactive
+Trash/speed test after the fresh backup and updated install described above. The old process's
 cached count may need a same-build relaunch after external restoration. Future interactive
 delete drills must secure newly arriving takes before leaving a destructive step pending.
 
