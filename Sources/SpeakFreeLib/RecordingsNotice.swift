@@ -315,6 +315,9 @@ struct RecordingsTrashConfirmView: View {
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("confirm-data-note")
+            Text("Recordings in use, or started during this move, stay in the recordings folder.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -341,9 +344,15 @@ struct RecordingsTrashConfirmView: View {
 
     private func completion(_ result: RecordingRemoval.Result) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(result.removedFiles > 0 ? "Moved to Trash" : "No recordings to move")
+            Text(result.removedFiles > 0 ? "Moved to Trash" :
+                 result.retainedRecordings > 0 ? "Recordings in use were kept" : "No recordings to move")
                 .font(.headline).accessibilityIdentifier("trash-completion")
             Text("\(result.removedFiles) files moved in \(String(format: "%.1f", completionElapsed ?? result.elapsedSeconds)) seconds.")
+            if result.retainedRecordings > 0 {
+                Text("\(result.retainedRecordings) recordings in use or started during this move were kept in the recordings folder.")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("trash-retained-recordings")
+            }
             Text("You can restore them from Trash until you empty it.")
                 .foregroundStyle(.secondary)
             HStack {
@@ -360,6 +369,10 @@ struct RecordingsTrashConfirmView: View {
             Text(result.enumerationFailed ? "The recordings folder could not be read." :
                  "\(result.removedFiles) files moved to Trash. \(result.failedFiles) files could not be moved.")
                 .foregroundStyle(.red)
+            if result.retainedRecordings > 0 {
+                Text("\(result.retainedRecordings) recordings in use or started during this move were kept.")
+                    .foregroundStyle(.secondary)
+            }
             if let recovery = result.recoveryDirectory {
                 Text("Some files are safe in a recovery folder. Open it before trying again.")
                 Button("Open Recovery Folder") { NSWorkspace.shared.activateFileViewerSelecting([recovery]) }

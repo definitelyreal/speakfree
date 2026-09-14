@@ -396,6 +396,8 @@ public class Transcriber {
     /// Falls back to CLI (whisper only) if the engine fails or samples are not provided.
     public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil,
                            punctuationMode: PunctuationMode = .off) async throws -> String {
+        let activityLease = try RecordingActivity.shared.acquireReading(audioURL)
+        defer { activityLease.release() }
         let result: String
         // Set when a rescue fires; carries the descriptor so the failure line can keep
         // the same first sentence the "trying" line opened with.
@@ -489,8 +491,7 @@ public class Transcriber {
                    Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords),
                    Self.activeSwapVeto(parakeet: cleaned, whisper: swap,
                                        durationSeconds: duration) == nil {
-                    let sidecar = audioURL.deletingPathExtension().appendingPathExtension("parakeet.txt")
-                    try? cleaned.write(to: sidecar, atomically: true, encoding: .utf8)
+                    RecordingStore.saveAuxiliaryTranscription(text: cleaned, kind: .parakeet, for: audioURL)
                     DiagnosticLogger.shared.log(String(
                         format: "Transcriber: SPARSE whisper rescue (%.2f) — %d words replace %d over %.1fs",
                         conf, wWords, pWords, duration))
@@ -500,8 +501,7 @@ public class Transcriber {
                     DiagnosticLogger.shared.log(String(
                         format: "Transcriber: sparse rescue declined (%.2f, %d vs %d words) — whisper to sidecar",
                         conf, wWords, pWords))
-                    let sidecar = audioURL.deletingPathExtension().appendingPathExtension("whisper.txt")
-                    try? swap.write(to: sidecar, atomically: true, encoding: .utf8)
+                    RecordingStore.saveAuxiliaryTranscription(text: swap, kind: .whisper, for: audioURL)
                 }
             } catch {
                 DiagnosticLogger.shared.log(
@@ -519,9 +519,11 @@ public class Transcriber {
             // for an eventual active low-confidence swap.
             let parakeetText = cleaned
             let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
+            // Acquire before dispatch: the parent can finish before this worker starts.
+            let shadowLease = try? RecordingActivity.shared.acquireReading(audioURL)
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                defer { Self.shadowSlot.signal() }
-                guard let self = self else { return }
+                defer { shadowLease?.release(); Self.shadowSlot.signal() }
+                guard let self = self, shadowLease != nil else { return }
                 let shadow: String
                 do {
                     shadow = try self.transcribeWithCLI(audioURL: audioURL, prompt: prompt,
@@ -534,8 +536,7 @@ public class Transcriber {
                         "Transcriber: shadow whisper failed (\(error.localizedDescription))")
                     return
                 }
-                let sidecar = audioURL.deletingPathExtension().appendingPathExtension("whisper.txt")
-                try? shadow.write(to: sidecar, atomically: true, encoding: .utf8)
+                RecordingStore.saveAuxiliaryTranscription(text: shadow, kind: .whisper, for: audioURL)
                 let agree = TextPipeline.normalizedForComparison(shadow)
                     == TextPipeline.normalizedForComparison(parakeetText)
                 DiagnosticLogger.shared.log(String(
@@ -902,6 +903,8 @@ public class Transcriber {
         progressHandler: @escaping (_ chunk: Int, _ totalChunks: Int, _ whisperPct: Int) -> Void,
         isCancelled: @escaping () -> Bool
     ) async throws -> String {
+        let activityLease = try RecordingActivity.shared.acquireReading(url)
+        defer { activityLease.release() }
         // Ensure model loaded
         if !engine.isLoaded {
             try await engine.loadModel(modelID: modelID)

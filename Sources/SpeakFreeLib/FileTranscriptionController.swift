@@ -426,6 +426,9 @@ public class FileTranscriptionController: NSWindowController {
         cfg.parakeetModel = settings.engine == "parakeet" ? settings.parakeetModel : config.parakeetModel
         cfg.language = settings.language == "auto" ? "en" : settings.language
 
+        let activityLease: RecordingActivity.Lease
+        do { activityLease = try RecordingActivity.shared.acquireReading(sourceURL) }
+        catch { showError(error.localizedDescription); return }
         let engine = EngineFactory.make(config: cfg)
         let transcriber = Transcriber(engine: engine,
                                       modelID: settings.engine == "parakeet" ? settings.parakeetModel : settings.modelSize,
@@ -442,7 +445,8 @@ public class FileTranscriptionController: NSWindowController {
         isCancelled = false
         outputURL = outputPath
 
-        transcriptionTask = Task {
+        transcriptionTask = Task { [activityLease] in
+            defer { activityLease.release() }
             do {
                 var modelLoaded = false
                 let text = try await transcriber.transcribeFile(
@@ -483,6 +487,8 @@ public class FileTranscriptionController: NSWindowController {
     }
 
     private func writeOutput(text: String, to url: URL, source: URL, cfg: Config) throws {
+        let outputLease = try RecordingActivity.shared.acquire(url)
+        defer { outputLease.release() }
         let tmp = url.appendingPathExtension("tmp")
         let content: String
         if settings.format == .md {
