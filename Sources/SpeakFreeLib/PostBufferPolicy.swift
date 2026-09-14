@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 // Claude · 2026-06-10 · Session: 5b06900b-1498-4764-a786-48f408c36626
 //
 // T2.1 — Adaptive post-buffer.
@@ -33,8 +34,8 @@ import Foundation
 ///   * Walk the trailing-audio windows in capture order.
 ///   * A window is "silent" when its RMS is at or below `silenceThreshold` (`≤`); a window exactly
 ///     at the threshold counts as silence.
-///   * Stop as soon as a CONTIGUOUS run of silent windows reaches `silenceNeededMs` of audio —
-///     return the elapsed time up to and including the window that completed that run.
+///   * A CONTIGUOUS silent suffix must reach `silenceNeededMs` of audio — return the elapsed time
+///     at which that current suffix met the target. Later speech invalidates an earlier pause.
 ///   * Never wait longer than `capMs` (never worse than the legacy 300 ms flat wait — the retuned
 ///     220 ms cap is strictly below it).
 ///   * If silence is observed from the very first window, the wait collapses toward
@@ -109,24 +110,13 @@ public enum PostBufferPolicy {
         // A zero/sub-window silence requirement still needs at least one silent window to act on.
         let needed = max(1, windowsNeeded)
 
-        var contiguousSilent = 0
-        var elapsedMs = 0.0
-
-        for rms in windowRMS {
-            elapsedMs += windowMs
-            // Reached the (possibly speech-extended) cap mid-walk: stop now, clamped.
-            if elapsedMs >= effectiveCapMs { return effectiveCapMs }
-
-            if rms <= silenceThreshold {
-                contiguousSilent += 1
-                if contiguousSilent >= needed {
-                    // Enough trailing silence: stop early (clamped, defensively, to the cap).
-                    return min(elapsedMs, effectiveCapMs)
-                }
-            } else {
-                // Speech (above threshold) resets the silence run.
-                contiguousSilent = 0
-            }
+        // A late timer tick may see a pause AND the speech that followed it in one batch.
+        // Only the current suffix can justify stopping; an earlier completed pause is stale.
+        // Negating <= keeps NaN non-silent, matching the previous comparison behavior.
+        let lastNonSilent = windowRMS.lastIndex(where: { !($0 <= silenceThreshold) }) ?? -1
+        let trailingSilentCount = windowRMS.count - lastNonSilent - 1
+        if trailingSilentCount >= needed {
+            return min(Double(lastNonSilent + 1 + needed) * windowMs, effectiveCapMs)
         }
 
         // Ran out of observed windows before a full contiguous-silence run or the cap — fall back to
