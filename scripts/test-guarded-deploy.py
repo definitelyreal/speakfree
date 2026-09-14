@@ -70,6 +70,21 @@ sf_fleet_main
 '''
 
 
+TRANSPORT_HARNESS = r'''
+source "$SCRIPTS/dev-deploy-fleet.sh"
+SF_STAGE_ROOT="$TEST_ROOT"
+SF_ARCHIVE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+ssh() {
+    echo "ssh:$*" >> "$TRACE"
+    case "$*" in *mktemp*) echo /tmp/speakfree-fleet.inert;; esac
+    return "${SSH_STATUS:-0}"
+}
+scp() { echo "scp:$*" >> "$TRACE"; return "${SCP_STATUS:-0}"; }
+sf_stage_remote inert-host
+sf_install_remote inert-host "$SF_NEW_REMOTE_STAGE"
+'''
+
+
 class GuardedDeployTests(unittest.TestCase):
     def run_flow(self, harness=INSTALL_HARNESS, **overrides):
         with tempfile.TemporaryDirectory(prefix="speakfree-deploy-test-") as directory:
@@ -210,6 +225,22 @@ exit "${GUARD_STATUS:-0}"
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("install:ark", events)
         self.assertNotIn("cleanup", events)
+
+    def test_all_stage_transfer_and_install_commands_bound_ssh_transport(self):
+        result, events, _ = self.run_flow(TRANSPORT_HARNESS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([event.split(":", 1)[0] for event in events], ["ssh", "scp", "ssh", "ssh"])
+        for event in events:
+            for option in ("BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=10", "ServerAliveCountMax=3"):
+                self.assertIn("-o " + option, event)
+
+    def test_transport_failure_aborts_before_install_command(self):
+        for options, expected_commands in (({"SSH_STATUS": 255}, ["ssh"]),
+                                           ({"SCP_STATUS": 1}, ["ssh", "scp"])):
+            with self.subTest(options=options):
+                result, events, _ = self.run_flow(TRANSPORT_HARNESS, **options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual([event.split(":", 1)[0] for event in events], expected_commands)
 
     def test_explicit_local_only_override_and_invalid_value(self):
         result, events, _ = self.run_flow(FLEET_HARNESS, M3_ONLY=1)
