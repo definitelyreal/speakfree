@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import XCTest
 @testable import SpeakFreeLib
@@ -139,6 +140,23 @@ final class MicrophoneCaptureCoordinatorTests: XCTestCase {
         let result = try XCTUnwrap(recorder.stopRecording())
         XCTAssertEqual(result.samples, [Float](repeating: 0.25, count: 8000) + [Float](repeating: 0.5, count: 1600))
         XCTAssertGreaterThan(try Data(contentsOf: url).count, 9600 * 2)
+    }
+
+    func testStopDrainsPacketsAlreadyQueuedAtTheRecordingBoundary() throws {
+        let session = ScriptedCapture()
+        let recorder = AudioRecorder(factory: { session })
+        recorder.capture.configure(devices: [builtIn], systemDefault: builtIn, pin: nil, prelisten: true)
+        recorder.capture.start()
+        recorder.capture.queue.sync {}
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID()).wav")
+        defer { try? FileManager.default.removeItem(at: url); recorder.shutdown(); recorder.capture.queue.sync {} }
+        try recorder.startRecording(to: url)
+        let samples = Array(repeating: Float(0.25), count: 1600)
+        session.deliver?(CapturePacket(start: 0, samples: samples))
+        // No explicit routing/write drain here: stopRecording must serialize both queues itself.
+        let result = try XCTUnwrap(recorder.stopRecording())
+        XCTAssertEqual(result.samples, samples)
+        XCTAssertEqual(try ProcessCommand.loadSamples(from: url).count, samples.count)
     }
 
     func testVirtualDriverIsNotChosenAsAutomaticBackupOverAvailableAirPods() {

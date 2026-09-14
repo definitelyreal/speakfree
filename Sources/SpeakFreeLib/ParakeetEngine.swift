@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 // ai-suggestion:unverified · session:unknown · 2026-08-24
 import Foundation
 import FluidAudio
@@ -23,7 +24,7 @@ protocol ConfidencePunctuationCorrectingEngine: TranscriptionEngine {
 /// All mutable model state (the `AsrManager`, the loaded model id, and the in-flight transcription
 /// counter) is owned by a private `actor Core`. The actor serializes lifecycle so a `transcribe`
 /// can never run against a manager that `unload` is tearing down, and two concurrent `load`s can
-/// never both build a manager (load is single-flight via a stored in-progress `Task`). The outer
+/// never both build a manager (load/unload share a FIFO gate across suspension points). The outer
 /// class is a thin facade that delegates to `Core` and maintains an NSLock-guarded `isLoaded`
 /// mirror for the synchronous protocol getter.
 public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCorrectingEngine {
@@ -146,17 +147,19 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         return Array(samples[..<end])
     }
 
-    /// True when every 50 ms window from `start` to the end of the buffer is below the
-    /// true-silence threshold. One louder window anywhere in the tail vetoes the trim.
+    /// True when every window, including the final partial window, is below the
+    /// true-silence threshold. Unusable samples cannot establish silence.
     static func tailIsTrueSilence(_ samples: [Float], from start: Int) -> Bool {
         var i = max(0, start)
-        while i + energyWindowSamples <= samples.count {
+        while i < samples.count {
+            let end = min(i + energyWindowSamples, samples.count)
             var acc: Float = 0
-            for s in samples[i..<(i + energyWindowSamples)] { acc += s * s }
-            if (acc / Float(energyWindowSamples)).squareRoot() >= trueSilenceRMSThreshold {
+            for s in samples[i..<end] { acc += s * s }
+            let rms = (acc / Float(end - i)).squareRoot()
+            if !rms.isFinite || rms >= trueSilenceRMSThreshold {
                 return false
             }
-            i += energyWindowSamples
+            i = end
         }
         return true
     }
@@ -503,10 +506,11 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         private var vocabRescorer: VocabularyRescorer?
         private var vocabContext: CustomVocabularyContext?
         private var vocabTermCount = 0
-        /// Handle on the background vocab setup, for the SPEAKFREE_WAIT_VOCAB test seam only.
+        /// Owned background work: unload and model replacement cancel AND drain these handles.
         private var vocabSetupTask: Task<Void, Never>?
         private var vadManager: VadManager?
         private var vadSetupTask: Task<Void, Never>?
+        private var auxiliaryGeneration: UInt64 = 0
 
         /// The model identifier currently loaded, e.g. "parakeet-tdt-0.6b-v3". `nil` when unloaded.
         private var loadedModelID: String?
@@ -525,12 +529,28 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         /// is about to be `cleanup()`'d.
         private var tearingDown = false
 
-        /// In-progress load, if any. Concurrent `load` callers await this single Task instead of
-        /// each building their own manager (single-flight). `Task` is a value type, so the paired
-        /// `loadToken` (a monotonically increasing id) lets the owning call detect whether it is
-        /// still the in-flight load before clearing the slot.
-        private var loadInFlight: Task<Void, Error>?
-        private var loadToken = 0
+        // Actor reentrancy does not serialize an entire async lifecycle operation. Hold this
+        // FIFO gate across native loads/cleanup so unload drains an earlier load, and a later load
+        // cannot publish a new manager/task while unload is suspended. Same-model loads remain
+        // idempotent after acquiring the gate.
+        private var lifecycleBusy = false
+        private var lifecycleWaiters: [CheckedContinuation<Void, Never>] = []
+
+        private func acquireLifecycle() async {
+            if lifecycleBusy {
+                await withCheckedContinuation { lifecycleWaiters.append($0) }
+            } else {
+                lifecycleBusy = true
+            }
+        }
+
+        private func releaseLifecycle() {
+            if lifecycleWaiters.isEmpty {
+                lifecycleBusy = false
+            } else {
+                lifecycleWaiters.removeFirst().resume()
+            }
+        }
 
         /// Notifies the outer facade so it can update its NSLock-guarded `isLoaded` mirror.
         private let onLoadedChange: @Sendable (Bool) -> Void
@@ -547,22 +567,12 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         // MARK: Load (single-flight)
 
         func load(modelID: String) async throws {
-            // Idempotent: requested model already loaded.
-            if loadedModelID == modelID, manager != nil { return }
-
-            // Coalesce concurrent loads onto one Task. If a load is already running, await it; if it
-            // landed on the model we want, we're done — otherwise fall through and load ours.
-            if let existing = loadInFlight {
-                _ = try? await existing.value
-                if loadedModelID == modelID, manager != nil { return }
-            }
-
-            loadToken += 1
-            let myToken = loadToken
-            let task = Task { try await self.performLoad(modelID: modelID) }
-            loadInFlight = task
-            defer { if loadToken == myToken { loadInFlight = nil } }
-            try await task.value
+            await acquireLifecycle()
+            defer { releaseLifecycle() }
+            // Queue admission itself is noncancellable; a canceled load releases its slot before
+            // starting any native work. Unload deliberately completes cleanup despite cancellation.
+            try Task.checkCancellation()
+            try await performLoad(modelID: modelID)
         }
 
         private func performLoad(modelID: String) async throws {
@@ -610,9 +620,11 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
                 tearingDown = true
                 onLoadedChange(false)
                 while active > 0 { await Task.yield() }
+                await drainAuxiliarySetup()
                 manager = nil
                 loadedModelID = nil
                 vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
+                vadManager = nil
                 await old.cleanup()
                 tearingDown = false
             }
@@ -624,29 +636,60 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
             DiagnosticLogger.shared.log("ParakeetEngine: model loaded in \(String(format: "%.2f", loadTime))s")
             onLoadedChange(true)
 
-            // Custom-vocabulary setup runs in the BACKGROUND so it never delays model-ready (loading
-            // the CTC keyword-spotter takes ~15s). Dictation works immediately via the batch path and
-            // upgrades to vocab-boosted automatically once ready. Never fatal. Cancel any prior
-            // setup first — an orphan from a model-replacing load would waste a download slot
-            // (its commit guard already prevents a stale commit).
-            vocabSetupTask?.cancel()
-            let modelForVocab = modelID
-            vocabSetupTask = Task { await self.setupVocabBoosting(models: models, forModelID: modelForVocab) }
-            vadSetupTask?.cancel()
-            vadSetupTask = Task { await self.setupEndpointing(forModelID: modelForVocab) }
+            // Optional models become ready in the background; their tasks remain owned until
+            // unload/model replacement has drained them, even when native setup ignores cancel.
+            startAuxiliarySetup(
+                vocabulary: { generation in
+                    await self.setupVocabBoosting(models: models, forModelID: modelID,
+                                                  generation: generation)
+                },
+                endpointing: { generation in
+                    await self.setupEndpointing(forModelID: modelID, generation: generation)
+                })
         }
 
-        private func setupEndpointing(forModelID: String) async {
+        private func startAuxiliarySetup(
+            vocabulary: @escaping @Sendable (UInt64) async -> Void,
+            endpointing: @escaping @Sendable (UInt64) async -> Void
+        ) {
+            auxiliaryGeneration &+= 1
+            let generation = auxiliaryGeneration
+            vocabSetupTask = Task { await vocabulary(generation) }
+            vadSetupTask = Task { await endpointing(generation) }
+        }
+
+        private func auxiliarySetupCanPublish(_ generation: UInt64) -> Bool {
+            generation == auxiliaryGeneration && !tearingDown && !Task.isCancelled
+        }
+
+        private func drainAuxiliarySetup() async {
+            auxiliaryGeneration &+= 1
+            let vocabulary = vocabSetupTask
+            let endpointing = vadSetupTask
+            vocabulary?.cancel()
+            endpointing?.cancel()
+            // Cancellation is cooperative; CoreML compilation may still be inside native code.
+            // Await completion before clearing ownership or cleaning up its supporting manager.
+            await vocabulary?.value
+            await endpointing?.value
+            vocabSetupTask = nil
+            vadSetupTask = nil
+        }
+
+        private func setupEndpointing(forModelID: String, generation: UInt64) async {
+            guard auxiliarySetupCanPublish(generation) else { return }
             do {
                 let vad = try await VadManager(config: VadConfig(
                     // Silero is tiny. Keep it off the Neural Engine so it cannot evict or contend
                     // with Parakeet + the CTC vocabulary graph. Dogfood 2026-08-13 showed a fast
                     // median but random 1.2–5.7s release tails after adding an ANE-backed VAD.
                     defaultThreshold: 0.85, debugMode: false, computeUnits: .cpuOnly))
-                guard loadedModelID == forModelID, manager != nil else { return }
+                guard auxiliarySetupCanPublish(generation), loadedModelID == forModelID,
+                      manager != nil else { return }
                 vadManager = vad
                 DiagnosticLogger.shared.log("ParakeetEngine: Silero endpointing ready")
             } catch {
+                guard auxiliarySetupCanPublish(generation) else { return }
                 DiagnosticLogger.shared.log(
                     "ParakeetEngine: endpointing unavailable — \(error.localizedDescription); using full audio")
                 vadManager = nil
@@ -661,7 +704,9 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         /// which are the only channel through which a real English word may be rescored.
         /// Downloads the ~110MB CTC keyword-spotter model on first use. Any failure logs and
         /// leaves the ingredients nil, so `transcribe` returns the plain batch result.
-        private func setupVocabBoosting(models: AsrModels, forModelID: String) async {
+        private func setupVocabBoosting(models: AsrModels, forModelID: String,
+                                        generation: UInt64) async {
+            guard auxiliarySetupCanPublish(generation) else { return }
             vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
 
             let dictURL = Config.configDir.appendingPathComponent("custom-vocabulary.json")
@@ -678,6 +723,7 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
                 let ctc = try await ParakeetModelManager.shared.withSanctionedDownload {
                     try await CtcModels.downloadAndLoad(variant: .ctc110m)
                 }
+                guard auxiliarySetupCanPublish(generation) else { return }
                 // Tokenize each term for the CTC keyword spotter (`.load()` leaves ctcTokenIds
                 // nil and nothing is ever spotted — dogfood 2026-07-02).
                 let tokenizer = try await CtcTokenizer.load(from: CtcModels.defaultCacheDirectory(for: .ctc110m))
@@ -695,13 +741,15 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
                     ctcModelDirectory: CtcModels.defaultCacheDirectory(for: .ctc110m))
 
                 // Commit only if this model is still the loaded one (a reload may have raced).
-                guard loadedModelID == forModelID, manager != nil else { return }
+                guard auxiliarySetupCanPublish(generation), loadedModelID == forModelID,
+                      manager != nil else { return }
                 vocabSpotter = spotter
                 vocabRescorer = rescorer
                 vocabContext = context
                 vocabTermCount = context.terms.count
                 DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting ready (\(context.terms.count) CTC-tokenized terms, batch-anchored)")
             } catch {
+                guard auxiliarySetupCanPublish(generation) else { return }
                 DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting unavailable — \(error.localizedDescription); using batch path")
                 vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
             }
@@ -870,9 +918,39 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
             return punctuationCorrection.text
         }
 
+        // Synthetic setup seam: exercise the same lifecycle gate/task ownership without loading
+        // a native model. Tests can hold noncooperative setup at a barrier, then call public unload.
+        func loadAuxiliarySetupForTesting(
+            vocabulary: @escaping @Sendable () async -> Void,
+            endpointing: @escaping @Sendable () async -> Void,
+            onAttempt: @Sendable () -> Void,
+            onReady: @escaping @Sendable (String) -> Void
+        ) async throws {
+            onAttempt()
+            await acquireLifecycle()
+            defer { releaseLifecycle() }
+            try Task.checkCancellation()
+            await drainAuxiliarySetup()
+            startAuxiliarySetup(
+                vocabulary: { generation in
+                    await vocabulary()
+                    if await self.auxiliarySetupCanPublish(generation) { onReady("vocabulary") }
+                }, endpointing: { generation in
+                    await endpointing()
+                    if await self.auxiliarySetupCanPublish(generation) { onReady("endpointing") }
+                })
+        }
+
+        var lifecycleStateForTesting: (auxiliaryTasks: Int, queuedOperations: Int, tearingDown: Bool) {
+            ((vocabSetupTask == nil ? 0 : 1) + (vadSetupTask == nil ? 0 : 1),
+             lifecycleWaiters.count, tearingDown)
+        }
+
         // MARK: Unload
 
         func unload() async {
+            await acquireLifecycle()
+            defer { releaseLifecycle() }
             // Gate new transcribes first, then publish the mirror false SYNCHRONOUSLY before niling
             // the manager — this closes the stale-mirror window where isLoaded == true but the
             // manager is already gone. Only then drain in-flight transcriptions and cleanup, so none
@@ -880,10 +958,12 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
             tearingDown = true
             onLoadedChange(false)
             while active > 0 { await Task.yield() }
+            await drainAuxiliarySetup()
             let m = manager
             manager = nil
             loadedModelID = nil
             vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
+            vadManager = nil
             await m?.cleanup()
             tearingDown = false
             DiagnosticLogger.shared.log("ParakeetEngine: model unloaded")
@@ -970,10 +1050,24 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         try await core.load(modelID: modelID)
     }
 
-    /// Release the FluidAudio models and drop the manager. Waits for in-flight transcriptions to
-    /// drain before teardown.
+    /// Release the FluidAudio models and drop the manager. Waits for in-flight loads,
+    /// transcriptions, and optional model setup before teardown.
     public func unloadModel() async {
         await core.unload()
+    }
+
+    func loadAuxiliarySetupForTesting(
+        vocabulary: @escaping @Sendable () async -> Void,
+        endpointing: @escaping @Sendable () async -> Void,
+        onAttempt: @Sendable () -> Void = {},
+        onReady: @escaping @Sendable (String) -> Void = { _ in }
+    ) async throws {
+        try await core.loadAuxiliarySetupForTesting(vocabulary: vocabulary, endpointing: endpointing,
+                                                   onAttempt: onAttempt, onReady: onReady)
+    }
+
+    var lifecycleStateForTesting: (auxiliaryTasks: Int, queuedOperations: Int, tearingDown: Bool) {
+        get async { await core.lifecycleStateForTesting }
     }
 
     /// No-op. FluidAudio runs on the Apple Neural Engine via CoreML and manages its own memory;

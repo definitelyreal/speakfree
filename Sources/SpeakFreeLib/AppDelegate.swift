@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import AppKit
 import ApplicationServices
@@ -124,11 +125,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // reloadConfig, same as when not pressed. Main-only.
     private var pendingConfigReload = false
 
-    // Adaptive post-buffer (T2.1): poll trailing audio after key release and finalize as soon as
-    // ~150ms of trailing silence is observed, hard-capped at 300ms (never worse than the old flat
-    // wait). The decision itself lives in the pure PostBufferPolicy; this timer only feeds it RMS
-    // windows from the live recorder.
+    // Adaptive post-buffer (T2.1): poll trailing audio after key release. The policy requires
+    // 90ms of current trailing silence, otherwise waits 220ms, extending up to 1.2s when trailing
+    // energy crosses the speech threshold. This timer feeds it RMS windows from the live recorder.
     private var postBufferTimer: Timer?
+    private var postBufferGeneration: UInt64 = 0
+    /// The current press resumed a take whose previous hold had already been released.
+    private var continuedReleasedTake = false
     /// Window cadence the post-buffer poll uses (matches PostBufferPolicy's default window grain).
     private let postBufferWindowMs: Double = 30.0
 
@@ -767,7 +770,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // (MAP §8): swapping the transcriber/hotkey or flipping Key Mode under an open session would
         // strand its segments and change the hotkey out from under it. Every dictation-end path (and
         // Phase 2's session-close path) re-runs the reload once via performPendingConfigReloadIfNeeded.
-        if isPressed || (editSessionOpenProbe?() ?? false) {
+        if isPressed || postBufferTimer != nil || (editSessionOpenProbe?() ?? false) {
             pendingConfigReload = true
             DiagnosticLogger.shared.log("Config: reload deferred — dictation or edit session in flight")
             return
@@ -1090,10 +1093,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// reloadConfig was called. Called from every path that ends a dictation (finalizeRecording,
     /// handleKeyUp, handleRecordingAbort); the guard-then-clear makes it fire once and is
     /// idempotent, so overlapping end paths don't double-reload. reloadConfig reloads fresh
-    /// Config.load() state from disk, and by the time any of these callers runs isPressed is
-    /// already false, so the reload proceeds (does not re-defer) — the hotkey rebuild included.
+    /// Config.load() state from disk. Key-up alone does not end the take: a pending post-buffer
+    /// keeps the reload deferred until its finalizer relinquishes the capture boundary.
     private func performPendingConfigReloadIfNeeded() {
-        guard pendingConfigReload else { return }
+        guard pendingConfigReload, postBufferTimer == nil else { return }
         pendingConfigReload = false
         DiagnosticLogger.shared.log("Config: applying deferred reload — dictation finished")
         reloadConfig()
@@ -1235,9 +1238,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         case .hold:
             handleRecordingStop()
-            // L1: the key was released via the still-installed old hotkey manager (the reload was
-            // deferred while held) and isPressed is now false — safe to apply any deferred config
-            // reload in full (transcriber swap + hotkey rebuild + settings).
+            // The post-buffer is still part of this take. A deferred reload waits for actual
+            // finalization so a re-press can continue with the same engine, route, and key mode.
             performPendingConfigReloadIfNeeded()
         }
     }
@@ -1517,8 +1519,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
-    private func handleRecordingStart() {
+    func handleRecordingStart() {
         guard !isPressed else { return }
+        if let timer = postBufferTimer {
+            // Capture is still running during the post-buffer. Continue this take without
+            // creating another WAV/sentinel or replacing the original insertion context.
+            postBufferGeneration &+= 1
+            timer.invalidate()
+            postBufferTimer = nil
+            isPressed = true
+            continuedReleasedTake = true
+            startRecordingWatchdog()
+            startStreamingTimer()
+            return
+        }
+        continuedReleasedTake = false
         let startRequestedAt = CFAbsoluteTimeGetCurrent()
 
         // A stale Secure-Input retry must never fire mid-take or after a newer dictation —
@@ -1690,9 +1705,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// A real key was pressed while fn was held — this is a keyboard shortcut, not dictation.
-    /// Cancel recording silently and let the shortcut pass through.
-    private func handleRecordingAbort() {
+    /// Cancel the press silently and let the shortcut pass through. If this press resumed an
+    /// already-released take, preserve that take and return to its normal post-buffer/finalize.
+    func handleRecordingAbort() {
         guard isPressed else { return }
+        if continuedReleasedTake {
+            handleRecordingStop()
+            return
+        }
         isPressed = false
 
         stopRecordingWatchdog()
@@ -1705,12 +1725,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         focusCapture.reset()  // invalidate any in-flight focus capture
         screenContextText = nil
         screenCaptureGeneration = UUID()  // invalidate any in-flight OCR
-        statusBar.state = .idle
-        recordingOverlay.hide()
-        statusBar.buildMenu()
+        resetRecordingUIAfterAbort()
 
         // L1: the dictation ended (aborted) — apply any config reload deferred while fn was held.
         performPendingConfigReloadIfNeeded()
+    }
+
+    func resetRecordingUIAfterAbort() {
+        statusBar.state = .idle
+        recordingOverlay.hide()
+        statusBar.buildMenu()
     }
 
     /// In-recording dead-audio watchdog (2026-07-25 audit C3/C5): the ONLY health
@@ -1768,9 +1792,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         watchdogSilentTicks = 0
     }
 
-    private func handleRecordingStop() {
+    func handleRecordingStop() {
         guard isPressed else { return }
         isPressed = false
+        continuedReleasedTake = false
 
         stopRecordingWatchdog()
 
@@ -1814,8 +1839,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let startTick = DispatchTime.now().uptimeNanoseconds
 
         postBufferTimer?.invalidate()
+        postBufferGeneration &+= 1
+        let generation = postBufferGeneration
         postBufferTimer = Timer.scheduledTimer(withTimeInterval: windowMs / 1000.0, repeats: true) { [weak self] timer in
             guard let self = self else { timer.invalidate(); return }
+            guard self.postBufferGeneration == generation, !self.isPressed else {
+                timer.invalidate()
+                return
+            }
             let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds &- startTick) / 1_000_000.0
             // R3: copy only the trailing slice, not the full (growing) sample array each tick.
             let trailing = self.recorder.samples(after: samplesAtRelease)
@@ -1831,7 +1862,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
+    func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
         // L1: the key was released before the post-buffer scheduled this call (isPressed is
         // already false). Applying a deferred FULL reload here — ahead of every return below —
         // guarantees no exit path (toggle-mode stop, gate failure, nil transcriber, success) leaves

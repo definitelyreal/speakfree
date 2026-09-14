@@ -1,3 +1,4 @@
+// ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 import Foundation
 
 public struct Config: Codable {
@@ -64,17 +65,15 @@ public struct Config: Codable {
     // user chooses. Never shown again once set.
     public var recordingsNoticeDecision: String?
 
-    // Microphone pin (2026-07-14): CoreAudio device UID the recorder captures from.
-    // nil = follow the system default input (historical behavior). Set from the
-    // menu-bar microphone selector; falls back to the default if the device vanishes.
+    // Preferred dictation microphone UID. nil selects Automatic: a connected Bluetooth
+    // input when available, otherwise the coordinator's base microphone. The built-in
+    // microphone supplies continuous pre-listening when available. A missing pinned
+    // device falls back to the base without erasing the pin. See coordinator.routes.
     public var inputDeviceUID: String?
 
-    // Deprecated 2026-08-12: dual-mic capture was removed. Recording a second
-    // Bluetooth track alongside the built-in mic and comparing the two transcripts
-    // bought no measurable accuracy (26-08-12 dual-mic troubleshoot). Capturing the
-    // built-in mic by default, which was the prototype's real benefit, is now
-    // unconditional in AudioRecorder. Key is kept so old configs decode and the value
-    // round-trips, but nothing reads it.
+    // Legacy simultaneous-transcript-comparison flag; retained only for config round-trip.
+    // Nothing reads it. The current coordinator's built-in pre-listening + preferred-mic
+    // handover is controlled by inputDeviceUID/preBuffer, independently of this old flag.
     public var dualMicCapture: FlexBool?
 
     // Recordings are kept forever by DEFAULT — they are the dictation corpus that
