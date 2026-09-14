@@ -74,21 +74,21 @@ enum NoticeCopy {
     """
     static let turnedOff = "Saving new dictations is off unless you turn it on. Keep building your corpus here or in Settings:"
     static let toggleLabel = "Save recordings and transcripts"
-    static let deleteLeadIn = "Rather not? We can "
-    static let deleteLinkText = "delete everything"
+    static let deleteLeadIn = "Rather not? "
+    static let deleteLinkText = "→ 🗑️"
     static let deleteLeadOut = ", or do it yourself from the folder:"
     static let openFolderLabel = "Open Recordings / Transcripts Folder…"
     static let continueKeepLabel = "Keep my recordings »"
     static let continueLabel = "Continue »"
 
-    static let confirmTitle = "Delete your recordings and transcripts"
+    static let confirmTitle = "Move recordings and transcripts to Trash?"
     static func confirmBody(fileCount: Int, folder: String) -> String {
-        "This will permanently delete \(fileCount) files in \(folder)."
+        "Move \(fileCount) recording \(fileCount == 1 ? "file" : "files") from \(folder) to Trash. You can restore them until you empty Trash."
     }
     // Michael's wording, 2026-08-12 — shown in the delete confirmation so the user knows
     // what the recordings are for before destroying them.
     static let confirmDataNote = """
-    A note before you delete: my saved recordings have been an incredible data source, \
+    A note before you move them: my saved recordings have been an incredible data source, \
     allowing me to run changes on Speakfree against all my past dictations and study \
     voice patterns / usage history. They are on your computer and never sent anywhere, \
     but can of course pose a privacy risk.
@@ -165,7 +165,7 @@ struct RecordingsNoticeView: View {
     var onToggle: (Bool) -> Void
     /// Resolves the notice. `didDelete` reports whether the in-app delete ran.
     var onContinue: (Bool) -> Void
-    var deleteAction: @Sendable () -> RecordingStore.DeletionResult = { RecordingStore.deleteAllRecordings() }
+    var trashAction: @Sendable (@escaping @Sendable (RecordingRemoval.Progress) -> Void) -> RecordingRemoval.Result = { RecordingStore.trashAllRecordings(progress: $0) }
 
     @State private var saveToggle = false
     @State private var showDeleteConfirm = false
@@ -211,6 +211,7 @@ struct RecordingsNoticeView: View {
                     Button(NoticeCopy.deleteLinkText) { showDeleteConfirm = true }
                         .buttonStyle(.link)
                         .accessibilityIdentifier("delete-link")
+                        .accessibilityLabel("Move recordings and transcripts to Trash")
                     Text(NoticeCopy.deleteLeadOut)
                 }
                 .padding(.top, 6)
@@ -240,10 +241,10 @@ struct RecordingsNoticeView: View {
         .frame(width: 540)
         .onAppear { saveToggle = initialSaveToggle }
         .sheet(isPresented: $showDeleteConfirm) {
-            DeleteRecordingsConfirmView(
+            RecordingsTrashConfirmView(
                 fileCount: RecordingStore.recordingFileCount(),
                 folderPath: RecordingStore.recordingsDir.path,
-                deleteAction: deleteAction,
+                trashAction: trashAction,
                 onDeleted: {
                     // Deletion no longer closes the notice — the user returns to it
                     // with the button reading "Continue »".
@@ -257,75 +258,146 @@ struct RecordingsNoticeView: View {
 
 // MARK: - Delete confirmation (shared with Settings)
 
-/// "Open Folder…" keeps the sheet up (per spec); "Delete" performs the deletion and
-/// dismisses. Cancel/Esc added beyond the spec — a permanent-delete confirmation
-/// needs a way out that isn't one of the two actions.
-struct DeleteRecordingsConfirmView: View {
+/// Shared recoverable removal UI. All filesystem work stays off the main queue;
+/// completion is shown only after Finder Trash accepts the recordings.
+struct RecordingsTrashConfirmView: View {
     let fileCount: Int
     let folderPath: String
-    var deleteAction: @Sendable () -> RecordingStore.DeletionResult = { RecordingStore.deleteAllRecordings() }
+    var trashAction: @Sendable (@escaping @Sendable (RecordingRemoval.Progress) -> Void) -> RecordingRemoval.Result = {
+        RecordingStore.trashAllRecordings(progress: $0)
+    }
     var onDeleted: () -> Void
 
-    @State private var isDeleting = false
-    @State private var showDeleteError = false
-
+    @State private var isMoving = false
+    @State private var progress: RecordingRemoval.Progress?
+    @State private var startedUptime: TimeInterval?
+    @State private var completionElapsed: TimeInterval?
+    @State private var result: RecordingRemoval.Result?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let result, result.succeeded {
+                completion(result)
+            } else {
+                confirmation
+                if let result { failure(result) }
+                if isMoving { progressIndicator }
+                HStack {
+                    Button("Cancel") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                        .disabled(isMoving)
+                    Spacer()
+                    Button("Open Folder…") {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folderPath)])
+                    }
+                    .accessibilityIdentifier("confirm-open-folder")
+                    Button(isMoving ? "Moving…" : "Move to Trash") { moveToTrash() }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("confirm-trash")
+                        .disabled(isMoving)
+                }
+                .padding(.top, 8)
+            }
+        }
+        .padding(20)
+        .frame(width: 500)
+        .interactiveDismissDisabled(isMoving)
+    }
+
+    private var confirmation: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(NoticeCopy.confirmTitle)
-                .font(.headline)
+            Text(NoticeCopy.confirmTitle).font(.headline)
             Text(NoticeCopy.confirmBody(fileCount: fileCount, folder: folderPath))
                 .fixedSize(horizontal: false, vertical: true)
             Text(NoticeCopy.confirmDataNote)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("confirm-data-note")
-            Text(NoticeCopy.confirmQuestion)
-
-            HStack {
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(isDeleting)
-                Spacer()
-                Button("Open Folder…") {
-                    NSWorkspace.shared.activateFileViewerSelecting(
-                        [URL(fileURLWithPath: folderPath)])
-                }
-                .accessibilityIdentifier("confirm-open-folder")
-                Button(isDeleting ? "Deleting…" : "Delete") {
-                    isDeleting = true
-                    // Large archives must not block the main run loop. Only a
-                    // successful result may close the sheet and acknowledge deletion.
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        let result = deleteAction()
-                        DispatchQueue.main.async {
-                            isDeleting = false
-                            if result.succeeded {
-                                dismiss()
-                                onDeleted()
-                            } else {
-                                showDeleteError = true
-                            }
-                        }
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .accessibilityIdentifier("confirm-delete")
-                .disabled(isDeleting)
-            }
-            .padding(.top, 8)
         }
-        .padding(20)
-        .frame(width: 460)
-        .interactiveDismissDisabled(isDeleting)
-        .alert("Some recordings could not be deleted", isPresented: $showDeleteError) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("Open the recordings folder to check its permissions and any remaining files, then try again.")
+    }
+
+    private var progressIndicator: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(progress?.phase == .finishing ? "Finishing move to Trash…" :
+                     progress?.phase == .moving ? "Moving recordings…" : "Preparing recordings…")
+                if let progress, progress.total > 0 {
+                    ProgressView(value: Double(progress.completed), total: Double(progress.total))
+                    Text("\(progress.completed) of \(progress.total) files")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                TimelineView(.periodic(from: .now, by: 0.25)) { _ in
+                    let seconds = max(0, ProcessInfo.processInfo.systemUptime - (startedUptime ?? ProcessInfo.processInfo.systemUptime))
+                    Text("\(String(format: "%.1f", seconds)) seconds")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .accessibilityIdentifier("trash-progress")
+    }
+
+    private func completion(_ result: RecordingRemoval.Result) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(result.removedFiles > 0 ? "Moved to Trash" : "No recordings to move")
+                .font(.headline).accessibilityIdentifier("trash-completion")
+            Text("\(result.removedFiles) files moved in \(String(format: "%.1f", completionElapsed ?? result.elapsedSeconds)) seconds.")
+            Text("You can restore them from Trash until you empty it.")
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Open Trash") { openTrash(result) }
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    private func failure(_ result: RecordingRemoval.Result) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(result.enumerationFailed ? "The recordings folder could not be read." :
+                 "\(result.removedFiles) files moved to Trash. \(result.failedFiles) files could not be moved.")
+                .foregroundStyle(.red)
+            if let recovery = result.recoveryDirectory {
+                Text("Some files are safe in a recovery folder. Open it before trying again.")
+                Button("Open Recovery Folder") { NSWorkspace.shared.activateFileViewerSelecting([recovery]) }
+            } else {
+                Text("The remaining files are in the recordings folder. Check access and try again.")
+                    .foregroundStyle(.secondary)
+            }
+            if result.removedFiles > 0 { Button("Open Trash") { openTrash(result) } }
+        }
+        .font(.callout)
+        .accessibilityIdentifier("trash-error")
+    }
+
+    private func openTrash(_ result: RecordingRemoval.Result) {
+        if let directory = result.trashDirectory {
+            NSWorkspace.shared.activateFileViewerSelecting([directory])
+        } else {
+            NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash"))
+        }
+    }
+
+    private func moveToTrash() {
+        guard !isMoving else { return }
+        isMoving = true
+        startedUptime = ProcessInfo.processInfo.systemUptime
+        completionElapsed = nil
+        result = nil
+        progress = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = trashAction { update in
+                DispatchQueue.main.async { progress = update }
+            }
+            DispatchQueue.main.async {
+                result = outcome
+                completionElapsed = ProcessInfo.processInfo.systemUptime - (startedUptime ?? ProcessInfo.processInfo.systemUptime)
+                isMoving = false
+                if outcome.succeeded { onDeleted() }
+            }
         }
     }
 }
@@ -366,9 +438,16 @@ public enum RecordingsNoticePreview {
             initialSaveToggle: false,
             onToggle: { print("preview: toggle → \($0) — inert") },
             onContinue: { print("preview: Continue (didDelete=\($0)) — inert") },
-            deleteAction: {
-                print("preview: DELETE clicked — inert, nothing deleted")
-                return RecordingStore.DeletionResult(failedFiles: simulateFailure ? 1 : 0)
+            trashAction: { progress in
+                print("preview: TRASH clicked — inert, nothing moved")
+                for step in 0...10 {
+                    Thread.sleep(forTimeInterval: 0.4)
+                    progress(RecordingRemoval.Progress(phase: .moving, completed: step, total: 10,
+                                                       elapsedSeconds: Double(step) * 0.4))
+                }
+                return RecordingRemoval.Result(removedFiles: simulateFailure ? 0 : 10,
+                    failedFiles: simulateFailure ? 1 : 0, enumerationFailed: false,
+                    recoveryDirectory: nil, trashDirectory: nil, elapsedSeconds: 4.4)
             }
         )
         let hosting = NSHostingController(rootView: view)

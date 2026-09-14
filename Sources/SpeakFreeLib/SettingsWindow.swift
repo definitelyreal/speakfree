@@ -424,6 +424,7 @@ struct SettingsView: View {
     /// flips, and after an in-app delete.
     @State private var recordingsFolderHasAudio = false
     @State private var storedRecordingCount = 0
+    @State private var pendingRecordingsRecovery: URL?
     /// Hand-travel units: false = miles (default), true = kilometers. Click the stats line
     /// to flip (Michael 2026-08-20).
     @State private var statsMetricUnits = false
@@ -455,7 +456,9 @@ struct SettingsView: View {
         // read to a background queue; warm-cache refreshes still come back instantly.
         DispatchQueue.global(qos: .userInitiated).async {
             let count = RecordingStore.cachedRecordingCount()
+            let recovery = RecordingRemoval.pendingRecoveryDirectory(in: RecordingStore.recordingsDir)
             DispatchQueue.main.async {
+                pendingRecordingsRecovery = recovery
                 storedRecordingCount = count
                 recordingsFolderHasAudio = count > 0
             }
@@ -751,13 +754,22 @@ struct SettingsView: View {
                         .controlSize(.small)
                         .disabled(!recordingsFolderHasAudio)
 
+                        if let recovery = pendingRecordingsRecovery {
+                            Text("A previous move to Trash did not finish. Your files are safe in a recovery folder.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                            Button("Open Recovery Folder") {
+                                NSWorkspace.shared.activateFileViewerSelecting([recovery])
+                            }
+                        }
                         if storedRecordingCount > 0 {
                             HStack(spacing: 4) {
                                 Text("Your corpus: \(storedRecordingCount) recordings and "
                                      + "transcripts, stored only on this Mac.")
                                     .font(.footnote)
                                     .foregroundColor(.secondary)
-                                Button("Click here to delete") { showDeleteRecordingsSheet = true }
+                                Button("→ 🗑️") { showDeleteRecordingsSheet = true }
+                                    .help("Move recordings and transcripts to Trash")
+                                    .accessibilityLabel("Move recordings and transcripts to Trash")
                                     .buttonStyle(.link)
                                     .font(.footnote)
                             }
@@ -767,7 +779,7 @@ struct SettingsView: View {
                     .padding(.horizontal, 4)
                     .onAppear { refreshRecordingsFolderState() }
                     .sheet(isPresented: $showDeleteRecordingsSheet) {
-                        DeleteRecordingsConfirmView(
+                        RecordingsTrashConfirmView(
                             fileCount: RecordingStore.recordingFileCount(),
                             folderPath: RecordingStore.recordingsDir.path,
                             onDeleted: { refreshRecordingsFolderState() }

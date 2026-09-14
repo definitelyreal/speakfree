@@ -540,6 +540,16 @@ public class RecordingStore {
         return parseTimestamp(datePart) != nil
     }
 
+    /// Recoverable removal used by Settings and the corpus notice. Permanent deletion
+    /// remains an internal compatibility API; no user-facing control invokes it.
+    static func trashAllRecordings(progress: @escaping @Sendable (RecordingRemoval.Progress) -> Void = { _ in }) -> RecordingRemoval.Result {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        let result = RecordingRemoval.run(directory: recordingsDir, progress: progress)
+        invalidateCachedCount()
+        return result
+    }
+
     public struct DeletionResult: Sendable, Equatable {
         public let removedFiles: Int
         public let failedFiles: Int
