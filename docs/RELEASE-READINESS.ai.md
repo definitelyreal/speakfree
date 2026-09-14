@@ -1,6 +1,26 @@
 <!-- ai-processed:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-13 | asof:2026-09-13 -->
 # Existing-code release: start here
 
+Current checkpoint: `02150d2` adds recording-group leases and atomic Trash claims.
+Active and newly created takes, pending finalizations, readers, recovery and shadow work
+retain their whole artifact group while the background Trash operation proceeds. New Fn
+recordings and final metadata publication remain available while filesystem Trash blocks.
+120 affected tests passed, including 20 new ownership/arrival/alias regressions. The final
+combined release qualification passed **189 tests**, zero failures, process exit 0; all 19
+inert deployment tests passed. Changed guard sources pass strict SwiftLint. Private log:
+`build/release-readiness/2026-09-13-final-qualified-tests.log`.
+
+The update guard also recognizes exact source-known legacy menu/config/health log formats;
+24 focused guard tests pass, and its plain native observation probe passes on both Studio
+and Ark. Unknown activity remains fail-closed. The optimized fleet build/install is next.
+No new installation or real Trash test has happened at this checkpoint. Michael has now
+confirmed that he sees the fresh backup in Finder, satisfying the inspection checkpoint.
+The old Noah app remains stopped; prioritize restoring the release-test app for daily use.
+
+Historical staging: `913874a` fixed startup state and bounded SSH transport. The older
+`31851cc` package passed local signature/CLI checks, but its Studio transfer stalled and
+was canceled without touching SpeakFree. Its receipt remains ineligible for installation.
+
 September 13 evening: Michael authorized installing the updated release-test build on the
 fleet after a fresh full backup and Finder confirmation, then reopening the recordings
 confirmation for a live Trash/speed test. He chose **Trash only**, removing permanent
@@ -16,7 +36,7 @@ The fresh full snapshot `2026-09-13T211114` contains 74,321 files / 6,950,207,20
 bytes, including 18,768 WAV files and all 58 annotations. Full separate extraction matched
 hashes, sizes and modes; source stability passed. Archive SHA256:
 `0bb8d3c1b8fc180fed939ae82a28663f4be5023056ede9d544ccfcb4e0c9354b`.
-Originals and this backup are open in Finder; Michael's inspection checkpoint is pending.
+Originals and this backup were opened side by side in Finder; Michael confirmed he sees the backup.
 No new build is installed. The old Noah app is stopped. Fresh installed-app rollback
 archives also exist on every host under `~/Library/Application Support/speakfree/AppBackups/2026-09-13-before-trash-update/`;
 each archived executable matches its still-installed executable. Inert preview processes were closed

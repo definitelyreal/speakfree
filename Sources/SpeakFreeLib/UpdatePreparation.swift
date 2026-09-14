@@ -56,6 +56,21 @@ enum UpdateLogEvent {
         if activityPrefixes.contains(where: message.hasPrefix) { return .activity }
         // Periodic health checks describe subsystem health, not a dictation boundary.
         if message.hasPrefix("Health check:") { return .unrelated }
+        // Legacy 3143a81 StatusBarController emits these menu/cache timing records.
+        // They describe a read-only UI refresh, not capture or a recovery attempt.
+        // Match the complete known numeric formats; unfamiliar history events stay unknown.
+        if message.range(of: #"^Recent Dictations: (?:rendered cached menu in -?[0-9]+\.[0-9]+ ms|refreshed [0-9]+-item cache in -?[0-9]+\.[0-9]+ ms)$"#,
+                         options: .regularExpression) != nil { return .unrelated }
+        // The legacy config snapshot contains saveRecordings/streaming fields, and
+        // pre-recording health is itself a capture-attempt signal. These known control
+        // events restart quiet; they never establish an idle capture boundary.
+        if message.range(of: #"^Config: engine=.+ model=.+ parakeetModel=.+ input=.+ punctuation=.+ streaming=(?:true|false) preBuffer=(?:true|false) keepLoaded=.+ saveRecordings=(?:true|false) screenContext=(?:true|false) language=.+$"#,
+                         options: .regularExpression) != nil
+            || message == "Config: reload deferred — dictation or edit session in flight"
+            || message == "Config: applying deferred reload — dictation finished"
+            || message == "Config: legacy default cap cleared in-memory — recordings will not be auto-pruned (persists on next Settings save)"
+            || message == "Health check (pre-recording): permissions and controls OK; audio recovery checked asynchronously"
+            || message.hasPrefix("Health check (pre-recording): ISSUES — ") { return .activity }
         let keywords = ["recording", "dictation", "transcription", "finalize", "streaming", "key-down", "key-up"]
         if keywords.contains(where: message.lowercased().contains) { return .unsupported }
         return .unrelated

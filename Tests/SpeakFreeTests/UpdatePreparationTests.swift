@@ -250,6 +250,45 @@ final class UpdatePreparationTests: XCTestCase {
         }
     }
 
+    func testLegacyMenuTimingIsUnrelatedButUnknownHistoryActivityStillBlocks() throws {
+        let render = "[12:03:00] Recent Dictations: rendered cached menu in 1.2 ms"
+        let refresh = "[12:03:00] Recent Dictations: refreshed 15-item cache in 31.2 ms"
+        XCTAssertEqual(UpdateLogEvent.classify(render), .unrelated)
+        XCTAssertEqual(UpdateLogEvent.classify(refresh), .unrelated)
+        XCTAssertEqual(UpdateLogEvent.classify("[12:03:00] Recent Dictations: recording started"), .unsupported)
+        try withFixture { root, log in
+            try append("[12:01:00] AudioRecorder: recording started, pre-roll 100 samples\n" + render + "\n", to: log)
+            let observer = makeObserver(root)
+            XCTAssertTrue(try observer.snapshot().active, "menu refresh must never clear a live capture")
+            try append("[12:02:00] AudioRecorder: recording stopped, 100 samples\n", to: log)
+            XCTAssertFalse(try observer.snapshot().active)
+            try append(refresh + "\n", to: log)
+            let idle = try observer.snapshot()
+            XCTAssertFalse(idle.active)
+            XCTAssertFalse(idle.changed, "routine history cache refresh must not restart quiet")
+        }
+    }
+
+    func testLegacyConfigAndPreRecordingHealthRemainActivityWithoutClearingCapture() throws {
+        let config = "[12:03:00] Config: engine=parakeet model=large-v3-turbo parakeetModel=test input=BuiltIn punctuation=off streaming=true preBuffer=true keepLoaded=auto saveRecordings=false screenContext=false language=en"
+        let health = "[12:03:00] Health check (pre-recording): permissions and controls OK; audio recovery checked asynchronously"
+        XCTAssertEqual(UpdateLogEvent.classify(config), .activity)
+        XCTAssertEqual(UpdateLogEvent.classify(health), .activity)
+        XCTAssertEqual(UpdateLogEvent.classify("[12:03:00] Health check (pre-recording): unknown activity"), .unsupported)
+        XCTAssertEqual(UpdateLogEvent.classify("[12:03:00] Config: unknown dictation protocol"), .unsupported)
+        try withFixture { root, log in
+            try append(config + "\n" + health + "\n", to: log)
+            let observer = makeObserver(root)
+            XCTAssertFalse(try observer.snapshot().active, "known controls permit replay to the actual session boundary")
+            try append("[12:04:00] AudioRecorder: recording started, pre-roll 100 samples\n", to: log)
+            XCTAssertTrue(try observer.snapshot().active)
+            try append(config + "\n", to: log)
+            let active = try observer.snapshot()
+            XCTAssertTrue(active.active)
+            XCTAssertTrue(active.changed)
+        }
+    }
+
     func testInvalidCLIArgumentsDoNotStartUI() {
         XCTAssertEqual(UpdatePreparation.run(arguments: ["--timeout", "0"]), 64)
         XCTAssertEqual(UpdatePreparation.run(arguments: ["--timeout", "nan"]), 64)
