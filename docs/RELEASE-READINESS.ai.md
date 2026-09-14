@@ -1,6 +1,14 @@
 <!-- ai-processed:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-13 | asof:2026-09-13 -->
 # Existing-code release: start here
 
+Current hardware-test candidate, September 13: `66a0e6d` includes the existing deletion
+and route-recovery fixes plus the selective capture/lifecycle fixes below. Optimized build
+and 153 focused tests passed. The signed vendored bundle passes signature and CLI loading
+on Noah, Studio, and Ark; remote archive/executable hashes match the local candidate.
+It is staged only, not installed. Receipt: `build/release-readiness/66a0e6d/candidate-receipt.json`.
+Public release still requires live deletion/capture checks, the AppKit quit-flow decision,
+and existing lint cleanup. The September 9 candidate evidence below remains historical.
+
 September 9 follow-up: [ROUTE-STABILITY.ai.md](ROUTE-STABILITY.ai.md) records the live
 Noah/Studio handoffs, removed stale diagnostic poller, and stopped-engine recovery candidate.
 Route stability is now a release gate; deletion correctness alone is insufficient.
@@ -51,8 +59,8 @@ Additional local release checks: all version surfaces agree at 1.7.1. `swiftlint
 with 0.63.2 reports 28 violations, including vendored iOS code and unchanged existing source;
 none are in the capture/deletion files changed in this lane. Do not report release CI as
 green. Private `a795f6b/{swiftlint.log,lint-findings.json,version-check.log}` retains details
-and the September 13 rerun has the same 28 file/line/message findings, with no additions.
-and per-file comparison to the lane's `1d86b3a` base. Resolve applicable lint failures before
+and per-file comparison to the lane's `1d86b3a` base. The September 13 rerun has the same
+28 file/line/message findings, with no additions. Resolve applicable lint failures before
 public release; this does not establish a runtime fault in the prepared hardware-test build.
 
 Michael's September 9 direction: release the existing app once the relevant flow is
