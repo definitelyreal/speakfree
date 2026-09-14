@@ -6,6 +6,10 @@ and route-recovery fixes plus the selective capture/lifecycle fixes below. Optim
 and 153 focused tests passed. The signed vendored bundle passes signature and CLI loading
 on Noah, Studio, and Ark; remote archive/executable hashes match the local candidate.
 It is staged only, not installed. Receipt: `build/release-readiness/66a0e6d/candidate-receipt.json`.
+Later September 13 playback evidence adds a capture gate: CoreAudio at 20:08:50.572
+attributes an AirPods HFP input start/output reconfiguration to installed SpeakFree PID 30910
+despite its built-in pin. The recovery candidate does not yet establish input isolation.
+Read research `docs/accuracy/STATUS.ai.md` and private corpus `analyses/2026-09-13-playback/`.
 Public release still requires live deletion/capture checks, the AppKit quit-flow decision,
 and existing lint cleanup. The September 9 candidate evidence below remains historical.
 
@@ -79,12 +83,22 @@ The private pointer is in the research checkout's
 `build/2026-09-13-checks/backup-location.json`. Do not depend on disposable build storage:
 the backup itself is under `~/Library/Application Support/speakfree/DeletionBackups/`.
 
-The user has been asked to open Settings → Your corpus → Click here to delete, then
-choose **Cancel**. Response is pending. No actual deletion has occurred, and cancellation
+The user was asked to open Settings → Your corpus → Click here to delete, then
+choose **Cancel**; he replied “Yes it confirmed settings” and asked to see the backups.
+All source files remained present. No actual deletion has occurred, and cancellation
 on the installed build would not qualify the uninstalled candidate. Refresh backup
 coverage before the destructive step and let the user perform the final deletion click
 as part of this interactive check. Verify the on-disk outcome, restore missing files
 without overwriting new recordings, and confirm the restored count/UI afterwards.
+
+At 20:24 a new recording-only archive and full restore drill passed for 73,946 files /
+6,758,455,219 content bytes. The current helper/manifest are under
+`~/Library/Application Support/speakfree/DeletionBackups/2026-09-13T202403/`;
+the original complete corpus/config snapshot remains at `2026-09-13T185739/`.
+Michael requested Finder proof; original and extracted backup folders were opened.
+After his reply to the Cancel step, the actual Delete-once step is now pending with
+instructions to type the response. The backup includes 91 nested `orphaned/` files;
+the current non-recursive delete allow-list preserves those. No real deletion observed yet.
 
 ## Boundaries
 
