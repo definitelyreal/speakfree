@@ -1,106 +1,118 @@
 #!/bin/bash
-# ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
-# Claude · 2026-07-22 · Session: dba44e2d-9a1a-4b83-b219-a922d882cf7f
-# Deploy the current dev build to the whole dogfood fleet:
-#   M3 (this Mac, Homebrew libwhisper) + M5 (movie@STUDIO_TAILSCALE_HOST) + M1 (ark)
-# Remote Macs get the vendored-dylib bundle (no Homebrew whisper-cpp there).
-# Michael's rule (2026-07-22): every redeploy goes to all three unless told otherwise.
-#
-# Honors the MANDATORY install sequence: stop -> Trash old bundle -> copy -> launch.
+# ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
+# Build, vendor and stage on the full fleet BEFORE warning or stopping any app.
+# Each staged executable enforces 30 seconds of quiet plus an audible/visible warning.
+# Stop only after its positive receipt; never force termination. Trash before copy.
+# All three Macs are the default. M3_ONLY=1 retains the explicit local-only override.
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$REPO_DIR"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTES=("movie@STUDIO_TAILSCALE_HOST" "ark")
+REMOTE_STAGES=()
 
-echo "== build =="
-xcrun swift build -c release
-bash scripts/bundle-app.sh .build/release/speakfree speakfree.app dev
+sf_initialize_stage() {
+    SF_STAGE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/speakfree-fleet.XXXXXX")"
+    chmod 700 "$SF_STAGE_ROOT"
+}
 
-echo "== M3 (local) =="
-# The app exits GRACEFULLY on SIGTERM (waits up to ~10s for quiet). Wait for the
-# process to actually die before reinstalling/relaunching — a fixed sleep raced it:
-# `open` then activates the DYING old instance instead of launching the new one,
-# the pgrep health check passes against that dying process, and minutes later the
-# machine has no speakfree at all (M5, 2026-07-23).
-# Wait out the app's OWN graceful window (in-flight dictation + 10s quiet; the app
-# refuses new recordings once signaled). 15s + pkill -9 SIGKILLed a live dictation
-# on 2026-07-25 — audio still in memory, wav had 0 samples. 3min covers any real
-# dictation; -9 only past that (matches the app's stuck-state escape hatch).
-pkill -f "speakfree.app/Contents/MacOS/speakfree" || true
-for _ in $(seq 1 360); do
-    pgrep -f "speakfree.app/Contents/MacOS/speakfree" >/dev/null || break
-    sleep 0.5
-done
-pkill -9 -f "speakfree.app/Contents/MacOS/speakfree" 2>/dev/null || true
-if [ -e /Applications/speakfree.app ] || [ -L /Applications/speakfree.app ]; then
-    /usr/bin/trash /Applications/speakfree.app
-fi
-# Never let a failed Trash operation turn cp into an in-place bundle replacement.
-[ ! -e /Applications/speakfree.app ] && [ ! -L /Applications/speakfree.app ] \
-    || { echo "FATAL: old app still exists; refusing to overwrite it" >&2; exit 1; }
-cp -R speakfree.app /Applications/speakfree.app
-open /Applications/speakfree.app
-sleep 4
-pgrep -f "speakfree.app/Contents/MacOS/speakfree" >/dev/null && echo "M3 RUNNING"
+sf_build_and_vendor() {
+    local app="$SF_STAGE_ROOT/speakfree-fleet.app" dylib real_dylib b s orig final dev_id
+    echo "== build and vendor =="
+    xcrun swift build -c release || return 1
+    bash scripts/bundle-app.sh .build/release/speakfree "$app" dev || return 1
+    for dylib in scripts/vendor/dylibs/*.dylib; do cp "$dylib" "$app/Contents/Frameworks/" || return 1; done
+    for real_dylib in "$app/Contents/Frameworks"/*.dylib; do
+        b=$(basename "$real_dylib")
+        s=$(echo "$b" | sed 's/\([^0-9]*[0-9]*\)\.[0-9]*\.[0-9]*\.dylib$/\1.dylib/')
+        if [ "$s" != "$b" ]; then ln -sf "$b" "$app/Contents/Frameworks/$s" || return 1; fi
+    done
+    orig=$(otool -L "$app/Contents/MacOS/speakfree" | awk '/libwhisper\.1\.dylib/ {print $1; exit}')
+    [ -n "$orig" ] || { echo "FATAL: libwhisper dependency not found" >&2; return 1; }
+    if [ "$orig" != "@rpath/libwhisper.1.dylib" ]; then
+        install_name_tool -change "$orig" "@rpath/libwhisper.1.dylib" "$app/Contents/MacOS/speakfree" || return 1
+    fi
+    final=$(otool -L "$app/Contents/MacOS/speakfree" | awk '/libwhisper\.1\.dylib/ {print $1; exit}')
+    [ "$final" = "@rpath/libwhisper.1.dylib" ] || { echo "FATAL: rpath fix failed" >&2; return 1; }
+    dev_id=$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
+    [ -n "$dev_id" ] || dev_id=-
+    for real_dylib in "$app/Contents/Frameworks"/*.dylib; do
+        [ -L "$real_dylib" ] || codesign --force --sign "$dev_id" "$real_dylib" || return 1
+    done
+    codesign --force --sign "$dev_id" "$app/Contents/Frameworks/Sparkle.framework" || return 1
+    codesign --force --sign "$dev_id" --identifier com.definitelyreal.speakfree "$app" || return 1
+    cp scripts/guarded-install.sh "$SF_STAGE_ROOT/guarded-install.sh" || return 1
+    bash "$SF_STAGE_ROOT/guarded-install.sh" verify "$app" || return 1
+    tar -czf "$SF_STAGE_ROOT/payload.tgz" -C "$SF_STAGE_ROOT" speakfree-fleet.app guarded-install.sh || return 1
+    SF_ARCHIVE_SHA=$(shasum -a 256 "$SF_STAGE_ROOT/payload.tgz" | awk '{print $1}')
+}
 
-# Release-fork window (2026-08-21): M3 is the dogfood for the release/X.Y.Z branch
-# while M5/M1 may keep running main. M3_ONLY=1 stops here so a release-branch
-# build never overwrites the experimental builds on the remotes.
-if [ "${M3_ONLY:-0}" = "1" ]; then
-    echo "== M3_ONLY=1: skipping M5/M1 (release-branch dogfood) =="
-    exit 0
-fi
+sf_stage_remote() {
+    local remote="$1" stage
+    echo "== stage and verify $remote =="
+    stage=$(ssh -o BatchMode=yes "$remote" 'umask 077; mktemp -d /tmp/speakfree-fleet.XXXXXX') || return 1
+    # Remote arguments below contain only this validated shell-safe path and SHA.
+    [[ "$stage" =~ ^/tmp/speakfree-fleet\.[A-Za-z0-9]+$ ]] \
+        || { echo "FATAL: invalid remote staging path" >&2; return 1; }
+    [[ "$SF_ARCHIVE_SHA" =~ ^[a-f0-9]{64}$ ]] || return 1
+    scp -o BatchMode=yes "$SF_STAGE_ROOT/payload.tgz" "$remote:$stage/payload.tgz" || return 1
+    ssh -o BatchMode=yes "$remote" bash -s -- "$stage" "$SF_ARCHIVE_SHA" <<'REMOTE_STAGE_SCRIPT' || return 1
+set -euo pipefail
+stage="$1"
+printf '%s  %s\n' "$2" "$stage/payload.tgz" | shasum -a 256 -c -
+tar -xzf "$stage/payload.tgz" -C "$stage"
+bash "$stage/guarded-install.sh" verify "$stage/speakfree-fleet.app"
+REMOTE_STAGE_SCRIPT
+    SF_NEW_REMOTE_STAGE="$stage"
+}
 
-echo "== vendored bundle for remotes =="
-rm -rf speakfree-fleet.app
-cp -R speakfree.app speakfree-fleet.app
-APP=speakfree-fleet.app
-for dylib in scripts/vendor/dylibs/*.dylib; do cp "$dylib" "$APP/Contents/Frameworks/"; done
-for real_dylib in "$APP/Contents/Frameworks"/*.dylib; do
-    b=$(basename "$real_dylib")
-    s=$(echo "$b" | sed 's/\([^0-9]*[0-9]*\)\.[0-9]*\.[0-9]*\.dylib$/\1.dylib/')
-    if [ "$s" != "$b" ]; then ln -sf "$b" "$APP/Contents/Frameworks/$s"; fi
-done
-ORIG=$(otool -L "$APP/Contents/MacOS/speakfree" | awk '/libwhisper\.1\.dylib/ {print $1; exit}')
-if [ "$ORIG" != "@rpath/libwhisper.1.dylib" ]; then
-    install_name_tool -change "$ORIG" "@rpath/libwhisper.1.dylib" "$APP/Contents/MacOS/speakfree"
-fi
-FINAL=$(otool -L "$APP/Contents/MacOS/speakfree" | awk '/libwhisper\.1\.dylib/ {print $1; exit}')
-[ "$FINAL" = "@rpath/libwhisper.1.dylib" ] || { echo "FATAL: rpath fix failed" >&2; exit 1; }
-DEV_ID=$(security find-identity -v -p codesigning 2>/dev/null \
-    | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
-find "$APP/Contents/Frameworks" -maxdepth 1 -name "*.dylib" -type f \
-    -exec codesign --force --sign "$DEV_ID" {} \;
-codesign --force --sign "$DEV_ID" "$APP/Contents/Frameworks/Sparkle.framework"
-codesign --force --sign "$DEV_ID" --identifier com.definitelyreal.speakfree "$APP"
-codesign --verify --deep "$APP"
-tar czf /tmp/speakfree-fleet.tgz speakfree-fleet.app
+sf_install_local() {
+    bash "$SF_STAGE_ROOT/guarded-install.sh" install "$SF_STAGE_ROOT/speakfree-fleet.app" M3
+}
 
-for REMOTE in "${REMOTES[@]}"; do
-    echo "== $REMOTE =="
-    scp -o BatchMode=yes /tmp/speakfree-fleet.tgz "$REMOTE":/tmp/speakfree-new.tgz
-    # shellcheck disable=SC2029
-    ssh -o BatchMode=yes "$REMOTE" '
-        set -eu
-        pkill -f "speakfree.app/Contents/MacOS/speakfree" || true
-        for _ in $(seq 1 360); do
-            pgrep -f "speakfree.app/Contents/MacOS/speakfree" >/dev/null || break
-            sleep 0.5
+sf_install_remote() {
+    local remote="$1" stage="$2"
+    # This invokes the newly staged, vendored guard; no Homebrew dependency on Macs.
+    ssh -o BatchMode=yes "$remote" bash -s -- "$stage" <<'REMOTE_INSTALL_SCRIPT'
+set -euo pipefail
+stage="$1"
+bash "$stage/guarded-install.sh" install "$stage/speakfree-fleet.app" remote
+rm -rf "$stage"
+REMOTE_INSTALL_SCRIPT
+}
+
+sf_cleanup_stage() { rm -rf "$SF_STAGE_ROOT"; }
+
+sf_fleet_main() {
+    local index
+    case "${M3_ONLY:-0}" in 0|1) ;; *) echo "FATAL: M3_ONLY must be 0 or 1" >&2; return 1;; esac
+    [ -z "${SPEAKFREE_CONFIG_DIR:-}" ] \
+        || { echo "FATAL: unset SPEAKFREE_CONFIG_DIR before deployment" >&2; return 1; }
+    cd "$REPO_DIR" || return 1
+    sf_initialize_stage || return 1
+    sf_build_and_vendor || return 1
+    if [ "${M3_ONLY:-0}" != 1 ]; then
+        for index in "${!REMOTES[@]}"; do
+            sf_stage_remote "${REMOTES[$index]}" || return 1
+            REMOTE_STAGES[$index]="$SF_NEW_REMOTE_STAGE"
         done
-        pkill -9 -f "speakfree.app/Contents/MacOS/speakfree" 2>/dev/null || true
-        if [ -e /Applications/speakfree.app ] || [ -L /Applications/speakfree.app ]; then
-            mv /Applications/speakfree.app ~/.Trash/speakfree-old-$(date +%Y%m%d-%H%M%S)-$$.app
-        fi
-        [ ! -e /Applications/speakfree.app ] && [ ! -L /Applications/speakfree.app ] \
-            || { echo "FATAL: old app still exists; refusing to overwrite it" >&2; exit 1; }
-        cd /Applications && tar xzf /tmp/speakfree-new.tgz
-        mv speakfree-fleet.app speakfree.app
-        codesign --verify --deep speakfree.app
-        open speakfree.app; sleep 5
-        pgrep -f "speakfree.app/Contents/MacOS/speakfree" >/dev/null && echo "RUNNING"
-        mv /tmp/speakfree-new.tgz ~/.Trash/ 2>/dev/null || true'
-done
+    fi
+    # Every selected host now has a verified complete bundle. No app has stopped.
+    sf_install_local || return 1
+    if [ "${M3_ONLY:-0}" = 1 ]; then
+        echo "== M3_ONLY=1: explicit override skips M5/M1 =="
+    else
+        for index in "${!REMOTES[@]}"; do
+            sf_install_remote "${REMOTES[$index]}" "${REMOTE_STAGES[$index]}" || return 1
+        done
+    fi
+    sf_cleanup_stage || return 1
+    echo "== selected fleet deploy complete =="
+}
 
-rm -rf speakfree-fleet.app
-echo "== fleet deploy complete =="
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    if ! sf_fleet_main "$@"; then
+        echo "FATAL: deployment aborted; fleet may be partly updated. Preserve staged files for diagnosis: ${SF_STAGE_ROOT:-not created}" >&2
+        exit 1
+    fi
+fi
