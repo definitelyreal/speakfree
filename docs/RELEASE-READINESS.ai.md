@@ -83,22 +83,25 @@ The private pointer is in the research checkout's
 `build/2026-09-13-checks/backup-location.json`. Do not depend on disposable build storage:
 the backup itself is under `~/Library/Application Support/speakfree/DeletionBackups/`.
 
-The user was asked to open Settings → Your corpus → Click here to delete, then
-choose **Cancel**; he replied “Yes it confirmed settings” and asked to see the backups.
-All source files remained present. No actual deletion has occurred, and cancellation
-on the installed build would not qualify the uninstalled candidate. Refresh backup
-coverage before the destructive step and let the user perform the final deletion click
-as part of this interactive check. Verify the on-disk outcome, restore missing files
-without overwriting new recordings, and confirm the restored count/UI afterwards.
+Michael confirmed Cancel returned normally, then clicked Delete and reported an apparent
+freeze. By 20:44 the installed `3143a81` had removed all 73,855 original top-level targets;
+91 nested `orphaned/` files survived as specified. A subsequent process sample showed
+normal event handling. Its synchronous main-thread delete explains the temporary UI
+stall; this candidate already dispatches deletion off-main and surfaces pending/errors.
+This is a live test of the old build, not qualification of this uninstalled candidate.
 
-At 20:24 a new recording-only archive and full restore drill passed for 73,946 files /
-6,758,455,219 content bytes. The current helper/manifest are under
-`~/Library/Application Support/speakfree/DeletionBackups/2026-09-13T202403/`;
-the original complete corpus/config snapshot remains at `2026-09-13T185739/`.
-Michael requested Finder proof; original and extracted backup folders were opened.
-After his reply to the Cancel step, the actual Delete-once step is now pending with
-instructions to type the response. The backup includes 91 nested `orphaned/` files;
-the current non-recursive delete allow-list preserves those. No real deletion observed yet.
+Recovery restored 73,855 base files and 12 additional post-snapshot files without overwrites
+or conflicts. The latter had copies in the extracted backup but no original manifest entry;
+they now have a separate verified supplement. Eight newer survivors were also backed up.
+Base snapshot: `2026-09-13T202403/`; surviving-file supplement:
+`2026-09-13T204454-supplement/`; recovered-copy supplement:
+`2026-09-13T204806-recovered-supplement/`, all under
+`~/Library/Application Support/speakfree/DeletionBackups/`. Keep all three manifests.
+The original corpus/config snapshot at `2026-09-13T185739/` remains intact. Full restore
+receipts and the process sample persist in research corpus `analyses/2026-09-13-deletion/`.
+Settings responsiveness is pending; no second deletion is requested. The old process's
+cached count may need a same-build relaunch after external restoration. Future interactive
+delete drills must secure newly arriving takes before leaving a destructive step pending.
 
 ## Boundaries
 
