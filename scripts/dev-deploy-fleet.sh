@@ -8,6 +8,8 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTES=("movie@100.82.136.101" "ark")
+# Bound connection establishment and detect an unresponsive transport.
+SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3)
 REMOTE_STAGES=()
 
 sf_initialize_stage() {
@@ -50,13 +52,13 @@ sf_build_and_vendor() {
 sf_stage_remote() {
     local remote="$1" stage
     echo "== stage and verify $remote =="
-    stage=$(ssh -o BatchMode=yes "$remote" 'umask 077; mktemp -d /tmp/speakfree-fleet.XXXXXX') || return 1
+    stage=$(ssh "${SSH_OPTIONS[@]}" "$remote" 'umask 077; mktemp -d /tmp/speakfree-fleet.XXXXXX') || return 1
     # Remote arguments below contain only this validated shell-safe path and SHA.
     [[ "$stage" =~ ^/tmp/speakfree-fleet\.[A-Za-z0-9]+$ ]] \
         || { echo "FATAL: invalid remote staging path" >&2; return 1; }
     [[ "$SF_ARCHIVE_SHA" =~ ^[a-f0-9]{64}$ ]] || return 1
-    scp -o BatchMode=yes "$SF_STAGE_ROOT/payload.tgz" "$remote:$stage/payload.tgz" || return 1
-    ssh -o BatchMode=yes "$remote" bash -s -- "$stage" "$SF_ARCHIVE_SHA" <<'REMOTE_STAGE_SCRIPT' || return 1
+    scp "${SSH_OPTIONS[@]}" "$SF_STAGE_ROOT/payload.tgz" "$remote:$stage/payload.tgz" || return 1
+    ssh "${SSH_OPTIONS[@]}" "$remote" bash -s -- "$stage" "$SF_ARCHIVE_SHA" <<'REMOTE_STAGE_SCRIPT' || return 1
 set -euo pipefail
 stage="$1"
 printf '%s  %s\n' "$2" "$stage/payload.tgz" | shasum -a 256 -c -
@@ -73,7 +75,7 @@ sf_install_local() {
 sf_install_remote() {
     local remote="$1" stage="$2"
     # This invokes the newly staged, vendored guard; no Homebrew dependency on Macs.
-    ssh -o BatchMode=yes "$remote" bash -s -- "$stage" <<'REMOTE_INSTALL_SCRIPT'
+    ssh "${SSH_OPTIONS[@]}" "$remote" bash -s -- "$stage" <<'REMOTE_INSTALL_SCRIPT'
 set -euo pipefail
 stage="$1"
 bash "$stage/guarded-install.sh" install "$stage/speakfree-fleet.app" remote

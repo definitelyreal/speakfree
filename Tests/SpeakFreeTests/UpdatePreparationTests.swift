@@ -1,5 +1,6 @@
 // ai-suggestion:unverified · session:01a09da8-0424-7b71-a705-10868c5f46e4 · 2026-09-13
 import XCTest
+import Darwin
 @testable import SpeakFreeLib
 
 final class UpdatePreparationTests: XCTestCase {
@@ -55,7 +56,7 @@ final class UpdatePreparationTests: XCTestCase {
 
     func testMetadataAndNewEventObservationWithoutReadingTranscriptBodies() throws {
         try withFixture { root, log in
-            let observer = LegacyUpdateActivityObserver(directory: root)
+            let observer = makeObserver(root)
             XCTAssertFalse(try observer.snapshot().changed)
             try append("[12:34:56] Health check: all OK\n", to: log)
             XCTAssertFalse(try observer.snapshot().changed, "unrelated periodic logs must allow updates")
@@ -75,7 +76,7 @@ final class UpdatePreparationTests: XCTestCase {
 
     func testSentinelPresenceAlwaysBlocksEvenMalformedOrStale() throws {
         try withFixture { root, _ in
-            let observer = LegacyUpdateActivityObserver(directory: root)
+            let observer = makeObserver(root)
             let sentinel = root.appendingPathComponent(".recording-in-progress.json")
             try Data("not JSON".utf8).write(to: sentinel)
             try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: sentinel.path)
@@ -87,18 +88,18 @@ final class UpdatePreparationTests: XCTestCase {
 
     func testMissingEvidenceAndUnknownNewEventFailClosed() throws {
         try withFixture { root, log in
-            let observer = LegacyUpdateActivityObserver(directory: root)
+            let observer = makeObserver(root)
             _ = try observer.snapshot()
             try append("[12:34:56] New recording protocol\n", to: log)
             XCTAssertThrowsError(try observer.snapshot())
             try FileManager.default.removeItem(at: log)
-            XCTAssertThrowsError(try LegacyUpdateActivityObserver(directory: root).snapshot())
+            XCTAssertThrowsError(try makeObserver(root).snapshot())
         }
     }
 
     func testPartialLineBlocksUntilCompleteAndCannotHideAttempt() throws {
         try withFixture { root, log in
-            let observer = LegacyUpdateActivityObserver(directory: root)
+            let observer = makeObserver(root)
             _ = try observer.snapshot()
             try append("[12:34:56] Recording start", to: log)
             XCTAssertTrue(try observer.snapshot().changed)
@@ -111,9 +112,10 @@ final class UpdatePreparationTests: XCTestCase {
 
     func testRotationCannotSkipNewCaptureAndLongBacklogBlocks() throws {
         try withFixture { root, log in
-            let observer = LegacyUpdateActivityObserver(directory: root)
+            let observer = makeObserver(root)
             _ = try observer.snapshot()
-            try FileManager.default.removeItem(at: log)
+            let previous = log.deletingPathExtension().appendingPathExtension("previous.log")
+            try FileManager.default.moveItem(at: log, to: previous)
             try Data("[12:34:56] Recording start FAILED: synthetic\n".utf8).write(to: log)
             XCTAssertTrue(try observer.snapshot().changed)
             try append(String(repeating: "a", count: 1_048_578), to: log)
@@ -127,7 +129,7 @@ final class UpdatePreparationTests: XCTestCase {
                 let name = String(format: "recording-2026-09-13-%06d-fixture.wav", index)
                 try Data().write(to: root.appendingPathComponent("recordings/" + name))
             }
-            let observer = LegacyUpdateActivityObserver(directory: root)
+            let observer = makeObserver(root)
             _ = try observer.snapshot()
             XCTAssertEqual(observer.recordingStatCount, LegacyUpdateActivityObserver.recentFileLimit)
             XCTAssertEqual(observer.recordingListingCount, 1)
@@ -145,7 +147,7 @@ final class UpdatePreparationTests: XCTestCase {
 
     func testKnownCaptureWithoutSentinelStaysActiveUntilStop() throws {
         try withFixture { root, log in
-            let observer = LegacyUpdateActivityObserver(directory: root)
+            let observer = makeObserver(root)
             _ = try observer.snapshot()
             try append("[12:34:56] AudioRecorder: recording started, pre-roll 100 samples\n", to: log)
             XCTAssertTrue(try observer.snapshot().active)
@@ -159,10 +161,104 @@ final class UpdatePreparationTests: XCTestCase {
         }
     }
 
+    func testPreexistingCaptureWithoutSentinelIsLatchedOnFirstSnapshot() throws {
+        try withFixture { root, log in
+            try append("[12:01:00] AudioRecorder: recording started, pre-roll 100 samples\n", to: log)
+            let observer = makeObserver(root)
+            XCTAssertTrue(try observer.snapshot().active)
+            XCTAssertTrue(try observer.snapshot().active)
+            try append("[12:02:00] AudioRecorder: recording stopped, 100 samples\n", to: log)
+            XCTAssertFalse(try observer.snapshot().active)
+        }
+    }
+
+    func testDeadProcessUnclosedLogDoesNotPoisonLiveIdleProcess() throws {
+        try withFixture { root, _ in
+            let dead = root.appendingPathComponent("logs/speakfree-2026-09-13T12-00-01Z-999-CCCCCCCC.log")
+            try Data("[12:00:01] AudioRecorder: recording started, pre-roll 100 samples\n".utf8).write(to: dead)
+            XCTAssertFalse(try makeObserver(root).snapshot().active)
+        }
+    }
+
+    func testPIDReuseDoesNotAcceptOldSessionAsNewProcessEvidence() throws {
+        try withFixture { root, _ in
+            let reused = LiveUpdateProcess(pid: 42, startedSeconds: 2_000_000_000, startedMicroseconds: 0)
+            let observer = LegacyUpdateActivityObserver(directory: root, liveProcesses: { [reused] })
+            XCTAssertThrowsError(try observer.snapshot())
+        }
+    }
+
+    func testStartupFindsActiveBoundaryAcrossRotation() throws {
+        try withFixture { root, log in
+            try append("[12:01:00] AudioRecorder: recording started, pre-roll 100 samples\n", to: log)
+            let previous = log.deletingPathExtension().appendingPathExtension("previous.log")
+            try FileManager.default.moveItem(at: log, to: previous)
+            try Data("[12:02:00] Health check: all OK\n".utf8).write(to: log)
+            let observer = makeObserver(root)
+            XCTAssertTrue(try observer.snapshot().active)
+            try append("[12:03:00] AudioRecorder: recording stopped, 100 samples\n", to: log)
+            XCTAssertFalse(try observer.snapshot().active)
+            XCTAssertFalse(try makeObserver(root).snapshot().active, "newer stop must override rotated start")
+        }
+    }
+
+    func testMissingStartupBoundaryOrExhaustedReplayFailsClosed() throws {
+        try withFixture { root, log in
+            try Data("[12:00:00] Health check: all OK\n".utf8).write(to: log)
+            XCTAssertThrowsError(try makeObserver(root).snapshot())
+            let start = "[12:00:00] Session started — com.definitelyreal.speakfree vtest\n"
+            let health = "[12:00:01] Health check: all OK\n"
+            try Data((start + String(repeating: health, count: 40_000)).utf8).write(to: log)
+            XCTAssertThrowsError(try makeObserver(root).snapshot())
+        }
+    }
+
+    func testProcessIdentityChangesDuringObservationFailClosed() throws {
+        try withFixture { root, _ in
+            var calls = 0
+            let process = fixtureProcess
+            let observer = LegacyUpdateActivityObserver(directory: root, liveProcesses: {
+                calls += 1
+                return calls == 1 ? [process] : []
+            })
+            XCTAssertThrowsError(try observer.snapshot())
+        }
+    }
+
+    func testNativeExecutableIdentityIncludesOnlyMatchingCurrentProcess() throws {
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        XCTAssertGreaterThan(proc_pidpath(getpid(), &path, UInt32(path.count)), 0)
+        let matches = try LiveUpdateProcess.running(executablePath: String(cString: path))
+        XCTAssertTrue(matches.contains { $0.pid == getpid() && $0.startedSeconds > 0 })
+    }
+
+    func testClosedRotationWithPartialLastLineFailsClosed() throws {
+        try withFixture { root, log in
+            try append("[12:01:00] AudioRecorder: recording started, pre-roll 100 samples", to: log)
+            let previous = log.deletingPathExtension().appendingPathExtension("previous.log")
+            try FileManager.default.moveItem(at: log, to: previous)
+            try Data("[12:02:00] Health check: all OK\n".utf8).write(to: log)
+            XCTAssertThrowsError(try makeObserver(root).snapshot())
+        }
+    }
+
+    func testMultipleSessionsForLivePIDFailClosed() throws {
+        try withFixture { root, _ in
+            let extra = root.appendingPathComponent("logs/speakfree-2026-09-13T12-01-00Z-42-BBBBBBBB.log")
+            try Data("[12:01:00] Session started — com.definitelyreal.speakfree vtest\n".utf8).write(to: extra)
+            XCTAssertThrowsError(try makeObserver(root).snapshot())
+        }
+    }
+
     func testInvalidCLIArgumentsDoNotStartUI() {
         XCTAssertEqual(UpdatePreparation.run(arguments: ["--timeout", "0"]), 64)
         XCTAssertEqual(UpdatePreparation.run(arguments: ["--timeout", "nan"]), 64)
         XCTAssertEqual(UpdatePreparation.run(arguments: ["--force"]), 64)
+    }
+
+    private let fixtureProcess = LiveUpdateProcess(pid: 42, startedSeconds: 1, startedMicroseconds: 0)
+    private func makeObserver(_ root: URL) -> LegacyUpdateActivityObserver {
+        LegacyUpdateActivityObserver(directory: root, liveProcesses: { [fixtureProcess] in [fixtureProcess] })
     }
 
     private func withFixture(_ body: (URL, URL) throws -> Void) throws {
@@ -170,8 +266,8 @@ final class UpdatePreparationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root.appendingPathComponent("recordings"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("logs"), withIntermediateDirectories: true)
-        let log = root.appendingPathComponent("logs/speakfree-fixture.log")
-        try Data("[12:00:00] Session started\n".utf8).write(to: log)
+        let log = root.appendingPathComponent("logs/speakfree-2026-09-13T12-00-00Z-42-AAAAAAAA.log")
+        try Data("[12:00:00] Session started — com.definitelyreal.speakfree vtest\n".utf8).write(to: log)
         try body(root, log)
     }
     private func append(_ value: String, to url: URL) throws {
