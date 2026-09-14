@@ -1605,7 +1605,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             // Always write to recordings dir — crash recovery works regardless of maxRecordings
             let outputURL = RecordingStore.newRecordingURL()
+            let pathPreparedAt = CFAbsoluteTimeGetCurrent()
             RecordingStore.writeSentinel(recordingURL: outputURL)
+            let sentinelWrittenAt = CFAbsoluteTimeGetCurrent()
             try recorder.startRecording(to: outputURL)
             let recordingStartedAt = CFAbsoluteTimeGetCurrent()
             if recordingStartedAt - startRequestedAt >= 0.25 {
@@ -1616,6 +1618,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     overlayFinishedAt - classificationFinishedAt,
                     recordingStartedAt - overlayFinishedAt,
                     recordingStartedAt - startRequestedAt))
+                DiagnosticLogger.shared.log(String(
+                    format: "Recording file setup: path=%.3fs sentinel=%.3fs writer=%.3fs",
+                    pathPreparedAt - overlayFinishedAt,
+                    sentinelWrittenAt - pathPreparedAt,
+                    recordingStartedAt - sentinelWrittenAt))
             }
 
             // Start streaming transcription timer — processes audio every 2s for live preview
