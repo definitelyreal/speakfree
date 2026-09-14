@@ -10,6 +10,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBar: StatusBarController!
     var hotkeyManager: HotkeyManager?
     var recorder: AudioRecorder!
+    /// Transfers to the finalization task; closing the writer alone does not end file use.
+    private var recordingActivityLease: RecordingActivity.Lease?
     var transcriber: Transcriber!
     var inserter: TextInserter!
     var config: Config!
@@ -1605,6 +1607,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             // Always write to recordings dir — crash recovery works regardless of maxRecordings
             let outputURL = RecordingStore.newRecordingURL()
+            recordingActivityLease = try RecordingActivity.shared.acquire(outputURL)
             let pathPreparedAt = CFAbsoluteTimeGetCurrent()
             RecordingStore.writeSentinel(recordingURL: outputURL)
             let sentinelWrittenAt = CFAbsoluteTimeGetCurrent()
@@ -1635,7 +1638,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             DiagnosticLogger.shared.log("Recording start FAILED: \(error)")
             stopRecordingWatchdog()
             print("Error: \(error.localizedDescription)")
-            RecordingStore.clearSentinel()
+            if let lease = recordingActivityLease {
+                RecordingStore.clearSentinel(recordingURL: lease.audioURL)
+            }
+            recordingActivityLease = nil
             isPressed = false
             focusCapture.reset()  // recording never started — invalidate the in-flight capture
             // I4: OCR was kicked off just above, but recording never started so nothing will
@@ -1727,8 +1733,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let result = recorder.stopRecording() {
             try? FileManager.default.removeItem(at: result.url)
+            RecordingStore.clearSentinel(recordingURL: result.url)
         }
-        RecordingStore.clearSentinel()
+        if let lease = recordingActivityLease {
+            RecordingStore.clearSentinel(recordingURL: lease.audioURL)
+        }
+        recordingActivityLease = nil
         focusCapture.reset()  // invalidate any in-flight focus capture
         screenContextText = nil
         screenCaptureGeneration = UUID()  // invalidate any in-flight OCR
@@ -1870,6 +1880,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
+        let activityLease = recordingActivityLease
+        recordingActivityLease = nil
+        // Retain on every synchronous early-return path, then transfer into Task below.
+        defer { withExtendedLifetime(activityLease) {} }
         // L1: the key was released before the post-buffer scheduled this call (isPressed is
         // already false). Applying a deferred FULL reload here — ahead of every return below —
         // guarantees no exit path (toggle-mode stop, gate failure, nil transcriber, success) leaves
@@ -1883,7 +1897,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let stopTime = keyReleaseTime
 
         guard let recording = recorder.stopRecording() else {
-            RecordingStore.clearSentinel()
+            if let activityLease {
+                RecordingStore.clearSentinel(recordingURL: activityLease.audioURL)
+            }
             focusCapture.reset()
             statusBar.state = .idle
             recordingOverlay.hide()
@@ -1959,7 +1975,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 // re-offers known-silent audio every launch and masks real orphans.
                 RecordingStore.saveTranscription(text: "", for: audioURL)
             }
-            RecordingStore.clearSentinel()
+            RecordingStore.clearSentinel(recordingURL: audioURL)
             focusCapture.reset()
             // I4: a gate-failed dictation never consumes its OCR, so clear it and invalidate any
             // in-flight capture — otherwise this recording's screenContextText survives and biases
@@ -2049,7 +2065,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // snapshot guarantees this recording's audio runs through the engine that was active
         // when the user spoke, not a freshly-swapped one.
         guard let transcriber = self.transcriber else {
-            RecordingStore.clearSentinel()
+            RecordingStore.clearSentinel(recordingURL: audioURL)
             statusBar.state = .idle
             recordingOverlay.hide()
             return
@@ -2082,7 +2098,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // async-only; WhisperEngine exposes async shims). The engines serialize access to
         // their own context internally, so we no longer need whisperSerialQueue to gate the
         // final pass. Results are still marshalled back to main via DispatchQueue.main.async.
-        Task { [weak self] in
+        Task { [weak self, activityLease] in
+            defer { activityLease?.release() }
             guard let self = self else { return }
             do {
                 // Build Whisper prompt + run post-processing through the shared
@@ -2146,7 +2163,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 )
                 RecordingStore.finishRecording(
                     audioURL: audioURL, keep: keepRecording, raw: primaryRaw, text: text, meta: meta)
-                RecordingStore.clearSentinel()
+                RecordingStore.clearSentinel(recordingURL: audioURL)
                 if keepRecording && maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
                 }
@@ -2179,7 +2196,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             } catch {
-                RecordingStore.clearSentinel()
+                RecordingStore.clearSentinel(recordingURL: audioURL)
                 // The opt-out must win on the failure path too: finishRecording(keep:false)
                 // — the deletion the user consented to — is never reached when inference
                 // throws, and the wav would silently persist against the setting.
@@ -2479,7 +2496,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
             queue.removeFirst()
             guard let transcriber = self.transcriber else { return }
-            Task.detached(priority: .utility) { [weak self] in
+            guard let activityLease = try? RecordingActivity.shared.acquireReading(url) else {
+                DiagnosticLogger.shared.log("Recovery: skipped a recording currently claimed by maintenance")
+                DispatchQueue.main.async { next() }
+                return
+            }
+            Task.detached(priority: .utility) { [weak self, activityLease] in
+                defer { activityLease.release() }
                 do {
                     let text = try await transcriber.transcribeFile(
                         url: url, progressHandler: { _, _, _ in }, isCancelled: { false })
@@ -2515,9 +2538,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             DiagnosticLogger.shared.log("Recovery: no transcriber loaded — cannot recover")
             return
         }
+        let activityLease: RecordingActivity.Lease
+        do { activityLease = try RecordingActivity.shared.acquireReading(audioURL) }
+        catch {
+            DiagnosticLogger.shared.log("Recovery: recording is currently claimed by maintenance")
+            recordingOverlay.show(state: .error(error.localizedDescription))
+            return
+        }
         statusBar.state = .transcribing
         statusBar.buildMenu()
-        Task.detached { [weak self] in
+        Task.detached { [weak self, activityLease] in
+            defer { activityLease.release() }
             do {
                 let text = try await transcriber.transcribeFile(
                     url: audioURL, progressHandler: { _, _, _ in }, isCancelled: { false })
@@ -2591,6 +2622,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Read saved transcription text — no need to re-transcribe
+        guard let activityLease = try? RecordingActivity.shared.acquireReading(audioURL) else {
+            recordingOverlay.show(state: .error("This recording is being moved. Please try again afterward."))
+            return
+        }
+        defer { activityLease.release() }
         let textURL = audioURL.deletingPathExtension().appendingPathExtension("txt")
         guard let text = try? String(contentsOf: textURL, encoding: .utf8),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

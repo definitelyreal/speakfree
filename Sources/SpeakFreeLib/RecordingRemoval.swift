@@ -53,6 +53,7 @@ enum RecordingRemoval {
     struct Result: Sendable {
         let removedFiles: Int
         let failedFiles: Int
+        var retainedRecordings: Int = 0
         let enumerationFailed: Bool
         let recoveryDirectory: URL?
         let trashDirectory: URL?
@@ -60,20 +61,33 @@ enum RecordingRemoval {
         var succeeded: Bool { failedFiles == 0 && !enumerationFailed && recoveryDirectory == nil }
     }
 
-    /// The caller owns RecordingStore's mutation lock. Tests inject a private Trash
-    /// directory; they never send fixtures or customer data to the system Trash.
+    /// Group claims exclude live users without holding a mutex across filesystem work.
+    /// Tests inject a private Trash directory, never the system Trash.
     static func run(directory: URL,
+                    activity: RecordingActivity.Removal? = nil,
                     progress: @Sendable (Progress) -> Void = { _ in },
                     trash: (URL) throws -> URL? = systemTrash,
                     move: (URL, URL) throws -> Void = moveWithoutReplacing) -> Result {
         let started = ProcessInfo.processInfo.systemUptime
         let fm = FileManager.default
+        let removal = activity ?? RecordingActivity.shared.beginRemoval(in: directory)
+        defer { if activity == nil { removal.finish() } }
+        var retainedGroups = Set<RecordingActivity.Group>()
         func elapsed() -> Double { ProcessInfo.processInfo.systemUptime - started }
         func finish(_ removed: Int, _ failed: Int, enumeration: Bool = false,
                     recovery: URL? = nil, trashed: URL? = nil) -> Result {
+            // New takes can arrive after target enumeration. Count only protected
+            // groups with an actual primary WAV, not failed-start/phantom read leases.
+            for group in removal.protectedGroups() {
+                let name = group.stem + ".wav"
+                guard RecordingStore.isRecordingArtifact(name) else { continue }
+                let path = URL(fileURLWithPath: group.directory).appendingPathComponent(name).path
+                if fm.fileExists(atPath: path) { retainedGroups.insert(group) }
+            }
             let seconds = elapsed()
-            DiagnosticLogger.shared.log("Recordings removal: mode=trash removed=\(removed) failed=\(failed) enumerationFailed=\(enumeration) recoveryRequired=\(recovery != nil) elapsedSeconds=\(String(format: "%.3f", seconds))")
-            return Result(removedFiles: removed, failedFiles: failed, enumerationFailed: enumeration,
+            DiagnosticLogger.shared.log("Recordings removal: mode=trash removed=\(removed) failed=\(failed) retainedRecordings=\(retainedGroups.count) enumerationFailed=\(enumeration) recoveryRequired=\(recovery != nil) elapsedSeconds=\(String(format: "%.3f", seconds))")
+            return Result(removedFiles: removed, failedFiles: failed, retainedRecordings: retainedGroups.count,
+                          enumerationFailed: enumeration,
                           recoveryDirectory: recovery, trashDirectory: trashed, elapsedSeconds: seconds)
         }
         DiagnosticLogger.shared.log("Recordings removal: started mode=trash")
@@ -135,6 +149,10 @@ enum RecordingRemoval {
         var failed = 0
         var lastUpdate = -Double.infinity
         for (index, url) in targets.enumerated() {
+            guard removal.claim(url) else {
+                retainedGroups.insert(RecordingActivity.group(for: url))
+                continue
+            }
             do {
                 guard try fm.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType == .typeRegular else {
                     throw Failure.sourceChanged
@@ -183,7 +201,7 @@ enum RecordingRemoval {
         }
     }
 
-    private static func systemTrash(_ url: URL) throws -> URL? {
+    static func systemTrash(_ url: URL) throws -> URL? {
         var destination: NSURL?
         try FileManager.default.trashItem(at: url, resultingItemURL: &destination)
         return destination as URL?

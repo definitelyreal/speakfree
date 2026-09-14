@@ -17,6 +17,7 @@ import AVFoundation
 /// itself thread-safe, matching how the AVAudioFile it replaces was used.
 final class WavWriter {
     private let handle: FileHandle
+    private let activityLease: RecordingActivity.Lease
     let url: URL
     private var samplesWritten: Int = 0
     private var samplesAtLastPatch: Int = 0
@@ -25,6 +26,8 @@ final class WavWriter {
 
     init(url: URL) throws {
         self.url = url
+        // Register before the file becomes visible to a maintenance snapshot.
+        activityLease = try RecordingActivity.shared.acquire(url)
         // Owner-only before any audio lands in it (mirrors the previous AVAudioFile +
         // setAttributes sequence, without the world-readable window).
         FileManager.default.createFile(atPath: url.path, contents: nil,
@@ -80,6 +83,7 @@ final class WavWriter {
 
     /// Final header patch + close. Safe to call once; the deinit also closes defensively.
     func close() {
+        defer { activityLease.release() }
         try? patchHeader()
         try? handle.close()
     }
@@ -121,6 +125,8 @@ final class WavWriter {
     /// needs no repair.
     @discardableResult
     static func repairHeader(at url: URL) -> Double? {
+        guard let activityLease = try? RecordingActivity.shared.acquireReading(url) else { return nil }
+        defer { activityLease.release() }
         guard let h = FileHandle(forUpdatingAtPath: url.path) else { return nil }
         defer { try? h.close() }
         guard let fileSize = try? h.seekToEnd(), fileSize > 44 else { return nil }

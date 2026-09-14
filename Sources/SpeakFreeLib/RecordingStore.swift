@@ -22,13 +22,11 @@ public class RecordingStore {
     static let filePrefix = "recording-"
     static let fileExtension = "wav"
 
-    /// P8: serializes the three mutating operations that otherwise race each other —
-    /// `finishRecording` (writes wav + sidecars), `deleteAllRecordings`, and `prune`. Without it
-    /// a "Delete All" from Settings can interleave with a dictation's finalize (TOCTOU: the
-    /// fileExists guard passes, another thread deletes the wav, then the sidecar writes resurrect
-    /// an orphan) and two concurrent prunes can double-remove the same file. Static because all
-    /// three operations are static. The read-only listing/count helpers stay un-locked.
+    /// Serializes final/edit publication and legacy pruning/deletion. Trash uses
+    /// RecordingActivity group claims, so long filesystem work never blocks a new
+    /// take's finalization on this mutex. Reader/writer admission is a separate short lock.
     private static let mutationLock = NSLock()
+    private static let sentinelLock = NSLock()
     static var sentinelFile: URL {
         Config.configDir.appendingPathComponent(".recording-in-progress.json")
     }
@@ -148,13 +146,22 @@ public class RecordingStore {
     }
 
     public static func writeSentinel(recordingURL: URL) {
+        sentinelLock.lock()
+        defer { sentinelLock.unlock() }
         let data = SentinelData(recordingPath: recordingURL.path, startedAt: Date())
         if let encoded = try? JSONEncoder().encode(data) {
             try? encoded.write(to: sentinelFile)
         }
     }
 
-    public static func clearSentinel() {
+    public static func clearSentinel(recordingURL: URL? = nil) {
+        sentinelLock.lock()
+        defer { sentinelLock.unlock() }
+        if let recordingURL {
+            guard let data = try? Data(contentsOf: sentinelFile),
+                  let sentinel = try? JSONDecoder().decode(SentinelData.self, from: data),
+                  URL(fileURLWithPath: sentinel.recordingPath).standardizedFileURL == recordingURL.standardizedFileURL else { return }
+        }
         try? FileManager.default.removeItem(at: sentinelFile)
     }
 
@@ -169,7 +176,7 @@ public class RecordingStore {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         let size = attrs?[.size] as? Int ?? 0
         guard FileManager.default.fileExists(atPath: url.path), size > 1024 else {
-            clearSentinel()
+            clearSentinel(recordingURL: url)
             return nil
         }
         return url
@@ -204,6 +211,8 @@ public class RecordingStore {
             // repair/transcribe a live capture. 120s of quiet is far beyond
             // WavWriter's 5s patch cadence.
             guard mtime.timeIntervalSinceNow < -120 else { continue }
+            guard let activityLease = try? RecordingActivity.shared.acquireReading(url) else { continue }
+            defer { activityLease.release() }
             // Repair a truncated header if needed (no-op returns nil when already valid),
             // then trust the (possibly just-fixed) header for duration.
             WavWriter.repairHeader(at: url)
@@ -218,13 +227,30 @@ public class RecordingStore {
     // MARK: - Transcription sidecar
 
     public static func saveTranscription(text: String, for audioURL: URL) {
-        let sidecar = audioURL.deletingPathExtension().appendingPathExtension("txt")
+        saveTextSidecar(text: text, extension: "txt", for: audioURL)
+    }
+
+    enum AuxiliaryTranscript: String { case parakeet, whisper }
+
+    static func saveAuxiliaryTranscription(text: String, kind: AuxiliaryTranscript, for audioURL: URL) {
+        saveTextSidecar(text: text, extension: "\(kind.rawValue).txt", for: audioURL)
+    }
+
+    /// Also protects standalone recovery/shadow publications after their caller returns.
+    /// Missing or already-claimed audio must not resurrect an orphaned transcript.
+    private static func saveTextSidecar(text: String, extension suffix: String, for audioURL: URL) {
+        guard let activityLease = try? RecordingActivity.shared.acquireReading(audioURL) else { return }
+        defer { activityLease.release() }
+        guard FileManager.default.fileExists(atPath: audioURL.path) else { return }
+        let sidecar = audioURL.deletingPathExtension().appendingPathExtension(suffix)
         try? text.write(to: sidecar, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sidecar.path)
     }
 
     @discardableResult
     public static func updateFinalTranscription(text: String, for audioURL: URL) -> Bool {
+        guard let activityLease = try? RecordingActivity.shared.acquireReading(audioURL) else { return false }
+        defer { activityLease.release() }
         mutationLock.lock()
         defer { mutationLock.unlock() }
         let sidecar = sidecarURL(for: audioURL)
@@ -246,9 +272,7 @@ public class RecordingStore {
     /// Save raw whisper output before any post-processing, as `<audio>.raw.txt`.
     /// Pairs with `.txt` (post-processed) to form a regression corpus for the post-processor.
     public static func saveRaw(text: String, for audioURL: URL) {
-        let sidecar = audioURL.deletingPathExtension().appendingPathExtension("raw.txt")
-        try? text.write(to: sidecar, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sidecar.path)
+        saveTextSidecar(text: text, extension: "raw.txt", for: audioURL)
     }
 
     private static func sidecarURL(for audioURL: URL) -> URL {
@@ -302,6 +326,9 @@ public class RecordingStore {
     }
 
     public static func saveMeta(_ meta: RecordingMeta, for audioURL: URL) {
+        guard let activityLease = try? RecordingActivity.shared.acquireReading(audioURL) else { return }
+        defer { activityLease.release() }
+        guard FileManager.default.fileExists(atPath: audioURL.path) else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(meta) else { return }
@@ -401,6 +428,8 @@ public class RecordingStore {
 
     public static func prune(maxCount: Int) {
         guard maxCount > 0 else { return }
+        let removal = RecordingActivity.shared.beginRemoval(in: recordingsDir)
+        defer { removal.finish() }
         mutationLock.lock()
         defer { mutationLock.unlock() }
         let recordings = listRecordings()
@@ -408,6 +437,7 @@ public class RecordingStore {
 
         let toRemove = recordings.suffix(from: maxCount)
         for recording in toRemove {
+            guard removal.claim(recording.url) else { continue }
             do {
                 try FileManager.default.removeItem(at: recording.url)
                 try? FileManager.default.removeItem(at: sidecarURL(for: recording.url))
@@ -418,6 +448,8 @@ public class RecordingStore {
                     at: base.appendingPathExtension("builtin.raw.txt"))
                 try? FileManager.default.removeItem(at: base.appendingPathExtension("bt.wav"))
                 try? FileManager.default.removeItem(at: base.appendingPathExtension("bt.raw.txt"))
+                try? FileManager.default.removeItem(at: base.appendingPathExtension("whisper.txt"))
+                try? FileManager.default.removeItem(at: base.appendingPathExtension("parakeet.txt"))
             } catch {
                 fputs("Warning: could not remove old recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
             }
@@ -494,6 +526,11 @@ public class RecordingStore {
     /// `keep: false` deletes the wav and writes no sidecars — nothing persists.
     public static func finishRecording(audioURL: URL, keep: Bool,
                                        raw: String, text: String, meta: RecordingMeta) {
+        guard let activityLease = try? RecordingActivity.shared.acquireReading(audioURL) else {
+            DiagnosticLogger.shared.log("RecordingStore: finalization skipped for a recording claimed by maintenance")
+            return
+        }
+        defer { activityLease.release() }
         mutationLock.lock()
         defer { mutationLock.unlock() }
         if keep {
@@ -523,7 +560,7 @@ public class RecordingStore {
     /// archive holds 905 real dual-capture takes, and every one of those files must
     /// still be excluded from recording counts and still be deleted by Delete All.
     private static let artifactSuffixes = [
-        ".builtin.raw.txt", ".bt.raw.txt", ".raw.txt", ".meta.json", ".bt.wav", ".wav", ".txt",
+        ".builtin.raw.txt", ".bt.raw.txt", ".parakeet.txt", ".whisper.txt", ".raw.txt", ".meta.json", ".bt.wav", ".wav", ".txt",
     ]
 
     /// True only for a name that is an EXACT recording artifact: `recording-<timestamp>...` with a
@@ -542,10 +579,13 @@ public class RecordingStore {
 
     /// Recoverable removal used by Settings and the corpus notice. Permanent deletion
     /// remains an internal compatibility API; no user-facing control invokes it.
-    static func trashAllRecordings(progress: @escaping @Sendable (RecordingRemoval.Progress) -> Void = { _ in }) -> RecordingRemoval.Result {
-        mutationLock.lock()
-        defer { mutationLock.unlock() }
-        let result = RecordingRemoval.run(directory: recordingsDir, progress: progress)
+    static func trashAllRecordings(
+        progress: @escaping @Sendable (RecordingRemoval.Progress) -> Void = { _ in },
+        trash: (URL) throws -> URL? = RecordingRemoval.systemTrash
+    ) -> RecordingRemoval.Result {
+        let removal = RecordingActivity.shared.beginRemoval(in: recordingsDir)
+        defer { removal.finish() }
+        let result = RecordingRemoval.run(directory: recordingsDir, activity: removal, progress: progress, trash: trash)
         invalidateCachedCount()
         return result
     }
@@ -565,6 +605,8 @@ public class RecordingStore {
 
     @discardableResult
     public static func deleteAllRecordings() -> DeletionResult {
+        let removal = RecordingActivity.shared.beginRemoval(in: recordingsDir)
+        defer { removal.finish() }
         mutationLock.lock()
         defer { mutationLock.unlock() }
         // M3 + orphan-sweep safety: enumerate names directly (no per-file sidecar opens) and remove
@@ -579,6 +621,7 @@ public class RecordingStore {
             let names = try fm.contentsOfDirectory(atPath: recordingsDir.path)
             for name in names where isRecordingArtifact(name) {
                 let url = recordingsDir.appendingPathComponent(name)
+                guard removal.claim(url) else { continue }
                 // Regular files only — a directory whose name happens to match is never removed
                 // (and never recursed into).
                 var isDir: ObjCBool = false
@@ -605,11 +648,8 @@ public class RecordingStore {
         // M2 / privacy: only zero the cached count when EVERY removal succeeded. A failed removal
         // leaves sensitive wavs on disk — invalidate instead so the next read rescans and Settings
         // keeps showing the survivors rather than reporting zero and hiding the folder controls.
-        if failed == 0 {
-            setCachedCount(0)
-        } else {
-            invalidateCachedCount()
-        }
+        // Active/new groups can remain even when every eligible removal succeeded.
+        invalidateCachedCount()
         return DeletionResult(removedFiles: removed, failedFiles: failed)
     }
 }
