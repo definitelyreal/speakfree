@@ -1,21 +1,42 @@
-<!-- ai-processed:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-13 | asof:2026-09-13 -->
+<!-- ai-processed:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-13 | asof:2026-09-14 -->
 # Existing-code release: start here
 
-Current checkpoint: `02150d2` adds recording-group leases and atomic Trash claims.
-Active and newly created takes, pending finalizations, readers, recovery and shadow work
-retain their whole artifact group while the background Trash operation proceeds. New Fn
-recordings and final metadata publication remain available while filesystem Trash blocks.
-120 affected tests passed, including 20 new ownership/arrival/alias regressions. The final
-combined release qualification passed **189 tests**, zero failures, process exit 0; all 19
-inert deployment tests passed. Changed guard sources pass strict SwiftLint. Private log:
+Current runtime checkpoint, September 14: **release-test `c90b1bc` is installed and
+running on Noah and Ark**. Noah PID 23308 logged hotkey readiness, permissions/controls OK,
+and successful Parakeet warm-up. Ark's guarded installer returned `remote RUNNING`, then
+an independent process/plist check found PID 48881 and `SFBuildCommit=c90b1bc`; its
+signature passed and executable SHA256 matches Noah and the staged candidate. Studio's
+transfer failed before verification via SFTP, legacy SCP, EC2 relay and bounded small
+chunks. No Studio stop/install was attempted; retry after connectivity recovers. Do not
+describe the fleet as fully updated.
+The signed vendored package and partial-fleet receipt are retained privately under
+`build/release-readiness/c90b1bc/` and the receipt's temporary staging path. Studio's failed
+transport did not hold Noah closed: Noah was already stopped, so no stop warning was
+needed there. All remote stops still require the staged quiet/warning guard.
+
+The candidate includes `02150d2` recording-group leases and atomic Trash claims. Active
+and newly created takes, pending finalizations, readers, recovery and shadow work retain
+their whole artifact group while background Trash proceeds. New Fn recordings and final
+metadata publication remain available while filesystem Trash blocks. Final combined
+qualification passed **189 tests**, zero failures, process exit 0; all 19 inert deployment
+tests passed. Changed guard sources pass strict SwiftLint. Private log:
 `build/release-readiness/2026-09-13-final-qualified-tests.log`.
 
-The update guard also recognizes exact source-known legacy menu/config/health log formats;
-24 focused guard tests pass, and its plain native observation probe passes on both Studio
-and Ark. Unknown activity remains fail-closed. The optimized fleet build/install is next.
-No new installation or real Trash test has happened at this checkpoint. Michael has now
-confirmed that he sees the fresh backup in Finder, satisfying the inspection checkpoint.
-The old Noah app remains stopped; prioritize restoring the release-test app for daily use.
+Michael confirmed the fresh backup in Finder. The real candidate Trash/speed test is still
+pending. CUA times out attaching to the menu-bar app, so Michael has been asked to open
+Settings and its `→ 🗑️` confirmation manually; do not substitute an inert preview or claim
+the real dialog is open. Refresh backup coverage for any new dictations before the final
+interactive Trash action. Existing full archive and restoration helper remain intact. A completed 80.61-second
+Noah take after reopening has four files protected by the full-extraction/hash/mode-checked
+`2026-09-14T000656-post-relaunch-supplement` (2,581,216 content bytes). This proves a
+capture completed, not transcript accuracy or absence of all audio gaps. The durable
+`CURRENT-RECOVERY-INDEX.json` links the supplement; inspect for further arrivals before Trash.
+
+The compatible update guard recognizes exact source-known legacy menu/config/health
+formats; 24 focused tests and plain native observation probes passed. Ark completed its
+live guard, which checks visible panel state and successful tone initiation before returning
+ready. Physical audibility was not independently observed. Unknown activity remains
+fail-closed. Research carries the exact compatible guard through `0b22230`.
 
 Historical staging: `913874a` fixed startup state and bounded SSH transport. The older
 `31851cc` package passed local signature/CLI checks, but its Studio transfer stalled and
@@ -37,9 +58,9 @@ bytes, including 18,768 WAV files and all 58 annotations. Full separate extracti
 hashes, sizes and modes; source stability passed. Archive SHA256:
 `0bb8d3c1b8fc180fed939ae82a28663f4be5023056ede9d544ccfcb4e0c9354b`.
 Originals and this backup were opened side by side in Finder; Michael confirmed he sees the backup.
-No new build is installed. The old Noah app is stopped. Fresh installed-app rollback
+At that snapshot the old Noah app was stopped; the current installation state is above. Fresh installed-app rollback
 archives also exist on every host under `~/Library/Application Support/speakfree/AppBackups/2026-09-13-before-trash-update/`;
-each archived executable matches its still-installed executable. Inert preview processes were closed
+each archived executable matched its installed executable before replacement. Inert preview processes were closed
 after Michael opened their test-folder link; the preview now has an explicit UI TEST banner.
 
 Michael additionally requires a tone and visible warning before future agent-driven stops,
@@ -162,7 +183,7 @@ delete drills must secure newly arriving takes before leaving a destructive step
 - Research checkout: sibling `../speakfree`, branch `codex/accuracy-research`.
 - Installed fleet build observed September 9: `3143a81`; Noah rechecked September 13.
   Public release last checked via GitHub September 9: `v1.7.1`.
-- No open PR existed at review. No new build has been installed or published in this lane.
+- No open PR existed at review. Current local/fleet test installation is recorded above; no public build has been published in this lane.
 - Do not merge the experimental branch wholesale. Its corpus, diagnostics, and model work
   must not hold up the existing-code release. Port individual approved fixes deliberately.
 
