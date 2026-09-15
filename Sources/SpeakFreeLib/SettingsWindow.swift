@@ -425,6 +425,8 @@ struct SettingsView: View {
     @State private var recordingsFolderHasAudio = false
     @State private var storedRecordingCount = 0
     @State private var pendingRecordingsRecovery: URL?
+    @State private var isRestoringRecordings = false
+    @State private var recordingsRestoreError: String?
     /// Hand-travel units: false = miles (default), true = kilometers. Click the stats line
     /// to flip (Michael 2026-08-20).
     @State private var statsMetricUnits = false
@@ -461,6 +463,22 @@ struct SettingsView: View {
                 pendingRecordingsRecovery = recovery
                 storedRecordingCount = count
                 recordingsFolderHasAudio = count > 0
+            }
+        }
+    }
+
+    private func restoreRecordings(from recovery: URL) {
+        guard !isRestoringRecordings else { return }
+        isRestoringRecordings = true
+        recordingsRestoreError = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = RecordingRemoval.restoreBatch(recovery, to: RecordingStore.recordingsDir)
+            RecordingStore.invalidateCachedCount()
+            DispatchQueue.main.async {
+                isRestoringRecordings = false
+                recordingsRestoreError = outcome.succeeded ? nil :
+                    "Some files could not be restored. They remain safe in the recovery folder; resolve any name conflicts or permissions issue and try again."
+                refreshRecordingsFolderState()
             }
         }
     }
@@ -757,8 +775,13 @@ struct SettingsView: View {
                         if let recovery = pendingRecordingsRecovery {
                             Text("A previous move to Trash did not finish. Your files are safe in a recovery folder.")
                                 .font(.footnote).foregroundStyle(.secondary)
-                            Button("Open Recovery Folder") {
-                                NSWorkspace.shared.activateFileViewerSelecting([recovery])
+                            Button(isRestoringRecordings ? "Restoring…" : "Restore Recordings") {
+                                restoreRecordings(from: recovery)
+                            }
+                            .disabled(isRestoringRecordings)
+                            .help("Return recoverable recordings to their original folder without overwriting newer files")
+                            if let recordingsRestoreError {
+                                Text(recordingsRestoreError).font(.footnote).foregroundStyle(.red)
                             }
                         }
                         if storedRecordingCount > 0 {
@@ -782,7 +805,8 @@ struct SettingsView: View {
                         RecordingsTrashConfirmView(
                             fileCount: RecordingStore.recordingFileCount(),
                             folderPath: RecordingStore.recordingsDir.path,
-                            onDeleted: { refreshRecordingsFolderState() }
+                            onDeleted: { refreshRecordingsFolderState() },
+                            onRestored: { refreshRecordingsFolderState() }
                         )
                     }
                 }

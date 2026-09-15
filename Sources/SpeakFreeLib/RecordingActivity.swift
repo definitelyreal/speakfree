@@ -81,7 +81,7 @@ final class RecordingActivity: @unchecked Sendable {
         return Group(directory: parent.path, stem: stem(for: normalized))
     }
 
-    private static func stem(for url: URL) -> String {
+    static func stem(for url: URL) -> String {
         let name = url.lastPathComponent
         let suffixes = [".builtin.raw.txt", ".bt.raw.txt", ".parakeet.txt", ".whisper.txt",
                         ".raw.txt", ".meta.json", ".bt.wav", ".wav", ".txt"]

@@ -267,6 +267,10 @@ struct RecordingsNoticeView: View {
                     // with the button reading "Continue »".
                     didDelete = true
                     tookAction = true
+                },
+                onRestored: {
+                    didDelete = false
+                    tookAction = true
                 }
             )
         }
@@ -284,12 +288,15 @@ struct RecordingsTrashConfirmView: View {
         RecordingStore.trashAllRecordings(progress: $0)
     }
     var onDeleted: () -> Void
+    var onRestored: () -> Void = {}
 
     @State private var isMoving = false
     @State private var progress: RecordingRemoval.Progress?
     @State private var startedUptime: TimeInterval?
     @State private var completionElapsed: TimeInterval?
     @State private var result: RecordingRemoval.Result?
+    @State private var restoreResult: RecordingRemoval.RestoreResult?
+    @State private var isRestoring = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -318,7 +325,7 @@ struct RecordingsTrashConfirmView: View {
         }
         .padding(20)
         .frame(width: 500)
-        .interactiveDismissDisabled(isMoving)
+        .interactiveDismissDisabled(isMoving || isRestoring)
     }
 
     private var confirmation: some View {
@@ -340,27 +347,53 @@ struct RecordingsTrashConfirmView: View {
 
     private func completion(_ result: RecordingRemoval.Result) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(result.removedFiles > 0 ? "Moved to Trash" :
+            Text(restoreResult?.succeeded == true ? "Recordings restored" :
+                 result.removedFiles > 0 ? "Moved to Trash" :
                  result.retainedRecordings > 0 ? "Recordings in use were kept" : "No recordings to move")
                 .font(.headline).accessibilityIdentifier("trash-completion")
-            Text("\(result.removedFiles) files moved in \(String(format: "%.1f", completionElapsed ?? result.elapsedSeconds)) seconds.")
+            if let restoreResult {
+                Text("\(restoreResult.restoredFiles) files returned to the recordings folder.")
+                if !restoreResult.succeeded {
+                    Text("Some files could not be restored. Newer or active recordings, permissions, or an interrupted restore may be blocking them. They remain safe in the recovery folder.")
+                        .foregroundStyle(.red)
+                }
+            } else {
+                Text("\(result.removedFiles) files moved in \(String(format: "%.1f", completionElapsed ?? result.elapsedSeconds)) seconds.")
+            }
             if result.retainedRecordings > 0 {
                 Text("\(result.retainedRecordings) recordings in use or started during this move were kept in the recordings folder.")
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("trash-retained-recordings")
             }
-            if result.removedFiles > 0 {
-                Text("You can restore them from Trash until you empty it.")
+            if result.removedFiles > 0 && restoreResult == nil {
+                Text("Use Restore Recordings here, or use Finder’s Put Back and then Restore Recordings in Settings.")
                     .foregroundStyle(.secondary)
             }
             HStack {
-                if result.removedFiles > 0 {
+                if result.removedFiles > 0 && restoreResult == nil {
                     Button("Open Trash") { openTrash(result) }
                         .help("Show the moved recordings in Finder Trash")
+                    if result.trashDirectory != nil {
+                        Button(isRestoring ? "Restoring…" : "Restore Recordings") { restore(result) }
+                            .disabled(isRestoring)
+                            .help("Return these recordings and transcripts to their original folder without overwriting newer files")
+                            .accessibilityIdentifier("restore-recordings")
+                    }
+                } else if let recovery = restoreResult?.recoveryDirectory {
+                    Button("Open Recovery Folder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([recovery])
+                    }
+                    .help("Show the files that still need to be restored")
+                    Button(isRestoring ? "Restoring…" : "Try Restore Again") {
+                        retryRestore(from: recovery)
+                    }
+                    .disabled(isRestoring)
+                    .help("Retry the safe restore without overwriting newer files")
                 }
                 Spacer()
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+                    .disabled(isRestoring)
                     .help("Close this result and return to the previous screen")
             }
         }
@@ -397,6 +430,36 @@ struct RecordingsTrashConfirmView: View {
             NSWorkspace.shared.activateFileViewerSelecting([directory])
         } else {
             NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash"))
+        }
+    }
+
+    private func restore(_ result: RecordingRemoval.Result) {
+        guard !isRestoring, let trashed = result.trashDirectory else { return }
+        isRestoring = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = RecordingRemoval.restoreTrashedBatch(
+                trashed, to: URL(fileURLWithPath: folderPath, isDirectory: true))
+            RecordingStore.invalidateCachedCount()
+            DispatchQueue.main.async {
+                restoreResult = outcome
+                isRestoring = false
+                if outcome.restoredFiles > 0 { onRestored() }
+            }
+        }
+    }
+
+    private func retryRestore(from recovery: URL) {
+        guard !isRestoring else { return }
+        isRestoring = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = RecordingRemoval.restoreBatch(
+                recovery, to: URL(fileURLWithPath: folderPath, isDirectory: true))
+            RecordingStore.invalidateCachedCount()
+            DispatchQueue.main.async {
+                restoreResult = outcome
+                isRestoring = false
+                if outcome.restoredFiles > 0 { onRestored() }
+            }
         }
     }
 
