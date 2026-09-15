@@ -79,6 +79,7 @@ enum RecordingRemoval {
 
     struct Result: Sendable {
         let removedFiles: Int
+        var removedRecordings: Int = 0
         let failedFiles: Int
         var retainedRecordings: Int = 0
         let enumerationFailed: Bool
@@ -90,6 +91,7 @@ enum RecordingRemoval {
 
     struct RestoreResult: Sendable, Equatable {
         let restoredFiles: Int
+        var restoredRecordings: Int = 0
         let retainedFiles: Int
         let recoveryDirectory: URL?
         var succeeded: Bool { retainedFiles == 0 && recoveryDirectory == nil }
@@ -100,7 +102,9 @@ enum RecordingRemoval {
     /// paired with newer audio (or vice versa). Failed and conflicting groups stay
     /// inside the marked batch for an explicit retry; no destination is overwritten.
     static func restoreBatch(_ recovery: URL, to directory: URL,
+                             progress: @Sendable (Progress) -> Void = { _ in },
                              move: (URL, URL) throws -> Void = moveWithoutReplacing) -> RestoreResult {
+        let started = ProcessInfo.processInfo.systemUptime
         restoreLock.lock()
         defer { restoreLock.unlock() }
         let fm = FileManager.default
@@ -166,6 +170,7 @@ enum RecordingRemoval {
             RecordingStore.isRecordingArtifact($0)
         }) { RecordingActivity.stem(for: URL(fileURLWithPath: $0)) }
         var restored = 0
+        var restoredRecordings = 0
         // Finish a durable in-flight group before beginning another one. Otherwise
         // a retry could overwrite the only transaction record for a partially moved
         // group while dictionary iteration happens to visit a different stem first.
@@ -174,7 +179,15 @@ enum RecordingRemoval {
             if $1 == pendingStem { return false }
             return $0 < $1
         }
+        progress(Progress(phase: .preparing, completed: 0, total: orderedStems.count,
+                          elapsedSeconds: ProcessInfo.processInfo.systemUptime - started))
+        var processedGroups = 0
         for stem in orderedStems {
+            defer {
+                processedGroups += 1
+                progress(Progress(phase: .moving, completed: processedGroups, total: orderedStems.count,
+                                  elapsedSeconds: ProcessInfo.processInfo.systemUptime - started))
+            }
             let sources = groups[stem] ?? []
             let representative = directory.appendingPathComponent(stem + ".wav")
             guard removal.claim(representative) else {
@@ -254,6 +267,7 @@ enum RecordingRemoval {
                 return matches(directory.appendingPathComponent(name), record)
             }
             if complete {
+                if expectedNames.contains(stem + ".wav") { restoredRecordings += 1 }
                 marker.removeValue(forKey: "restoreTransaction")
                 do { try writeRecoveryMarker(marker, in: recovery) }
                 catch {
@@ -275,9 +289,13 @@ enum RecordingRemoval {
             }
         }
         if retained == 0 {
+            progress(Progress(phase: .finishing, completed: orderedStems.count,
+                              total: orderedStems.count,
+                              elapsedSeconds: ProcessInfo.processInfo.systemUptime - started))
             try? fm.removeItem(at: recovery.appendingPathComponent(markerName))
             if rmdir(recovery.path) == 0 {
-                return RestoreResult(restoredFiles: restored, retainedFiles: 0, recoveryDirectory: nil)
+                return RestoreResult(restoredFiles: restored, restoredRecordings: restoredRecordings,
+                                     retainedFiles: 0, recoveryDirectory: nil)
             }
             // A file may have arrived after enumeration. Restore the marker so this
             // remains a recognized recovery folder and never becomes hidden debris.
@@ -290,7 +308,8 @@ enum RecordingRemoval {
             }
             retained = 1
         }
-        return RestoreResult(restoredFiles: restored, retainedFiles: retained,
+        return RestoreResult(restoredFiles: restored, restoredRecordings: restoredRecordings,
+                             retainedFiles: retained,
                              recoveryDirectory: recovery)
     }
 
@@ -303,7 +322,8 @@ enum RecordingRemoval {
 
     /// Undo a successful batch move. Move the container out of Trash to its marked
     /// recovery location, then use the same group-safe restore path as Finder Put Back.
-    static func restoreTrashedBatch(_ trashed: URL, to directory: URL) -> RestoreResult {
+    static func restoreTrashedBatch(_ trashed: URL, to directory: URL,
+                                    progress: @Sendable (Progress) -> Void = { _ in }) -> RestoreResult {
         restoreLock.lock()
         defer { restoreLock.unlock() }
         guard let type = try? FileManager.default.attributesOfItem(atPath: directory.path)[.type] as? FileAttributeType,
@@ -314,7 +334,7 @@ enum RecordingRemoval {
         let recovery = directory.deletingLastPathComponent().appendingPathComponent(trashed.lastPathComponent)
         do { try moveWithoutReplacing(trashed, recovery) }
         catch { return RestoreResult(restoredFiles: 0, retainedFiles: 1, recoveryDirectory: trashed) }
-        return restoreBatch(recovery, to: directory)
+        return restoreBatch(recovery, to: directory, progress: progress)
     }
 
     /// Group claims exclude live users without holding a mutex across filesystem work.
@@ -330,7 +350,8 @@ enum RecordingRemoval {
         defer { if activity == nil { removal.finish() } }
         var retainedGroups = Set<RecordingActivity.Group>()
         func elapsed() -> Double { ProcessInfo.processInfo.systemUptime - started }
-        func finish(_ removed: Int, _ failed: Int, enumeration: Bool = false,
+        func finish(_ removed: Int, _ failed: Int, removedRecordings: Int = 0,
+                    enumeration: Bool = false,
                     recovery: URL? = nil, trashed: URL? = nil) -> Result {
             // New takes can arrive after target enumeration. Count only protected
             // groups with an actual primary WAV, not failed-start/phantom read leases.
@@ -342,7 +363,8 @@ enum RecordingRemoval {
             }
             let seconds = elapsed()
             DiagnosticLogger.shared.log("Recordings removal: mode=trash removed=\(removed) failed=\(failed) retainedRecordings=\(retainedGroups.count) enumerationFailed=\(enumeration) recoveryRequired=\(recovery != nil) elapsedSeconds=\(String(format: "%.3f", seconds))")
-            return Result(removedFiles: removed, failedFiles: failed, retainedRecordings: retainedGroups.count,
+            return Result(removedFiles: removed, removedRecordings: removedRecordings,
+                          failedFiles: failed, retainedRecordings: retainedGroups.count,
                           enumerationFailed: enumeration,
                           recoveryDirectory: recovery, trashDirectory: trashed, elapsedSeconds: seconds)
         }
@@ -431,7 +453,12 @@ enum RecordingRemoval {
         do {
             let destination = try trash(staging)
             guard !fm.fileExists(atPath: staging.path) else { throw Failure.trashDidNotMove }
-            return finish(moved.count, failed, trashed: destination)
+            let removedRecordings = moved.reduce(into: Set<String>()) { stems, url in
+                guard url.pathExtension == "wav", !url.lastPathComponent.hasSuffix(".bt.wav") else { return }
+                stems.insert(RecordingActivity.stem(for: url))
+            }.count
+            return finish(moved.count, failed, removedRecordings: removedRecordings,
+                          trashed: destination)
         } catch {
             // A failed Trash operation must not silently hide recordings. Return
             // moved files to their exact paths without overwriting new arrivals.

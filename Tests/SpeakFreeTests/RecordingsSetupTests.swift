@@ -98,7 +98,7 @@ final class RecordingsSetupTests: XCTestCase {
             .init(phase: .finishing, completed: 74321, total: 74321, elapsedSeconds: 4)]
         for width: CGFloat in [300, 460] {
             let sizes = phases.map { progress -> NSSize in
-                let view = NSHostingView(rootView: RecordingsTrashProgress(progress: progress, startedUptime: nil)
+                let view = NSHostingView(rootView: RecordingsTrashProgress(progress: progress)
                     .frame(width: width))
                 view.layoutSubtreeIfNeeded()
                 return view.fittingSize

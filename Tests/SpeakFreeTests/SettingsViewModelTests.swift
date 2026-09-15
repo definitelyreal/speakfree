@@ -103,7 +103,9 @@ final class SettingsViewModelTests: XCTestCase {
         let saved = vm.toConfig()
 
         XCTAssertEqual(saved.language, "fr")
-        XCTAssertEqual(saved.preserveAllRecordings?.value, true)
+        XCTAssertEqual(vm.maxRecordings, 0)
+        XCTAssertNil(saved.preserveAllRecordings)
+        XCTAssertEqual(saved.maxRecordings, 0)
         XCTAssertEqual(saved.reuseStreamingPartial?.value, false)
         XCTAssertEqual(saved.localAPIToken, "secret-token")
         XCTAssertEqual(saved.modelPath, "/custom/model/path.bin")
