@@ -27,7 +27,7 @@ struct EnginePickerView: View {
     /// never expose a "Cancel" control; the only honest action is "Hide" (run in background).
     @State private var downloadTask: Task<Void, Never>?
 
-    private let labelWidth: CGFloat = 110
+    private let labelWidth: CGFloat = 105
 
     /// Headroom required before we attempt a Parakeet download (~600 MB weights plus
     /// CoreML compile scratch). ~1.5 GB keeps us clear of the compile pause running out
@@ -48,7 +48,7 @@ struct EnginePickerView: View {
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
-                    .frame(width: 160, alignment: .leading)
+                    .frame(width: 260, alignment: .leading)
                 }
 
                 if viewModel.engine == "parakeet" {
@@ -77,17 +77,7 @@ struct EnginePickerView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if viewModel.engine == "parakeet" {
-                // H2: Parakeet has no live preview while recording.
-                Text("Parakeet transcribes after you finish speaking \u{2014} no live preview while recording.")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
-
                 parakeetDownloadBanner
-
-                // M4: CC-BY attribution (license obligation).
-                Text("Speech recognition by NVIDIA Parakeet (CC-BY-4.0) via FluidAudio (Apache-2.0).")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
             }
         }
         .onChange(of: viewModel.engine) { _ in
@@ -163,9 +153,9 @@ struct EnginePickerView: View {
                     .buttonStyle(.borderedProminent)
             }
         } else {
-            Text("\(parakeetDisplayName) (\(parakeetSizeDescription)) is downloaded and ready.")
+            Label("Downloaded and ready", systemImage: "checkmark.circle.fill")
                 .font(.footnote)
-                .foregroundColor(.secondary)
+                .foregroundColor(.green)
         }
     }
 

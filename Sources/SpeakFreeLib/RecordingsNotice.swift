@@ -90,11 +90,12 @@ enum NoticeCopy {
     static let continueKeepLabel = "Keep my recordings »"
     static let continueLabel = "Continue »"
 
-    static let confirmTitle = "Move recordings and transcripts to Trash?"
-    static func confirmBody(fileCount: Int) -> String {
-        "Move \(fileCount) recording \(fileCount == 1 ? "file" : "files") from this folder to Trash. "
-            + "You can restore them until you empty Trash."
+    static func confirmTitle(recordingCount: Int, artifactCount: Int) -> String {
+        "Move \(recordingCount.formatted()) recordings and transcripts "
+            + "(\(artifactCount.formatted()) files) to Trash?"
     }
+    static let restoreNotice = "You can restore them until you empty the Trash."
+    static let activeNotice = "Recordings in use will stay in the recordings folder."
 }
 
 // MARK: - Window controller
@@ -155,6 +156,36 @@ final class RecordingsNoticeController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         if !resolved { onDismissed?() }
     }
+}
+
+/// Standalone host used by the menu-bar "Recent Dictations → Clear…" command.
+final class RecordingsTrashWindowController: NSWindowController, NSWindowDelegate {
+    private static var shared: RecordingsTrashWindowController?
+
+    static func present() {
+        if let existing = shared?.window {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let controller = RecordingsTrashWindowController(window: nil)
+        let view = RecordingsTrashConfirmView(
+            fileCount: RecordingStore.recordingCount(),
+            folderPath: RecordingStore.recordingsDir.path,
+            onDeleted: {}, onRestored: {}, onDismiss: { [weak controller] in controller?.close() })
+        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+        window.title = "speakfree"
+        window.styleMask = [.titled]
+        window.isReleasedWhenClosed = false
+        window.delegate = controller
+        controller.window = window
+        shared = controller
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ notification: Notification) { Self.shared = nil }
 }
 
 // MARK: - The notice view (banner design, Michael 2026-07-14)
@@ -259,7 +290,7 @@ struct RecordingsNoticeView: View {
         .onAppear { saveToggle = initialSaveToggle }
         .sheet(isPresented: $showDeleteConfirm) {
             RecordingsTrashConfirmView(
-                fileCount: RecordingStore.recordingFileCount(),
+                fileCount: RecordingStore.recordingCount(),
                 folderPath: RecordingStore.recordingsDir.path,
                 trashAction: trashAction,
                 onDeleted: {
@@ -283,19 +314,20 @@ struct RecordingsNoticeView: View {
 /// completion is shown only after Finder Trash accepts the recordings.
 struct RecordingsTrashConfirmView: View {
     let fileCount: Int
+    var artifactCount: Int = RecordingStore.recordingFileCount()
     let folderPath: String
     var trashAction: @Sendable (@escaping @Sendable (RecordingRemoval.Progress) -> Void) -> RecordingRemoval.Result = {
         RecordingStore.trashAllRecordings(progress: $0)
     }
     var onDeleted: () -> Void
     var onRestored: () -> Void = {}
+    var onDismiss: (() -> Void)? = nil
 
     @State private var isMoving = false
     @State private var progress: RecordingRemoval.Progress?
-    @State private var startedUptime: TimeInterval?
-    @State private var completionElapsed: TimeInterval?
     @State private var result: RecordingRemoval.Result?
     @State private var restoreResult: RecordingRemoval.RestoreResult?
+    @State private var restoreProgress: RecordingRemoval.Progress?
     @State private var isRestoring = false
     @Environment(\.dismiss) private var dismiss
 
@@ -308,13 +340,12 @@ struct RecordingsTrashConfirmView: View {
                 if let result { failure(result) }
                 if isMoving { progressIndicator }
                 HStack {
-                    Button("Cancel") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
+                    Button("Cancel") { close() }
+                        .keyboardShortcut(.defaultAction)
                         .disabled(isMoving)
                         .help("Return without moving any recordings")
                     Spacer()
-                    Button(isMoving ? "Moving…" : "Move to Trash") { moveToTrash() }
-                        .keyboardShortcut(.defaultAction)
+                    Button(isMoving ? "Moving…" : "🗑️ Move to Trash") { moveToTrash() }
                         .buttonStyle(.borderedProminent)
                         .accessibilityIdentifier("confirm-trash")
                         .help("Move eligible recordings and transcripts to Trash; active recordings stay here")
@@ -326,23 +357,25 @@ struct RecordingsTrashConfirmView: View {
         .padding(20)
         .frame(width: 500)
         .interactiveDismissDisabled(isMoving || isRestoring)
+        .onExitCommand { if !isMoving && !isRestoring { close() } }
     }
 
     private var confirmation: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(NoticeCopy.confirmTitle).font(.headline)
-            Text(NoticeCopy.confirmBody(fileCount: fileCount))
-                .fixedSize(horizontal: false, vertical: true)
+            Text(NoticeCopy.confirmTitle(recordingCount: fileCount, artifactCount: artifactCount))
+                .font(.headline)
             RecordingsFolderLink(folderPath: folderPath)
                 .accessibilityIdentifier("confirm-folder-link")
-            Text("Recordings in use, or started during this move, stay in the recordings folder.")
+            Text(NoticeCopy.restoreNotice)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(NoticeCopy.activeNotice)
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var progressIndicator: some View {
-        RecordingsTrashProgress(progress: progress, startedUptime: startedUptime)
+        RecordingsTrashProgress(progress: progress)
     }
 
     private func completion(_ result: RecordingRemoval.Result) -> some View {
@@ -352,33 +385,31 @@ struct RecordingsTrashConfirmView: View {
                  result.retainedRecordings > 0 ? "Recordings in use were kept" : "No recordings to move")
                 .font(.headline).accessibilityIdentifier("trash-completion")
             if let restoreResult {
-                Text("\(restoreResult.restoredFiles) files returned to the recordings folder.")
+                Text("\(restoreResult.restoredRecordings.formatted()) recordings and transcripts "
+                     + "(\(restoreResult.restoredFiles.formatted()) files) returned to the recordings folder.")
                 if !restoreResult.succeeded {
                     Text("Some files could not be restored. Newer or active recordings, permissions, or an interrupted restore may be blocking them. They remain safe in the recovery folder.")
                         .foregroundStyle(.red)
                 }
             } else {
-                Text("\(result.removedFiles) files moved in \(String(format: "%.1f", completionElapsed ?? result.elapsedSeconds)) seconds.")
+                Text("\(result.removedRecordings.formatted()) recordings and transcripts "
+                     + "(\(result.removedFiles.formatted()) files) were moved to Trash.")
             }
             if result.retainedRecordings > 0 {
                 Text("\(result.retainedRecordings) recordings in use or started during this move were kept in the recordings folder.")
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("trash-retained-recordings")
             }
-            if result.removedFiles > 0 && restoreResult == nil {
-                Text("Use Restore Recordings here, or use Finder’s Put Back and then Restore Recordings in Settings.")
-                    .foregroundStyle(.secondary)
-            }
             HStack {
                 if result.removedFiles > 0 && restoreResult == nil {
-                    Button("Open Trash") { openTrash(result) }
-                        .help("Show the moved recordings in Finder Trash")
                     if result.trashDirectory != nil {
-                        Button(isRestoring ? "Restoring…" : "Restore Recordings") { restore(result) }
+                        Button(isRestoring ? "Restoring…" : "Restore") { restore(result) }
                             .disabled(isRestoring)
                             .help("Return these recordings and transcripts to their original folder without overwriting newer files")
                             .accessibilityIdentifier("restore-recordings")
                     }
+                    Button("Open Trash") { openTrash(result) }
+                        .help("Show the moved recordings in Finder Trash")
                 } else if let recovery = restoreResult?.recoveryDirectory {
                     Button("Open Recovery Folder") {
                         NSWorkspace.shared.activateFileViewerSelecting([recovery])
@@ -391,12 +422,26 @@ struct RecordingsTrashConfirmView: View {
                     .help("Retry the safe restore without overwriting newer files")
                 }
                 Spacer()
-                Button("Done") { dismiss() }
+                Button("Done") { close() }
                     .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
                     .disabled(isRestoring)
                     .help("Close this result and return to the previous screen")
             }
+            if isRestoring {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Restoring recordings and transcripts…")
+                    let total = Double(max(1, restoreProgress?.total ?? 1))
+                    ProgressView(value: max(total * 0.02, Double(restoreProgress?.completed ?? 0)),
+                                 total: total)
+                        .progressViewStyle(.linear)
+                }
+                .accessibilityIdentifier("restore-progress")
+            }
         }
+    }
+
+    private func close() {
+        if let onDismiss { onDismiss() } else { dismiss() }
     }
 
     private func failure(_ result: RecordingRemoval.Result) -> some View {
@@ -436,11 +481,14 @@ struct RecordingsTrashConfirmView: View {
     private func restore(_ result: RecordingRemoval.Result) {
         guard !isRestoring, let trashed = result.trashDirectory else { return }
         isRestoring = true
+        restoreProgress = nil
         DispatchQueue.global(qos: .userInitiated).async {
             let outcome = RecordingRemoval.restoreTrashedBatch(
-                trashed, to: URL(fileURLWithPath: folderPath, isDirectory: true))
+                trashed, to: URL(fileURLWithPath: folderPath, isDirectory: true),
+                progress: { update in DispatchQueue.main.async { restoreProgress = update } })
             RecordingStore.invalidateCachedCount()
             DispatchQueue.main.async {
+                NSWorkspace.shared.noteFileSystemChanged(folderPath)
                 restoreResult = outcome
                 isRestoring = false
                 if outcome.restoredFiles > 0 { onRestored() }
@@ -451,11 +499,14 @@ struct RecordingsTrashConfirmView: View {
     private func retryRestore(from recovery: URL) {
         guard !isRestoring else { return }
         isRestoring = true
+        restoreProgress = nil
         DispatchQueue.global(qos: .userInitiated).async {
             let outcome = RecordingRemoval.restoreBatch(
-                recovery, to: URL(fileURLWithPath: folderPath, isDirectory: true))
+                recovery, to: URL(fileURLWithPath: folderPath, isDirectory: true),
+                progress: { update in DispatchQueue.main.async { restoreProgress = update } })
             RecordingStore.invalidateCachedCount()
             DispatchQueue.main.async {
+                NSWorkspace.shared.noteFileSystemChanged(folderPath)
                 restoreResult = outcome
                 isRestoring = false
                 if outcome.restoredFiles > 0 { onRestored() }
@@ -466,8 +517,6 @@ struct RecordingsTrashConfirmView: View {
     private func moveToTrash() {
         guard !isMoving else { return }
         isMoving = true
-        startedUptime = ProcessInfo.processInfo.systemUptime
-        completionElapsed = nil
         result = nil
         progress = nil
         DispatchQueue.global(qos: .userInitiated).async {
@@ -476,7 +525,6 @@ struct RecordingsTrashConfirmView: View {
             }
             DispatchQueue.main.async {
                 result = outcome
-                completionElapsed = ProcessInfo.processInfo.systemUptime - (startedUptime ?? ProcessInfo.processInfo.systemUptime)
                 isMoving = false
                 if outcome.succeeded { onDeleted() }
             }
@@ -496,7 +544,7 @@ struct RecordingsFolderLink: View {
         } label: {
             Text(folderPath)
                 .foregroundStyle(.blue)
-                .multilineTextAlignment(.center)
+                .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity)
         }
@@ -511,32 +559,16 @@ struct RecordingsFolderLink: View {
 /// reserved bar/count avoids resizing the sheet at its first moving-phase update.
 struct RecordingsTrashProgress: View {
     let progress: RecordingRemoval.Progress?
-    let startedUptime: TimeInterval?
 
     var body: some View {
-        HStack(spacing: 10) {
-            ProgressView().controlSize(.small)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(progress?.phase == .finishing ? "Finishing move to Trash…" :
-                     progress?.phase == .moving ? "Moving recordings…" : "Preparing recordings…")
-                    .lineLimit(1)
-                VStack(alignment: .leading, spacing: 3) {
-                    ProgressView(value: Double(progress?.completed ?? 0),
-                                 total: Double(max(1, progress?.total ?? 0)))
-                    Text("\(progress?.completed ?? 0) of \(progress?.total ?? 0) files")
-                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .opacity((progress?.total ?? 0) > 0 ? 1 : 0)
-                .accessibilityHidden((progress?.total ?? 0) == 0)
-                TimelineView(.periodic(from: .now, by: 0.25)) { _ in
-                    let seconds = max(0, ProcessInfo.processInfo.systemUptime -
-                                      (startedUptime ?? ProcessInfo.processInfo.systemUptime))
-                    Text("\(String(format: "%.1f", seconds)) seconds")
-                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(progress == nil || progress?.phase == .preparing ? "Preparing…" :
+                 progress?.phase == .finishing ? "Finishing…" : "Moving recordings and transcripts…")
+                .lineLimit(1)
+            let total = Double(max(1, progress?.total ?? 1))
+            ProgressView(value: max(total * 0.02, Double(progress?.completed ?? 0)),
+                         total: total)
+                .progressViewStyle(.linear)
         }
         .accessibilityIdentifier("trash-progress")
     }

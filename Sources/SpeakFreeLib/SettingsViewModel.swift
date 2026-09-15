@@ -57,7 +57,7 @@ public class SettingsViewModel: ObservableObject {
         self.modelSize = c.modelSize
         self.language = c.language
         self.punctuationMode = c.effectivePunctuationMode
-        self.maxRecordings = c.maxRecordings ?? 0  // 0 = keep everything (default)
+        self.maxRecordings = c.preserveAllRecordings?.value == true ? 0 : (c.maxRecordings ?? 0)
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
@@ -92,7 +92,7 @@ public class SettingsViewModel: ObservableObject {
         self.modelSize = c.modelSize
         self.language = c.language
         self.punctuationMode = c.effectivePunctuationMode
-        self.maxRecordings = c.maxRecordings ?? 0
+        self.maxRecordings = c.preserveAllRecordings?.value == true ? 0 : (c.maxRecordings ?? 0)
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
@@ -123,6 +123,9 @@ public class SettingsViewModel: ObservableObject {
         config.language = language
         config.spokenPunctuation = punctuationMode
         config.maxRecordings = maxRecordings
+        // The visible picker is now authoritative. Clear the legacy hidden override so
+        // choosing Last 1,000/10,000 cannot continue to behave as Keep All.
+        config.preserveAllRecordings = nil
         // PR-A: any Settings save is an explicit user choice — stamp the marker so the
         // legacy-30 migration never re-fires (a user re-picking 30 sticks; a non-30 legacy
         // value gets confirmed on next save).

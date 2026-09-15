@@ -472,6 +472,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
         let folderItem = NSMenuItem(title: "Open Recordings Folder…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
         folderItem.target = folderTarget
         menu.addItem(folderItem)
+
+        let clearTarget = MenuItemTarget { RecordingsTrashWindowController.present() }
+        recentMenuTargets.append(clearTarget)
+        let clearItem = NSMenuItem(title: "Clear…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+        clearItem.target = clearTarget
+        menu.addItem(clearItem)
     }
 
     /// Main-thread state, background filesystem work. If another state change requests

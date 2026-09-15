@@ -74,13 +74,13 @@ class SettingsWindowController: NSWindowController {
         let screenHeight = NSScreen.main?.visibleFrame.height ?? 900
         let windowHeight = min(screenHeight * 0.8, 900)
 
-        hostingController.preferredContentSize = NSSize(width: 480, height: windowHeight)
+        hostingController.preferredContentSize = NSSize(width: 720, height: windowHeight)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "speakfree Settings"
         window.styleMask = [.titled, .closable, .resizable]
-        window.setContentSize(NSSize(width: 480, height: windowHeight))
-        window.minSize = NSSize(width: 480, height: 500)
-        window.maxSize = NSSize(width: 600, height: screenHeight)
+        window.setContentSize(NSSize(width: 720, height: windowHeight))
+        window.minSize = NSSize(width: 680, height: 500)
+        window.maxSize = NSSize(width: 900, height: screenHeight)
         window.center()
         window.isReleasedWhenClosed = false
 
@@ -159,12 +159,10 @@ private func availableModels(language: String) -> [ModelInfo] {
 // Keep-everything is the default: recordings are the dictation corpus that makes
 // accuracy regressions diagnosable. Pruning is the explicit opt-in.
 private let maxRecordingsOptions: [(label: String, value: Int)] = [
-    ("Keep everything", 0),
-    ("Last 10", 10),
-    ("Last 20", 20),
-    ("Last 30", 30),
-    ("Last 50", 50),
-    ("Last 100", 100),
+    ("All", 0),
+    ("None", -1),
+    ("Last 1,000", 1_000),
+    ("Last 10,000", 10_000),
 ]
 
 // MARK: - Key Recorder Monitor
@@ -475,6 +473,7 @@ struct SettingsView: View {
             let outcome = RecordingRemoval.restoreBatch(recovery, to: RecordingStore.recordingsDir)
             RecordingStore.invalidateCachedCount()
             DispatchQueue.main.async {
+                NSWorkspace.shared.noteFileSystemChanged(RecordingStore.recordingsDir.path)
                 isRestoringRecordings = false
                 recordingsRestoreError = outcome.succeeded ? nil :
                     "Some files could not be restored. They remain safe in the recovery folder; resolve any name conflicts or permissions issue and try again."
@@ -565,6 +564,18 @@ struct SettingsView: View {
         DevMode.isActive || viewModel.saveRecordings
     }
 
+    private var keepRecordingsSelection: Binding<Int> {
+        Binding(
+            get: { viewModel.saveRecordings ? viewModel.maxRecordings : -1 },
+            set: { value in
+                viewModel.saveRecordings = value != -1
+                if value >= 0 { viewModel.maxRecordings = value }
+                viewModel.save()
+                refreshRecordingsFolderState()
+            }
+        )
+    }
+
     /// Shown when the chosen hotkey costs the user the macOS Globe-key action. One click
     /// moves the hotkey to Right Option, which has no system action of its own.
     private var globeKeyBanner: some View {
@@ -615,16 +626,17 @@ struct SettingsView: View {
                 // the honest range across typing speeds (2026-07-26 ruling); hand-travel
                 // distance uses a stated 2 cm/keystroke assumption. Clicking the stats
                 // flips the distance between miles and kilometers.
-                VStack(spacing: 2) {
-                    Text("\(UsageStats.shared.totalDictations.formatted()) dictations   "
-                         + "\(UsageStats.shared.totalWords.formatted()) words   "
-                         + "\(UsageStats.formatDaysHoursMinutes(UsageStats.shared.totalAudioSeconds)) total")
+                VStack(spacing: 6) {
+                    Text("Total: \(UsageStats.shared.totalDictations.formatted()) dictations, "
+                         + "\(UsageStats.shared.totalWords.formatted()) words, "
+                         + "\(UsageStats.formatDaysHoursMinutes(UsageStats.shared.totalAudioSeconds))")
                         .font(.callout)
+                        .fontWeight(.semibold)
                         .foregroundColor(.primary)
-                    Text("You saved \(UsageStats.shared.keystrokesDescription) keystrokes, "
-                         + "\(UsageStats.shared.timeSavedDescription), and "
+                    Text("You would have typed: \(UsageStats.shared.keystrokesDescription) keystrokes, "
                          + (statsMetricUnits ? UsageStats.shared.handTravelMetricDescription
-                                             : UsageStats.shared.handTravelImperialDescription))
+                                             : UsageStats.shared.handTravelImperialDescription)
+                         + ", and \(UsageStats.formatDaysHours(UsageStats.shared.estimatedTypingTime))")
                         .font(.callout)
                         .foregroundColor(.secondary)
                 }
@@ -721,56 +733,43 @@ struct SettingsView: View {
                             }
 
                             GridRow {
-                                Text("Recordings")
-                                // The checkbox used to bind the RAW config value while
-                                // DevMode.effectiveSaveRecordings forced saving ON, so on a
-                                // developer machine it read "off" while recordings were in fact
-                                // being written (2026-07-26 — Michael ticked it and nothing
-                                // changed, because nothing needed to). Same class of dishonesty
-                                // as an untagged test build: show the state the app is actually
-                                // in, and say who is holding it there.
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Toggle("Save recordings and transcripts",
-                                           isOn: DevMode.isActive
-                                               ? .constant(true)
-                                               : $viewModel.saveRecordings)
-                                        .disabled(DevMode.isActive)
-                                        .onChange(of: viewModel.saveRecordings) { _ in
-                                            viewModel.save()
-                                            refreshRecordingsFolderState()
+                                Text("Keep Recordings")
+                                    .frame(width: labelWidth, alignment: .leading)
+                                    .gridColumnAlignment(.leading)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 8) {
+                                        Picker("", selection: DevMode.isActive
+                                               ? .constant(0) : keepRecordingsSelection) {
+                                        if !maxRecordingsOptions.contains(where: { $0.value == keepRecordingsSelection.wrappedValue }) {
+                                            Text("Last \(keepRecordingsSelection.wrappedValue.formatted())")
+                                                .tag(keepRecordingsSelection.wrappedValue)
+                                            Divider()
                                         }
-                                    if DevMode.isActive {
-                                        Text("Forced on by developer mode "
-                                             + "(~/\(DevMode.markerName) exists). Delete that "
-                                             + "file to control this yourself.")
-                                            .font(.footnote)
-                                            .foregroundColor(.secondary)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
-                                }
-                            }
-
-                            if recordingsEffectivelySaving {
-                                GridRow {
-                                    Text("Past Recordings")
-                                    Picker("", selection: $viewModel.maxRecordings) {
                                         ForEach(maxRecordingsOptions, id: \.value) { option in
                                             Text(option.label).tag(option.value)
                                         }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .labelsHidden()
+                                        .frame(width: 150, alignment: .leading)
+                                        .disabled(DevMode.isActive)
                                     }
-                                    .pickerStyle(.menu)
-                                    .labelsHidden()
-                                    .frame(width: 150, alignment: .leading)
+                                    Button {
+                                            NSWorkspace.shared.activateFileViewerSelecting([RecordingStore.recordingsDir])
+                                        } label: {
+                                            Label("Recordings & Transcripts Folder", systemImage: "folder")
+                                        }
+                                        .controlSize(.regular)
+                                        .disabled(!recordingsFolderHasAudio)
+                                    if DevMode.isActive {
+                                        Text("Kept as All by developer mode (~/\(DevMode.markerName) exists).")
+                                            .font(.footnote)
+                                            .foregroundColor(.secondary)
+                                    }
                                 }
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-
-                        Button("Open Recordings / Transcripts Folder…") {
-                            NSWorkspace.shared.activateFileViewerSelecting([RecordingStore.recordingsDir])
-                        }
-                        .controlSize(.small)
-                        .disabled(!recordingsFolderHasAudio)
 
                         if let recovery = pendingRecordingsRecovery {
                             Text("A previous move to Trash did not finish. Your files are safe in a recovery folder.")
@@ -785,7 +784,7 @@ struct SettingsView: View {
                             }
                         }
                         if storedRecordingCount > 0 {
-                            VStack(alignment: .leading, spacing: 4) {
+                            VStack(alignment: .center, spacing: 4) {
                                 Text("Your corpus: \(storedRecordingCount) recordings and "
                                      + "transcripts, stored only on this Mac.")
                                     .font(.footnote)
@@ -796,6 +795,7 @@ struct SettingsView: View {
                                     .buttonStyle(.link)
                                     .font(.footnote)
                             }
+                            .frame(maxWidth: .infinity)
                         }
                     }
                     .padding(.vertical, 6)
@@ -803,7 +803,7 @@ struct SettingsView: View {
                     .onAppear { refreshRecordingsFolderState() }
                     .sheet(isPresented: $showDeleteRecordingsSheet) {
                         RecordingsTrashConfirmView(
-                            fileCount: RecordingStore.recordingFileCount(),
+                            fileCount: RecordingStore.recordingCount(),
                             folderPath: RecordingStore.recordingsDir.path,
                             onDeleted: { refreshRecordingsFolderState() },
                             onRestored: { refreshRecordingsFolderState() }
@@ -891,23 +891,29 @@ struct SettingsView: View {
 
                             GridRow {
                                 Text("Punctuation")
-                                Picker("", selection: punctuationSelection) {
-                                    // Spoken Only is omitted on Parakeet (Whisper-only).
-                                    ForEach(availablePunctuationModes, id: \.self) { mode in
-                                        Text(SettingsViewModel.punctuationModeLabel(mode)).tag(mode)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Picker("", selection: punctuationSelection) {
+                                        ForEach(availablePunctuationModes, id: \.self) { mode in
+                                            Text(SettingsViewModel.punctuationModeLabel(mode)).tag(mode)
+                                        }
                                     }
+                                    .pickerStyle(.menu)
+                                    .labelsHidden()
+                                    Text("Controls whether spoken punctuation, automatic punctuation, or both are used.")
+                                        .font(.footnote)
+                                        .foregroundColor(.secondary)
                                 }
-                                .pickerStyle(.menu)
-                                .labelsHidden()
+                            }
+
+                            GridRow {
+                                Text("Vocabulary")
+                                    .frame(width: labelWidth, alignment: .leading)
+                                vocabularyStatusRow
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                        if let note = parakeetLanguageNote {
-                            Text(note)
-                                .font(.footnote)
-                                .foregroundColor(.secondary)
-                        } else {
+                        if viewModel.engine == "whisper" {
                             Text("Larger models are more accurate but use more memory.")
                                 .font(.footnote)
                                 .foregroundColor(.secondary)
@@ -922,6 +928,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 14) {
                         preBufferRow
 
+                        if viewModel.engine == "whisper" {
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
                             GridRow {
                                 Text("Model Loading").frame(width: labelWidth, alignment: .leading).gridColumnAlignment(.leading)
@@ -933,34 +940,19 @@ struct SettingsView: View {
                                 .pickerStyle(.menu)
                                 .labelsHidden()
                                 .frame(width: 120, alignment: .leading)
-                                // Parakeet manages its own model lifecycle; this control has
-                                // no effect for it (memory-pressure policy is a no-op).
-                                .disabled(viewModel.engine != "whisper")
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                         VStack(alignment: .leading, spacing: 1) {
-                            if viewModel.engine == "whisper" {
-                                Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac.")
-                                Text("Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)).")
-                                Text("Automatic unloads the model whenever your Mac needs the memory.")
-                            } else {
-                                Text("Parakeet manages model loading automatically; this setting has no effect.")
-                            }
+                            Text("Loading the model takes about \(SettingsViewModel.modelLoadTimeDescription(viewModel.modelSize)) on your Mac.")
+                            Text("Keeping it loaded uses \(SettingsViewModel.modelMemoryDescription(viewModel.modelSize)).")
+                            Text("Automatic unloads the model whenever your Mac needs the memory.")
                         }
                         .font(.footnote)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 4)
-                }
-
-                // -- VOCABULARY & CONTEXT ----------------------------------
-                GroupBox("Vocabulary & Context") {
-                    VStack(alignment: .leading, spacing: 14) {
-                        vocabularyStatusRow
+                        }
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
@@ -988,6 +980,7 @@ struct SettingsView: View {
                             .font(.footnote)
                             .foregroundColor(.secondary)
 
+                        if viewModel.engine == "whisper" {
                         VStack(alignment: .leading, spacing: 4) {
                             Toggle("Live Preview (Experimental)", isOn: $viewModel.streamingEnabled)
                                 .toggleStyle(.checkbox)
@@ -995,6 +988,7 @@ struct SettingsView: View {
                             Text("Shows transcribed text as you speak. Work in progress \u{2014} text may flicker.")
                                 .font(.footnote)
                                 .foregroundColor(.secondary)
+                        }
                         }
 
                         localAPIRow
@@ -1005,18 +999,23 @@ struct SettingsView: View {
                     .padding(.horizontal, 4)
                 }
 
+                if viewModel.engine == "parakeet" {
+                    Text("Speech recognition by NVIDIA Parakeet (CC-BY-4.0) via FluidAudio (Apache-2.0).")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 // Footer — scrolls with content, not pinned
                 Divider()
                     .padding(.top, 8)
                 HStack(spacing: 0) {
                     Text("Proudly vibe coded. ")
-                        .font(.caption)
                         .foregroundColor(.secondary)
                     Button {
                         NSWorkspace.shared.open(URL(string: "https://github.com/definitelyreal/speakfree")!)
                     } label: {
                         Text("Let's improve it together →")
-                            .font(.caption)
                             .foregroundColor(Color(red: 0.6, green: 0.2, blue: 0.8))
                             .underline(isHoveringGitHub)
                     }
@@ -1258,10 +1257,10 @@ struct SettingsView: View {
     // MARK: - Vocabulary Status Row
 
     private var vocabularyStatusRow: some View {
-        HStack {
-            Spacer()
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
             let count = WordMemory.loadVocabularyEntries().count
-            Button("Edit Vocabulary File") {
+            Button("📝 Edit Vocabulary File") {
                 let url = Config.vocabularyFile
                 let dir = Config.configDir
                 try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -1271,12 +1270,15 @@ struct SettingsView: View {
                 }
                 NSWorkspace.shared.open(url)
             }
-            .controlSize(.small)
             Text("(\(count) word\(count == 1 ? "" : "s"))")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Spacer()
+            }
+            Text("Add names, terms, and phrases to help Speakfree recognize them accurately.")
+                .font(.footnote)
+                .foregroundColor(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Pre-Buffer Row

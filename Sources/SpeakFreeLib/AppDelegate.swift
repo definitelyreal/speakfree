@@ -406,7 +406,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // inventory is the ORPHAN SWEEP — any recent wav without a transcript sidecar,
         // headers repaired in place. The old handler (`reprocess`) only re-read a .txt
         // that a crashed recording never has; recovery now actually TRANSCRIBES.
-        let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
+        let maxRecordings = (DevMode.isActive || config.preserveAllRecordings?.value == true)
+            ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         if maxRecordings > 0 {
             RecordingStore.prune(maxCount: maxRecordings)
         }
@@ -2076,7 +2077,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Snapshot ALL config-derived state on main before crossing into the async Task.
         // Accessing self.config.* from a background queue is a torn-read race — Config is a
         // struct so reads and writes are not atomic across threads.
-        let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
+        let maxRecordings = (DevMode.isActive || config.preserveAllRecordings?.value == true)
+            ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         // Recordings privacy: persisting audio + transcripts is opt-in (2026-07-14).
         let keepRecording = DevMode.effectiveSaveRecordings(config)
         // Resolved through the one shared default (Michael 2026-08-12). The full history of
