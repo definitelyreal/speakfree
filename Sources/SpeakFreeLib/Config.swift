@@ -84,7 +84,7 @@ public struct Config: Codable {
     // 0 = keep everything.
     public static func effectiveMaxRecordings(_ value: Int?) -> Int {
         guard let raw = value, raw > 0 else { return 0 }
-        return min(raw, 100)
+        return raw
     }
 
     /// THE single resolution of a missing `spokenPunctuation` key (Michael's ruling

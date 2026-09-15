@@ -75,19 +75,20 @@ enum NoticeCopy {
     values of this app. The app NEVER uploads anything of yours or phones home, aside from checks \
     for updates.
 
-    You can delete them, but before you do, consider why you might want them. This is a POWERFUL \
+    You can delete them, but before you do, consider that this is a POWERFUL \
     source of personal data: about your own voice, your speech patterns, anything you choose to \
     analyze. They are local to your device, and there are even private LLMs that can analyze them \
     without ever uploading them to a company’s dataset. And having your recordings allows you to \
     participate more in developing the app. You can test changes in the code against your corpus \
     (without uploading them) and help improve the app for everyone.
     """
-    static let turnedOff = "Your choice (now an option in settings):"
+    static let turnedOff = "Your choice"
     static let toggleLabel = "Save recordings and transcripts"
     static let deleteLeadIn = "Rather not? "
     static let deleteLinkText = "🗑️ Move Recordings to Trash"
     static let deleteLeadOut = "or do it yourself from the folder:"
-    static let continueKeepLabel = "Keep my recordings »"
+    static let continueKeepLabel = "💾 Keep My Recordings »"
+    static let continueTrashLabel = "🗑️ Move Recordings to Trash »"
     static let continueLabel = "Continue »"
 
     static func confirmTitle(recordingCount: Int, artifactCount: Int) -> String {
@@ -135,14 +136,26 @@ final class RecordingsNoticeController: NSWindowController, NSWindowDelegate {
 
     private func loadNoticeWindow() {
         let view = RecordingsNoticeView(
-            initialSaveToggle: Config.load().saveRecordings?.value ?? false,
-            onToggle: { [weak self] save in
-                RecordingsNotice.persistSaveToggle(save)
+            refreshCounts: { (RecordingStore.recordingCount(), RecordingStore.recordingFileCount()) },
+            onSaveSelection: { [weak self] choice in
+                var config = Config.load()
+                RecordingRetention.apply(choice, to: &config)
+                try config.save()
+                self?.onConfigChanged?()
+            },
+            onCommit: { [weak self] choice, didDelete in
+                var config = Config.load()
+                RecordingRetention.apply(choice, to: &config)
+                config.recordingsNoticeDecision = didDelete ? "delete" : "keep"
+                try config.save()
                 self?.onConfigChanged?()
             },
             onContinue: { [weak self] didDelete in
-                self?.resolve(didDelete ? "delete" : "keep")
-            }
+                self?.resolved = true
+                self?.close()
+                self?.onResolved?()
+            },
+            onClose: { [weak self] in self?.close() }
         )
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
@@ -191,21 +204,34 @@ final class RecordingsTrashWindowController: NSWindowController, NSWindowDelegat
 // MARK: - The notice view (banner design, Michael 2026-07-14)
 
 struct RecordingsNoticeView: View {
-    var initialSaveToggle = false
-    /// In the shipping dialog these persist config / delete files; the preview
-    /// command injects inert versions, so a preview can never touch user data.
-    var onToggle: (Bool) -> Void
+    var initialRetention = 0
+    var folderPath = RecordingStore.recordingsDir.path
+    var recordingCount: Int = RecordingStore.recordingCount()
+    var artifactCount: Int = RecordingStore.recordingFileCount()
+    var refreshCounts: (() -> (Int, Int))? = nil
+    var choiceIsBold = true
+    var folderAlignment: Alignment = .leading
+    var noteText = NoticeCopy.note
+    var openFolder: ((String) -> Void)? = nil
+    /// Called only after the user confirms Move. A failed Trash operation must not
+    /// silently leave future saving on after the explicit Keep None choice.
+    var onSaveSelection: (Int) throws -> Void = { _ in }
+    /// The default is a proposal. Opening, inspecting, or canceling changes nothing.
+    var onCommit: (Int, Bool) throws -> Void
     /// Resolves the notice. `didDelete` reports whether the in-app delete ran.
     var onContinue: (Bool) -> Void
+    var onClose: () -> Void = {}
     var trashAction: @Sendable (@escaping @Sendable (RecordingRemoval.Progress) -> Void) -> RecordingRemoval.Result = { RecordingStore.trashAllRecordings(progress: $0) }
 
-    @State private var saveToggle = false
+    @State private var retention = 0
     @State private var showDeleteConfirm = false
     /// Deleting (in-app) or opening the folder flips the continue button from
     /// "Keep my recordings »" to plain "Continue »" — the qualifier only
     /// makes sense while doing nothing is still the choice being made.
     @State private var didDelete = false
-    @State private var tookAction = false
+    @State private var didRestore = false
+    @State private var confirmationCounts: (Int, Int)?
+    @State private var preferenceError: String?
 
     fileprivate static let purple = Color(nsColor: WelcomeController.purple)
 
@@ -223,87 +249,92 @@ struct RecordingsNoticeView: View {
             .background(Self.purple.opacity(0.1))
 
             VStack(alignment: .leading, spacing: 10) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 8) {
                         Text(NoticeCopy.noteLabel)
                             .font(.callout.weight(.semibold))
                             .foregroundColor(.secondary)
-                        Text(NoticeCopy.note)
+                        Text(noteText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                RecordingsFolderButton(folderPath: folderPath, open: openFolder)
+                    .frame(maxWidth: .infinity, alignment: folderAlignment)
+                    .padding(.top, 2)
 
-                Text(NoticeCopy.turnedOff)
-                    .padding(.top, 4)
-
-                HStack {
-                    Spacer(minLength: 0)
-                    Toggle(NoticeCopy.toggleLabel, isOn: $saveToggle)
-                        .toggleStyle(.switch)
-                        .fixedSize()
-                        .accessibilityIdentifier("save-recordings-toggle")
-                        .help("Save audio and transcripts from future dictations on this Mac")
-                        .onChange(of: saveToggle) { newValue in onToggle(newValue) }
-                    Spacer(minLength: 0)
-                }
-                .padding(12)
-                .background(Color.gray.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                VStack(spacing: 6) {
-                    HStack(spacing: 0) {
-                        Text(NoticeCopy.deleteLeadIn)
-                        Button(NoticeCopy.deleteLinkText) { showDeleteConfirm = true }
-                            .buttonStyle(.link)
-                            .help("Review which recordings and transcripts to move to Trash")
-                            .accessibilityIdentifier("delete-link")
-                            .accessibilityLabel("Move recordings and transcripts to Trash")
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(NoticeCopy.turnedOff)
+                        .fontWeight(choiceIsBold ? .bold : .regular)
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(RecordingRetention.label)
+                        RecordingRetentionPicker(selection: $retention)
                     }
-                    Text(NoticeCopy.deleteLeadOut)
-                    RecordingsFolderLink(folderPath: RecordingStore.recordingsDir.path) {
-                        tookAction = true
-                    }
-                    .accessibilityIdentifier("open-folder")
+                    Text(RecordingRetention.explanation(retention, notice: !didRestore))
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .padding(16)
+                .frame(width: 510, alignment: .leading)
+                .background(Color.gray.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
                 .frame(maxWidth: .infinity)
-                .padding(.top, 6)
+                .padding(.vertical, 6)
 
-                Divider().padding(.vertical, 8)
+                if let preferenceError {
+                    Text(preferenceError).foregroundStyle(.red)
+                }
+                Divider()
 
                 HStack {
                     Spacer()
-                    Button(tookAction ? NoticeCopy.continueLabel : NoticeCopy.continueKeepLabel) {
-                        onContinue(didDelete)
+                    RecordingsChoiceButton(title: didDelete || didRestore ? NoticeCopy.continueLabel :
+                           retention == -1 ? NoticeCopy.continueTrashLabel : NoticeCopy.continueKeepLabel) {
+                        if retention == -1 && !didDelete && !didRestore {
+                            confirmationCounts = refreshCounts?() ?? (recordingCount, artifactCount)
+                            showDeleteConfirm = true
+                        }
+                        else { commitAndContinue() }
                     }
                     .fixedSize()
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .tint(Self.purple)
                     .accessibilityIdentifier("continue-btn")
-                    .help("Close this notice and keep your current recording preferences")
+                    .help(retention == -1 && !didDelete && !didRestore ? "Review the Trash confirmation" : "Apply your recording choice")
                 }
             }
             .padding(20)
         }
-        .frame(width: 580, height: 720)
-        .onAppear { saveToggle = initialSaveToggle }
+        .frame(width: 660)
+        .fixedSize(horizontal: false, vertical: true)
+        .onAppear { retention = initialRetention }
+        .onExitCommand { if !showDeleteConfirm { onClose() } }
         .sheet(isPresented: $showDeleteConfirm) {
             RecordingsTrashConfirmView(
-                fileCount: RecordingStore.recordingCount(),
-                folderPath: RecordingStore.recordingsDir.path,
+                fileCount: confirmationCounts?.0 ?? recordingCount,
+                artifactCount: confirmationCounts?.1 ?? artifactCount,
+                folderPath: folderPath,
+                beforeTrash: { try onSaveSelection(retention) },
                 trashAction: trashAction,
                 onDeleted: {
                     // Deletion no longer closes the notice — the user returns to it
                     // with the button reading "Continue »".
                     didDelete = true
-                    tookAction = true
+                    do { try onCommit(retention, true) }
+                    catch { preferenceError = "Files were moved, but the recording preference could not be saved: \(error.localizedDescription)" }
                 },
                 onRestored: {
                     didDelete = false
-                    tookAction = true
+                    didRestore = true
+                    // Restore returns files, never silently opts back into future saving.
+                    do { try onCommit(retention, false) }
+                    catch { preferenceError = "Files were restored, but the notice could not be saved: \(error.localizedDescription)" }
                 }
             )
+        }
+    }
+
+    private func commitAndContinue() {
+        do {
+            try onCommit(retention, didDelete)
+            onContinue(didDelete)
+        } catch {
+            preferenceError = "Could not save your recording preference: \(error.localizedDescription)"
         }
     }
 }
@@ -313,9 +344,18 @@ struct RecordingsNoticeView: View {
 /// Shared recoverable removal UI. All filesystem work stays off the main queue;
 /// completion is shown only after Finder Trash accepts the recordings.
 struct RecordingsTrashConfirmView: View {
+    /// Snapshot-only state. Production callers leave this nil and use real transitions.
+    enum ReviewState {
+        case moving(RecordingRemoval.Progress?)
+        case completed(RecordingRemoval.Result, RecordingRemoval.RestoreResult?, RecordingRemoval.Progress?, Bool)
+        case failed(RecordingRemoval.Result)
+    }
     let fileCount: Int
     var artifactCount: Int = RecordingStore.recordingFileCount()
     let folderPath: String
+    var folderAlignment: Alignment = .leading
+    var reviewState: ReviewState? = nil
+    var beforeTrash: () throws -> Void = {}
     var trashAction: @Sendable (@escaping @Sendable (RecordingRemoval.Progress) -> Void) -> RecordingRemoval.Result = {
         RecordingStore.trashAllRecordings(progress: $0)
     }
@@ -329,6 +369,7 @@ struct RecordingsTrashConfirmView: View {
     @State private var restoreResult: RecordingRemoval.RestoreResult?
     @State private var restoreProgress: RecordingRemoval.Progress?
     @State private var isRestoring = false
+    @State private var startError: String?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -337,6 +378,7 @@ struct RecordingsTrashConfirmView: View {
                 completion(result)
             } else {
                 confirmation
+                if let startError { Text(startError).foregroundStyle(.red) }
                 if let result { failure(result) }
                 if isMoving { progressIndicator }
                 HStack {
@@ -358,13 +400,22 @@ struct RecordingsTrashConfirmView: View {
         .frame(width: 500)
         .interactiveDismissDisabled(isMoving || isRestoring)
         .onExitCommand { if !isMoving && !isRestoring { close() } }
+        .onAppear {
+            switch reviewState {
+            case .moving(let update): isMoving = true; progress = update
+            case .completed(let outcome, let restored, let update, let busy):
+                result = outcome; restoreResult = restored; restoreProgress = update; isRestoring = busy
+            case .failed(let outcome): result = outcome
+            case nil: break
+            }
+        }
     }
 
     private var confirmation: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(NoticeCopy.confirmTitle(recordingCount: fileCount, artifactCount: artifactCount))
                 .font(.headline)
-            RecordingsFolderLink(folderPath: folderPath)
+            RecordingsFolderLink(folderPath: folderPath, alignment: folderAlignment)
                 .accessibilityIdentifier("confirm-folder-link")
             Text(NoticeCopy.restoreNotice)
                 .fixedSize(horizontal: false, vertical: true)
@@ -380,7 +431,7 @@ struct RecordingsTrashConfirmView: View {
 
     private func completion(_ result: RecordingRemoval.Result) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(restoreResult?.succeeded == true ? "Recordings restored" :
+            Text(restoreResult != nil ? (restoreResult?.succeeded == true ? "Recordings restored" : "Some recordings still need restoring") :
                  result.removedFiles > 0 ? "Moved to Trash" :
                  result.retainedRecordings > 0 ? "Recordings in use were kept" : "No recordings to move")
                 .font(.headline).accessibilityIdentifier("trash-completion")
@@ -396,7 +447,7 @@ struct RecordingsTrashConfirmView: View {
                      + "(\(result.removedFiles.formatted()) files) were moved to Trash.")
             }
             if result.retainedRecordings > 0 {
-                Text("\(result.retainedRecordings) recordings in use or started during this move were kept in the recordings folder.")
+                Text("\(result.retainedRecordings.formatted()) \(result.retainedRecordings == 1 ? "recording in use or started during this move was" : "recordings in use or started during this move were") kept in the recordings folder.")
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("trash-retained-recordings")
             }
@@ -516,6 +567,13 @@ struct RecordingsTrashConfirmView: View {
 
     private func moveToTrash() {
         guard !isMoving else { return }
+        do {
+            try beforeTrash()
+            startError = nil
+        } catch {
+            startError = "Your recording preference could not be saved, so no files were moved. \(error.localizedDescription)"
+            return
+        }
         isMoving = true
         result = nil
         progress = nil
@@ -535,6 +593,7 @@ struct RecordingsTrashConfirmView: View {
 /// A visible file URL remains useful for long paths and keyboard/VoiceOver users.
 struct RecordingsFolderLink: View {
     let folderPath: String
+    var alignment: Alignment = .leading
     var onOpen: () -> Void = {}
 
     var body: some View {
@@ -544,9 +603,9 @@ struct RecordingsFolderLink: View {
         } label: {
             Text(folderPath)
                 .foregroundStyle(.blue)
-                .multilineTextAlignment(.leading)
+                .multilineTextAlignment(alignment == .center ? .center : .leading)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, alignment: alignment)
         }
         .buttonStyle(.plain)
         .help("Open recordings and transcripts in Finder: \(folderPath)")
@@ -591,60 +650,5 @@ struct WaveformMark: View {
                               y: geo.size.height / 2)
             }
         }
-    }
-}
-
-// MARK: - Design-review preview (`speakfree notice-preview`)
-
-/// Opens the shipping dialog with INERT actions — clicks only print to stdout;
-/// nothing reads or writes config, and delete deletes nothing.
-public enum RecordingsNoticePreview {
-    public static func run() {
-        let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
-        // Preview-only failure injection exercises the real error sheet without
-        // deleting user files. It has no effect on the running dictation app.
-        let simulateFailure = ProcessInfo.processInfo.environment["SPEAKFREE_NOTICE_PREVIEW_FAILURE"] == "1"
-
-        let view = RecordingsNoticeView(
-            initialSaveToggle: false,
-            onToggle: { print("preview: toggle → \($0) — inert") },
-            onContinue: { print("preview: Continue (didDelete=\($0)) — inert") },
-            trashAction: { progress in
-                print("preview: TRASH clicked — inert, nothing moved")
-                for step in 0...10 {
-                    Thread.sleep(forTimeInterval: 0.4)
-                    progress(RecordingRemoval.Progress(phase: .moving, completed: step, total: 10,
-                                                       elapsedSeconds: Double(step) * 0.4))
-                }
-                return RecordingRemoval.Result(removedFiles: simulateFailure ? 0 : 10,
-                    failedFiles: simulateFailure ? 1 : 0, enumerationFailed: false,
-                    recoveryDirectory: nil, trashDirectory: nil, elapsedSeconds: 4.4)
-            }
-        )
-        let hosting = NSHostingController(rootView: VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("UI TEST — no recordings will be moved")
-                    .font(.headline)
-                Text("Folder buttons open the test folder. This is not the running SpeakFree app.")
-                    .font(.callout)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16)
-            .background(Color.gray.opacity(0.12))
-            Divider()
-            view
-        })
-        let window = NSWindow(contentViewController: hosting)
-        window.title = "UI TEST — SpeakFree recordings preview"
-        window.styleMask = [.titled, .closable]
-        window.isReleasedWhenClosed = false
-        window.center()
-        window.orderFront(nil)
-
-        app.activate(ignoringOtherApps: true)
-        print("notice-preview: dialog on screen (inert) — Ctrl-C or close to quit")
-        app.run()
     }
 }

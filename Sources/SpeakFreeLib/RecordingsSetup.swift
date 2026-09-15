@@ -102,15 +102,17 @@ struct RecordingsSetupView: View {
                 Text(RecordingsSetupCopy.existingBody)
                 Text(RecordingsSetupCopy.existingDetail).foregroundStyle(.secondary)
                 RecordingsFolderLink(folderPath: folderPath)
-                HStack {
+                VStack(alignment: .leading, spacing: 12) {
                     Button("Back") { saveChoice = nil; saveError = nil }
                         .help("Return to the choice about saving future dictations")
-                    Spacer()
+                    HStack {
                     Button(NoticeCopy.deleteLinkText) { showTrash = true }
                         .help("Review the confirmation before moving existing recordings to Trash")
+                    Spacer()
                     Button(RecordingsSetupCopy.keep) { finish(decision: movedRecordings ? "delete" : "keep") }
                         .help("Leave existing recordings here and finish setup")
                         .keyboardShortcut(.defaultAction)
+                    }
                 }
             } else {
                 Text(RecordingsSetupCopy.title).font(.title2.weight(.semibold))
@@ -136,7 +138,7 @@ struct RecordingsSetupView: View {
         }
         .fixedSize(horizontal: false, vertical: true)
         .padding(24)
-        .frame(width: 540)
+        .frame(width: 660)
         .sheet(isPresented: $showTrash, onDismiss: {
             if movedRecordings { finish(decision: "delete") }
         }) {

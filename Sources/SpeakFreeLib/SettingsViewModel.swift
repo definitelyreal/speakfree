@@ -30,6 +30,7 @@ public class SettingsViewModel: ObservableObject {
     @Published public var localAPIEnabled: Bool
     @Published public var localAPIPort: Int
     @Published public var saveRecordings: Bool
+    @Published public var saveError: String?
 
     // MARK: - Callback
 
@@ -152,9 +153,22 @@ public class SettingsViewModel: ObservableObject {
     /// Save the current settings to disk and notify the callback.
     public func save() {
         let config = toConfig()
-        try? config.save()
-        baseConfig = config
-        onSave?()
+        do {
+            try config.save()
+            baseConfig = config
+            saveError = nil
+            onSave?()
+        } catch {
+            saveError = "Settings could not be saved. Your previous saved settings are still active. \(error.localizedDescription)"
+        }
+    }
+
+    func selectRecordingRetention(_ value: Int) {
+        var config = toConfig()
+        RecordingRetention.apply(value, to: &config)
+        saveRecordings = config.saveRecordings?.value == true
+        maxRecordings = config.maxRecordings ?? 0
+        save()
     }
 
     // MARK: - Punctuation modes per engine
