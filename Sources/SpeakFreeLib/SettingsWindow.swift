@@ -762,12 +762,12 @@ struct SettingsView: View {
                             }
                         }
                         if storedRecordingCount > 0 {
-                            HStack(spacing: 4) {
+                            VStack(alignment: .leading, spacing: 4) {
                                 Text("Your corpus: \(storedRecordingCount) recordings and "
                                      + "transcripts, stored only on this Mac.")
                                     .font(.footnote)
                                     .foregroundColor(.secondary)
-                                Button("→ 🗑️") { showDeleteRecordingsSheet = true }
+                                Button(NoticeCopy.deleteLinkText) { showDeleteRecordingsSheet = true }
                                     .help("Move recordings and transcripts to Trash")
                                     .accessibilityLabel("Move recordings and transcripts to Trash")
                                     .buttonStyle(.link)

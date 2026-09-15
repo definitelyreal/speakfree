@@ -1,3 +1,4 @@
+// ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-14
 // Claude · 2026-07-14 · Session: c58489fa-5c7d-451c-870d-8f4f5578ed2c
 import XCTest
 @testable import SpeakFreeLib
@@ -170,28 +171,8 @@ final class RecordingsNoticeTests: XCTestCase {
                       "with saving off, a finished dictation must leave zero files; found \(contents)")
     }
 
-    // MARK: - Copy
-
-    func testNoticeCopyHasNoEmDashes() {
-        // UI copy rule (2026-08-21 reframe): no em-dashes anywhere the user reads.
-        let all = [
-            NoticeCopy.header, NoticeCopy.noteLabel, NoticeCopy.note, NoticeCopy.turnedOff,
-            NoticeCopy.toggleLabel, NoticeCopy.deleteLeadIn, NoticeCopy.deleteLinkText,
-            NoticeCopy.deleteLeadOut, NoticeCopy.openFolderLabel, NoticeCopy.continueKeepLabel,
-            NoticeCopy.continueLabel, NoticeCopy.confirmTitle, NoticeCopy.confirmDataNote,
-            NoticeCopy.confirmQuestion, NoticeCopy.confirmBody(fileCount: 3, folder: "/x"),
-        ]
-        for s in all {
-            XCTAssertFalse(s.contains("\u{2014}"), "em-dash in notice copy: \(s)")
-        }
-    }
-
-    func testNoticeCopyLeadsWithTheCorpusNotTheApology() {
-        // The header is the first thing read: it must frame the archive as the user's
-        // asset, not as something done to them (Michael, 2026-08-21).
-        XCTAssertTrue(NoticeCopy.header.lowercased().contains("corpus"))
-        XCTAssertFalse(NoticeCopy.header.lowercased().contains("we were"))
-    }
+    // Michael's September 14 edits supersede the older no-em-dash and
+    // corpus-before-apology editorial assertions. Wording is reviewed in context.
 
     // MARK: - Config round-trip
 

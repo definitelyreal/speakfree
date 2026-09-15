@@ -332,10 +332,48 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         return choice
     }
 
+    private func completeRecordingsSetupIfNeeded() -> Bool {
+        // Avoid scanning a large corpus on ordinary reloads or developer machines.
+        guard RecordingsSetup.shouldPresent(config: config, hasRecordings: false,
+                                            developerMode: DevMode.isActive) else { return true }
+        let hasRecordings = RecordingStore.hasAudioFiles()
+        guard RecordingsSetup.shouldPresent(config: config, hasRecordings: hasRecordings,
+                                            developerMode: DevMode.isActive) else { return true }
+        let fileCount = hasRecordings ? RecordingStore.recordingFileCount() : 0
+        let folderPath = RecordingStore.recordingsDir.path
+        var proceeded = false
+        let present = {
+            proceeded = RecordingsSetupController.show(hasRecordings: hasRecordings,
+                                                       fileCount: fileCount, folderPath: folderPath)
+        }
+        if Thread.isMainThread {
+            present()
+        } else {
+            let finished = DispatchSemaphore(value: 0)
+            CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+                present()
+                finished.signal()
+            }
+            CFRunLoopWakeUp(CFRunLoopGetMain())
+            finished.wait()
+        }
+        guard proceeded else {
+            // Closing initial setup leaves no implicit answer. Quit gracefully so
+            // the next launch asks again rather than leaving a non-recording app.
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+            return false
+        }
+        config = Config.load()
+        return true
+    }
+
     private func setupInner() throws {
         DiagnosticLogger.shared.setup()
         DiagnosticLogger.shared.log("Setup started")
         config = Config.load()
+        // Ask before pruning, recovery, downloads or live capture. This single gate
+        // covers both cached models and Welcome's automatic post-download restart.
+        guard completeRecordingsSetupIfNeeded() else { return }
         // One-line effective-config snapshot (Michael 2026-08-20: forensics need the
         // settings a session actually ran with, not a guess from the current file).
         var cfgParts: [String] = []
