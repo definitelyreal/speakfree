@@ -339,7 +339,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let hasRecordings = RecordingStore.hasAudioFiles()
         guard RecordingsSetup.shouldPresent(config: config, hasRecordings: hasRecordings,
                                             developerMode: DevMode.isActive) else { return true }
-        let fileCount = hasRecordings ? RecordingStore.recordingFileCount() : 0
+        let fileCount = hasRecordings ? RecordingStore.recordingCount() : 0
         let folderPath = RecordingStore.recordingsDir.path
         var proceeded = false
         let present = {
@@ -406,7 +406,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // inventory is the ORPHAN SWEEP — any recent wav without a transcript sidecar,
         // headers repaired in place. The old handler (`reprocess`) only re-read a .txt
         // that a crashed recording never has; recovery now actually TRANSCRIBES.
-        let maxRecordings = (DevMode.isActive || config.preserveAllRecordings?.value == true)
+        let maxRecordings = (DevMode.isActive || !DevMode.effectiveSaveRecordings(config) || config.preserveAllRecordings?.value == true)
             ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         if maxRecordings > 0 {
             RecordingStore.prune(maxCount: maxRecordings)
@@ -1981,10 +1981,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 DiagnosticLogger.shared.log(
                     "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples))) and the wav did not rescue it — audio engine may be dead, rebuilding")
             }
-            // Keep the wav on a SILENT failure even when saving is off (2026-07-25
-            // audit F11): a silent capture means the mic/route is broken, and the
-            // audio is the diagnostic evidence. Only genuine accidental taps
-            // (.tooShort with real samples) honor the opt-out deletion.
+            // Keep None also applies to diagnostic failures. Developer mode remains
+            // the explicit, visibly disclosed override through effectiveSaveRecordings.
             let isSilentFailure: Bool
             if case .silent = failure { isSilentFailure = true } else { isSilentFailure = false }
             let isCaptureFailure: Bool
@@ -1994,7 +1992,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 isCaptureFailure = false
             }
-            if !DevMode.effectiveSaveRecordings(config) && !isSilentFailure {
+            if !DevMode.effectiveSaveRecordings(config) {
                 try? FileManager.default.removeItem(at: audioURL)
             }
             if isCaptureFailure {
@@ -2008,7 +2006,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 recordingOverlay.show(state: .error("Capture failed: please try again"))
                 showCaptureFailureAlert()
-            } else if isSilentFailure {
+            } else if isSilentFailure && DevMode.effectiveSaveRecordings(config) {
                 // Empty sidecar (review #6): the kept wav is diagnostic evidence,
                 // NOT a recoverable dictation — without this the launch sweep
                 // re-offers known-silent audio every launch and masks real orphans.
@@ -2077,10 +2075,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Snapshot ALL config-derived state on main before crossing into the async Task.
         // Accessing self.config.* from a background queue is a torn-read race — Config is a
         // struct so reads and writes are not atomic across threads.
-        let maxRecordings = (DevMode.isActive || config.preserveAllRecordings?.value == true)
-            ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
-        // Recordings privacy: persisting audio + transcripts is opt-in (2026-07-14).
-        let keepRecording = DevMode.effectiveSaveRecordings(config)
+        // Retention is deliberately NOT captured here. A user can change it while
+        // inference runs; the completion must honor that newer preference.
         // Resolved through the one shared default (Michael 2026-08-12). The full history of
         // why a missing key means `.off` — including the reverted 2026-07-26 flip to
         // `.hybrid` and the text corruption it caused — lives on
@@ -2201,6 +2197,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     targetApp: metaTargetApp,
                     transcriptionDiagnostics: transcriber.lastDiagnostics
                 )
+                let retentionConfig = Config.load()
+                let keepRecording = DevMode.effectiveSaveRecordings(retentionConfig)
+                let maxRecordings = (DevMode.isActive || !keepRecording || retentionConfig.preserveAllRecordings?.value == true)
+                    ? 0 : Config.effectiveMaxRecordings(retentionConfig.maxRecordings)
                 RecordingStore.finishRecording(
                     audioURL: audioURL, keep: keepRecording, raw: primaryRaw, text: text, meta: meta)
                 RecordingStore.clearSentinel(recordingURL: audioURL)
@@ -2240,6 +2240,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 // The opt-out must win on the failure path too: finishRecording(keep:false)
                 // — the deletion the user consented to — is never reached when inference
                 // throws, and the wav would silently persist against the setting.
+                let retentionConfig = Config.load()
+                let keepRecording = DevMode.effectiveSaveRecordings(retentionConfig)
+                let maxRecordings = (DevMode.isActive || !keepRecording || retentionConfig.preserveAllRecordings?.value == true)
+                    ? 0 : Config.effectiveMaxRecordings(retentionConfig.maxRecordings)
                 if !keepRecording {
                     try? FileManager.default.removeItem(at: audioURL)
                 }

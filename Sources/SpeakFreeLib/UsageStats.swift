@@ -160,11 +160,9 @@ class UsageStats {
     static let handTravelMetresPerKeystroke = 0.02
     var handTravelMetres: Double { Double(data.totalCharacters) * Self.handTravelMetresPerKeystroke }
 
-    /// Imperial: feet under a mile, then miles ("0.6 miles", "12 miles").
+    /// One consistent unit and one decimal, including zero (Michael's settings copy).
     var handTravelImperialDescription: String {
-        let feet = handTravelMetres * 3.28084
-        if feet < 5280 { return "\(Int(feet)) feet" }
-        let miles = feet / 5280
+        let miles = handTravelMetres / 1609.344
         return String(format: "%.1f miles", miles)
     }
 

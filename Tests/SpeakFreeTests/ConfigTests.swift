@@ -1,3 +1,4 @@
+// ai-processed:unverified · session:unknown · 2026-09-15
 import XCTest
 @testable import SpeakFreeLib
 
@@ -25,9 +26,11 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(Config.effectiveMaxRecordings(100), 100)
     }
 
-    func testEffectiveMaxRecordingsClampsAbove100() {
-        XCTAssertEqual(Config.effectiveMaxRecordings(200), 100)
-        XCTAssertEqual(Config.effectiveMaxRecordings(999), 100)
+    func testEffectiveMaxRecordingsPreservesRequestedPositiveLimit() {
+        for limit in [200, 999, 1_000, 10_000] {
+            XCTAssertEqual(Config.effectiveMaxRecordings(limit), limit,
+                           "A selected retention limit must not silently retain fewer recordings")
+        }
     }
 
     // MARK: - FlexBool decoding

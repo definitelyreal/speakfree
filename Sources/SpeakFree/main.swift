@@ -268,7 +268,11 @@ case "--help", "-h", "help":
     printUsage()
 case nil:
     // Launched as app bundle (no arguments) — start the daemon
-    cmdStart()
+    if Bundle.main.object(forInfoDictionaryKey: "SFInertRecordingsReview") as? Bool == true {
+        RecordingsNoticePreview.run()
+    } else {
+        cmdStart()
+    }
 default:
     print("Unknown command: \(command!)")
     printUsage()
