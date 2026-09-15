@@ -64,6 +64,8 @@ public struct Config: Codable {
     // nil = undecided — the notice returns every launch and every few hours until the
     // user chooses. Never shown again once set.
     public var recordingsNoticeDecision: String?
+    // Explicit new-user saving choice completed; nil remains backward compatible.
+    public var recordingsSetupCompleted: Bool?
 
     // Preferred dictation microphone UID. nil selects Automatic: a connected Bluetooth
     // input when available, otherwise the coordinator's base microphone. The built-in

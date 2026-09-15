@@ -1,6 +1,39 @@
 <!-- ai-processed:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-13 | asof:2026-09-14 -->
 # Existing-code release: start here
 
+## September 14: approved copy, layout and initial saving choice
+
+The release checkout now contains Michael's five saved recordings copy edits and his
+approved setup draft. The notice has a centered saving switch in an explicit gray box,
+a centered blue folder link, and the updated “🗑️ Move Recordings to Trash” label in
+both notice and Settings. The confirmation is the sheet opened by that link: it omits
+the repeated data note and separate Open Folder button, and gives clickable controls
+hover help. Preparing, moving and finishing reserve identical progress space. Empty
+results no longer imply that files were moved or offer a restore link for nonexistent moves.
+
+New users answer the saving question before setup can reach downloads, pruning or capture.
+Both cached-model and automatic post-download paths pass this gate. Existing explicit
+saving choices, acknowledged legacy notices and developer mode are preserved. Existing
+users with an undisclosed corpus still receive Michael's full notice. Setup with recordings
+keeps future saving separate from keeping or trashing existing files; persistence errors
+leave the choice open. Closing initial setup leaves no saved answer and exits gracefully.
+
+Seventy focused tests passed, including 8 new consent/persistence/failure and native layout
+checks. Optimized build passed in 77.07 seconds. Strict lint of RecordingsNotice,
+RecordingsSetup and RecordingsSetupTests reports zero violations. This does not clear the
+previously documented broader CI findings. An independent source review found no actionable
+issue. The inert native sheet measured 500 × 276 points at identical x/y through all three
+progress phases; new-user decline and existing-files choice were exercised in the preview.
+These are fixture observations, not installed-app or real-files acceptance.
+
+Private application receipt and human correction snapshot:
+`build/release-readiness/2026-09-14-copy-layout/`. Revised editable preview and native
+images are in sibling research `build/2026-09-14-approved-copy-preview/`. Original edit
+ledgers remain intact. No app was installed or restarted for this change. Installed state
+below remains unchanged; fresh installed-app setup/close, actual Trash and fleet qualification
+are still required before public release.
+
+
 Current runtime checkpoint, September 14: **release-test `c90b1bc` is installed and
 running on Noah and Ark**. Noah PID 23308 logged hotkey readiness, permissions/controls OK,
 and successful Parakeet warm-up. Ark's guarded installer returned `remote RUNNING`, then

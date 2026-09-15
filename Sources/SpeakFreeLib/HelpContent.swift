@@ -431,7 +431,7 @@ public enum HelpContent {
             .action("Open Recordings Folder", .openRecordingsFolder),
             .spacer,
             .paragraph("Once recordings exist, Settings → General shows how many you have with a "
-                       + "\"→ 🗑️\" link beside the count. That moves the audio "
+                       + "\"\(NoticeCopy.deleteLinkText)\" link below the count. That moves the audio "
                        + "and the transcripts together."),
             .action("Open Settings", .openSettings),
         ])
