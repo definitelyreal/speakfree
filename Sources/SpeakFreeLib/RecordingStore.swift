@@ -492,7 +492,7 @@ public class RecordingStore {
         cachedCountDir = recordingsDir.path
     }
 
-    private static func invalidateCachedCount() {
+    static func invalidateCachedCount() {
         countLock.lock()
         defer { countLock.unlock() }
         cachedCountDir = nil

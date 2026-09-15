@@ -141,7 +141,9 @@ struct RecordingsSetupView: View {
             if movedRecordings { finish(decision: "delete") }
         }) {
             RecordingsTrashConfirmView(fileCount: fileCount, folderPath: folderPath,
-                                      trashAction: trashAction, onDeleted: { movedRecordings = true })
+                                      trashAction: trashAction,
+                                      onDeleted: { movedRecordings = true },
+                                      onRestored: { movedRecordings = false })
         }
     }
 
