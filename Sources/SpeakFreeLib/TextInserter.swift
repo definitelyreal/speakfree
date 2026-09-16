@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:019fecb2-8ac5-7423-90a3-d70aac039387 · 2026-08-10
+// ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-16
 import AppKit
 import Foundation
 import Cocoa
@@ -31,6 +31,27 @@ class TextInserter {
     /// frontmost on the developer's machine — the "ghost typing" failure mode where a unit test
     /// types its own fixture text into the foreground app (see SecureInputTests).
     var performInsertion: ((String) -> Void)?
+
+    /// Routing seams let regression tests exercise the production remote/local decision
+    /// without querying another app or posting input into the user's foreground window.
+    var frontmostBundleIDProvider: () -> String? = {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+    }
+    var performRemoteInsertion: ((String) -> Void)?
+    var performLocalInsertion: ((String) -> Void)?
+    var frontmostPIDProvider: () -> pid_t? = {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+    var executeAppleScript: (String) -> NSDictionary? = { source in
+        guard let script = NSAppleScript(source: source) else {
+            return ["NSAppleScriptErrorNumber": -2740]
+        }
+        var error: NSDictionary?
+        script.executeAndReturnError(&error)
+        return error
+    }
+    var performUnicodeInsertion: ((String) -> Bool)?
+    var onRemoteInsertionFailure: ((String, String) -> Void)?
 
     /// Seam for the pasteboard all clipboard paths write to (`pasteViaClipboard`,
     /// `copyToClipboard`, `secureInputClipboardFallback`). Production stays on
@@ -351,7 +372,16 @@ class TextInserter {
                         }
                         // Fall back to clipboard paste (through the test seam so a unit test
                         // reaching this closure can never fire a real Cmd+V — PLAN.md P-1).
-                        (self.performInsertion ?? self.pasteViaClipboard)(text)
+                        if let performInsertion = self.performInsertion {
+                            performInsertion(text)
+                        } else if self.isRemoteDesktopFrontmost() {
+                            // Remote viewers need their remote-specific insertion route even
+                            // after refocusing. A blind clipboard paste requires clipboard
+                            // sharing and must not replace the single-line keystroke route.
+                            self.pasteText(text)
+                        } else {
+                            (self.performLocalInsertion ?? self.pasteViaClipboard)(text)
+                        }
                     }
                     return true
                 } else {
@@ -393,7 +423,12 @@ class TextInserter {
         // Remote desktop: type via AppleScript keystroke (clipboard sync unreliable)
         if isRemote {
             DiagnosticLogger.shared.log("TextInserter: using AppleScript keystroke (remote desktop)")
-            typeViaAppleScript(text)
+            (performRemoteInsertion ?? typeViaAppleScript)(text)
+            return
+        }
+
+        if let performLocalInsertion = performLocalInsertion {
+            performLocalInsertion(text)
             return
         }
 
@@ -444,32 +479,75 @@ class TextInserter {
     /// Used for remote desktop apps where clipboard sync is unreliable.
     private func typeViaAppleScript(_ text: String) {
         // Multi-line text is slow and lossy as per-line keystrokes on remote desktop.
-        // Fall back to clipboard which remote desktop apps sync correctly.
+        // Clipboard insertion requires the remote viewer's clipboard sharing feature.
         if text.contains("\n") || text.contains("\r") {
             pasteViaClipboard(text)
             return
         }
 
-        guard let app = NSWorkspace.shared.frontmostApplication else { return }
-        let pid = app.processIdentifier  // target by PID — process name can be ambiguous
+        guard let pid = frontmostPIDProvider() else {
+            remoteInsertionFailed(text, message: "The remote desktop is no longer available.")
+            return
+        }
         // Escape double quotes and backslashes for AppleScript
         let escaped = text
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
-        let script = NSAppleScript(source: """
+        let source = """
             tell application "System Events"
                 tell (first process whose unix id is \(pid))
                     keystroke "\(escaped)"
                 end tell
             end tell
-        """)
-        var error: NSDictionary?
-        script?.executeAndReturnError(&error)
-        if let error = error {
+        """
+        if let error = executeAppleScript(source) {
             Self.logAppleEventsDenialHint(error)
-            DiagnosticLogger.shared.log("TextInserter: AppleScript keystroke failed: \(error) — falling back to clipboard")
-            pasteViaClipboard(text)
+            // An error does not prove that no prefix was inserted. Retrying by paste
+            // can duplicate it, and an Automation denial blocks both AppleScript tiers.
+            DiagnosticLogger.shared.log("TextInserter: remote keystroke failed; offering recovery without retry")
+            remoteInsertionFailed(text, message: Self.remoteScriptFailureMessage(error))
         }
+    }
+
+    private static func remoteScriptFailureMessage(_ error: NSDictionary) -> String {
+        if (error["NSAppleScriptErrorNumber"] as? Int) == -1743 {
+            return "Allow SpeakFree to control System Events in System Settings → Privacy & Security → Automation, then try again."
+        }
+        return "macOS could not confirm delivery to the remote desktop."
+    }
+
+    /// Retain text visibly without clobbering the clipboard or automatically retrying.
+    /// Copying is an explicit user choice, especially important for large clipboard items.
+    private func remoteInsertionFailed(_ text: String, message: String) {
+        if let onRemoteInsertionFailure = onRemoteInsertionFailure {
+            onRemoteInsertionFailure(text, message)
+            return
+        }
+        // A modal started from a main-dispatch block starves other main-queue
+        // work, including clipboard restoration. Enter through the run loop.
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) { [weak self] in
+            guard let self = self else { return }
+            let alert = NSAlert()
+            alert.messageText = "Check your remote dictation"
+            alert.informativeText = message + "\n\nYour dictation is below. Check the destination before pasting to avoid duplicates."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Close")
+            alert.addButton(withTitle: "Copy Dictation")
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 440, height: 160))
+            scroll.hasVerticalScroller = true
+            let view = NSTextView(frame: scroll.bounds)
+            view.isEditable = false
+            view.isSelectable = true
+            view.string = text
+            view.font = .systemFont(ofSize: NSFont.systemFontSize)
+            view.textContainerInset = NSSize(width: 8, height: 8)
+            scroll.documentView = view
+            alert.accessoryView = scroll
+            if alert.runModal() == .alertSecondButtonReturn {
+                Self.writeTransientString(text, to: self.pasteboard)
+            }
+        }
+        CFRunLoopWakeUp(CFRunLoopGetMain())
     }
 
     /// -1743 = the app has no Automation (Apple Events → System Events) grant. Both remote-
@@ -650,6 +728,7 @@ class TextInserter {
 
     /// Remote desktop apps that don't properly forward CGEvent unicode key events.
     private static let remoteDesktopBundleIDs: Set<String> = [
+        "com.apple.ScreenSharing",          // macOS Screen Sharing (raw key 0 becomes "a")
         "com.splashtop.stp.macosx",          // Splashtop Personal
         "com.splashtop.Splashtop-Streamer",  // Splashtop Streamer
         "com.splashtop.PersonalBusiness",    // Splashtop Business
@@ -666,8 +745,14 @@ class TextInserter {
     ]
 
     func isRemoteDesktopFrontmost() -> Bool {
-        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return false }
-        if Self.remoteDesktopBundleIDs.contains(bundleID) { return true }
+        Self.isRemoteDesktop(bundleID: frontmostBundleIDProvider())
+    }
+
+    static func isRemoteDesktop(bundleID: String?) -> Bool {
+        guard let bundleID = bundleID else { return false }
+        if Self.remoteDesktopBundleIDs.contains(where: {
+            $0.caseInsensitiveCompare(bundleID) == .orderedSame
+        }) { return true }
         // Fuzzy match for apps with variant bundle IDs
         let lower = bundleID.lowercased()
         let remoteKeywords = ["splashtop", "teamviewer", "parsec", "moonlight", "vnc", "remotedesktop"]
@@ -929,6 +1014,12 @@ class TextInserter {
     /// CGEventKeyboardSetUnicodeString limits input to 20 UTF-16 code units per event.
     /// Chunks by Unicode scalars to avoid splitting surrogate pairs at chunk boundaries.
     private func typeViaKeyEvents(_ text: String) -> Bool {
+        if let performUnicodeInsertion = performUnicodeInsertion {
+            return performUnicodeInsertion(text)
+        }
+        // Remote viewers may ignore the Unicode payload and forward virtualKey 0
+        // literally as "a". Never use this backend for a recognized remote viewer.
+        guard !isRemoteDesktopFrontmost() else { return false }
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
 
         for op in Self.keystrokeOps(for: text) {
@@ -981,7 +1072,7 @@ class TextInserter {
     /// focus-settle) and the backstop closure is main-dispatched. The precondition turns a future
     /// off-main caller (e.g. FinalizePipeline.run with a real inserter) into a crash instead of a
     /// silent data race on the shared state.
-    private func pasteViaClipboard(_ text: String) {
+    func pasteViaClipboard(_ text: String) {
         dispatchPrecondition(condition: .onQueue(.main))
         let pasteboard = self.pasteboard
         let route: PasteRoute = isRemoteDesktopFrontmost() ? .remote
@@ -999,6 +1090,10 @@ class TextInserter {
             total + item.reduce(0) { $0 + $1.1.count }
         }
         if !Self.canSafelySaveClipboard(byteSize: clipboardByteSize) {
+            if route == .remote {
+                remoteInsertionFailed(text, message: "Your clipboard contains a large item. SpeakFree left it unchanged instead of sending unreliable remote keystrokes.")
+                return
+            }
             DiagnosticLogger.shared.log(
                 "TextInserter: clipboard has \(clipboardByteSize / 1024)KB of data — "
                 + "falling back to CGEvent to avoid clobbering it"
@@ -1012,7 +1107,7 @@ class TextInserter {
         // ONE generation, so the restore guard compares against THIS returned value (equality).
         let writtenChangeCount = TextInserter.writeTransientString(text, to: pasteboard)
 
-        simulatePaste()
+        simulatePaste(text, expectedChangeCount: writtenChangeCount)
 
         pendingRestore = PendingClipboardRestore(savedItems: savedItems,
                                                  writtenChangeCount: writtenChangeCount)
@@ -1203,9 +1298,7 @@ class TextInserter {
         pasteboard.writeObjects(pasteboardItems)
     }
 
-    private func simulatePaste() {
-        guard let vKey = vKeyCode() else { return }
-
+    private func simulatePaste(_ text: String, expectedChangeCount: Int) {
         // For remote desktop apps, use AppleScript keystroke targeted at the process.
         // Remote desktop apps capture raw HID events and forward them to the remote
         // machine. CGEvent.post sends through HID, so Cmd+V becomes a raw "V" keypress.
@@ -1215,26 +1308,44 @@ class TextInserter {
         // Delay the Cmd+V by 400ms so the remote clipboard has time to sync from
         // the local clipboard before the paste fires. Without this delay, Splashtop
         // pastes the OLD clipboard content on the remote (sync hadn't completed yet).
-        if isRemoteDesktopFrontmost(), let app = NSWorkspace.shared.frontmostApplication {
-            let pid = app.processIdentifier  // target by PID — process name can be ambiguous
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                let script = NSAppleScript(source: """
+        if isRemoteDesktopFrontmost() {
+            guard let pid = frontmostPIDProvider() else {
+                remoteInsertionFailed(text, message: "The remote desktop is no longer available.")
+                return
+            }
+            let bundleID = frontmostBundleIDProvider()
+            let focusedElement = currentFocusedElement()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self = self else { return }
+                let focusUnchanged = focusedElement.map { expected in
+                    self.currentFocusedElement().map { CFEqual(expected, $0) } ?? false
+                } ?? true
+                guard self.frontmostPIDProvider() == pid,
+                      self.frontmostBundleIDProvider() == bundleID,
+                      self.pasteboard.changeCount == expectedChangeCount,
+                      !self.isSecureInputActive(), focusUnchanged else {
+                    // A rapid second dictation owns the newer clipboard and its own paste.
+                    // Do not paste any newer user copy or send input into changed focus.
+                    self.remoteInsertionFailed(text, message: "The clipboard or focused field changed before the remote paste. SpeakFree did not send the paste shortcut.")
+                    return
+                }
+                let source = """
                     tell application "System Events"
                         tell (first process whose unix id is \(pid))
                             keystroke "v" using command down
                         end tell
                     end tell
-                """)
-                var error: NSDictionary?
-                script?.executeAndReturnError(&error)
-                if let error = error {
+                """
+                if let error = self.executeAppleScript(source) {
                     Self.logAppleEventsDenialHint(error)
-                    DiagnosticLogger.shared.log("TextInserter: AppleScript paste failed: \(error)")
+                    DiagnosticLogger.shared.log("TextInserter: remote paste failed; offering recovery")
+                    self.remoteInsertionFailed(text, message: Self.remoteScriptFailureMessage(error))
                 }
             }
             return
         }
 
+        guard let vKey = vKeyCode() else { return }
         guard let source = CGEventSource(stateID: .hidSystemState),
             let keyDown = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true),
             let keyUp = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false) else {
