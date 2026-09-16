@@ -40,6 +40,16 @@ not a main-dispatch block, so clipboard restoration can continue.
 
 ## Still requires live acceptance
 
+Candidate `ecee961` is installed and running on all three Macs after the guarded
+fleet update. The first attempt timed out during Studio staging, before any app stop;
+the retry completed. Independent post-install reads found the same build stamp and
+executable SHA256 `45f6dd8577951f583dd82f1e81e88628e78b8ce3563d66d3b62a12081f234c2e`
+on Noah (PID 60578), Studio (PID 54279) and Ark (PID 84976). Previous installed bundles
+were moved to Trash before copying. No recording/backups were removed. Receipt:
+`build/release-readiness/2026-09-16-screen-sharing-deploy-retry.log`.
+Noah free space returned to about 87 GB at the post-install check as background
+disk activity settled. These startup checks do not establish live dictation success.
+
 Actual voice-to-remote-document insertion, non-ASCII/emoji fidelity and remote clipboard
 synchronization remain unverified. Multiline uses the remote clipboard path and depends
 on the viewer's clipboard-sharing capability. Unit tests use a named pasteboard and
