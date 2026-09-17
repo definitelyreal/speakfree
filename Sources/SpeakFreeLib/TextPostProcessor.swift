@@ -1001,7 +1001,7 @@ public struct TextPostProcessor {
                     // Other command-demo forms intentionally keep the historical output
                     // ("end with a period" -> "end with a.") to avoid changing the calibrated
                     // article/noun tradeoff beyond the evidence supplied for this feature.
-                    if (precedingWord == "a" || precedingWord == "an"),
+                    if precedingWord == "a" || precedingWord == "an",
                        ["over", "like"].contains(articleIntroducer) {
                         let beforeSlice = result[..<range.lowerBound]
                         if let articleEnd = beforeSlice.lastIndex(where: { !$0.isWhitespace }) {

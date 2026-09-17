@@ -1,4 +1,4 @@
-<!-- ai:processed | session: 5b06900b-1498-4764-a786-48f408c36626 | date: 2026-06-10 -->
+<!-- ai-processed:unverified | session:01a0a336-fe39-7870-bdab-33c820f98955 | date:2026-09-17 | asof:2026-09-17 -->
 # speakfree — Release Runbook
 
 This document covers the full path from source to a live Sparkle update.
@@ -95,7 +95,9 @@ This value is committed to the repo and is not secret.
 
 ## 3. Step-by-step release flow
 
-Everything from source to a live Sparkle update in one ordered list.
+Packaging, downloadable publication, and live-update promotion are separate operations.
+The scripts never stop the running app or bypass main's required pull-request review.
+Any separately authorized development installation uses `scripts/dev-deploy-fleet.sh`.
 
 > **After any FluidAudio (or engine) version bump, run the replay canaries first:**
 > `python3 scripts/replay-regression.py --canaries` (optionally `--corpus 40` for a
@@ -105,33 +107,31 @@ Everything from source to a live Sparkle update in one ordered list.
 > 2026-06-12) — so an engine upgrade can silently re-break tail clauses. The canaries
 > replay the original failing clip and assert the clause survives.
 
-```
-1.  Bump version in all three sources (see §4)
-2.  Commit + push the version bump to main
-3.  Run: bash scripts/build.sh
-        └─ Calls check-version.sh (aborts on mismatch)
-        └─ xcrun swift build -c release
-        └─ Copies Info.plist + binary into speakfree.app
-        └─ Verifies vendored dylib checksums (SHA256)
-        └─ Bundles Sparkle.framework + whisper dylibs
-        └─ Fixes rpaths
-        └─ codesign (hardened runtime, entitlements)
-        └─ create-dmg  →  speakfree-<VERSION>.dmg
-        └─ xcrun notarytool submit  (--keychain-profile speakfree-notary)
-        └─ xcrun stapler staple
-        └─ sign_update  →  edSignature
-        └─ Writes docs/appcast.xml  (LOCALLY — not pushed yet)
-        └─ Updates docs/index.html download link (LOCALLY)
-        └─ Installs to /Applications
-        └─ gh release create (DRAFT)
-4.  Dogfood the app from /Applications
-5.  When satisfied, publish:
-        bash scripts/publish-release.sh <VERSION>
-        └─ Promotes draft GitHub release to public
-        └─ git add docs/appcast.xml docs/index.html
-        └─ git commit + git push origin main
-        └─ Verifies the public download URL returns 200
-```
+1. Prepare the version, accurate release notes, and Pages changelog on `main`,
+   `release/X.Y.Z`, or `codex/release/X.Y.Z`. Commit all tracked changes. Keep the
+   source commit SHA; this is the eventual release tag target.
+2. Run relevant tests and strict lint. Run `bash scripts/build.sh`. It checks source
+   version agreement, builds a fresh retained staging bundle, validates vendored
+   libraries, stamps the full source SHA, signs with Developer ID, creates and
+   notarizes/staples the DMG, then generates the signed appcast. The full version
+   check runs afterward. It performs no install, app stop, push, or release upload.
+3. Inspect the actual DMG: signature, notarization, bundled dependency paths, CLI
+   startup and relevant smoke tests. Commit generated appcast/Pages metadata.
+4. Push the candidate branch. Create and push `vX.Y.Z` pointing at the exact source
+   SHA from step 1, not the default branch or a guessed latest commit. Verify the
+   remote tag resolves to that SHA. Upload a draft with:
+   `gh release create vX.Y.Z speakfree-X.Y.Z.dmg --repo definitelyreal/speakfree --verify-tag --draft --title "speakfree vX.Y.Z" --notes-file docs/release-notes/vX.Y.Z.md`.
+5. With publication authorized, run `bash scripts/publish-release.sh X.Y.Z --binary-only`.
+   It verifies the source tag and GitHub asset digest before making the download
+   public. This intentionally leaves GitHub's latest release unchanged, preserving
+   the old site's latest/download URL until reviewed metadata is deployed.
+6. Open a PR to main containing the candidate and signed appcast. Obtain the required
+   independent GitHub review and passing CI; do not use an administrative bypass.
+   The new site uses a version-specific URL so Pages and latest cannot race.
+7. After merge and Pages deployment, use a clean main checkout matching GitHub and
+   retain the original DMG. Run `bash scripts/publish-release.sh X.Y.Z` to promote
+   latest. It requires the actual live appcast and website to reference this release.
+   Verify the public asset, website, and Sparkle feed before claiming auto-update live.
 
 ### Sparkle bin discovery in build.sh
 
@@ -151,25 +151,27 @@ build time and in CI:
 
 | Source | Location | How to update |
 |--------|----------|---------------|
-| Swift constant | `Sources/OpenWisprLib/Version.swift` | Edit the `version` string literal |
+| Swift constant | `Sources/SpeakFreeLib/Version.swift` | Edit the `version` string literal |
 | Info.plist | `Resources/Info.plist` | Edit `CFBundleShortVersionString` + `CFBundleVersion` |
 | Appcast | `docs/appcast.xml` | Written automatically by `build.sh` — do not hand-edit |
 
 ### Version bump procedure
 
-1. Edit `Sources/OpenWisprLib/Version.swift`: change the `version` string.
+1. Edit `Sources/SpeakFreeLib/Version.swift`: change the `version` string.
 2. Edit `Resources/Info.plist`: update both `CFBundleShortVersionString` and
    `CFBundleVersion` to match.
 3. `docs/appcast.xml` is rewritten by `build.sh` — do not pre-edit it.
-4. Confirm: `bash scripts/check-version.sh` exits 0.
+4. Update the Pages version/download surfaces and top changelog entry. Confirm:
+   `bash scripts/check-version.sh --source-only` exits 0. The full check must pass
+   after packaging generates the real signed appcast; never invent its signature.
 5. Commit: `git commit -m "build: bump version to X.Y.Z"`.
 
 ### Appcast update
 
 `build.sh` fully rewrites `docs/appcast.xml` with the new version, download
 URL, DMG byte length, EdDSA signature, and publish date.  It does NOT push
-this file.  `publish-release.sh` commits and pushes it together with the
-updated `docs/index.html` download button as a single atomic commit.
+this file. Commit it with the updated `docs/index.html` download button and submit
+both through the reviewed PR. `publish-release.sh` never commits or pushes main.
 
 ---
 

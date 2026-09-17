@@ -54,6 +54,6 @@ public enum AudioCaptureDiagnostics {
             result["rmsBySource"] = Dictionary(uniqueKeysWithValues: counts.map { ($0.key, sqrt((energy[$0.key] ?? 0) / Double(max(1, $0.value)))) })
         }
         let data = try! JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
-        return String(decoding: data, as: UTF8.self)
+        return String(bytes: data, encoding: .utf8)!
     }
 }

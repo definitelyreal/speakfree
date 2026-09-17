@@ -8,8 +8,8 @@ final class BoundedProcessTests: XCTestCase {
     func testDrainsBothPipesAndPreservesExitStatus() throws {
         let output = try BoundedProcess.run(executable: shell,
             arguments: ["-c", "printf output; printf error >&2; exit 7"], timeout: 2)
-        XCTAssertEqual(String(decoding: output.stdout, as: UTF8.self), "output")
-        XCTAssertEqual(String(decoding: output.stderr, as: UTF8.self), "error")
+        XCTAssertEqual(String(bytes: output.stdout, encoding: .utf8), "output")
+        XCTAssertEqual(String(bytes: output.stderr, encoding: .utf8), "error")
         XCTAssertEqual(output.status, 7)
     }
 

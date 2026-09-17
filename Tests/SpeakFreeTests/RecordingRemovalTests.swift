@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
+// ai-suggestion:unverified · session:01a0abd2-f049-7a20-b665-8b3e09bb8110 · 2026-09-17
 import XCTest
 @testable import SpeakFreeLib
 
@@ -314,6 +314,63 @@ final class RecordingRemovalTests: XCTestCase {
         let recovery = try XCTUnwrap(result.recoveryDirectory)
         XCTAssertEqual(try String(contentsOf: recovery.appendingPathComponent(file.lastPathComponent)), "old")
         XCTAssertFalse(result.succeeded)
+    }
+
+    func testRollbackRetainsWholeGroupWhenNewAudioOccupiesOriginalPath() throws {
+        let audio = try artifact("collision", contents: "old audio")
+        let transcript = try artifact("collision", suffix: "txt", contents: "old transcript")
+        let metadata = try artifact("collision", suffix: "meta.json", contents: "old metadata")
+        let unrelated = try artifact("unrelated", contents: "unrelated audio")
+        let result = RecordingRemoval.run(directory: recordings, trash: { _ in
+            try Data("new audio".utf8).write(to: audio)
+            throw FixtureError.injected
+        })
+
+        XCTAssertFalse(result.succeeded)
+        XCTAssertEqual(try String(contentsOf: audio), "new audio")
+        XCTAssertFalse(fm.fileExists(atPath: transcript.path))
+        XCTAssertFalse(fm.fileExists(atPath: metadata.path))
+        XCTAssertEqual(try String(contentsOf: unrelated), "unrelated audio")
+        let recovery = try XCTUnwrap(result.recoveryDirectory)
+        for (file, contents) in [(audio, "old audio"), (transcript, "old transcript"), (metadata, "old metadata")] {
+            XCTAssertEqual(try String(contentsOf: recovery.appendingPathComponent(file.lastPathComponent)), contents)
+        }
+    }
+
+    func testRollbackRetainsWholeGroupWhenAnUnexpectedCompanionArrives() throws {
+        let audio = try artifact("companion", contents: "old audio")
+        let transcript = try artifact("companion", suffix: "txt", contents: "old transcript")
+        let newCompanion = audio.deletingPathExtension().appendingPathExtension("parakeet.txt")
+        let result = RecordingRemoval.run(directory: recordings, trash: { _ in
+            try Data("new companion".utf8).write(to: newCompanion)
+            throw FixtureError.injected
+        })
+
+        XCTAssertFalse(result.succeeded)
+        XCTAssertEqual(try String(contentsOf: newCompanion), "new companion")
+        XCTAssertFalse(fm.fileExists(atPath: audio.path))
+        XCTAssertFalse(fm.fileExists(atPath: transcript.path))
+        let recovery = try XCTUnwrap(result.recoveryDirectory)
+        XCTAssertEqual(try String(contentsOf: recovery.appendingPathComponent(audio.lastPathComponent)), "old audio")
+        XCTAssertEqual(try String(contentsOf: recovery.appendingPathComponent(transcript.lastPathComponent)), "old transcript")
+    }
+
+    func testRollbackKeepsMovedFilesWhenAnUnstagedCompanionIsAmbiguous() throws {
+        let audio = try artifact("unstaged", contents: "old audio")
+        let transcript = try artifact("unstaged", suffix: "txt", contents: "original transcript")
+        let result = RecordingRemoval.run(directory: recordings, trash: { _ in
+            try Data("changed transcript".utf8).write(to: transcript)
+            throw FixtureError.injected
+        }, move: { source, destination in
+            if source == transcript { throw FixtureError.injected }
+            try RecordingRemoval.moveWithoutReplacing(source, destination)
+        })
+
+        XCTAssertFalse(result.succeeded)
+        XCTAssertFalse(fm.fileExists(atPath: audio.path))
+        XCTAssertEqual(try String(contentsOf: transcript), "changed transcript")
+        let recovery = try XCTUnwrap(result.recoveryDirectory)
+        XCTAssertEqual(try String(contentsOf: recovery.appendingPathComponent(audio.lastPathComponent)), "old audio")
     }
 
     func testAtomicMoverRejectsEveryOccupiedDestination() throws {

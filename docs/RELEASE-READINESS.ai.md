@@ -1,6 +1,34 @@
 <!-- ai-processed:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-13 | asof:2026-09-14 -->
 # Existing-code release: start here
 
+## September 17: v1.7.2 publication candidate
+
+Michael authorized GitHub code and signed binary publication, without reopening the
+preview. Skill integration is deferred to a later update. The accepted rounded folder
+button is centered in the notice; Settings keeps its aligned control column.
+
+Fresh local qualification: 1,340 tests executed, 12 skipped, zero unexpected failures,
+process exit 0. Existing expected-failure punctuation cases remain expected failures;
+this does not claim every aspirational case passes. Strict SwiftLint passes after
+cosmetic first-party corrections and excluding only upstream vendored FluidAudio source.
+All shell scripts pass warning-level ShellCheck; 19 inert guarded-deployment tests pass.
+Logs: `build/release-readiness/2026-09-17-release-all-tests.log` and the current shell
+qualification output. No recording or backup was deleted by these checks.
+
+Astra's source review found a failed-Trash rollback collision: old companions could be
+returned alongside newer audio. Whole-group preflight now retains ambiguous groups in
+recovery. Three new regressions failed before the fix and pass afterward; the focused
+removal/activity/Screen Sharing suite passed 49 tests. Real remote typing fidelity and
+Finder behavior are not established by injected unit fixtures.
+
+Release packaging no longer stops/installs the running app or creates an unbound tag.
+It creates a fresh bundle stamped with the exact committed source, then signs and
+notarizes the DMG. Publication separately checks the tag, actual mounted payload,
+GitHub digest and Sparkle signature. Main requires an independent approving GitHub
+review. Publish the downloadable binary without changing latest, then merge reviewed
+appcast/Pages metadata before promoting latest. Do not claim the live feed has changed
+until it has actually deployed. Earlier readiness entries below are historical.
+
 ## September 14: approved copy, layout and initial saving choice
 
 The release checkout now contains Michael's five saved recordings copy edits and his

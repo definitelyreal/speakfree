@@ -1,7 +1,8 @@
+// ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-17
 import Foundation
 
 public enum SpeakFree {
-    public static let version = "1.7.1"
+    public static let version = "1.7.2"
 
     /// Menu-bar title reflecting the build variant and mode, so an experimental/test build is
     /// never mistaken for the dogfood release. (2026-07-02: two builds ran at once, fought the

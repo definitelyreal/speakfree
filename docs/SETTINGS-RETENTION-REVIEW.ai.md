@@ -1,6 +1,14 @@
 <!-- ai-suggestion:unverified | session:01a0a336-fe39-7870-bdab-33c820f98955 | date:2026-09-15 | asof:2026-09-15 -->
 # Settings and recordings review
 
+## September 17: accepted shape and centered notice folder button
+
+Michael accepted the rounded-rectangle folder button and requested it centered beneath
+the notice. The production notice and new review drafts now default to Center; existing
+saved drafts are preserved. Settings retains its aligned control column. No preview was
+reopened, per Michael's direction to publish the code and release binary. Skill integration
+is explicitly deferred to the next update.
+
 ## September 17 correction: match the other buttons' shape
 
 Michael rejected the large control's capsule shape. The shared folder button now
