@@ -89,9 +89,13 @@ struct RecordingsFolderButton: View {
                     .accessibilityHidden(true)
             }
                 .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
         }
         .buttonStyle(.bordered)
-        .controlSize(.large)
+        // macOS gives large controls a capsule bezel. Use the same regular
+        // rounded rectangle as neighboring controls, with roomier label insets.
+        .controlSize(.regular)
         .help(folderPath)
         .accessibilityIdentifier("recordings-folder-button")
     }
