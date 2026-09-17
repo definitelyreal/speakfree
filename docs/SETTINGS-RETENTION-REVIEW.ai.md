@@ -1,6 +1,15 @@
 <!-- ai-suggestion:unverified | session:01a0a336-fe39-7870-bdab-33c820f98955 | date:2026-09-15 | asof:2026-09-15 -->
 # Settings and recordings review
 
+## September 17 correction: match the other buttons' shape
+
+Michael rejected the large control's capsule shape. The shared folder button now
+uses the same regular native rounded-rectangle bezel as its neighbors, with 4-point
+label insets preserving its full size and the yellow Apple folder symbol. The three
+native render tests passed again, including the minimum-height assertion; captures
+are in `build/release-readiness/2026-09-17-folder-button-rectangular`. This correction
+is being shown in the inert review before another installed-app update.
+
 ## September 17: full-size yellow folder button
 
 Michael requested a full-size folder button with a yellow Apple folder icon. The
