@@ -37,6 +37,17 @@ settings. Apple accepted notarization submission `c848a02c-3ade-48fe-b2df-84d388
 for the DMG built from `bad54ae2703c119dc1e3a4f33b62f41b64e7264b`; stapling,
 Gatekeeper assessment and full version checks passed. Publication is not yet claimed.
 
+First PR CI run `35256083227` exposed two timed-out adaptive audio fixtures on the
+fresh macOS 15 VM. Its Homebrew ggml 0.23 logs show 36.609 seconds of Metal compilation,
+versus approximately 37.8 seconds allowed for those clips; later warmed fixtures pass.
+All four adaptive tests pass locally with the actual tiny model, not skips. CI now
+completes a bounded explicit Homebrew kernel warm-up before the unchanged inference
+assertions. This does not widen the application's timeout or alter the pinned DMG.
+The advisory performance benchmark measured successfully but failed comparison because
+no cached baseline existed. PRs now restore trusted main caches when available, but only
+main pushes seed/save them. Missing comparison evidence remains missing, not a fabricated
+performance pass. CI must be rerun before merge.
+
 ## September 14: approved copy, layout and initial saving choice
 
 The release checkout now contains Michael's five saved recordings copy edits and his
