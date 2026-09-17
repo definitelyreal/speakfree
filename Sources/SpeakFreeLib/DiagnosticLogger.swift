@@ -143,6 +143,8 @@ public final class DiagnosticLogger {
         let dropped = droppedLines
         droppedLines = 0
         // A pathological error message cannot bypass the per-file or queue cap.
+        // The byte cap can split a UTF-8 scalar; retain the prefix with a replacement character.
+        // swiftlint:disable:next optional_data_string_conversion
         let bounded = String(decoding: message.utf8.prefix(min(16_384, maxFileBytes / 4)), as: UTF8.self)
         queue.async {
             if dropped > 0 { self.write("Logger: dropped \(dropped) messages while busy", at: now) }

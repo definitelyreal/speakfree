@@ -1,91 +1,107 @@
 #!/bin/bash
-# publish-release.sh <version>
-#
-# Promotes the draft GitHub release to public and pushes the appcast so
-# existing users receive the Sparkle update prompt.
-#
-# Run ONLY after dogfooding the build from /Applications.
-# build.sh must have been run first (it creates the draft + updates appcast locally).
-set -e
+# ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-17
+# Publishing a downloadable binary is separate from promoting the update feed.
+# This script never installs an app, pushes main, or bypasses its required review.
+set -euo pipefail
 
-if [ -z "$1" ]; then
-    echo "Usage: publish-release.sh <version>"
-    echo "Example: publish-release.sh 1.3.0"
+VERSION="${1:-}"
+MODE="${2:-}"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+   { [ -n "$MODE" ] && [ "$MODE" != "--binary-only" ]; }; then
+    echo "Usage: publish-release.sh X.Y.Z [--binary-only]" >&2
     exit 1
 fi
-
-VERSION="$1"
-TAG="v${VERSION}"
+TAG="v$VERSION"
 REPO="definitelyreal/speakfree"
-APPCAST="docs/appcast.xml"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-
-echo "Publishing speakfree ${TAG}..."
-
-# 0. Refuse to publish from any branch but main — this script pushes appcast.xml
-# and docs/index.html straight to main (step 4), so running it off-branch would
-# either fail confusingly or publish content from the wrong tree.
-CURRENT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)
-if [ "$CURRENT_BRANCH" != "main" ]; then
-    echo "Error: publish-release.sh must be run from main (currently on '$CURRENT_BRANCH')." >&2
-    exit 1
-fi
-
-# 1. Verify the draft exists
-RELEASE_STATE=$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq '.isDraft' 2>/dev/null || echo "missing")
-if [ "$RELEASE_STATE" = "missing" ]; then
-    echo "Error: no release found for $TAG. Run build.sh first." >&2
-    exit 1
-fi
-if [ "$RELEASE_STATE" != "true" ]; then
-    echo "Error: release $TAG is not a draft (state=$RELEASE_STATE). Already published?" >&2
-    exit 1
-fi
-
-# 2. Verify appcast.xml is updated for this version
-APPCAST_VERSION=$(grep -o '<sparkle:version>[^<]*</sparkle:version>' "$REPO_DIR/$APPCAST" | sed 's/<[^>]*>//g')
-if [ "$APPCAST_VERSION" != "$VERSION" ]; then
-    echo "Error: appcast.xml has version '$APPCAST_VERSION', expected '$VERSION'." >&2
-    echo "Run build.sh first to update the appcast." >&2
-    exit 1
-fi
-
-# 3. Replace the draft-placeholder notes with real release notes, then promote to public.
-# build.sh creates the draft with a "*Draft — not yet published*" placeholder body; without
-# this step it went PUBLIC with that placeholder still showing (the v1.7.0 bug). Require a
-# real notes file so the placeholder can never reach users.
-NOTES_FILE="$REPO_DIR/docs/release-notes/v${VERSION}.md"
-if [ ! -f "$NOTES_FILE" ]; then
-    echo "FATAL: no release notes at docs/release-notes/v${VERSION}.md." >&2
-    echo "  Write the user-facing notes there before publishing (prevents the draft placeholder going public)." >&2
-    exit 1
-fi
-echo "Setting real release notes + promoting draft to public..."
-gh release edit "$TAG" --repo "$REPO" --notes-file "$NOTES_FILE" --draft=false
-
-# 4. Commit and push the appcast + Pages download link together — this is the moment
-# existing users see the Sparkle update AND the public Download button points at the new
-# binary. Both MUST ship together or the Pages link goes stale.
-echo "Pushing appcast + Pages download link to main..."
 cd "$REPO_DIR"
-git add "$APPCAST" docs/index.html
-git commit -m "release: publish appcast + download link for v${VERSION}" || echo "(already committed)"
-git push origin main
+NOTES_FILE="docs/release-notes/$TAG.md"
+DMG="speakfree-$VERSION.dmg"
+DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$DMG"
 
-# 5. Verify the public Pages download link resolves to THIS release's binary.
-echo "Verifying download link resolves to v${VERSION}..."
-DL_URL="https://github.com/${REPO}/releases/latest/download/speakfree-${VERSION}.dmg"
-HTTP_CODE=$(curl -s -o /dev/null -L -w '%{http_code}' "$DL_URL" || echo "000")
-[ "$HTTP_CODE" = "200" ] && echo "  OK: $DL_URL -> 200" || echo "  WARNING: $DL_URL returned $HTTP_CODE (asset may still be propagating)." >&2
+[ -f "$NOTES_FILE" ] && [ -f "$DMG" ] || {
+    echo "FATAL: release notes and the original signed DMG are required." >&2; exit 1;
+}
+[ -z "$(git status --porcelain --untracked-files=no)" ] || {
+    echo "FATAL: commit tracked changes before publication." >&2; exit 1;
+}
+bash scripts/check-version.sh
+APPCAST_URL=$(xmllint --xpath 'string(/rss/channel/item[1]/enclosure/@url)' docs/appcast.xml)
+APPCAST_SIZE=$(xmllint --xpath 'string(/rss/channel/item[1]/enclosure/@length)' docs/appcast.xml)
+[ "$APPCAST_URL" = "$DOWNLOAD_URL" ] && [ "$APPCAST_SIZE" = "$(stat -f%z "$DMG")" ] || {
+    echo "FATAL: appcast URL/length does not match the release DMG." >&2; exit 1;
+}
+SOURCE_COMMIT=$(git rev-parse "$TAG^{commit}")
+REMOTE_COMMIT=$(gh api "repos/$REPO/commits/$TAG" --jq '.sha')
+[ "$SOURCE_COMMIT" = "$REMOTE_COMMIT" ] || {
+    echo "FATAL: local and GitHub release tags differ." >&2; exit 1;
+}
+git diff --quiet "$TAG" -- Sources Resources Package.swift Package.resolved scripts || {
+    echo "FATAL: source/package files differ from the release tag." >&2; exit 1;
+}
+LOCAL_DIGEST="sha256:$(shasum -a 256 "$DMG" | awk '{print $1}')"
+REMOTE_DIGEST=$(gh api "repos/$REPO/releases/tags/$TAG" \
+    --jq ".assets[] | select(.name == \"$DMG\") | .digest")
+[ "$LOCAL_DIGEST" = "$REMOTE_DIGEST" ] || {
+    echo "FATAL: GitHub asset digest differs from the signed local DMG." >&2; exit 1;
+}
+xcrun stapler validate "$DMG"
 
-echo ""
-echo "=============================="
-echo "  PUBLISHED: speakfree ${TAG}  "
-echo "=============================="
-echo ""
-echo "  Release: https://github.com/${REPO}/releases/tag/${TAG}"
-echo "  Appcast: https://definitelyreal.github.io/speakfree/appcast.xml"
-echo ""
-echo "  Existing users will see the update prompt within 24h (Sparkle auto-check interval)."
-echo "  To check immediately: launch speakfree → Help menu → Check for Updates."
-echo ""
+# Bind the actual notarized payload to the source tag, not just its filename.
+MOUNT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/speakfree-release-verify.XXXXXX")
+cleanup_mount() {
+    hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1 || return
+    rmdir "$MOUNT_DIR"
+}
+trap cleanup_mount EXIT
+hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_DIR" "$DMG" >/dev/null
+APP="$MOUNT_DIR/speakfree.app"
+codesign --verify --deep --strict "$APP"
+EMBEDDED_COMMIT=$(/usr/libexec/PlistBuddy -c 'Print :SFBuildCommit' "$APP/Contents/Info.plist")
+EMBEDDED_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+EMBEDDED_BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")
+EMBEDDED_CHANNEL=$(/usr/libexec/PlistBuddy -c 'Print :SFBuildChannel' "$APP/Contents/Info.plist")
+[ "$EMBEDDED_COMMIT" = "$SOURCE_COMMIT" ] && [ "$EMBEDDED_VERSION" = "$VERSION" ] &&
+    [ "$EMBEDDED_BUILD" = "$VERSION" ] && [ "$EMBEDDED_CHANNEL" = "release" ] || {
+    echo "FATAL: DMG payload does not match the tagged release source/version/channel." >&2; exit 1;
+}
+SPARKLE_VERSION=$(ls /opt/homebrew/Caskroom/sparkle | sort -V | tail -1)
+SPARKLE_BIN="/opt/homebrew/Caskroom/sparkle/$SPARKLE_VERSION/bin"
+APP_KEY=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$APP/Contents/Info.plist")
+SIGNING_KEY=$("$SPARKLE_BIN/generate_keys" -p | tr -d '[:space:]')
+[ "$APP_KEY" = "$SIGNING_KEY" ] || {
+    echo "FATAL: app's pinned update key differs from the verification key." >&2; exit 1;
+}
+APPCAST_SIGNATURE=$(xmllint --xpath 'string(/rss/channel/item[1]/enclosure/@*[local-name()="edSignature"])' docs/appcast.xml)
+"$SPARKLE_BIN/sign_update" --verify "$DMG" "$APPCAST_SIGNATURE"
+cleanup_mount
+trap - EXIT
+
+if [ "$MODE" = "--binary-only" ]; then
+    # Keep /releases/latest pointing at the old asset until its Pages link is updated.
+    gh release edit "$TAG" --repo "$REPO" --notes-file "$NOTES_FILE" --draft=false --latest=false
+    curl --fail --silent --show-error --location --head "$DOWNLOAD_URL" >/dev/null
+    echo "Published $DOWNLOAD_URL; latest release and live update feed unchanged."
+    exit 0
+fi
+
+[ "$(git branch --show-current)" = "main" ] || {
+    echo "FATAL: promote latest only after the reviewed metadata lands on main." >&2; exit 1;
+}
+[ "$(git rev-parse HEAD)" = "$(gh api "repos/$REPO/commits/main" --jq '.sha')" ] || {
+    echo "FATAL: local main does not match GitHub main." >&2; exit 1;
+}
+[ "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq '.isDraft')" = "false" ] || {
+    echo "FATAL: publish with --binary-only before promoting the update feed." >&2; exit 1;
+}
+LIVE_APPCAST=$(curl --fail --silent --show-error "https://definitelyreal.github.io/speakfree/appcast.xml")
+[ "$LIVE_APPCAST" = "$(< docs/appcast.xml)" ] || {
+    echo "FATAL: live appcast differs from the signed local feed; wait for Pages deployment." >&2; exit 1;
+}
+LIVE_SITE=$(curl --fail --silent --show-error "https://definitelyreal.github.io/speakfree/")
+[[ "$LIVE_SITE" == *"$DOWNLOAD_URL"* ]] || {
+    echo "FATAL: reviewed version-specific download link is not live yet." >&2; exit 1;
+}
+curl --fail --silent --show-error --location --head "$DOWNLOAD_URL" >/dev/null
+gh release edit "$TAG" --repo "$REPO" --latest=true
+echo "Promoted $TAG: public binary, deployed Pages link and Sparkle feed agree."

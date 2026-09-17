@@ -1,3 +1,4 @@
+// ai-processed:unverified · session:unknown · 2026-09-17
 import Foundation
 
 /// Runs the background LLM cleanup for an edit segment: hands the RAW pre-pipeline transcript plus
@@ -219,6 +220,8 @@ public final class CleanupService {
                                         stdin: prompt, timeout: timeout)
             switch outcome {
             case .completed(let data):
+                // Preserve replacement characters for malformed subprocess UTF-8 before parsing.
+                // swiftlint:disable:next optional_data_string_conversion
                 switch SpanEditParser.parse(String(decoding: data, as: UTF8.self)) {
                 case .parsed(let edits):
                     return .success(edits)

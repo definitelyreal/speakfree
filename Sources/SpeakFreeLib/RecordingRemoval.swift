@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
+// ai-suggestion:unverified · session:01a0abd2-f049-7a20-b665-8b3e09bb8110 · 2026-09-17
 import Foundation
 import Darwin
 import CryptoKit
@@ -460,17 +460,37 @@ enum RecordingRemoval {
             return finish(moved.count, failed, removedRecordings: removedRecordings,
                           trashed: destination)
         } catch {
-            // A failed Trash operation must not silently hide recordings. Return
-            // moved files to their exact paths without overwriting new arrivals.
+            // A failed Trash operation must not silently hide recordings. Check
+            // whole groups before rollback: restoring an old transcript beside a
+            // newly arrived WAV would corrupt their association without overwriting
+            // either file. Unstaged companions are ambiguous too, so retain those
+            // groups in recovery. A failed directory read retains every group.
+            let rollbackGroups = Dictionary(grouping: moved) { RecordingActivity.stem(for: $0) }
+            let occupiedStems = (try? fm.contentsOfDirectory(atPath: directory.path)).map { names in
+                Set(names.filter { RecordingStore.isRecordingArtifact($0) }.map {
+                    RecordingActivity.stem(for: URL(fileURLWithPath: $0))
+                })
+            }
             var stranded = 0
-            for original in moved {
-                do {
-                    // Keep this explicit even for injected movers; the production
-                    // rename additionally enforces no replacement atomically.
-                    if (try? fm.attributesOfItem(atPath: original.path)) != nil { throw Failure.sourceChanged }
-                    try move(staging.appendingPathComponent(original.lastPathComponent), original)
+            for (stem, originals) in rollbackGroups {
+                guard occupiedStems?.contains(stem) == false,
+                      originals.allSatisfy({ (try? fm.attributesOfItem(atPath: $0.path)) == nil }) else {
+                    stranded += originals.count
+                    continue
                 }
-                catch { stranded += 1 }
+                for (index, original) in originals.enumerated() {
+                    do {
+                        // Keep this explicit even for injected movers; production
+                        // rename also rejects occupied destinations atomically.
+                        if (try? fm.attributesOfItem(atPath: original.path)) != nil { throw Failure.sourceChanged }
+                        try move(staging.appendingPathComponent(original.lastPathComponent), original)
+                    } catch {
+                        // A failed move may indicate a new collision. Leave the
+                        // remaining companions in recovery instead of pairing them.
+                        stranded += originals.count - index
+                        break
+                    }
+                }
                 let seconds = elapsed()
                 if seconds - lastUpdate >= 0.05 {
                     progress(Progress(phase: .finishing, completed: targets.count,

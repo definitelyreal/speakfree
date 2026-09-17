@@ -23,6 +23,18 @@ final class RecordingsUIRenderTests: XCTestCase {
     private let artifactCount = 76_144
     private let sampleFolderPath = "/Users/preview/Library/Application Support/SpeakFree UI Test/recordings"
 
+    func testNoticeCentersFolderButtonByDefault() {
+        let notice = RecordingsNoticeView(
+            folderPath: sampleFolderPath,
+            recordingCount: recordingCount,
+            artifactCount: artifactCount,
+            openFolder: { _ in },
+            onCommit: { _, _ in },
+            onContinue: { _ in },
+            trashAction: { _ in Self.inertRemovalResult() })
+        XCTAssertEqual(notice.folderAlignment, .center)
+    }
+
     func testRenderFullSizeFolderButton() throws {
         try withIsolatedOutput { output, _ in
             for profile in TextProfile.allCases {

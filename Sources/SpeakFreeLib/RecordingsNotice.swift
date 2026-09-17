@@ -210,7 +210,7 @@ struct RecordingsNoticeView: View {
     var artifactCount: Int = RecordingStore.recordingFileCount()
     var refreshCounts: (() -> (Int, Int))? = nil
     var choiceIsBold = true
-    var folderAlignment: Alignment = .leading
+    var folderAlignment: Alignment = .center
     var noteText = NoticeCopy.note
     var openFolder: ((String) -> Void)? = nil
     /// Called only after the user confirms Move. A failed Trash operation must not

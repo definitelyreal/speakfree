@@ -1,3 +1,4 @@
+// ai-processed:unverified · session:unknown · 2026-09-17
 import XCTest
 @testable import SpeakFreeLib
 
@@ -86,7 +87,7 @@ final class KeyModeTests: XCTestCase {
         var c = Config.defaultConfig
         c.keyMode = nil
         let data = try JSONEncoder().encode(c)
-        let jsonString = String(decoding: data, as: UTF8.self)
+        let jsonString = try XCTUnwrap(String(bytes: data, encoding: .utf8))
         XCTAssertFalse(jsonString.contains("keyMode"),
                        "a nil keyMode must not appear on disk (not even as null)")
         let decoded = try JSONDecoder().decode(Config.self, from: data)
@@ -106,7 +107,7 @@ final class KeyModeTests: XCTestCase {
     func testKeyModeEncodesAsBareString() throws {
         var c = Config.defaultConfig
         c.keyMode = .edit
-        let jsonString = String(decoding: try JSONEncoder().encode(c), as: UTF8.self)
+        let jsonString = try XCTUnwrap(String(bytes: JSONEncoder().encode(c), encoding: .utf8))
         XCTAssertTrue(jsonString.contains("\"keyMode\" : \"edit\"")
                         || jsonString.contains("\"keyMode\":\"edit\""),
                       "keyMode serializes as the raw string 'edit'")

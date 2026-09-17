@@ -50,7 +50,7 @@ private final class NoticeReviewDraft: ObservableObject {
         var source = "Sources/SpeakFreeLib/RecordingsNotice.swift → NoticeCopy.note"
         var note = NoticeCopy.note
         var choiceIsBold = true
-        var folderAlignment = "Left"
+        var folderAlignment = "Center"
     }
     @Published var values: Values
     @Published var status = ""

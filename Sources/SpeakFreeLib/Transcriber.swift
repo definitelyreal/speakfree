@@ -643,7 +643,7 @@ public class Transcriber {
     /// "Karma" was removed 2026-08-21: there is no such person (the vocab term was mined
     /// from mishears of a real name), so protecting Parakeet's "Karma" outputs only
     /// blocked whisper from fixing them.
-    /// TODO: derive from vocabulary.txt so user terms are covered automatically.
+    /// User terms from vocabulary.txt are not yet included automatically.
     static let swapProtectedTerms = [
         "Claude", "Codex", "Fable", "Opus", "Parakeet", "speakfree",
         "Anthropic", "Zander", "Airtable", "Premiere",
@@ -682,8 +682,9 @@ public class Transcriber {
     /// speech, retry up to `maxEmptyRetriesOnVoicedSpeech` times. Gated on `hasVoicedSpeech` so an
     /// accidental silent key-tap (no harmonic pitch structure) still fast-paths to empty with no
     /// added latency. Non-empty results and true-silence returns are untouched.
-    private func transcribeWithEngineRecoveringEmpty(samples: [Float], prompt: String?,
-                                                      punctuationMode: PunctuationMode) async throws -> String {
+    private func transcribeWithEngineRecoveringEmpty(
+        samples: [Float], prompt: String?, punctuationMode: PunctuationMode
+    ) async throws -> String {
         var text = try await transcribeWithEngine(
             samples: samples, prompt: prompt, punctuationMode: punctuationMode)
         guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
