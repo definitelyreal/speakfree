@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 // Claude · 2026-06-10 · Session: 5b06900b-1498-4764-a786-48f408c36626
 //
 // T2.1 — Unit tests for the PURE adaptive-post-buffer decision (PostBufferPolicy).
@@ -54,6 +55,28 @@ final class PostBufferTests: XCTestCase {
         let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
         XCTAssertEqual(wait, 180.0, accuracy: 0.001)
         XCTAssertLessThan(wait, cap)
+    }
+
+    func test_delayedPollWithSpeechAfterEarlierSilence_doesNotFinalize() {
+        let w = windows([(silent, 3), (speech, 2)])
+        let wait = PostBufferPolicy.decideWaitMs(windowRMS: w, windowMs: windowMs)
+        XCTAssertEqual(wait, extendedCap)
+        XCTAssertFalse(PostBufferPolicy.postBufferShouldFinalize(
+            elapsedMs: 150, decidedMs: wait, capMs: extendedCap))
+    }
+
+    func test_resumedSpeechRequiresANewCompleteSilenceSuffix() {
+        let incomplete = windows([(silent, 3), (speech, 2), (silent, 2)])
+        XCTAssertEqual(PostBufferPolicy.decideWaitMs(windowRMS: incomplete, windowMs: windowMs),
+                       extendedCap)
+        let complete = incomplete + [silent]
+        XCTAssertEqual(PostBufferPolicy.decideWaitMs(windowRMS: complete, windowMs: windowMs),
+                       240)
+    }
+
+    func test_sampleLevelDelayedPollCannotUseSilenceBeforeVisibleSpeech() {
+        let samples = Array(repeating: silent, count: 1440) + Array(repeating: speech, count: 960)
+        XCTAssertEqual(PostBufferPolicy.decideWaitMs(trailingSamples: samples), extendedCap)
     }
 
     // MARK: - Case 3: speech continuing past release (clipping guard)

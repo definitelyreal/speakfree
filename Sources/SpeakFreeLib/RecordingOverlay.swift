@@ -826,6 +826,14 @@ class OverlayContentView: NSView {
     private static let maxVisibleLines = 6
     private static let lineHeightEstimate: CGFloat = 18 // ~13pt font with leading
 
+    // Rescue status line layout (transcribing phase only): text centred in the
+    // card, spinner hung off its left edge, cymatics grains above and below.
+    private static let statusSpinnerGap: CGFloat = 10
+    /// Spinner (22) + gap (10) + edge (12), mirrored on the right so the text centres.
+    static let statusSidePad: CGFloat = spinnerSize + statusSpinnerGap + 12
+    static let statusHeight: CGFloat = 56
+    private static let statusDotEdgeInset: CGFloat = 5
+
     // Compressed bars layout when text is showing
     private static let compressedDotSize: CGFloat = 1.5
     private static let compressedBarGap: CGFloat = 2.0
@@ -860,8 +868,11 @@ class OverlayContentView: NSView {
             let textWidth = ceil((streamingText as NSString).size(withAttributes: [
                 .font: streamingTextFont,
             ]).width)
-            return NSSize(width: max(baseWidth, min(400, textWidth + 76)),
-                          height: max(baseHeight, 48))
+            // Symmetric side room (spinner + gap on the left, mirrored on the right)
+            // so the text itself lands dead centre; height leaves the cymatics
+            // grains a band above and below the line (Michael 2026-08-22).
+            return NSSize(width: max(baseWidth, min(400, textWidth + statusSidePad * 2)),
+                          height: max(baseHeight, statusHeight))
         }
 
         if streamingText.isEmpty {
@@ -1012,17 +1023,7 @@ class OverlayContentView: NSView {
             if streamingText.isEmpty {
                 drawSpinner(ctx: ctx, rect: rect)
             } else {
-                let indicatorWidth: CGFloat = showsTranscribingSpinner ? 48 : 12
-                if showsTranscribingSpinner {
-                    drawSpinner(ctx: ctx, rect: NSRect(
-                        x: rect.minX + 8, y: rect.minY,
-                        width: indicatorWidth, height: rect.height))
-                }
-                drawTranscribingText(in: NSRect(
-                    x: rect.minX + indicatorWidth,
-                    y: rect.minY,
-                    width: rect.width - indicatorWidth - 12,
-                    height: rect.height))
+                drawStatusLine(ctx: ctx, rect: rect, pillPath: pillPath)
             }
         } else if hasText {
             // Bars compressed to top of the expanded pill
@@ -1723,14 +1724,47 @@ class OverlayContentView: NSView {
         }
     }
 
-    private func drawTranscribingText(in rect: NSRect) {
+    /// Rescue status line (Michael 2026-08-22): the text sits dead centre in the
+    /// card; the spinner hangs off its left edge (the pill reserves the same room
+    /// on the right, so the text, not the spinner+text group, is what centres);
+    /// while the rescue is still running, cymatics grains drift out from the text
+    /// line into the bands above and below it. The failure linger keeps the text
+    /// and drops both indicators, so it reads as settled.
+    private func drawStatusLine(ctx: CGContext, rect: NSRect, pillPath: CGPath) {
+        let c = OverlayEmergence.statusTextRGB
         let text = NSAttributedString(string: streamingText, attributes: [
             .font: Self.streamingTextFont,
-            .foregroundColor: NSColor.white.withAlphaComponent(0.9),
+            .foregroundColor: NSColor(red: c.r, green: c.g, blue: c.b,
+                                      alpha: OverlayEmergence.statusTextAlpha),
         ])
         let size = text.size()
-        text.draw(at: NSPoint(x: rect.minX,
-                              y: rect.midY - size.height / 2))
+        let textMinX = rect.midX - size.width / 2
+        let textMidY = rect.midY
+        text.draw(at: NSPoint(x: textMinX, y: textMidY - size.height / 2))
+
+        guard showsTranscribingSpinner else { return }
+
+        drawSpinner(ctx: ctx, rect: NSRect(
+            x: textMinX - Self.statusSpinnerGap - Self.spinnerSize, y: rect.minY,
+            width: Self.spinnerSize, height: rect.height))
+
+        // Grains: |y| maps from the text's edge to just inside the card edge, so a
+        // grain is born touching the line and settles before it could clip.
+        let halfText = size.height / 2
+        let room = max(0, rect.height / 2 - halfText - Self.statusDotEdgeInset)
+        let halfSpan = size.width / 2
+        let lilac = OverlayEmergence.barLilac
+        ctx.saveGState()
+        ctx.addPath(pillPath)
+        ctx.clip()
+        for dot in OverlayEmergence.statusDots(tick: tick) where dot.alpha > 0.005 {
+            let x = rect.midX + dot.x * halfSpan
+            let y = textMidY + (dot.y < 0 ? -1 : 1) * (halfText + abs(dot.y) * room)
+            let r = OverlayEmergence.statusDotRadius * dot.scale
+            setFill(ctx, lilac, dot.alpha)
+            ctx.fillEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+        }
+        ctx.restoreGState()
     }
 
     private func drawStreamingText(ctx: CGContext, rect: NSRect) {

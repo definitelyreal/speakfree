@@ -1,6 +1,15 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
+// ai-suggestion:unverified · session:unknown · 2026-08-24
 import Foundation
 import FluidAudio
 import CoreML
+
+/// Optional engine capability used by Transcriber to carry the resolved user mode without
+/// overloading a lossy ASR prompt or changing every transcription backend's public contract.
+protocol ConfidencePunctuationCorrectingEngine: TranscriptionEngine {
+    func transcribe(samples: [Float], language: String, prompt: String?, suppressRegex: String?,
+                    enablePunctuationCommandCorrection: Bool) async throws -> String
+}
 
 /// Wraps FluidAudio's Parakeet TDT ASR for in-process transcription on the Apple Neural Engine.
 ///
@@ -15,10 +24,10 @@ import CoreML
 /// All mutable model state (the `AsrManager`, the loaded model id, and the in-flight transcription
 /// counter) is owned by a private `actor Core`. The actor serializes lifecycle so a `transcribe`
 /// can never run against a manager that `unload` is tearing down, and two concurrent `load`s can
-/// never both build a manager (load is single-flight via a stored in-progress `Task`). The outer
+/// never both build a manager (load/unload share a FIFO gate across suspension points). The outer
 /// class is a thin facade that delegates to `Core` and maintains an NSLock-guarded `isLoaded`
 /// mirror for the synchronous protocol getter.
-public final class ParakeetEngine: TranscriptionEngine {
+public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCorrectingEngine {
 
     // MARK: - Audio constraints
 
@@ -138,17 +147,19 @@ public final class ParakeetEngine: TranscriptionEngine {
         return Array(samples[..<end])
     }
 
-    /// True when every 50 ms window from `start` to the end of the buffer is below the
-    /// true-silence threshold. One louder window anywhere in the tail vetoes the trim.
+    /// True when every window, including the final partial window, is below the
+    /// true-silence threshold. Unusable samples cannot establish silence.
     static func tailIsTrueSilence(_ samples: [Float], from start: Int) -> Bool {
         var i = max(0, start)
-        while i + energyWindowSamples <= samples.count {
+        while i < samples.count {
+            let end = min(i + energyWindowSamples, samples.count)
             var acc: Float = 0
-            for s in samples[i..<(i + energyWindowSamples)] { acc += s * s }
-            if (acc / Float(energyWindowSamples)).squareRoot() >= trueSilenceRMSThreshold {
+            for s in samples[i..<end] { acc += s * s }
+            let rms = (acc / Float(end - i)).squareRoot()
+            if !rms.isFinite || rms >= trueSilenceRMSThreshold {
                 return false
             }
-            i += energyWindowSamples
+            i = end
         }
         return true
     }
@@ -195,6 +206,285 @@ public final class ParakeetEngine: TranscriptionEngine {
         String(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
     }
 
+    // MARK: - Confidence-guided punctuation-command correction
+
+    /// The result stays inspectable so corpus tests can prove which acoustic token caused an edit.
+    /// Production logs only these bounded token-level decisions, never the full transcript.
+    struct PunctuationCommandCorrection: Equatable {
+        let original: String
+        let replacement: String
+        let confidence: Float
+        let takeMedian: Float
+        let gapBefore: TimeInterval
+        let startTime: TimeInterval
+    }
+
+    struct PunctuationCommandCorrectionResult: Equatable {
+        let text: String
+        let corrections: [PunctuationCommandCorrection]
+    }
+
+    /// A collision word must be both an acoustic outlier and command-shaped. The absolute ceiling
+    /// prevents a merely relative dip in an otherwise weak take from rewriting real English; the
+    /// ratio catches the observed 0.381-in-a-1.0-median garbles that a fixed 0.3 threshold misses.
+    static let punctuationCommandAbsoluteConfidenceCeiling: Float = 0.60
+    static let punctuationCommandMedianRatioCeiling: Float = 0.65
+    static let punctuationCommandPauseSeconds: TimeInterval = 0.20
+
+    private struct ConfidenceWord {
+        let surface: String
+        let startTime: TimeInterval
+        let endTime: TimeInterval
+        let confidence: Float
+    }
+
+    private static let punctuationCollisionLexicon: [String: String] = [
+        // comma -- every entry here is a real-word collision; non-word spellings stay in
+        // TextPostProcessor where they do not need acoustic confidence.
+        "gamma": ",", "coma": ",", "comment": ",", "common": ",",
+        "come": ",", "comes": ",", "coming": ",", "count": ",",
+        // period
+        "paired": ".", "pierre": ".",
+        // question mark
+        "questioner": "?", "questionnaire": "?",
+        // colon
+        "column": ":", "cologne": ":",
+    ]
+
+    /// Real-word meanings that stay literal even when the recognizer also emits a pause or
+    /// sentence boundary. These are deliberately phrase-level fences for corpus-observed and
+    /// user-specified collisions, not a general language model hidden inside the corrector.
+    private static let punctuationCollisionFollowingWordGuards: [String: Set<String>] = [
+        "gamma": ["correction", "ray", "rays", "radiation"],
+        "paired": ["the", "with", "sock", "socks", "sample", "samples", "test", "tests"],
+        "count": ["the", "on", "up", "down", "vote", "votes"],
+        "common": ["sense", "law", "knowledge", "practice", "mistake", "mistakes",
+                   "issue", "issues", "problem", "problems", "ground"],
+        "comment": ["on", "about"],
+        "questioner": ["asked", "asks", "said", "says"],
+        "questionnaire": ["response", "responses", "result", "results", "survey", "data"],
+        "pierre": ["arrived", "went", "said", "says", "is", "was"],
+        "cologne": ["smells", "scent", "bottle", "brand"],
+        "come": ["on", "up"], "comes": ["on", "up"], "coming": ["on", "up"],
+    ]
+    private static let punctuationCollisionPrecedingWordGuards: [String: Set<String>] = [
+        "column": ["first", "second", "third", "fourth", "last", "next", "left", "right"],
+    ]
+
+    /// Convert only confidence-qualified real-word homophones. Literal command words and safe
+    /// non-word garbles are deliberately absent: TextPostProcessor owns those without confidence.
+    static func correctingPunctuationCommandHomophones(
+        text: String, timings: [TokenTiming]?
+    ) -> PunctuationCommandCorrectionResult {
+        guard let timings, !timings.isEmpty, !text.isEmpty else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+
+        let timingWords = punctuationConfidenceWords(from: timings)
+        guard !timingWords.isEmpty else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+
+        let tokenized = VocabularyBoost.tokenizePreservingGaps(text)
+        let originalWords = tokenized.words
+        var words = originalWords
+        var gaps = tokenized.gaps
+        let textKeys = originalWords.map(normalizedWordKey)
+        let alignment = alignTimingWords(timingWords, to: textKeys)
+        // Tail/pad stripping happens before this pass, while FluidAudio timings still describe
+        // the pre-strip decode. Base the take median only on words that survived into `text` so a
+        // stripped synthetic tail cannot make a real token look like an outlier.
+        let alignedTimingIndices = timingWords.indices.filter { alignment[$0] != nil }
+        guard !alignedTimingIndices.isEmpty else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+        let sorted = alignedTimingIndices.map { timingWords[$0].confidence }.sorted()
+        let median: Float = sorted.count.isMultiple(of: 2)
+            ? (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
+            : sorted[sorted.count / 2]
+        guard median > 0 else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+        let hasConfidenceQualifiedCollision = alignedTimingIndices.contains { timingIndex in
+            let word = timingWords[timingIndex]
+            let key = normalizedWordKey(word.surface)
+            return punctuationCollisionLexicon[key] != nil
+                && word.confidence < punctuationCommandAbsoluteConfidenceCeiling
+                && word.confidence / median < punctuationCommandMedianRatioCeiling
+        }
+        guard hasConfidenceQualifiedCollision else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+
+        let clauseMarks: Set<Character> = [".", ",", "!", "?", ";", ":"]
+        let closingMarks: Set<Character> = ["\"", "'", "’", "”", ")", "]", "}"]
+        func hasTrailingClauseMark(_ word: String) -> Bool {
+            guard let last = word.reversed().first(where: { !closingMarks.contains($0) }) else {
+                return false
+            }
+            return clauseMarks.contains(last)
+        }
+        var deletedWordIndices = Set<Int>()
+        var corrections: [PunctuationCommandCorrection] = []
+
+        for timingIndex in timingWords.indices {
+            let timingWord = timingWords[timingIndex]
+            let key = normalizedWordKey(timingWord.surface)
+            guard let replacement = punctuationCollisionLexicon[key],
+                  let textIndex = alignment[timingIndex],
+                  timingWord.confidence < punctuationCommandAbsoluteConfidenceCeiling,
+                  timingWord.confidence / median < punctuationCommandMedianRatioCeiling else { continue }
+
+            let gapBefore = timingIndex > 0
+                ? max(0, timingWord.startTime - timingWords[timingIndex - 1].endTime) : 0
+            let paused = gapBefore >= punctuationCommandPauseSeconds
+            let previousIndex = textIndex > 0 ? textIndex - 1 : nil
+            let previousKey = previousIndex.map { normalizedWordKey(originalWords[$0]) } ?? ""
+            let nextKey = textIndex + 1 < originalWords.count
+                ? normalizedWordKey(originalWords[textIndex + 1]) : ""
+            if punctuationCollisionFollowingWordGuards[key]?.contains(nextKey) == true { continue }
+            if punctuationCollisionPrecedingWordGuards[key]?.contains(previousKey) == true { continue }
+            if key == "column", nextKey.count == 1 { continue }
+
+            let candidatePunctuated = hasTrailingClauseMark(originalWords[textIndex])
+            // A grammatical determiner/possessive normally makes the collision a noun. Allow only
+            // article shapes that are themselves ungrammatical: "an" before this consonant
+            // lexicon, or utterance-final "a paired." (the adjective cannot stand as that noun).
+            // Broad a/that + punctuation exceptions corrupt ordinary "a comment, which..." prose.
+            let articleBefore = previousKey == "a" || previousKey == "an"
+            let strongInsertedArticleShape = previousKey == "an"
+                || (previousKey == "a" && key == "paired" && candidatePunctuated
+                    && nextKey.isEmpty)
+            if articleBefore && !strongInsertedArticleShape { continue }
+            let hardLiteralNounMarker: Set<String> = [
+                "the", "my", "your", "his", "her", "its", "our", "their",
+            ]
+            if hardLiteralNounMarker.contains(previousKey) { continue }
+            let demonstrativeMarker: Set<String> = ["this", "that", "these", "those"]
+            let studyGammaCommandShape = key == "gamma" && previousKey == "this"
+                && candidatePunctuated && ["whether", "if"].contains(nextKey)
+            if demonstrativeMarker.contains(previousKey),
+               !studyGammaCommandShape { continue }
+            let articleInsertion = strongInsertedArticleShape
+            let clauseBoundary = previousIndex.map { hasTrailingClauseMark(originalWords[$0]) } ?? false
+            guard paused || clauseBoundary || articleInsertion else { continue }
+
+            // "come" is the dominant collision family. One generic slot signal is not enough:
+            // require two independent shape signals, with punctuation on the candidate itself
+            // counting as the observed isolated-command signature ("Sure, come, I'd...").
+            if key == "come" || key == "comes" || key == "coming" {
+                let strength = [paused, clauseBoundary, articleInsertion, candidatePunctuated]
+                    .filter { $0 }.count
+                guard strength >= 2 else { continue }
+            }
+
+            // Spoken punctuation outranks the engine's auto-punctuation at the boundary.
+            if clauseBoundary, let previousIndex {
+                var closingSuffix = ""
+                while let last = words[previousIndex].last, closingMarks.contains(last) {
+                    closingSuffix.insert(last, at: closingSuffix.startIndex)
+                    words[previousIndex].removeLast()
+                }
+                while let last = words[previousIndex].last, clauseMarks.contains(last) {
+                    words[previousIndex].removeLast()
+                }
+                words[previousIndex] += closingSuffix
+            }
+            if articleInsertion, let previousIndex {
+                deletedWordIndices.insert(previousIndex)
+                gaps[previousIndex] = ""
+                gaps[previousIndex + 1] = ""
+            }
+            gaps[textIndex] = ""
+            words[textIndex] = replacement
+            corrections.append(PunctuationCommandCorrection(
+                original: timingWord.surface, replacement: replacement,
+                confidence: timingWord.confidence, takeMedian: median, gapBefore: gapBefore,
+                startTime: timingWord.startTime))
+        }
+
+        guard !corrections.isEmpty else {
+            return PunctuationCommandCorrectionResult(text: text, corrections: [])
+        }
+        var corrected = gaps[0]
+        for index in words.indices {
+            if !deletedWordIndices.contains(index) { corrected += words[index] }
+            corrected += gaps[index + 1]
+        }
+        return PunctuationCommandCorrectionResult(text: corrected, corrections: corrections)
+    }
+
+    private static func punctuationConfidenceWords(from timings: [TokenTiming]) -> [ConfidenceWord] {
+        var words: [ConfidenceWord] = []
+        var surface = ""
+        var start: TimeInterval = 0
+        var end: TimeInterval = 0
+        var lexicalConfidences: [Float] = []
+
+        func flush() {
+            guard !normalizedWordKey(surface).isEmpty, !lexicalConfidences.isEmpty else { return }
+            words.append(ConfidenceWord(
+                surface: surface, startTime: start, endTime: end,
+                confidence: lexicalConfidences.min() ?? 1))
+        }
+
+        for timing in timings {
+            let raw = timing.token
+            guard !raw.isEmpty, raw != "<blank>", raw != "<pad>" else { continue }
+            let startsWord = raw.first == "▁" || raw.first?.isWhitespace == true
+            if startsWord, !surface.isEmpty {
+                flush(); surface = ""; lexicalConfidences = []
+            }
+            let piece = String(raw.drop(while: { $0 == "▁" || $0.isWhitespace }))
+            guard !piece.isEmpty else { continue }
+            if surface.isEmpty { start = timing.startTime }
+            surface += piece
+            end = timing.endTime
+            if piece.unicodeScalars.contains(where: { CharacterSet.alphanumerics.contains($0) }) {
+                lexicalConfidences.append(timing.confidence)
+            }
+        }
+        flush()
+        return words
+    }
+
+    /// LCS word alignment. Vocabulary boosting may change unrelated words, so timing and final-
+    /// text indices are not assumed equal; a candidate is edited only when its original normalized
+    /// word still participates in the monotonic alignment. The cap keeps malformed huge results
+    /// from turning this bounded correction pass into an unbounded quadratic allocation.
+    private static func alignTimingWords(
+        _ timingWords: [ConfidenceWord], to textKeys: [String]
+    ) -> [Int: Int] {
+        let timingKeys = timingWords.map { normalizedWordKey($0.surface) }
+        let n = timingKeys.count, m = textKeys.count
+        guard n <= VocabularyBoost.maxBoostWords, m <= VocabularyBoost.maxBoostWords else {
+            return [:]
+        }
+        var lengths = Array(repeating: Array(repeating: 0, count: m + 1), count: n + 1)
+        if n > 0, m > 0 {
+            for i in stride(from: n - 1, through: 0, by: -1) {
+                for j in stride(from: m - 1, through: 0, by: -1) {
+                    lengths[i][j] = timingKeys[i] == textKeys[j]
+                        ? lengths[i + 1][j + 1] + 1
+                        : max(lengths[i + 1][j], lengths[i][j + 1])
+                }
+            }
+        }
+        var result: [Int: Int] = [:]
+        var i = 0, j = 0
+        while i < n, j < m {
+            if !timingKeys[i].isEmpty, timingKeys[i] == textKeys[j] {
+                result[i] = j
+                i += 1; j += 1
+            } else if lengths[i + 1][j] >= lengths[i][j + 1] {
+                i += 1
+            } else {
+                j += 1
+            }
+        }
+        return result
+    }
+
     // MARK: - Core (owns all mutable model state)
 
     /// Serializes all model lifecycle and transcription against a single owner. Every mutable
@@ -216,10 +506,11 @@ public final class ParakeetEngine: TranscriptionEngine {
         private var vocabRescorer: VocabularyRescorer?
         private var vocabContext: CustomVocabularyContext?
         private var vocabTermCount = 0
-        /// Handle on the background vocab setup, for the SPEAKFREE_WAIT_VOCAB test seam only.
+        /// Owned background work: unload and model replacement cancel AND drain these handles.
         private var vocabSetupTask: Task<Void, Never>?
         private var vadManager: VadManager?
         private var vadSetupTask: Task<Void, Never>?
+        private var auxiliaryGeneration: UInt64 = 0
 
         /// The model identifier currently loaded, e.g. "parakeet-tdt-0.6b-v3". `nil` when unloaded.
         private var loadedModelID: String?
@@ -238,12 +529,28 @@ public final class ParakeetEngine: TranscriptionEngine {
         /// is about to be `cleanup()`'d.
         private var tearingDown = false
 
-        /// In-progress load, if any. Concurrent `load` callers await this single Task instead of
-        /// each building their own manager (single-flight). `Task` is a value type, so the paired
-        /// `loadToken` (a monotonically increasing id) lets the owning call detect whether it is
-        /// still the in-flight load before clearing the slot.
-        private var loadInFlight: Task<Void, Error>?
-        private var loadToken = 0
+        // Actor reentrancy does not serialize an entire async lifecycle operation. Hold this
+        // FIFO gate across native loads/cleanup so unload drains an earlier load, and a later load
+        // cannot publish a new manager/task while unload is suspended. Same-model loads remain
+        // idempotent after acquiring the gate.
+        private var lifecycleBusy = false
+        private var lifecycleWaiters: [CheckedContinuation<Void, Never>] = []
+
+        private func acquireLifecycle() async {
+            if lifecycleBusy {
+                await withCheckedContinuation { lifecycleWaiters.append($0) }
+            } else {
+                lifecycleBusy = true
+            }
+        }
+
+        private func releaseLifecycle() {
+            if lifecycleWaiters.isEmpty {
+                lifecycleBusy = false
+            } else {
+                lifecycleWaiters.removeFirst().resume()
+            }
+        }
 
         /// Notifies the outer facade so it can update its NSLock-guarded `isLoaded` mirror.
         private let onLoadedChange: @Sendable (Bool) -> Void
@@ -260,22 +567,12 @@ public final class ParakeetEngine: TranscriptionEngine {
         // MARK: Load (single-flight)
 
         func load(modelID: String) async throws {
-            // Idempotent: requested model already loaded.
-            if loadedModelID == modelID, manager != nil { return }
-
-            // Coalesce concurrent loads onto one Task. If a load is already running, await it; if it
-            // landed on the model we want, we're done — otherwise fall through and load ours.
-            if let existing = loadInFlight {
-                _ = try? await existing.value
-                if loadedModelID == modelID, manager != nil { return }
-            }
-
-            loadToken += 1
-            let myToken = loadToken
-            let task = Task { try await self.performLoad(modelID: modelID) }
-            loadInFlight = task
-            defer { if loadToken == myToken { loadInFlight = nil } }
-            try await task.value
+            await acquireLifecycle()
+            defer { releaseLifecycle() }
+            // Queue admission itself is noncancellable; a canceled load releases its slot before
+            // starting any native work. Unload deliberately completes cleanup despite cancellation.
+            try Task.checkCancellation()
+            try await performLoad(modelID: modelID)
         }
 
         private func performLoad(modelID: String) async throws {
@@ -323,9 +620,11 @@ public final class ParakeetEngine: TranscriptionEngine {
                 tearingDown = true
                 onLoadedChange(false)
                 while active > 0 { await Task.yield() }
+                await drainAuxiliarySetup()
                 manager = nil
                 loadedModelID = nil
                 vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
+                vadManager = nil
                 await old.cleanup()
                 tearingDown = false
             }
@@ -337,29 +636,60 @@ public final class ParakeetEngine: TranscriptionEngine {
             DiagnosticLogger.shared.log("ParakeetEngine: model loaded in \(String(format: "%.2f", loadTime))s")
             onLoadedChange(true)
 
-            // Custom-vocabulary setup runs in the BACKGROUND so it never delays model-ready (loading
-            // the CTC keyword-spotter takes ~15s). Dictation works immediately via the batch path and
-            // upgrades to vocab-boosted automatically once ready. Never fatal. Cancel any prior
-            // setup first — an orphan from a model-replacing load would waste a download slot
-            // (its commit guard already prevents a stale commit).
-            vocabSetupTask?.cancel()
-            let modelForVocab = modelID
-            vocabSetupTask = Task { await self.setupVocabBoosting(models: models, forModelID: modelForVocab) }
-            vadSetupTask?.cancel()
-            vadSetupTask = Task { await self.setupEndpointing(forModelID: modelForVocab) }
+            // Optional models become ready in the background; their tasks remain owned until
+            // unload/model replacement has drained them, even when native setup ignores cancel.
+            startAuxiliarySetup(
+                vocabulary: { generation in
+                    await self.setupVocabBoosting(models: models, forModelID: modelID,
+                                                  generation: generation)
+                },
+                endpointing: { generation in
+                    await self.setupEndpointing(forModelID: modelID, generation: generation)
+                })
         }
 
-        private func setupEndpointing(forModelID: String) async {
+        private func startAuxiliarySetup(
+            vocabulary: @escaping @Sendable (UInt64) async -> Void,
+            endpointing: @escaping @Sendable (UInt64) async -> Void
+        ) {
+            auxiliaryGeneration &+= 1
+            let generation = auxiliaryGeneration
+            vocabSetupTask = Task { await vocabulary(generation) }
+            vadSetupTask = Task { await endpointing(generation) }
+        }
+
+        private func auxiliarySetupCanPublish(_ generation: UInt64) -> Bool {
+            generation == auxiliaryGeneration && !tearingDown && !Task.isCancelled
+        }
+
+        private func drainAuxiliarySetup() async {
+            auxiliaryGeneration &+= 1
+            let vocabulary = vocabSetupTask
+            let endpointing = vadSetupTask
+            vocabulary?.cancel()
+            endpointing?.cancel()
+            // Cancellation is cooperative; CoreML compilation may still be inside native code.
+            // Await completion before clearing ownership or cleaning up its supporting manager.
+            await vocabulary?.value
+            await endpointing?.value
+            vocabSetupTask = nil
+            vadSetupTask = nil
+        }
+
+        private func setupEndpointing(forModelID: String, generation: UInt64) async {
+            guard auxiliarySetupCanPublish(generation) else { return }
             do {
                 let vad = try await VadManager(config: VadConfig(
                     // Silero is tiny. Keep it off the Neural Engine so it cannot evict or contend
                     // with Parakeet + the CTC vocabulary graph. Dogfood 2026-08-13 showed a fast
                     // median but random 1.2–5.7s release tails after adding an ANE-backed VAD.
                     defaultThreshold: 0.85, debugMode: false, computeUnits: .cpuOnly))
-                guard loadedModelID == forModelID, manager != nil else { return }
+                guard auxiliarySetupCanPublish(generation), loadedModelID == forModelID,
+                      manager != nil else { return }
                 vadManager = vad
                 DiagnosticLogger.shared.log("ParakeetEngine: Silero endpointing ready")
             } catch {
+                guard auxiliarySetupCanPublish(generation) else { return }
                 DiagnosticLogger.shared.log(
                     "ParakeetEngine: endpointing unavailable — \(error.localizedDescription); using full audio")
                 vadManager = nil
@@ -374,7 +704,9 @@ public final class ParakeetEngine: TranscriptionEngine {
         /// which are the only channel through which a real English word may be rescored.
         /// Downloads the ~110MB CTC keyword-spotter model on first use. Any failure logs and
         /// leaves the ingredients nil, so `transcribe` returns the plain batch result.
-        private func setupVocabBoosting(models: AsrModels, forModelID: String) async {
+        private func setupVocabBoosting(models: AsrModels, forModelID: String,
+                                        generation: UInt64) async {
+            guard auxiliarySetupCanPublish(generation) else { return }
             vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
 
             let dictURL = Config.configDir.appendingPathComponent("custom-vocabulary.json")
@@ -391,6 +723,7 @@ public final class ParakeetEngine: TranscriptionEngine {
                 let ctc = try await ParakeetModelManager.shared.withSanctionedDownload {
                     try await CtcModels.downloadAndLoad(variant: .ctc110m)
                 }
+                guard auxiliarySetupCanPublish(generation) else { return }
                 // Tokenize each term for the CTC keyword spotter (`.load()` leaves ctcTokenIds
                 // nil and nothing is ever spotted — dogfood 2026-07-02).
                 let tokenizer = try await CtcTokenizer.load(from: CtcModels.defaultCacheDirectory(for: .ctc110m))
@@ -408,13 +741,15 @@ public final class ParakeetEngine: TranscriptionEngine {
                     ctcModelDirectory: CtcModels.defaultCacheDirectory(for: .ctc110m))
 
                 // Commit only if this model is still the loaded one (a reload may have raced).
-                guard loadedModelID == forModelID, manager != nil else { return }
+                guard auxiliarySetupCanPublish(generation), loadedModelID == forModelID,
+                      manager != nil else { return }
                 vocabSpotter = spotter
                 vocabRescorer = rescorer
                 vocabContext = context
                 vocabTermCount = context.terms.count
                 DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting ready (\(context.terms.count) CTC-tokenized terms, batch-anchored)")
             } catch {
+                guard auxiliarySetupCanPublish(generation) else { return }
                 DiagnosticLogger.shared.log("ParakeetEngine: vocab boosting unavailable — \(error.localizedDescription); using batch path")
                 vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
             }
@@ -422,7 +757,8 @@ public final class ParakeetEngine: TranscriptionEngine {
 
         // MARK: Transcribe
 
-        func transcribe(samples: [Float], language: String) async throws -> String {
+        func transcribe(samples: [Float], language: String,
+                        enablePunctuationCommandCorrection: Bool) async throws -> String {
             // Gate on `tearingDown` BEFORE bumping `active` so no transcribe begins once a teardown
             // (unload or model-replacing load) has started. This is what lets the drain loop finish.
             guard let mgr = manager, let modelID = loadedModelID, !tearingDown else {
@@ -553,6 +889,19 @@ public final class ParakeetEngine: TranscriptionEngine {
                     format: "ParakeetEngine: stripped pad hallucination (%d chars past %.2fs)",
                     text.count - stripped.count, Double(speechSamples.count) / 16_000.0))
             }
+            let punctuationCorrection = enablePunctuationCommandCorrection
+                ? ParakeetEngine.correctingPunctuationCommandHomophones(
+                    text: stripped, timings: result.tokenTimings)
+                : PunctuationCommandCorrectionResult(text: stripped, corrections: [])
+            if !punctuationCorrection.corrections.isEmpty {
+                DiagnosticLogger.shared.log(
+                    "ParakeetEngine: confidence-guided punctuation corrected "
+                        + punctuationCorrection.corrections.map {
+                            String(format: "'%@'→'%@' (%.3f/%.3f, gap %.2fs)",
+                                   $0.original, $0.replacement, $0.confidence,
+                                   $0.takeMedian, $0.gapBefore)
+                        }.joined(separator: ", "))
+            }
             let minConfidence = result.tokenTimings?.map(\.confidence).min()
             let uncertain = result.confidence < 0.5 || (minConfidence.map { $0 < 0.3 } ?? false)
             onDiagnostics(TranscriptionDiagnostics(
@@ -566,12 +915,42 @@ public final class ParakeetEngine: TranscriptionEngine {
                     format: "ParakeetEngine: uncertain take (aggregate %.3f, min-token %.3f)",
                     result.confidence, minConfidence ?? -1))
             }
-            return stripped
+            return punctuationCorrection.text
+        }
+
+        // Synthetic setup seam: exercise the same lifecycle gate/task ownership without loading
+        // a native model. Tests can hold noncooperative setup at a barrier, then call public unload.
+        func loadAuxiliarySetupForTesting(
+            vocabulary: @escaping @Sendable () async -> Void,
+            endpointing: @escaping @Sendable () async -> Void,
+            onAttempt: @Sendable () -> Void,
+            onReady: @escaping @Sendable (String) -> Void
+        ) async throws {
+            onAttempt()
+            await acquireLifecycle()
+            defer { releaseLifecycle() }
+            try Task.checkCancellation()
+            await drainAuxiliarySetup()
+            startAuxiliarySetup(
+                vocabulary: { generation in
+                    await vocabulary()
+                    if await self.auxiliarySetupCanPublish(generation) { onReady("vocabulary") }
+                }, endpointing: { generation in
+                    await endpointing()
+                    if await self.auxiliarySetupCanPublish(generation) { onReady("endpointing") }
+                })
+        }
+
+        var lifecycleStateForTesting: (auxiliaryTasks: Int, queuedOperations: Int, tearingDown: Bool) {
+            ((vocabSetupTask == nil ? 0 : 1) + (vadSetupTask == nil ? 0 : 1),
+             lifecycleWaiters.count, tearingDown)
         }
 
         // MARK: Unload
 
         func unload() async {
+            await acquireLifecycle()
+            defer { releaseLifecycle() }
             // Gate new transcribes first, then publish the mirror false SYNCHRONOUSLY before niling
             // the manager — this closes the stale-mirror window where isLoaded == true but the
             // manager is already gone. Only then drain in-flight transcriptions and cleanup, so none
@@ -579,10 +958,12 @@ public final class ParakeetEngine: TranscriptionEngine {
             tearingDown = true
             onLoadedChange(false)
             while active > 0 { await Task.yield() }
+            await drainAuxiliarySetup()
             let m = manager
             manager = nil
             loadedModelID = nil
             vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
+            vadManager = nil
             await m?.cleanup()
             tearingDown = false
             DiagnosticLogger.shared.log("ParakeetEngine: model unloaded")
@@ -669,10 +1050,24 @@ public final class ParakeetEngine: TranscriptionEngine {
         try await core.load(modelID: modelID)
     }
 
-    /// Release the FluidAudio models and drop the manager. Waits for in-flight transcriptions to
-    /// drain before teardown.
+    /// Release the FluidAudio models and drop the manager. Waits for in-flight loads,
+    /// transcriptions, and optional model setup before teardown.
     public func unloadModel() async {
         await core.unload()
+    }
+
+    func loadAuxiliarySetupForTesting(
+        vocabulary: @escaping @Sendable () async -> Void,
+        endpointing: @escaping @Sendable () async -> Void,
+        onAttempt: @Sendable () -> Void = {},
+        onReady: @escaping @Sendable (String) -> Void = { _ in }
+    ) async throws {
+        try await core.loadAuxiliarySetupForTesting(vocabulary: vocabulary, endpointing: endpointing,
+                                                   onAttempt: onAttempt, onReady: onReady)
+    }
+
+    var lifecycleStateForTesting: (auxiliaryTasks: Int, queuedOperations: Int, tearingDown: Bool) {
+        get async { await core.lifecycleStateForTesting }
     }
 
     /// No-op. FluidAudio runs on the Apple Neural Engine via CoreML and manages its own memory;
@@ -683,8 +1078,9 @@ public final class ParakeetEngine: TranscriptionEngine {
 
     // MARK: - Transcription
 
-    /// Transcribe `[Float]` 16 kHz mono samples. `prompt` and `suppressRegex` are ignored —
-    /// Parakeet has no equivalent of whisper's initial prompt / token-suppression knobs.
+    /// Transcribe `[Float]` 16 kHz mono samples. Parakeet has no ASR equivalent of whisper's
+    /// prompt / token suppression, but their spoken-punctuation mode signal gates the confidence
+    /// corrector so Off mode remains byte-faithful to Parakeet's lexical output.
     ///
     /// - Parameter language: short language code ("en", "fr", …) or "auto". The hint is only
     ///   forwarded to FluidAudio for v3 (multilingual); v2 is English-only and ignores it.
@@ -692,7 +1088,22 @@ public final class ParakeetEngine: TranscriptionEngine {
                            language: String,
                            prompt: String?,
                            suppressRegex: String?) async throws -> String {
-        try await core.transcribe(samples: samples, language: language)
+        try await transcribe(
+            samples: samples, language: language, prompt: prompt,
+            suppressRegex: suppressRegex, enablePunctuationCommandCorrection: false)
+    }
+
+    /// Transcriber's Parakeet-specific path carries the resolved punctuation mode explicitly.
+    /// Keeping it separate from the ASR prompt matters because prompt-budget truncation can remove
+    /// the spoken-punctuation instruction while the user's mode is still Hybrid.
+    func transcribe(samples: [Float],
+                    language: String,
+                    prompt: String?,
+                    suppressRegex: String?,
+                    enablePunctuationCommandCorrection: Bool) async throws -> String {
+        try await core.transcribe(
+            samples: samples, language: language,
+            enablePunctuationCommandCorrection: enablePunctuationCommandCorrection)
     }
 
     /// Parakeet (batch `AsrManager`) does not support live preview. Streaming would require

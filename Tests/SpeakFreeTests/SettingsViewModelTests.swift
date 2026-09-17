@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
+// ai-processed:unverified · session:unknown · 2026-09-15
 import XCTest
 @testable import SpeakFreeLib
 
@@ -103,7 +104,9 @@ final class SettingsViewModelTests: XCTestCase {
         let saved = vm.toConfig()
 
         XCTAssertEqual(saved.language, "fr")
-        XCTAssertEqual(saved.preserveAllRecordings?.value, true)
+        XCTAssertEqual(vm.maxRecordings, 0)
+        XCTAssertNil(saved.preserveAllRecordings)
+        XCTAssertEqual(saved.maxRecordings, 0)
         XCTAssertEqual(saved.reuseStreamingPartial?.value, false)
         XCTAssertEqual(saved.localAPIToken, "secret-token")
         XCTAssertEqual(saved.modelPath, "/custom/model/path.bin")
@@ -175,6 +178,48 @@ final class SettingsViewModelTests: XCTestCase {
         vm.save()
 
         XCTAssertTrue(callbackCalled)
+    }
+
+    func testFailedSaveReportsErrorAndDoesNotNotifyUntilRetrySucceeds() throws {
+        // Only this suite's scratch config is used. A directory at the file destination
+        // makes the atomic save fail without depending on the process's privileges.
+        try FileManager.default.createDirectory(at: Config.configFile, withIntermediateDirectories: true)
+        let vm = SettingsViewModel(config: .defaultConfig)
+        vm.language = "fr"
+        var callbackCount = 0
+        vm.onSave = { callbackCount += 1 }
+
+        vm.save()
+
+        XCTAssertNotNil(vm.saveError, "A failed preference write must be visible to the Settings UI")
+        XCTAssertEqual(callbackCount, 0, "The running app must not reload an unpersisted preference")
+
+        try FileManager.default.removeItem(at: Config.configFile)
+        vm.save()
+
+        XCTAssertNil(vm.saveError, "A successful retry must clear the old failure message")
+        XCTAssertEqual(callbackCount, 1)
+        XCTAssertEqual(Config.load().language, "fr")
+    }
+
+    func testSelectingRetentionPersistsBothLargeCapsAndClearsTheCapForNoneAndAll() {
+        var config = Config.defaultConfig
+        config.saveRecordings = FlexBool(true)
+        config.maxRecordings = 50
+        config.preserveAllRecordings = FlexBool(true)
+        let vm = SettingsViewModel(config: config)
+
+        for choice in [1_000, -1, 10_000, 0] {
+            vm.selectRecordingRetention(choice)
+
+            XCTAssertNil(vm.saveError)
+            let saved = Config.load()
+            XCTAssertEqual(RecordingRetention.selection(in: saved), choice)
+            XCTAssertEqual(saved.saveRecordings?.value, choice != -1)
+            XCTAssertEqual(Config.effectiveMaxRecordings(saved.maxRecordings), max(0, choice),
+                           "None and All must clear the earlier cap; positive choices keep their full limit")
+            XCTAssertNil(saved.preserveAllRecordings)
+        }
     }
 
     // MARK: - Punctuation modes per engine (Spoken Only is Whisper-only)

@@ -52,6 +52,15 @@ class StatusBarController: NSObject, NSMenuDelegate {
         buildMenu()
     }
 
+    var captureMessage: String? { didSet { buildMenu() } }
+
+    var modelIsLoading = false {
+        didSet {
+            modelLoadMessage = modelIsLoading ? "Loading speech model… First dictation may take longer." : nil
+        }
+    }
+    var modelLoadMessage: String? { didSet { buildMenu() } }
+
     enum State: Equatable {
         case idle
         case recording
@@ -213,13 +222,15 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 (NSApplication.shared.delegate as? AppDelegate)?.toggleDictationMode()
             }
             menuItemTargets.append(dictTarget)
-            let dictItem = NSMenuItem(title: "Dictation Mode (\(bt.name))",
+            let dictItem = NSMenuItem(title: "Use \(bt.name) for Dictation",
                                       action: #selector(MenuItemTarget.invoke),
                                       keyEquivalent: "")
             dictItem.target = dictTarget
             dictItem.state = delegate.dictationModeActive() ? .on : .off
-            dictItem.toolTip = "Best dictation quality in noisy rooms — uses the \(bt.name) "
-                + "microphone. Audio output drops to call quality while on."
+            dictItem.toolTip = "Preserve pre-listening on the built-in microphone and use \(bt.name) for live dictation. Bluetooth capture rests after 30 seconds idle."
+            if delegate.dictationModeActive() && !AudioDeviceCatalog.cachedInputDevices.contains(where: { !$0.isBluetooth && !$0.isVirtual }) {
+                dictItem.isEnabled = false
+            }
             menu.addItem(dictItem)
             menu.addItem(NSMenuItem.separator())
         }
@@ -241,6 +252,20 @@ class StatusBarController: NSObject, NSMenuDelegate {
             let dlItem = NSMenuItem(title: progress, action: nil, keyEquivalent: "")
             dlItem.isEnabled = false
             menu.addItem(dlItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        if let message = captureMessage {
+            let item = NSMenuItem(title: message, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        if let message = modelLoadMessage {
+            let item = NSMenuItem(title: message, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
             menu.addItem(NSMenuItem.separator())
         }
 
@@ -447,6 +472,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
         let folderItem = NSMenuItem(title: "Open Recordings Folder…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
         folderItem.target = folderTarget
         menu.addItem(folderItem)
+
+        let clearTarget = MenuItemTarget { RecordingsTrashWindowController.present() }
+        recentMenuTargets.append(clearTarget)
+        let clearItem = NSMenuItem(title: "Clear…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+        clearItem.target = clearTarget
+        menu.addItem(clearItem)
     }
 
     /// Main-thread state, background filesystem work. If another state change requests

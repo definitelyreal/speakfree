@@ -1,5 +1,15 @@
-// ai:suggestion · session: 26-06-07-parakeet-impl · 2026-06-07
+// ai-suggestion:unverified · session:01a0a4bf-8ebb-7b73-8929-dad5ed263731 · 2026-09-15
 import SwiftUI
+
+/// Each model retains its own download state when the selection changes. Attempt IDs
+/// reject late progress callbacks after a failure or retry.
+private struct ParakeetDownloadAttempt {
+    let id: UUID
+    var progress: Double = 0
+    var isInFlight = true
+    var detailsHidden = false
+    var error: String?
+}
 
 /// Engine selector for the Transcription settings GroupBox. Lets the user pick the
 /// transcription backend (Whisper or Parakeet) and, when Parakeet is selected, choose
@@ -12,22 +22,12 @@ import SwiftUI
 struct EnginePickerView: View {
     @ObservedObject var viewModel: SettingsViewModel
 
-    /// True while a Parakeet model download is in flight.
-    @State private var isDownloading = false
-    /// Download progress in 0...1, mirrored from ParakeetModelManager.ensureDownloaded.
-    @State private var downloadProgress: Double = 0
-    /// Set when a download fails so the user sees why.
-    @State private var downloadError: String?
+    @State private var downloads: [String: ParakeetDownloadAttempt] = [:]
     /// Re-checked after downloads / model switches to drive the banner.
     @State private var isModelDownloaded = false
-    /// Retained so re-opening the picker reflects real in-flight state (M1). NOTE: FluidAudio's
-    /// download/compile path has no cancellation support (no Task.checkCancellation in
-    /// DownloadUtils.download or AsrModels.load), so cancelling this task does NOT stop the
-    /// 600 MB fetch + CoreML compile — they keep running in the background. We therefore
-    /// never expose a "Cancel" control; the only honest action is "Hide" (run in background).
-    @State private var downloadTask: Task<Void, Never>?
-
-    private let labelWidth: CGFloat = 110
+    private var selectedDownload: ParakeetDownloadAttempt? {
+        downloads[viewModel.parakeetModel]
+    }
 
     /// Headroom required before we attempt a Parakeet download (~600 MB weights plus
     /// CoreML compile scratch). ~1.5 GB keeps us clear of the compile pause running out
@@ -37,85 +37,63 @@ struct EnginePickerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
-                GridRow {
+                GridRow(alignment: .firstTextBaseline) {
                     Text("Engine")
-                        .frame(width: labelWidth, alignment: .leading)
+                        .frame(width: SettingsLayout.labelWidth, alignment: .leading)
                         .gridColumnAlignment(.leading)
-                    Picker("", selection: $viewModel.engine) {
+                    Picker("Transcription engine", selection: $viewModel.engine) {
                         ForEach(EngineCatalog.engines, id: \.id) { engine in
                             Text(engine.displayName).tag(engine.id)
                         }
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
-                    .frame(width: 160, alignment: .leading)
+                    .controlSize(.regular)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: 360, maxWidth: .infinity, alignment: .leading)
                 }
 
                 if viewModel.engine == "parakeet" {
-                    GridRow {
+                    GridRow(alignment: .firstTextBaseline) {
                         Text("Parakeet Model")
-                        VStack(alignment: .leading, spacing: 2) {
-                            Picker("", selection: $viewModel.parakeetModel) {
+                            .frame(width: SettingsLayout.labelWidth, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Picker("Parakeet model", selection: $viewModel.parakeetModel) {
                                 ForEach(EngineCatalog.parakeetModels, id: \.id) { model in
                                     // Un-downloaded models are greyed and labeled, so
                                     // picking one is a knowing "this will download"
                                     // choice (Michael 2026-08-19).
                                     let downloaded = ParakeetModelManager.shared.isModelDownloaded(model.id)
-                                    Text("\(model.displayName) (\(model.sizeDescription))"
-                                         + (downloaded ? "" : "  (Not Downloaded)"))
+                                    Text(model.displayName
+                                         + (downloaded ? "" : " · Download needed"))
                                         .foregroundColor(downloaded ? .primary : .secondary)
                                         .tag(model.id)
                                 }
                             }
                             .pickerStyle(.menu)
                             .labelsHidden()
-                            .frame(width: 260, alignment: .leading)
+                            .controlSize(.regular)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(minWidth: 360, maxWidth: .infinity, alignment: .leading)
+
+                            parakeetDownloadBanner
                         }
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            if viewModel.engine == "parakeet" {
-                // H2: Parakeet has no live preview while recording.
-                Text("Parakeet transcribes after you finish speaking \u{2014} no live preview while recording.")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
-
-                parakeetDownloadBanner
-
-                // M4: CC-BY attribution (license obligation).
-                Text("Speech recognition by NVIDIA Parakeet (CC-BY-4.0) via FluidAudio (Apache-2.0).")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
-            }
         }
         .onChange(of: viewModel.engine) { _ in
             viewModel.save()
-            // M (MID-DOWNLOAD SWITCH): a download may still be running for the previous
-            // selection (FluidAudio can't be cancelled). Clear the transient banner so the
-            // old progress/labels don't bleed into the new selection, then re-evaluate the
-            // on-disk state for the now-selected engine/model. The background task finishes
-            // on its own; its completion handler is a no-op for this view's current state.
-            downloadTask = nil
-            resetTransientDownloadUI()
             refreshDownloadState()
         }
         .onChange(of: viewModel.parakeetModel) { _ in
             viewModel.save()
-            // M (MID-DOWNLOAD SWITCH): same as engine — reset transient UI and re-check the
-            // newly selected model's downloaded state instead of showing stale progress.
-            downloadTask = nil
-            resetTransientDownloadUI()
             refreshDownloadState()
         }
         .onAppear {
-            restoreInFlightState()
-        }
-        .onDisappear {
-            // Keep the background task running but drop the transient banner state so a
-            // re-open starts from a coherent baseline (restoreInFlightState rebuilds it).
-            resetTransientDownloadUI()
+            downloads[viewModel.parakeetModel]?.detailsHidden = false
+            refreshDownloadState()
         }
     }
 
@@ -123,36 +101,45 @@ struct EnginePickerView: View {
 
     @ViewBuilder
     private var parakeetDownloadBanner: some View {
-        if isDownloading {
-            VStack(alignment: .leading, spacing: 4) {
-                // L2: single phase-spanning label. FluidAudio does expose a phase signal
-                // (DownloadProgress.phase: .listing/.downloading/.compiling), but our
-                // manager flattens it to a 0..1 fraction. The CoreML compile phase makes
-                // the bar jump near the end, so we use one "Downloading / preparing" label
-                // covering both fetch and compile rather than implying a stalled download.
-                HStack {
-                    Text("Downloading / preparing \(parakeetDisplayName)\u{2026} \(Int(downloadProgress * 100))%")
-                        .font(.callout.weight(.medium))
-                    Spacer()
-                    // M1 (HONEST CANCEL): FluidAudio cannot be cancelled, so we offer "Hide"
-                    // instead of "Cancel" — it dismisses the banner but the download keeps
-                    // running in the background. Re-opening the picker shows real state.
-                    Button("Hide") { hideDownload() }
-                        .buttonStyle(.bordered)
+        if let download = selectedDownload, download.isInFlight {
+            if download.detailsHidden {
+                HStack(spacing: 8) {
+                    Text("Downloading in background · \(Int(download.progress * 100))%")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                    Button("Show Progress") {
+                        downloads[viewModel.parakeetModel]?.detailsHidden = false
+                    }
+                    .controlSize(.regular)
                 }
-                ProgressView(value: downloadProgress, total: 1.0)
-                    .progressViewStyle(.linear)
-                Text("Download continues in the background \u{2014} it can\u{2019}t be stopped once started. You can close this and keep using the app.")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    // FluidAudio combines downloading and preparation into one fraction.
+                    HStack {
+                        Text("Downloading / preparing · \(Int(download.progress * 100))%")
+                            .font(.callout.weight(.medium))
+                        Spacer()
+                        // FluidAudio cannot cancel. Hide only collapses the details.
+                        Button("Hide") {
+                            downloads[viewModel.parakeetModel]?.detailsHidden = true
+                        }
+                            .buttonStyle(.bordered)
+                            .controlSize(.regular)
+                    }
+                    ProgressView(value: download.progress, total: 1.0)
+                        .progressViewStyle(.linear)
+                    Text("Downloading and preparation continue if you hide this or close Settings. They cannot be stopped once started.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
             }
         } else if !isModelDownloaded {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     // L3: surface the model size so the download cost is clear.
-                    Text("\(parakeetDisplayName) (\(parakeetSizeDescription)) needs to be downloaded.")
+                    Text("Download needed (\(parakeetSizeDescription)).")
                         .font(.callout.weight(.medium))
-                    if let downloadError = downloadError {
+                    if let downloadError = selectedDownload?.error {
                         Text(downloadError)
                             .font(.footnote)
                             .foregroundColor(.red)
@@ -161,11 +148,12 @@ struct EnginePickerView: View {
                 Spacer()
                 Button("Download") { startDownload() }
                     .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
             }
         } else {
-            Text("\(parakeetDisplayName) (\(parakeetSizeDescription)) is downloaded and ready.")
+            Label("Downloaded and ready", systemImage: "checkmark.circle.fill")
                 .font(.footnote)
-                .foregroundColor(.secondary)
+                .foregroundColor(.green)
         }
     }
 
@@ -175,10 +163,6 @@ struct EnginePickerView: View {
         EngineCatalog.parakeetModels.first(where: { $0.id == viewModel.parakeetModel })
     }
 
-    private var parakeetDisplayName: String {
-        parakeetModelInfo?.displayName ?? viewModel.parakeetModel
-    }
-
     private var parakeetSizeDescription: String {
         parakeetModelInfo?.sizeDescription ?? "~600 MB"
     }
@@ -186,7 +170,6 @@ struct EnginePickerView: View {
     /// Refresh the downloaded-state flag for the currently selected Parakeet model.
     private func refreshDownloadState() {
         guard viewModel.engine == "parakeet" else { return }
-        downloadError = nil
         isModelDownloaded = ParakeetModelManager.shared.isModelDownloaded(viewModel.parakeetModel)
     }
 
@@ -217,57 +200,39 @@ struct EnginePickerView: View {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
-    /// M1 (HONEST CANCEL): Dismiss the in-flight banner WITHOUT cancelling the work.
-    /// FluidAudio's fetch + compile can't be stopped, so we deliberately do not call
-    /// `downloadTask?.cancel()` (it would do nothing but mislead). We keep `downloadTask`
-    /// set so re-opening the picker can restore the live banner via `restoreInFlightState`.
-    private func hideDownload() {
-        isDownloading = false
-    }
-
-    /// Reset only the transient banner UI (progress/error/flag). Does not touch a running
-    /// download task — used on disappear and on engine/model switch to keep UI coherent.
-    private func resetTransientDownloadUI() {
-        isDownloading = false
-        downloadProgress = 0
-        downloadError = nil
-    }
-
-    /// If a download is still running (task retained), restore the live banner; otherwise
-    /// re-check the on-disk downloaded state.
-    private func restoreInFlightState() {
-        if downloadTask != nil {
-            isDownloading = true
-        } else {
-            isDownloading = false
-        }
-        refreshDownloadState()
-    }
-
     private func startDownload() {
         let modelName = viewModel.parakeetModel
-        downloadError = nil
+        guard downloads[modelName]?.isInFlight != true else { return }
+        let attemptID = UUID()
 
         // H3: disk-space precheck before committing to a download. If we can read the
         // volume capacity and it's short, refuse early with a concrete number.
         if let free = availableFreeBytes(for: modelName), free < requiredFreeBytes {
             // L3: message must match the real gate (~1.5 GB: ~600 MB model + CoreML compile scratch).
-            downloadError = "Need ~1.5 GB free (\u{2248}600 MB model + compile scratch), you have \(Self.formatBytes(free))."
+            downloads[modelName] = ParakeetDownloadAttempt(
+                id: attemptID, isInFlight: false,
+                error: "Need ~1.5 GB free (\u{2248}600 MB model + compile scratch), you have \(Self.formatBytes(free)).")
             return
         }
 
-        downloadProgress = 0
-        isDownloading = true
-        downloadTask = Task {
+        downloads[modelName] = ParakeetDownloadAttempt(id: attemptID)
+        // FluidAudio does not support cancellation. The task keeps running independently
+        // of the selected engine, model, and whether its progress details are visible.
+        Task {
             do {
                 try await ParakeetModelManager.shared.ensureDownloaded(modelName) { progress in
                     Task { @MainActor in
-                        self.downloadProgress = progress
+                        guard self.downloads[modelName]?.id == attemptID,
+                              self.downloads[modelName]?.isInFlight == true else { return }
+                        self.downloads[modelName]?.progress = min(1, max(0, progress))
                     }
                 }
                 await MainActor.run {
-                    self.isDownloading = false
-                    self.downloadTask = nil
+                    guard self.downloads[modelName]?.id == attemptID else { return }
+                    self.downloads[modelName]?.isInFlight = false
+                    self.downloads[modelName]?.progress = 1
+                    guard self.viewModel.engine == "parakeet",
+                          self.viewModel.parakeetModel == modelName else { return }
                     self.refreshDownloadState()
                     // I1: while the model was undownloaded, reloadConfig took the `.keepCurrent`
                     // branch (see AppDelegate.parakeetReloadDecision) and left the live transcriber
@@ -276,17 +241,13 @@ struct EnginePickerView: View {
                     // take effect until the app restarts.
                     self.viewModel.save()
                 }
-            } catch is CancellationError {
-                await MainActor.run {
-                    self.isDownloading = false
-                    self.downloadTask = nil
-                    self.refreshDownloadState()
-                }
             } catch {
                 await MainActor.run {
-                    self.isDownloading = false
-                    self.downloadTask = nil
-                    self.downloadError = Self.userFacingMessage(for: error)
+                    guard self.downloads[modelName]?.id == attemptID else { return }
+                    self.downloads[modelName]?.isInFlight = false
+                    self.downloads[modelName]?.error = Self.userFacingMessage(for: error)
+                    guard self.viewModel.engine == "parakeet",
+                          self.viewModel.parakeetModel == modelName else { return }
                     self.refreshDownloadState()
                 }
             }

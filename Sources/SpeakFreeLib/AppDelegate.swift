@@ -1,4 +1,5 @@
-// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import AppKit
 import ApplicationServices
 import AVFoundation
@@ -9,6 +10,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBar: StatusBarController!
     var hotkeyManager: HotkeyManager?
     var recorder: AudioRecorder!
+    /// Transfers to the finalization task; closing the writer alone does not end file use.
+    private var recordingActivityLease: RecordingActivity.Lease?
     var transcriber: Transcriber!
     var inserter: TextInserter!
     var config: Config!
@@ -26,6 +29,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Frontmost app at record start — where the dictation will land. Persisted in
     /// .meta.json so the edit-feedback batch can find the final artifact to diff.
     private var recordingTargetBundleID: String?
+
+    // MARK: - Edit Mode seams (Phase 2 wires these; nil/false in Phase 1 = no behavior change)
+    //
+    /// Set at record-start by the edit session (Phase 2) so finalize knows this segment belongs to an
+    /// open edit session. nil for every hold/toggle dictation, which then resolves to
+    /// FinalizeDestination.insertImmediately — byte-identical to pre-Edit-Mode.
+    var pendingEditFinalizeTarget: (sessionID: UUID, segmentID: UUID)?
+    /// Delivers a finalized edit segment to the open session INSTEAD of inserting it (C1).
+    var editFinalizeSink: ((EditFinalizePayload) -> Void)?
+    /// True while an edit session window is open — extends the config-reload defer (MAP §8).
+    var editSessionOpenProbe: (() -> Bool)?
+    /// Routes an Edit-mode fn-tap through the EditSessionController (Phase 2). nil = fall back to
+    /// toggle semantics so keyMode:"edit" still dictates before the controller exists.
+    var editHotkeyRouter: (() -> Void)?
 
     // Clean up whisper model before exit to prevent ggml Metal assertion crash.
     // The crash happens in __cxa_finalize_ranges when ggml tries to free Metal
@@ -110,11 +127,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // reloadConfig, same as when not pressed. Main-only.
     private var pendingConfigReload = false
 
-    // Adaptive post-buffer (T2.1): poll trailing audio after key release and finalize as soon as
-    // ~150ms of trailing silence is observed, hard-capped at 300ms (never worse than the old flat
-    // wait). The decision itself lives in the pure PostBufferPolicy; this timer only feeds it RMS
-    // windows from the live recorder.
+    // Adaptive post-buffer (T2.1): poll trailing audio after key release. The policy requires
+    // 90ms of current trailing silence, otherwise waits 220ms, extending up to 1.2s when trailing
+    // energy crosses the speech threshold. This timer feeds it RMS windows from the live recorder.
     private var postBufferTimer: Timer?
+    private var postBufferGeneration: UInt64 = 0
+    /// The current press resumed a take whose previous hold had already been released.
+    private var continuedReleasedTake = false
     /// Window cadence the post-buffer poll uses (matches PostBufferPolicy's default window grain).
     private let postBufferWindowMs: Double = 30.0
 
@@ -155,22 +174,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Device catalog cache: the ONLY CoreAudio the main thread ever sees. Refreshes
         // off-main at launch and on device changes; the menu rebuilds from the cache.
-        AudioDeviceCatalog.onCacheRefreshed = { [weak self] in self?.statusBar.buildMenu() }
-        AudioDeviceCatalog.startCache()
-
-        // Multi-device AirPods contention: the detector throttles itself (max one
-        // notice per hour) — surface it visibly when it fires.
-        recorder.onContention = { message in
-            DispatchQueue.main.async {
-                NSApp.activate(ignoringOtherApps: true)
-                let alert = NSAlert()
-                alert.messageText = "AirPods Interference Detected"
-                alert.informativeText = message
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
+        AudioDeviceCatalog.onCacheRefreshed = { [weak self] in
+            self?.recorder.handleDeviceListChanged(AudioDeviceCatalog.cachedInputDevices)
+            self?.statusBar.buildMenu()
+        }
+        recorder.onCaptureStatus = { [weak self] message in
+            guard let self else { return }
+            self.statusBar.captureMessage = message
+            if self.statusBar.state == .recording {
+                self.recordingOverlay.updateStreamingText(message)
             }
         }
+        AudioDeviceCatalog.startCache()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.setup()
@@ -192,8 +207,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Injectable executor: tests replace this to simulate a throw without running the full setup.
     /// Production code leaves it nil — `setup()` calls `setupInner()` directly.
     var _setupExecutor: (() throws -> Void)?
+    private let setupGate = SetupGate()
 
     private func setup() {
+        guard setupGate.begin() else { return }
+        defer {
+            // Keep the gate closed until queued UI initialization has finished too.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.setupGate.finish() { self.reloadConfig() }
+            }
+        }
         do {
             if let executor = _setupExecutor {
                 try executor()
@@ -213,10 +237,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
             // Surface a modal alert. Runs on main so we block the setup thread here
             // until the user dismisses — the process stays alive and in the error state.
-            DispatchQueue.main.sync { [weak self] in
-                guard let self else { return }
-                self.showSetupFailureAlert(message: message)
-            }
+            let present = { [weak self] in self?.showSetupFailureAlert(message: message) }
+            if Thread.isMainThread { present() } else { DispatchQueue.main.sync(execute: present) }
         }
     }
 
@@ -310,10 +332,48 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         return choice
     }
 
+    private func completeRecordingsSetupIfNeeded() -> Bool {
+        // Avoid scanning a large corpus on ordinary reloads or developer machines.
+        guard RecordingsSetup.shouldPresent(config: config, hasRecordings: false,
+                                            developerMode: DevMode.isActive) else { return true }
+        let hasRecordings = RecordingStore.hasAudioFiles()
+        guard RecordingsSetup.shouldPresent(config: config, hasRecordings: hasRecordings,
+                                            developerMode: DevMode.isActive) else { return true }
+        let fileCount = hasRecordings ? RecordingStore.recordingCount() : 0
+        let folderPath = RecordingStore.recordingsDir.path
+        var proceeded = false
+        let present = {
+            proceeded = RecordingsSetupController.show(hasRecordings: hasRecordings,
+                                                       fileCount: fileCount, folderPath: folderPath)
+        }
+        if Thread.isMainThread {
+            present()
+        } else {
+            let finished = DispatchSemaphore(value: 0)
+            CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+                present()
+                finished.signal()
+            }
+            CFRunLoopWakeUp(CFRunLoopGetMain())
+            finished.wait()
+        }
+        guard proceeded else {
+            // Closing initial setup leaves no implicit answer. Quit gracefully so
+            // the next launch asks again rather than leaving a non-recording app.
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+            return false
+        }
+        config = Config.load()
+        return true
+    }
+
     private func setupInner() throws {
         DiagnosticLogger.shared.setup()
         DiagnosticLogger.shared.log("Setup started")
         config = Config.load()
+        // Ask before pruning, recovery, downloads or live capture. This single gate
+        // covers both cached models and Welcome's automatic post-download restart.
+        guard completeRecordingsSetupIfNeeded() else { return }
         // One-line effective-config snapshot (Michael 2026-08-20: forensics need the
         // settings a session actually ran with, not a guess from the current file).
         var cfgParts: [String] = []
@@ -346,7 +406,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // inventory is the ORPHAN SWEEP — any recent wav without a transcript sidecar,
         // headers repaired in place. The old handler (`reprocess`) only re-read a .txt
         // that a crashed recording never has; recovery now actually TRANSCRIBES.
-        let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
+        let maxRecordings = (DevMode.isActive || !DevMode.effectiveSaveRecordings(config) || config.preserveAllRecordings?.value == true)
+            ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
         if maxRecordings > 0 {
             RecordingStore.prune(maxCount: maxRecordings)
         }
@@ -370,8 +431,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
 
-        // Recordings apology notice (2026-07-14): saving shipped on-by-default through
-        // v1.7.1; the notice lets users keep or delete what accumulated. Returns every
+        // Recordings notice (2026-07-14; corpus framing 2026-08-21): saving shipped
+        // on-by-default through v1.7.1; the notice lets users keep or delete what
+        // accumulated. Returns every
         // launch (and every few hours, below) until resolved. Dev machines are exempt —
         // the corpus there is intentional.
         switch DevMode.isActive
@@ -488,13 +550,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         wireSecondOpinionStatus(for: transcriber)
         activeEngineID = engineID
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
-        DiagnosticLogger.shared.log("Model loaded: \(modelID) (engine: \(engineID))")
+        DiagnosticLogger.shared.log("Transcriber configured: \(modelID) (engine: \(engineID))")
 
         // Apply routing BEFORE enabling pre-buffer. Assigning preBufferEnabled=true
         // starts the engine immediately; doing that first briefly opens the system
         // default route and then races the route-triggered rebuild at launch.
-        recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
-        recorder.preBufferEnabled = config.preBuffer?.value ?? true
+        let inputDeviceUID = config.inputDeviceUID
+        let preBufferEnabled = config.preBuffer?.value ?? true
+        DispatchQueue.main.async { [weak self] in
+            self?.recorder.setPinnedInputDevice(uid: inputDeviceUID)
+            self?.recorder.preBufferEnabled = preBufferEnabled
+        }
 
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
@@ -578,6 +644,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startListening() {
+        hotkeyManager?.stop()
+        tapHealthTimer?.invalidate()
         hotkeyManager = HotkeyManager(
             keyCode: config.hotkey.keyCode,
             modifiers: config.hotkey.modifierFlags
@@ -627,8 +695,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         print("speakfree v\(SpeakFree.version)")
         print("Hotkey: \(hotkeyDesc)")
         print("Model: \(config.modelSize)")
-        print("Ready.")
-        DiagnosticLogger.shared.log("Ready — hotkey=\(hotkeyDesc) model=\(config.modelSize)")
+        let readiness = transcriber.isLoaded ? "Ready" : "Hotkey ready; speech model not loaded yet"
+        print(readiness)
+        DiagnosticLogger.shared.log("\(readiness) — hotkey=\(hotkeyDesc) model=\(transcriber.modelID)")
 
         // Start LocalAPIServer on launch if enabled in config (T1.2).
         syncLocalAPIServerState()
@@ -679,7 +748,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if issues.isEmpty {
-            DiagnosticLogger.shared.log("Health check (\(context)): all OK")
+            DiagnosticLogger.shared.log("Health check (\(context)): permissions and controls OK; audio recovery checked asynchronously")
         } else {
             DiagnosticLogger.shared.log("Health check (\(context)): ISSUES — \(issues.joined(separator: ", "))")
             print("⚠️ Health check (\(context)): \(issues.joined(separator: ", "))")
@@ -729,6 +798,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func reloadConfig() {
+        if setupGate.deferReloadIfRunning() { return }
         // L1: never mutate live dictation state mid-utterance. If fn is held (a dictation is in
         // flight), defer the ENTIRE reload — not just the hotkey rebuild — because it also swaps
         // the transcriber (this utterance would finalize on the wrong engine) and flips
@@ -737,9 +807,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // full reload once (performPendingConfigReloadIfNeeded), reloading fresh Config.load()
         // state from disk. This is reached from settings save, notice callbacks, and mic select —
         // all correctly get the same defer-if-pressed semantics.
-        if isPressed {
+        // Defer the whole reload while a dictation is in flight OR while an edit session is open
+        // (MAP §8): swapping the transcriber/hotkey or flipping Key Mode under an open session would
+        // strand its segments and change the hotkey out from under it. Every dictation-end path (and
+        // Phase 2's session-close path) re-runs the reload once via performPendingConfigReloadIfNeeded.
+        if isPressed || postBufferTimer != nil || (editSessionOpenProbe?() ?? false) {
             pendingConfigReload = true
-            DiagnosticLogger.shared.log("Config: reload deferred — dictation in flight")
+            DiagnosticLogger.shared.log("Config: reload deferred — dictation or edit session in flight")
             return
         }
 
@@ -771,7 +845,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         config = Config.load()
 
         // Parakeet: no ggml-on-disk gate (FluidAudio downloads/validates its own cache).
-        // Always rebuild the transcriber so an engine switch takes effect.
+        // Rebuild only when the engine, model, or language changes.
         if effectiveEngineID == "parakeet" {
             // Same transient-window fallback as above — see resolveLegacyParakeetModel.
             let modelID = config.parakeetModel ?? "parakeet-tdt-0.6b-v3"
@@ -812,19 +886,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finishReloadConfig(modelID: String) {
-        // Capture the outgoing transcriber so its engine's cleanup runs before we drop it.
-        // Without this, switching engine/model leaks the old engine's loaded model (ANE/Metal
-        // residency) until ARC happens to release it — unload it deterministically instead.
-        let old = transcriber
-
-        let engine = EngineFactory.make(config: config)
-        transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
-        wireSecondOpinionStatus(for: transcriber)
-        activeEngineID = effectiveEngineID
-
-        // Unload the previous engine off the main thread (async unload); ARC drops `old` after.
-        if let old = old {
-            Task { await old.unloadModel() }
+        let needsNewEngine = transcriber == nil || activeEngineID != effectiveEngineID
+            || transcriber.modelID != modelID || transcriber.language != config.language
+        if needsNewEngine {
+            let old = transcriber
+            let engine = EngineFactory.make(config: config)
+            transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
+            wireSecondOpinionStatus(for: transcriber)
+            activeEngineID = effectiveEngineID
+            if let old { Task { await old.unloadModel() } }
         }
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
 
@@ -841,7 +911,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
         transcriber.startMemoryPressureMonitoring()
-        warmUpEngine(effectiveEngineID)
+        if needsNewEngine { warmUpEngine(effectiveEngineID) }
 
         reloadHotkeyAndSettings()
         print("Config reloaded: hotkey=\(KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)) model=\(modelID) engine=\(effectiveEngineID)")
@@ -865,12 +935,22 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// first dictation isn't a ~15-20s cold ANE load. Parakeet only (Whisper's cold
     /// load is fast and its memory profile differs); no-ops if assets aren't present.
     private func warmUpEngine(_ engineID: String) {
+        guard let t = transcriber else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.transcriber === t else { return }
+            self.statusBar.modelIsLoading = engineID == "parakeet" && !t.isLoaded
+        }
         guard engineID == "parakeet" else { return }
-        let t = transcriber
-        Task.detached(priority: .userInitiated) {
+        Task.detached(priority: .userInitiated) { [weak self] in
             let start = Date()
-            await t?.warmUp()
-            print("Parakeet warm-up finished in \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
+            await t.warmUp()
+            let loaded = t.isLoaded
+            DiagnosticLogger.shared.log("Parakeet warm-up \(loaded ? "ready" : "failed") after \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.transcriber === t else { return }
+                self.statusBar.modelIsLoading = false
+                if !loaded { self.statusBar.modelLoadMessage = "Initial model load failed — dictation will retry" }
+            }
         }
     }
 
@@ -950,7 +1030,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Whether the current pin IS the connected Bluetooth mic (menu checkmark state).
     public func dictationModeActive() -> Bool {
         guard let bt = connectedBluetoothInput() else { return false }
-        return config?.inputDeviceUID == bt.uid
+        return config?.inputDeviceUID == nil || config?.inputDeviceUID == bt.uid
     }
 
     /// Toggle: ON pins the Bluetooth mic (remembering the previous pin for restore);
@@ -961,10 +1041,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         var updated = Config.load()
         if dictationModeActive() {
             let restore = updated.preDictationModeInputUID
+                ?? AudioDeviceCatalog.cachedBuiltInInput?.uid
+                ?? AudioDeviceCatalog.cachedInputDevices.first(where: { !$0.isBluetooth && !$0.isVirtual })?.uid
+            guard let restore else { return } // No alternative mic to switch to.
             updated.preDictationModeInputUID = nil
             try? updated.save()
             config?.preDictationModeInputUID = nil
-            DiagnosticLogger.shared.log("Dictation Mode: OFF — restoring input \(restore ?? "system default")")
+            DiagnosticLogger.shared.log("Dictation Mode: OFF — restoring input \(restore)")
             selectInputDevice(uid: restore)
         } else {
             updated.preDictationModeInputUID = updated.inputDeviceUID
@@ -1051,10 +1134,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// reloadConfig was called. Called from every path that ends a dictation (finalizeRecording,
     /// handleKeyUp, handleRecordingAbort); the guard-then-clear makes it fire once and is
     /// idempotent, so overlapping end paths don't double-reload. reloadConfig reloads fresh
-    /// Config.load() state from disk, and by the time any of these callers runs isPressed is
-    /// already false, so the reload proceeds (does not re-defer) — the hotkey rebuild included.
+    /// Config.load() state from disk. Key-up alone does not end the take: a pending post-buffer
+    /// keeps the reload deferred until its finalizer relinquishes the capture boundary.
     private func performPendingConfigReloadIfNeeded() {
-        guard pendingConfigReload else { return }
+        guard pendingConfigReload, postBufferTimer == nil else { return }
         pendingConfigReload = false
         DiagnosticLogger.shared.log("Config: applying deferred reload — dictation finished")
         reloadConfig()
@@ -1119,7 +1202,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.show(viewModel: settingsViewModel!)
     }
 
-    /// Present the recordings apology notice. Main-only. A dismissal without a
+    /// Present the recordings notice. Main-only. A dismissal without a
     /// keep/delete decision re-arms it a few hours out; a decision (persisted by the
     /// controller) reloads config so the dialog's toggle takes effect immediately.
     private func showRecordingsNotice() {
@@ -1159,30 +1242,47 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleKeyDown() {
         guard isReady, !isTerminating else { return }
 
-        let isToggle = config.toggleMode?.value ?? false
-
-        if isToggle {
+        // Resolve Key Mode through the one shared property (KeyMode.swift), never a site-local
+        // `config.toggleMode?.value ?? false` — that is exactly the drift `effectiveKeyMode` and
+        // `effectivePunctuationMode` exist to prevent.
+        switch config.effectiveKeyMode {
+        case .hold:
+            guard !isPressed else { return }
+            handleRecordingStart()
+        case .toggle:
             if isPressed {
                 handleRecordingStop()
             } else {
                 handleRecordingStart()
             }
-        } else {
-            guard !isPressed else { return }
-            handleRecordingStart()
+        case .edit:
+            // Phase 2 owns the EditSessionController: the window, the fn-tap reducer routing
+            // (EditKeyReducer), and the finalize-destination target. Until it is wired, route the
+            // tap through the same toggle semantics so a manually-set keyMode:"edit" config still
+            // dictates rather than bricking the hotkey. The FinalizeDestination seam keeps edit
+            // finalization off the direct-insert path only once a target is captured (nil today).
+            if let router = editHotkeyRouter {
+                router()
+            } else if isPressed {
+                handleRecordingStop()
+            } else {
+                handleRecordingStart()
+            }
         }
     }
 
     private func handleKeyUp() {
-        let isToggle = config.toggleMode?.value ?? false
-        if isToggle { return }
-
-        handleRecordingStop()
-
-        // L1: the key was released via the still-installed old hotkey manager (the reload was
-        // deferred while held) and isPressed is now false — safe to apply any deferred config
-        // reload in full (transcriber swap + hotkey rebuild + settings).
-        performPendingConfigReloadIfNeeded()
+        // Toggle and Edit are tap-driven: the key-up is ignored (the tap already started/stopped in
+        // handleKeyDown). Only Hold stops on release.
+        switch config.effectiveKeyMode {
+        case .toggle, .edit:
+            return
+        case .hold:
+            handleRecordingStop()
+            // The post-buffer is still part of this take. A deferred reload waits for actual
+            // finalization so a re-press can continue with the same engine, route, and key mode.
+            performPendingConfigReloadIfNeeded()
+        }
     }
 
     private func showAccessibilityAlert() {
@@ -1460,8 +1560,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
-    private func handleRecordingStart() {
+    func handleRecordingStart() {
         guard !isPressed else { return }
+        if let timer = postBufferTimer {
+            // Capture is still running during the post-buffer. Continue this take without
+            // creating another WAV/sentinel or replacing the original insertion context.
+            postBufferGeneration &+= 1
+            timer.invalidate()
+            postBufferTimer = nil
+            isPressed = true
+            continuedReleasedTake = true
+            startRecordingWatchdog()
+            startStreamingTimer()
+            return
+        }
+        continuedReleasedTake = false
         let startRequestedAt = CFAbsoluteTimeGetCurrent()
 
         // A stale Secure-Input retry must never fire mid-take or after a newer dictation —
@@ -1533,7 +1646,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             // Always write to recordings dir — crash recovery works regardless of maxRecordings
             let outputURL = RecordingStore.newRecordingURL()
+            recordingActivityLease = try RecordingActivity.shared.acquire(outputURL)
+            let pathPreparedAt = CFAbsoluteTimeGetCurrent()
             RecordingStore.writeSentinel(recordingURL: outputURL)
+            let sentinelWrittenAt = CFAbsoluteTimeGetCurrent()
             try recorder.startRecording(to: outputURL)
             let recordingStartedAt = CFAbsoluteTimeGetCurrent()
             if recordingStartedAt - startRequestedAt >= 0.25 {
@@ -1544,6 +1660,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     overlayFinishedAt - classificationFinishedAt,
                     recordingStartedAt - overlayFinishedAt,
                     recordingStartedAt - startRequestedAt))
+                DiagnosticLogger.shared.log(String(
+                    format: "Recording file setup: path=%.3fs sentinel=%.3fs writer=%.3fs",
+                    pathPreparedAt - overlayFinishedAt,
+                    sentinelWrittenAt - pathPreparedAt,
+                    recordingStartedAt - sentinelWrittenAt))
             }
 
             // Start streaming transcription timer — processes audio every 2s for live preview
@@ -1556,7 +1677,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             DiagnosticLogger.shared.log("Recording start FAILED: \(error)")
             stopRecordingWatchdog()
             print("Error: \(error.localizedDescription)")
-            RecordingStore.clearSentinel()
+            if let lease = recordingActivityLease {
+                RecordingStore.clearSentinel(recordingURL: lease.audioURL)
+            }
+            recordingActivityLease = nil
             isPressed = false
             focusCapture.reset()  // recording never started — invalidate the in-flight capture
             // I4: OCR was kicked off just above, but recording never started so nothing will
@@ -1633,9 +1757,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// A real key was pressed while fn was held — this is a keyboard shortcut, not dictation.
-    /// Cancel recording silently and let the shortcut pass through.
-    private func handleRecordingAbort() {
+    /// Cancel the press silently and let the shortcut pass through. If this press resumed an
+    /// already-released take, preserve that take and return to its normal post-buffer/finalize.
+    func handleRecordingAbort() {
         guard isPressed else { return }
+        if continuedReleasedTake {
+            handleRecordingStop()
+            return
+        }
         isPressed = false
 
         stopRecordingWatchdog()
@@ -1643,17 +1772,25 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let result = recorder.stopRecording() {
             try? FileManager.default.removeItem(at: result.url)
+            RecordingStore.clearSentinel(recordingURL: result.url)
         }
-        RecordingStore.clearSentinel()
+        if let lease = recordingActivityLease {
+            RecordingStore.clearSentinel(recordingURL: lease.audioURL)
+        }
+        recordingActivityLease = nil
         focusCapture.reset()  // invalidate any in-flight focus capture
         screenContextText = nil
         screenCaptureGeneration = UUID()  // invalidate any in-flight OCR
-        statusBar.state = .idle
-        recordingOverlay.hide()
-        statusBar.buildMenu()
+        resetRecordingUIAfterAbort()
 
         // L1: the dictation ended (aborted) — apply any config reload deferred while fn was held.
         performPendingConfigReloadIfNeeded()
+    }
+
+    func resetRecordingUIAfterAbort() {
+        statusBar.state = .idle
+        recordingOverlay.hide()
+        statusBar.buildMenu()
     }
 
     /// In-recording dead-audio watchdog (2026-07-25 audit C3/C5): the ONLY health
@@ -1711,9 +1848,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         watchdogSilentTicks = 0
     }
 
-    private func handleRecordingStop() {
+    func handleRecordingStop() {
         guard isPressed else { return }
         isPressed = false
+        continuedReleasedTake = false
 
         stopRecordingWatchdog()
 
@@ -1757,8 +1895,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let startTick = DispatchTime.now().uptimeNanoseconds
 
         postBufferTimer?.invalidate()
+        postBufferGeneration &+= 1
+        let generation = postBufferGeneration
         postBufferTimer = Timer.scheduledTimer(withTimeInterval: windowMs / 1000.0, repeats: true) { [weak self] timer in
             guard let self = self else { timer.invalidate(); return }
+            guard self.postBufferGeneration == generation, !self.isPressed else {
+                timer.invalidate()
+                return
+            }
             let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds &- startTick) / 1_000_000.0
             // R3: copy only the trailing slice, not the full (growing) sample array each tick.
             let trailing = self.recorder.samples(after: samplesAtRelease)
@@ -1774,7 +1918,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
+    func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
+        let activityLease = recordingActivityLease
+        recordingActivityLease = nil
+        // Retain on every synchronous early-return path, then transfer into Task below.
+        defer { withExtendedLifetime(activityLease) {} }
         // L1: the key was released before the post-buffer scheduled this call (isPressed is
         // already false). Applying a deferred FULL reload here — ahead of every return below —
         // guarantees no exit path (toggle-mode stop, gate failure, nil transcriber, success) leaves
@@ -1788,7 +1936,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let stopTime = keyReleaseTime
 
         guard let recording = recorder.stopRecording() else {
-            RecordingStore.clearSentinel()
+            if let activityLease {
+                RecordingStore.clearSentinel(recordingURL: activityLease.audioURL)
+            }
             focusCapture.reset()
             statusBar.state = .idle
             recordingOverlay.hide()
@@ -1814,9 +1964,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // kick a rebuild now regardless of how the dictation resolves.
             switch failure {
             case .captureFailed:
-                recorder.ensureAudioHealthy()
+                recorder.recoverFailedCapture()
             case .silent:
-                recorder.ensureAudioHealthy()
+                recorder.recoverFailedCapture()
             default:
                 break
             }
@@ -1831,10 +1981,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 DiagnosticLogger.shared.log(
                     "Recording was silent (RMS \(FinalizePipeline.rms(of: recording.samples))) and the wav did not rescue it — audio engine may be dead, rebuilding")
             }
-            // Keep the wav on a SILENT failure even when saving is off (2026-07-25
-            // audit F11): a silent capture means the mic/route is broken, and the
-            // audio is the diagnostic evidence. Only genuine accidental taps
-            // (.tooShort with real samples) honor the opt-out deletion.
+            // Keep None also applies to diagnostic failures. Developer mode remains
+            // the explicit, visibly disclosed override through effectiveSaveRecordings.
             let isSilentFailure: Bool
             if case .silent = failure { isSilentFailure = true } else { isSilentFailure = false }
             let isCaptureFailure: Bool
@@ -1844,7 +1992,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 isCaptureFailure = false
             }
-            if !DevMode.effectiveSaveRecordings(config) && !isSilentFailure {
+            if !DevMode.effectiveSaveRecordings(config) {
                 try? FileManager.default.removeItem(at: audioURL)
             }
             if isCaptureFailure {
@@ -1858,13 +2006,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 recordingOverlay.show(state: .error("Capture failed: please try again"))
                 showCaptureFailureAlert()
-            } else if isSilentFailure {
+            } else if isSilentFailure && DevMode.effectiveSaveRecordings(config) {
                 // Empty sidecar (review #6): the kept wav is diagnostic evidence,
                 // NOT a recoverable dictation — without this the launch sweep
                 // re-offers known-silent audio every launch and masks real orphans.
                 RecordingStore.saveTranscription(text: "", for: audioURL)
             }
-            RecordingStore.clearSentinel()
+            RecordingStore.clearSentinel(recordingURL: audioURL)
             focusCapture.reset()
             // I4: a gate-failed dictation never consumes its OCR, so clear it and invalidate any
             // in-flight capture — otherwise this recording's screenContextText survives and biases
@@ -1927,9 +2075,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Snapshot ALL config-derived state on main before crossing into the async Task.
         // Accessing self.config.* from a background queue is a torn-read race — Config is a
         // struct so reads and writes are not atomic across threads.
-        let maxRecordings = (config.preserveAllRecordings?.value ?? false) ? 0 : Config.effectiveMaxRecordings(config.maxRecordings)
-        // Recordings privacy: persisting audio + transcripts is opt-in (2026-07-14).
-        let keepRecording = DevMode.effectiveSaveRecordings(config)
+        // Retention is deliberately NOT captured here. A user can change it while
+        // inference runs; the completion must honor that newer preference.
         // Resolved through the one shared default (Michael 2026-08-12). The full history of
         // why a missing key means `.off` — including the reverted 2026-07-26 flip to
         // `.hybrid` and the text corruption it caused — lives on
@@ -1944,13 +2091,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let metaEngine = activeEngineID
         let metaDevice = recorder.currentCaptureDeviceName()
         let metaTargetApp = recordingTargetBundleID
+        // C1: snapshot the edit-session target (nil for hold/toggle) on main before the async Task,
+        // so the finalize destination is decided from the target captured at record-start, never
+        // re-derived. Always nil in Phase 1 (no EditSessionController yet) → insertImmediately.
+        let editTarget = pendingEditFinalizeTarget
 
         // Snapshot the transcriber on main BEFORE crossing into the async Task. A settings
         // change mid-finalize (reloadConfig) can swap self.transcriber out from under us; the
         // snapshot guarantees this recording's audio runs through the engine that was active
         // when the user spoke, not a freshly-swapped one.
         guard let transcriber = self.transcriber else {
-            RecordingStore.clearSentinel()
+            RecordingStore.clearSentinel(recordingURL: audioURL)
             statusBar.state = .idle
             recordingOverlay.hide()
             return
@@ -1983,7 +2134,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // async-only; WhisperEngine exposes async shims). The engines serialize access to
         // their own context internally, so we no longer need whisperSerialQueue to gate the
         // final pass. Results are still marshalled back to main via DispatchQueue.main.async.
-        Task { [weak self] in
+        Task { [weak self, activityLease] in
+            defer { activityLease?.release() }
             guard let self = self else { return }
             do {
                 // Build Whisper prompt + run post-processing through the shared
@@ -2024,7 +2176,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     reuseDecision: reuseDecision
                 ) {
                     try await transcriber.transcribe(
-                        audioURL: audioURL, samples: samples, prompt: prompt)
+                        audioURL: audioURL, samples: samples, prompt: prompt,
+                        punctuationMode: mode)
                 }
                 if reusedPartial {
                     DiagnosticLogger.shared.log(
@@ -2033,41 +2186,64 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 let text = TextPipeline.run(
                     makeInput(primaryRaw, samples.count),
                     precomputedPrompt: .some(prompt)).finalText
+                let meta = RecordingStore.RecordingMeta(
+                    appVersion: SpeakFree.version,
+                    engine: metaEngine,
+                    model: transcriber.modelID,
+                    inputDevice: metaDevice,
+                    date: ISO8601DateFormatter().string(from: Date()),
+                    durationSeconds: Double(samples.count) / 16_000.0,
+                    transcriptChars: text.count,
+                    targetApp: metaTargetApp,
+                    transcriptionDiagnostics: transcriber.lastDiagnostics
+                )
+                let retentionConfig = Config.load()
+                let keepRecording = DevMode.effectiveSaveRecordings(retentionConfig)
+                let maxRecordings = (DevMode.isActive || !keepRecording || retentionConfig.preserveAllRecordings?.value == true)
+                    ? 0 : Config.effectiveMaxRecordings(retentionConfig.maxRecordings)
                 RecordingStore.finishRecording(
-                    audioURL: audioURL, keep: keepRecording, raw: primaryRaw, text: text,
-                    meta: RecordingStore.RecordingMeta(
-                        appVersion: SpeakFree.version,
-                        engine: metaEngine,
-                        model: transcriber.modelID,
-                        inputDevice: metaDevice,
-                        date: ISO8601DateFormatter().string(from: Date()),
-                        durationSeconds: Double(samples.count) / 16_000.0,
-                        transcriptChars: text.count,
-                        targetApp: metaTargetApp,
-                        transcriptionDiagnostics: transcriber.lastDiagnostics
-                    ))
-                RecordingStore.clearSentinel()
+                    audioURL: audioURL, keep: keepRecording, raw: primaryRaw, text: text, meta: meta)
+                RecordingStore.clearSentinel(recordingURL: audioURL)
                 if keepRecording && maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
                 }
-                DispatchQueue.main.async {
-                    if keepRecording {
-                        self.statusBar.noteFinishedRecording(url: audioURL, text: text)
+                // C1 finalize destination: hold/toggle insert immediately (today's path, unchanged);
+                // an edit segment is delivered to its session and CANNOT reach the inserter.
+                switch FinalizeDestination.resolve(editTarget: editTarget) {
+                case .returnToEditSession(let sessionID, let segmentID):
+                    let payload = EditFinalizePayload(
+                        sessionID: sessionID, segmentID: segmentID, raw: primaryRaw,
+                        pipelineText: text, audioURL: audioURL, meta: meta)
+                    DispatchQueue.main.async {
+                        // No presentFinalizedText, no TextInserter, no focus recapture — the session
+                        // owns the segment from here.
+                        self.statusBar.state = .idle
+                        self.editFinalizeSink?(payload)
                     }
-                    self.presentFinalizedText(
-                        text,
-                        sampleCount: samples.count,
-                        stopTime: stopTime,
-                        prependSpace: capturedPrependSpace,
-                        contextBefore: capturedInputText,
-                        element: capturedElement
-                    )
+                case .insertImmediately:
+                    DispatchQueue.main.async {
+                        if keepRecording {
+                            self.statusBar.noteFinishedRecording(url: audioURL, text: text)
+                        }
+                        self.presentFinalizedText(
+                            text,
+                            sampleCount: samples.count,
+                            stopTime: stopTime,
+                            prependSpace: capturedPrependSpace,
+                            contextBefore: capturedInputText,
+                            element: capturedElement
+                        )
+                    }
                 }
             } catch {
-                RecordingStore.clearSentinel()
+                RecordingStore.clearSentinel(recordingURL: audioURL)
                 // The opt-out must win on the failure path too: finishRecording(keep:false)
                 // — the deletion the user consented to — is never reached when inference
                 // throws, and the wav would silently persist against the setting.
+                let retentionConfig = Config.load()
+                let keepRecording = DevMode.effectiveSaveRecordings(retentionConfig)
+                let maxRecordings = (DevMode.isActive || !keepRecording || retentionConfig.preserveAllRecordings?.value == true)
+                    ? 0 : Config.effectiveMaxRecordings(retentionConfig.maxRecordings)
                 if !keepRecording {
                     try? FileManager.default.removeItem(at: audioURL)
                 }
@@ -2364,7 +2540,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
             queue.removeFirst()
             guard let transcriber = self.transcriber else { return }
-            Task.detached(priority: .utility) { [weak self] in
+            guard let activityLease = try? RecordingActivity.shared.acquireReading(url) else {
+                DiagnosticLogger.shared.log("Recovery: skipped a recording currently claimed by maintenance")
+                DispatchQueue.main.async { next() }
+                return
+            }
+            Task.detached(priority: .utility) { [weak self, activityLease] in
+                defer { activityLease.release() }
                 do {
                     let text = try await transcriber.transcribeFile(
                         url: url, progressHandler: { _, _, _ in }, isCancelled: { false })
@@ -2400,9 +2582,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             DiagnosticLogger.shared.log("Recovery: no transcriber loaded — cannot recover")
             return
         }
+        let activityLease: RecordingActivity.Lease
+        do { activityLease = try RecordingActivity.shared.acquireReading(audioURL) }
+        catch {
+            DiagnosticLogger.shared.log("Recovery: recording is currently claimed by maintenance")
+            recordingOverlay.show(state: .error(error.localizedDescription))
+            return
+        }
         statusBar.state = .transcribing
         statusBar.buildMenu()
-        Task.detached { [weak self] in
+        Task.detached { [weak self, activityLease] in
+            defer { activityLease.release() }
             do {
                 let text = try await transcriber.transcribeFile(
                     url: audioURL, progressHandler: { _, _, _ in }, isCancelled: { false })
@@ -2476,6 +2666,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Read saved transcription text — no need to re-transcribe
+        guard let activityLease = try? RecordingActivity.shared.acquireReading(audioURL) else {
+            recordingOverlay.show(state: .error("This recording is being moved. Please try again afterward."))
+            return
+        }
+        defer { activityLease.release() }
         let textURL = audioURL.deletingPathExtension().appendingPathExtension("txt")
         guard let text = try? String(contentsOf: textURL, encoding: .utf8),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

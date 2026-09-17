@@ -41,6 +41,15 @@ final class CommaMishearTests: XCTestCase {
         XCTAssertEqual(hybrid("That is the plan: coma"), "That is the plan,")
     }
 
+    /// Real 2026-08-22 dictation: Parakeet split the spoken "comma" into two capitalised
+    /// tokens "Ka Ma" ("Yeah, Ka Ma, it also becomes…"). The non-word bigram joins the loose
+    /// kama/kana family (preceding-punctuation garble signature), not the both-sides real-word rule.
+    func test_kaMaSplitTokenBecomesComma() {
+        let out = hybrid("Yeah, Ka Ma, it also becomes the way that we use newer models")
+        XCTAssertFalse(out.contains("Ka Ma"), "got: \(out)")
+        XCTAssertTrue(out.contains("Yeah, it also becomes"), "got: \(out)")
+    }
+
     func test_discourseMarkerRealWordHomophoneBecomesComma() {
         XCTAssertEqual(hybrid("Shoot comment, I thought I sent it"),
                        "Shoot, I thought I sent it")

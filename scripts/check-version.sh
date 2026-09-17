@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-17
 # check-version.sh — assert that EVERY version-bearing surface agrees:
 #   Version.swift, Resources/Info.plist, docs/appcast.xml, and the GitHub Pages
 #   site (docs/index.html: download URL, visible label, and newest changelog entry).
@@ -12,6 +13,12 @@
 # label, heading) automatically before calling this; the changelog body is the
 # one human step this check enforces.
 set -euo pipefail
+SOURCE_ONLY=0
+case "${1:-}" in
+    "") ;;
+    --source-only) SOURCE_ONLY=1 ;;
+    *) echo "Usage: check-version.sh [--source-only]" >&2; exit 1 ;;
+esac
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INDEX="$REPO_DIR/docs/index.html"
@@ -22,6 +29,8 @@ VERSION_SWIFT=$(grep 'let version' "$REPO_DIR/Sources/SpeakFreeLib/Version.swift
     | sed 's/.*"\(.*\)".*/\1/')
 
 VERSION_PLIST=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+    "$REPO_DIR/Resources/Info.plist")
+VERSION_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" \
     "$REPO_DIR/Resources/Info.plist")
 
 # Newest <item> is the first one in the file (build.sh always prepends).
@@ -70,9 +79,12 @@ check() {  # check <name> <value>
     fi
 }
 check "Info.plist"             "$VERSION_PLIST"
-check "appcast"                "$VERSION_APPCAST"
-check "appcast sparkle:version" "$VERSION_APPCAST_SPARKLE"
-check "appcast enclosure URL"   "$VERSION_APPCAST_URL"
+check "Info.plist build"       "$VERSION_BUILD"
+if [ "$SOURCE_ONLY" -eq 0 ]; then
+    check "appcast"                "$VERSION_APPCAST"
+    check "appcast sparkle:version" "$VERSION_APPCAST_SPARKLE"
+    check "appcast enclosure URL"   "$VERSION_APPCAST_URL"
+fi
 check "index.html download URL" "$VERSION_PAGES_URL"
 check "index.html version label" "$VERSION_PAGES_LABEL"
 check "index.html changelog top" "$VERSION_PAGES_CHANGELOG"
@@ -85,4 +97,8 @@ if [ "$MISMATCH" -ne 0 ]; then
     exit 1
 fi
 
-echo "OK: all version surfaces agree ($VERSION_SWIFT)"
+if [ "$SOURCE_ONLY" -eq 1 ]; then
+    echo "OK: source version surfaces agree ($VERSION_SWIFT); signed appcast checked after packaging"
+else
+    echo "OK: all version surfaces agree ($VERSION_SWIFT)"
+fi

@@ -1,12 +1,49 @@
 #!/bin/bash
-set -e
+# ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-17
+set -euo pipefail
 
-APP="speakfree.app"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_DIR"
 VERSION=$(grep 'let version' Sources/SpeakFreeLib/Version.swift | sed 's/.*"\(.*\)".*/\1/')
 DMG="speakfree-${VERSION}.dmg"
 SIGN_ID="Developer ID Application: Michael Morgenstern (AZ53Y7V4UZ)"
 ENTITLEMENTS="$(dirname "$0")/speakfree.entitlements"
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_COMMIT=$(git rev-parse HEAD)
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "FATAL: commit tracked source changes before packaging." >&2
+    exit 1
+fi
+check_source_inputs() {
+    git diff --quiet "$BUILD_COMMIT" -- Sources Resources Package.swift Package.resolved scripts || {
+        echo "FATAL: source inputs changed while packaging." >&2; return 1;
+    }
+    [ -z "$(git ls-files --others --exclude-standard -- Sources Resources scripts)" ] || {
+        echo "FATAL: untracked build inputs must be committed before packaging." >&2; return 1;
+    }
+}
+check_source_inputs
+if [ -e "$DMG" ]; then
+    echo "FATAL: $DMG already exists; preserve it before starting another build." >&2
+    exit 1
+fi
+
+# Fork policy (2026-08-21): releases are cut from main or a release/X.Y.Z branch.
+# release/* carries only regression fixes cherry-picked from main; main keeps
+# experimenting. On a release branch the version in its name must match
+# Version.swift so a mis-bumped branch can never ship under the wrong number.
+CURRENT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)
+case "$CURRENT_BRANCH" in
+    main) ;;
+    release/*|codex/release/*)
+        BRANCH_VERSION="${CURRENT_BRANCH##*/}"
+        if [ "$BRANCH_VERSION" != "$VERSION" ]; then
+            echo "FATAL: on $CURRENT_BRANCH but Version.swift says $VERSION." >&2
+            exit 1
+        fi ;;
+    *)
+        echo "FATAL: build.sh requires main, release/X.Y.Z or codex/release/X.Y.Z (currently '$CURRENT_BRANCH')." >&2
+        exit 1 ;;
+esac
 
 # Vendored whisper.cpp + ggml binaries. Pinning to a known-good version
 # (libwhisper 1.8.3 + ggml 0.9.5) avoids depending on transient brew state —
@@ -26,7 +63,7 @@ MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1-2)
 if [ -f "$INDEX" ]; then
     echo "Stamping Pages site version surfaces to v${VERSION}..."
     # Download button URL
-    sed -i '' -E "s#releases/latest/download/speakfree-[0-9][0-9.]*\.dmg#releases/latest/download/speakfree-${VERSION}.dmg#g" "$INDEX"
+    sed -i '' -E "s#releases/(latest/download|download/v[0-9.]+)/speakfree-[0-9.]+\.dmg#releases/download/v${VERSION}/speakfree-${VERSION}.dmg#g" "$INDEX"
     # Visible version label under the download button
     sed -i '' -E "s#(class=\"btn-sub\">v)[0-9][0-9.]*#\1${VERSION}#g" "$INDEX"
     # "What's new in vX.Y" disclosure heading
@@ -39,11 +76,19 @@ if [ -f "$INDEX" ]; then
 fi
 
 echo "Checking version consistency..."
-bash "$REPO_DIR/scripts/check-version.sh"
+bash "$REPO_DIR/scripts/check-version.sh" --source-only
 
 echo "Building speakfree v${VERSION}..."
 xcrun swift build -c release
+check_source_inputs
 
+# A fresh, retained staging bundle cannot inherit stale files from a prior app.
+# Packaging never installs, stops, or restarts the user's running SpeakFree.
+mkdir -p build
+PACKAGE_DIR=$(mktemp -d "$REPO_DIR/build/release-package.XXXXXX")
+APP="$PACKAGE_DIR/speakfree.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Always regenerate Info.plist from the tracked Resources/Info.plist so the bundle
 # template (speakfree.app, which is gitignored) never drifts out of sync with the
 # canonical plist. This ensures Sparkle keys, entitlements descriptions, and other
@@ -52,6 +97,8 @@ echo "Copying canonical Info.plist and setting version to ${VERSION}..."
 cp "Resources/Info.plist" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :SFBuildCommit string $BUILD_COMMIT" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :SFBuildDate string $(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APP/Contents/Info.plist"
 # Mark this as the RELEASE channel so the menu-bar title is clean ("speakfree X.Y.Z").
 # Any build without this key defaults to "Testing" (dev/experimental) — see SpeakFree.menuTitle.
 /usr/libexec/PlistBuddy -c "Set :SFBuildChannel release" "$APP/Contents/Info.plist" 2>/dev/null \
@@ -123,6 +170,7 @@ if [ "$FINAL_WHISPER_REF" != "@rpath/libwhisper.1.dylib" ]; then
 fi
 
 echo "Signing..."
+check_source_inputs
 find "$APP" -exec xattr -c {} \; 2>/dev/null || true
 # Sign dylibs and whisper-cli first (no entitlements needed for these).
 # Use find -type f to skip symlinks — codesign fails with "timestamp expected"
@@ -134,9 +182,10 @@ codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/Frameworks/S
 codesign --force --options runtime --sign "$SIGN_ID" "$APP/Contents/MacOS/whisper-cli"
 # Sign the main app with entitlements (microphone + apple-events)
 codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
+"$APP/Contents/MacOS/speakfree" --help >/dev/null
 
 echo "Building DMG..."
-rm -f "$DMG"
 create-dmg \
     --volname "speakfree" \
     --window-pos 200 120 \
@@ -149,6 +198,7 @@ create-dmg \
     "$DMG" \
     "$APP"
 
+codesign --sign "$SIGN_ID" --timestamp "$DMG"
 echo "Notarizing..."
 xcrun notarytool submit "$DMG" \
     --keychain-profile "speakfree-notary" \
@@ -156,6 +206,8 @@ xcrun notarytool submit "$DMG" \
 
 echo "Stapling..."
 xcrun stapler staple "$DMG"
+xcrun stapler validate "$DMG"
+spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 
 echo "Updating Sparkle appcast..."
 # Discover the installed Sparkle cask version dynamically so the path does not
@@ -235,45 +287,22 @@ cat > "$APPCAST" << APPCAST_EOF
 </rss>
 APPCAST_EOF
 
+bash "$REPO_DIR/scripts/check-version.sh"
+
 # NOTE: the GitHub Pages site (docs/index.html) — download URL, version label, and
 # "What's new" heading — was already stamped to v${VERSION} at the top of this
 # script and validated by check-version.sh. Nothing to do here.
 
-echo "Force-quitting any running instance and deleting old app before install..."
-osascript -e 'quit app "speakfree"' 2>/dev/null || true
-pkill -x speakfree 2>/dev/null || true
-sleep 1
-pkill -9 -x speakfree 2>/dev/null || true
-sleep 1
-echo "Installing to /Applications..."
-rm -rf /Applications/speakfree.app
-cp -a "$APP" /Applications/
-
-# Create a DRAFT GitHub release and upload the DMG.
-# The release is NOT public yet — the appcast.xml is updated locally but NOT pushed.
-# Dogfood the app from /Applications, then run scripts/publish-release.sh to go live.
-echo "Creating draft GitHub release v${VERSION}..."
-gh release create "v${VERSION}" "$DMG" \
-    --repo definitelyreal/speakfree \
-    --title "speakfree v${VERSION}" \
-    --draft \
-    --notes "$(cat <<NOTES_EOF
-## speakfree v${VERSION}
-
-*Draft — not yet published. Run scripts/publish-release.sh after dogfood.*
-NOTES_EOF
-)"
-
 echo ""
 echo "==========================================="
-echo "  BUILD COMPLETE — DOGFOOD BEFORE RELEASE  "
+echo "  SIGNED PACKAGE READY — NOT YET PUBLISHED "
 echo "==========================================="
 echo ""
-echo "  Installed:  /Applications/speakfree.app (v${VERSION})"
+echo "  Staged:     $APP (v${VERSION}; $BUILD_COMMIT)"
 echo "  DMG:        ${DMG} (signed, notarized, stapled)"
 echo "  Appcast:    ${APPCAST} (updated locally, NOT pushed)"
-echo "  GH Release: draft at github.com/definitelyreal/speakfree/releases"
+echo "  Running app: unchanged. No GitHub mutations performed."
 echo ""
-echo "  Test the app. When ready to ship:"
-echo "    bash scripts/publish-release.sh ${VERSION}"
+echo "  Verify the package, push its source commit and exact tag, then upload"
+echo "  a draft using gh release create --verify-tag. See docs/RELEASING.md."
 echo ""

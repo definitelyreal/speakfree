@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-08-24
 import Foundation
 import AVFoundation
 
@@ -72,7 +73,9 @@ public enum ProcessCommand {
         let raw: String
         do {
             raw = try runBlocking {
-                try await transcriber.transcribe(audioURL: wavURL, samples: samples, prompt: nil)
+                try await transcriber.transcribe(
+                    audioURL: wavURL, samples: samples, prompt: nil,
+                    punctuationMode: config.effectivePunctuationMode)
             }
         } catch {
             throw Error.transcriptionFailed(error)
