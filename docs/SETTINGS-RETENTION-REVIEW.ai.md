@@ -16,6 +16,19 @@ build passed in 35.31 seconds; changed-file SwiftLint and whitespace checks pass
 BODY20 still tests inherited text styling, not actual system Larger Text settings.
 These are implementation/render checks, not human visual approval.
 
+Scoped code review found no actionable blocker. Build `68614fe` was installed by the
+guarded fleet script on Noah (PID 21192) and Studio (PID 80583), with matching build
+stamps re-read afterward. Ark's visible-console guard blocked its stop; it remains on
+`ecee961` (PID 84976). Do not describe this as a completed fleet update. Previous
+Noah/Studio bundles remain recoverable from Trash. Deployment receipt:
+`build/release-readiness/2026-09-17-folder-button-deploy.log`.
+
+A refreshed inert preview is open from
+`build/recordings-folder-review.uIIn10/SpeakFree Folder Button Review.app`, using the
+existing saved wording draft via `SPEAKFREE_REVIEW_DRAFT`. Its window/controls were
+inspected through native accessibility and a screenshot; old review drafts/windows
+were not deleted. The preview cannot move actual recordings.
+
 ## September 15 review
 
 This is design feedback and a test record, not release approval. Three fresh-context reviewers challenged consent, settings clarity, and layout/accessibility. Their findings were source reviews, not independent visual approval or a cross-family verification gate.
