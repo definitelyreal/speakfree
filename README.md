@@ -53,6 +53,18 @@ Click the menu bar icon → **Settings** to change everything in-app:
 
 Click **Help** in the menu for plain-English explanations of every setting.
 
+## Microphones — and the AirPods problem
+
+The built-in Mac microphone is the default because it transcribes most reliably. You can pin any mic in **Settings → Microphone**; a pinned mic stays pinned even when you join a call or plug in headphones.
+
+AirPods deserve an honest note, because no dictation app handles them perfectly and we would rather explain the tradeoff than pretend it away:
+
+- **Bluetooth makes you choose.** The moment any app records from an AirPods mic, the headset switches from its high-quality listening profile to its lower-quality call profile. Dictating through AirPods means everything you hear drops to call quality until you stop.
+- **Accuracy is situational.** In a quiet room, the Mac's built-in mic transcribes better than AirPods. In a noisy place (a plane, a café, a street), the AirPods mic — built to isolate your voice — is often the best microphone you own.
+- **Auto-switching guesses wrong.** We tried automatic behaviors, and they produced surprising results more often than good ones.
+
+The compromise we chose: **you decide, with the cost stated up front.** The built-in mic is the default, and AirPods are never silently substituted. While AirPods are connected, a **Dictation Mode** toggle appears in the menu bar — turn it on to pin the AirPods mic for noisy environments (the toggle itself tells you audio output will drop to call quality while it's on), turn it off and your previous mic comes back.
+
 ## Transcription engines
 
 speakfree can transcribe with one of two local engines. Both run entirely on your Mac — no audio or text ever leaves your computer.

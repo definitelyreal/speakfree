@@ -1,3 +1,4 @@
+# ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-17
 name: CI
 
 on:
@@ -88,6 +89,27 @@ jobs:
             '  "spokenPunctuation": "hybrid"' \
             '}' > ~/.config/speakfree/config.json
 
+      - name: Compile Homebrew Whisper GPU kernels before timed inference
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        # Fresh macos-15 VMs with ggml 0.23 need ~37s to compile Metal libraries.
+        # Complete that setup once before duration-bounded inference assertions;
+        # interrupted compilation never finishes its cache. Release DMGs use the
+        # separately pinned vendored runtime, not this evolving Homebrew runtime.
+        # Keep the application's inference timeout and every audio assertion intact.
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import shutil
+          import subprocess
+          binary = shutil.which("whisper-cli") or shutil.which("whisper-cpp")
+          if not binary:
+              raise SystemExit("Homebrew Whisper CLI missing")
+          model = pathlib.Path.home() / ".config/speakfree/models/ggml-tiny.en.bin"
+          subprocess.run([binary, "-m", str(model), "-f",
+                          "Tests/SpeakFreeTests/AudioFixtures/fixture-1-clean.wav", "-nt"],
+                         check=True, timeout=180)
+          PY
+
       - name: Unit tests
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
         # --no-parallel + line-buffered tee so per-test "Test Case '…' started/passed" lines
@@ -140,7 +162,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Restore CI perf baseline (latest seed)
-        if: github.event_name == 'push'
+        # PRs may read a trusted main-branch baseline; only pushes may seed/save it.
         uses: actions/cache/restore@v4
         with:
           path: Tests/PerfBaseline/baseline-ci.json

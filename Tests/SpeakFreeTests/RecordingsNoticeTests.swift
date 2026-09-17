@@ -1,8 +1,9 @@
+// ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-14
 // Claude · 2026-07-14 · Session: c58489fa-5c7d-451c-870d-8f4f5578ed2c
 import XCTest
 @testable import SpeakFreeLib
 
-/// Recordings privacy (2026-07-14): saving is opt-in, and the apology notice governs
+/// Recordings privacy (2026-07-14): saving is opt-in, and the recordings notice governs
 /// what happens to files that accumulated while saving was accidentally on-by-default.
 final class RecordingsNoticeTests: XCTestCase {
 
@@ -169,6 +170,9 @@ final class RecordingsNoticeTests: XCTestCase {
         XCTAssertTrue(contents.isEmpty,
                       "with saving off, a finished dictation must leave zero files; found \(contents)")
     }
+
+    // Michael's September 14 edits supersede the older no-em-dash and
+    // corpus-before-apology editorial assertions. Wording is reviewed in context.
 
     // MARK: - Config round-trip
 

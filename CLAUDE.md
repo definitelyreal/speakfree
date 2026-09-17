@@ -1,5 +1,15 @@
 # speakfree — project instructions
 
+<!-- ai-suggestion:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-09 -->
+## Active release lane
+
+This is `codex/release-readiness`, based on the existing app at `1d86b3a`.
+Read [RELEASE-READINESS.ai.md](docs/RELEASE-READINESS.ai.md) before editing or releasing.
+Experimental accuracy/corpus/engine work is in sibling `../speakfree` on
+`codex/accuracy-research`. Keep this release independent; do not merge that branch wholesale.
+<!-- /ai -->
+
+<!-- ai-processed:unverified | session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 | date:2026-09-13 -->
 ## Replacing the installed app (MANDATORY)
 
 **Always DELETE the existing `speakfree.app` before copying a new build in. Never copy over / replace it in place.**
@@ -7,9 +17,16 @@
 Replacing the bundle in place leaves stale files and corrupts TCC (Microphone / Accessibility) permission state, so the rebuilt app can hang, lose its menu-bar icon, or silently fail to record.
 
 Correct sequence when installing a fresh build to `/Applications` (or `~/Applications`):
-1. Stop any running instance: `pkill -f "speakfree start"`
+1. Prepare the build and transfers first. Before any agent-driven stop/restart, require
+   no active dictation and at least 30 seconds since the last dictation, then play a tone
+   and show a visible cancellable warning. New activity resets the wait. Use the guarded
+   fleet deployment flow; cancel, uncertainty, timeout, or failure to exit must abort the
+   update, never trigger SIGKILL. This is Michael's explicit September 13 requirement.
+   Only after this preparation may the running instance receive a graceful stop.
 2. Delete the old bundle: move it to the Trash (`/usr/bin/trash /Applications/speakfree.app`), do not `cp` over it.
 3. Copy the new bundle in: `cp -R speakfree.app /Applications/speakfree.app`
+
+<!-- /ai -->
 
 ## Build / install for local testing
 

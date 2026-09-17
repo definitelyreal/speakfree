@@ -23,3 +23,5 @@ build/
 docs/superpowers/
 .gstack/
 .agents/
+# Shadow-whisper sidecars the test suite writes next to audio fixtures.
+Tests/SpeakFreeTests/AudioFixtures/*.whisper.txt

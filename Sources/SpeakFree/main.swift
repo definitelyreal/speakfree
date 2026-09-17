@@ -1,3 +1,5 @@
+// ai-suggestion:unverified · session:01a09da8-0424-7b71-a705-10868c5f46e4 · 2026-09-13
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import AppKit
 import Foundation
 import SpeakFreeLib
@@ -13,6 +15,7 @@ func printUsage() {
 
     USAGE:
         speakfree start              Start the dictation daemon
+        speakfree prepare-update     Wait for quiet and warn before an external update
         speakfree process <wav>      Transcribe a wav file; prints JSON {raw, processed, styled}
         speakfree set-hotkey <key>   Set the push-to-talk hotkey
         speakfree get-hotkey         Show current hotkey
@@ -21,6 +24,7 @@ func printUsage() {
         speakfree set-engine <name>  Set the transcription engine (whisper | parakeet)
         speakfree download-parakeet [id]  Download a Parakeet model (default parakeet-tdt-0.6b-v2)
         speakfree status             Show configuration and status
+        speakfree audio-check        Check microphone handover for 12 seconds (saves no audio)
         speakfree --help             Show this help message
 
     HOTKEY EXAMPLES:
@@ -211,8 +215,12 @@ let args = CommandLine.arguments
 let command = args.count > 1 ? args[1] : nil
 
 switch command {
+case "prepare-update":
+    exit(UpdatePreparation.run(arguments: Array(args.dropFirst(2))))
 case "start":
     cmdStart()
+case "audio-check":
+    print(AudioCaptureDiagnostics.run())
 case "process":
     guard args.count > 2 else {
         print("Usage: speakfree process <wav>")
@@ -260,7 +268,11 @@ case "--help", "-h", "help":
     printUsage()
 case nil:
     // Launched as app bundle (no arguments) — start the daemon
-    cmdStart()
+    if Bundle.main.object(forInfoDictionaryKey: "SFInertRecordingsReview") as? Bool == true {
+        RecordingsNoticePreview.run()
+    } else {
+        cmdStart()
+    }
 default:
     print("Unknown command: \(command!)")
     printUsage()

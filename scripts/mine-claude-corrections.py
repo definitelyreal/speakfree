@@ -50,14 +50,32 @@ Michael-specific vocabulary. Schema per output line:
     "message_uuid":  "d086058a-...",
     "message_utc":   "2026-08-21T19:39:06.425Z",
     "match_coverage": 0.83,          # fraction of inserted tokens aligned
+    "utterance_aligned": true,       # coverage >= HIGH_COVERAGE and no long insert/delete
+    "confidence": "high" | "low",    # record has >= 1 high-confidence pair
     "corrections": [
-      { "kind": "word-sub" | "case-only" | "punct-only" | "insert" | "delete",
-        "original": "a Airtable builder",   # inserted span ("" for insert)
-        "corrected": "a Fable builder",     # sent span ("" for delete)
-        "before": "want to start",          # up to CONTEXT_TOKENS of context
-        "after": "in the dev" }
+      { "kind": "word-sub" | "case-only" | "punct-only" | "punct-command"
+                | "insert" | "delete",
+        "original": "Airtable",             # inserted span ("" for insert)
+        "corrected": "Fable",               # sent span ("" for delete)
+        "plausibility": 0.615,              # word-sub only: could the sent span be a
+                                            # transcription of the same sound? (0..1)
+        "confidence": "high" | "low",
+        "before": "want to start a",        # up to CONTEXT_TOKENS of context
+        "after": "builder in the dev" }
     ]
   }
+
+Confidence (Michael's constraint, 2026-08-21): a pair is a TRANSCRIPTION label only
+when the sent text could plausibly be a transcription of what he said. Casing-only
+and punctuation-only edits inside otherwise identical text qualify; so does a
+spoken-punctuation command realized as its glyph ("question mark" -> "?"); a word
+substitution qualifies only when it is phonetically close to what was typed
+(Airtable -> Fable yes; fleet -> "the three Macs" no, that is a content edit).
+Added or reordered sentences mean he was editing, not correcting, so the whole
+utterance must align (HIGH_COVERAGE, no insert/delete longer than MAX_EDIT_TOKENS)
+before any of its pairs can be high-confidence. Low-confidence pairs are still
+emitted (an explicit correction is always a signpost) but tagged, and
+--high-confidence-only drops them.
 """
 
 import argparse
@@ -101,7 +119,22 @@ WINDOW_BEFORE_S = 60          # message may predate the recording slightly (cloc
 WINDOW_AFTER_S = 180          # ±3 min per spec: he edits, then sends
 CONTEXT_TOKENS = 5
 
+# High-confidence gate (see module docstring)
+HIGH_COVERAGE = 0.85          # whole-utterance alignment
+MAX_EDIT_TOKENS = 3           # a longer pure insert/delete = editing, not correcting
+MIN_PLAUSIBILITY = 0.5        # word-sub: sent span must sound like the typed span
+
+# Spoken punctuation commands and the glyphs they realize as. A sub from a span
+# containing one of these words to a pure-punctuation span is a command the engine
+# failed to execute, which is exactly the "exclamation park" -> "!" label shape.
+PUNCT_COMMAND_WORDS = {
+    "comma", "period", "question", "mark", "exclamation", "point", "colon",
+    "semicolon", "dash", "hyphen", "quote", "unquote", "apostrophe", "ellipsis",
+    "new", "line", "paragraph", "slash", "parenthesis", "parentheses",
+}
+
 WORD_RE = re.compile(r"[\w']+", re.UNICODE)
+PUNCT_ONLY_RE = re.compile(r"^[^\w\s]+$", re.UNICODE)
 FILENAME_TS_RE = re.compile(r"^recording-(\d{4}-\d{2}-\d{2}-\d{6})-([0-9A-Fa-f]{8})\.meta\.json$")
 
 
@@ -321,7 +354,71 @@ def classify(orig_raw, corr_raw):
     strip = lambda s: "".join(WORD_RE.findall(s)).lower()
     if strip(o) == strip(c) and strip(o):
         return "punct-only"
+    if PUNCT_ONLY_RE.match(c) and any(
+            w.lower() in PUNCT_COMMAND_WORDS for w in WORD_RE.findall(o)):
+        return "punct-command"
     return "word-sub"
+
+
+def phonetic_key(letters):
+    """Cheap grapheme->sound folding, no external deps: enough to rank 'airtable'
+    next to 'fable' and far from 'threemacs'. Not a real G2P; the raw-letter
+    ratio is taken alongside it so neither view alone decides."""
+    s = letters
+    for a, b in (("ph", "f"), ("ck", "k"), ("qu", "kw"), ("wh", "w"), ("wr", "r"),
+                 ("kn", "n"), ("gh", ""), ("tch", "ch"), ("dg", "j"),
+                 ("ce", "se"), ("ci", "si"), ("cy", "sy"), ("c", "k"),
+                 ("x", "ks"), ("z", "s")):
+        s = s.replace(a, b)
+    s = re.sub(r"(.)\1+", r"\1", s)
+    return s[:1] + re.sub(r"[aeiouyhw]", "", s[1:])
+
+
+def plausibility(original, corrected):
+    """0..1: could `corrected` be a transcription of the sound that produced
+    `original`? max(raw letter similarity, phonetic-key similarity)."""
+    a = re.sub(r"[^a-z]", "", original.lower())
+    b = re.sub(r"[^a-z]", "", corrected.lower())
+    if not a or not b:
+        return 0.0
+    raw = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+    ka, kb = phonetic_key(a), phonetic_key(b)
+    ph = difflib.SequenceMatcher(None, ka, kb, autojunk=False).ratio() if ka and kb else 0.0
+    return round(max(raw, ph), 3)
+
+
+def pair_is_plausible(pair):
+    """Pair-level half of the high-confidence gate (record alignment is the other)."""
+    kind = pair["kind"]
+    if kind in ("case-only", "punct-only", "punct-command"):
+        return True
+    if kind == "word-sub":
+        return pair.get("plausibility", 0.0) >= MIN_PLAUSIBILITY
+    return False          # insert/delete: dropped or added words are not labels
+
+
+def utterance_aligned(coverage, pairs):
+    """Record-level half of the gate: the whole dictation aligns and nothing
+    longer than MAX_EDIT_TOKENS was added or removed (that would be editing)."""
+    if coverage < HIGH_COVERAGE:
+        return False
+    for p in pairs:
+        if p["kind"] in ("insert", "delete"):
+            n = len((p["corrected"] if p["kind"] == "insert" else p["original"]).split())
+            if n > MAX_EDIT_TOKENS:
+                return False
+    return True
+
+
+def grade(pairs, coverage):
+    """Stamp per-pair and record confidence. -> record confidence."""
+    aligned = utterance_aligned(coverage, pairs)
+    any_high = False
+    for p in pairs:
+        high = aligned and pair_is_plausible(p)
+        p["confidence"] = "high" if high else "low"
+        any_high = any_high or high
+    return aligned, ("high" if any_high else "low")
 
 
 def diff_pairs(ins_raw, ins_norm, sent_raw, sent_norm, sm):
@@ -340,19 +437,22 @@ def diff_pairs(ins_raw, ins_norm, sent_raw, sent_norm, sm):
             continue
         # keep only edits inside the aligned span (with the inserted side's
         # own head/tail included — dropped leading/trailing words are real)
-        if a2 < lo_a and b2 <= lo_b and a1 == a2:
+        if a1 == a2 and a2 <= lo_a and b2 <= lo_b:
             continue      # pure insert before alignment = his surrounding prose
-        if a1 >= hi_a and b1 >= hi_b and a1 == a2:
+        if a1 == a2 and a1 >= hi_a and b1 >= hi_b:
             continue      # pure insert after alignment = his surrounding prose
         orig = ins_raw[a1:a2]
         corr = sent_raw[b1:b2]
-        pairs.append({
+        pair = {
             "kind": classify(orig, corr),
             "original": " ".join(orig),
             "corrected": " ".join(corr),
             "before": " ".join(ins_raw[max(0, a1 - CONTEXT_TOKENS):a1]),
             "after": " ".join(ins_raw[a2:a2 + CONTEXT_TOKENS]),
-        })
+        }
+        if pair["kind"] == "word-sub":
+            pair["plausibility"] = plausibility(pair["original"], pair["corrected"])
+        pairs.append(pair)
     return pairs
 
 
@@ -427,6 +527,67 @@ def self_test():
     # case/punct classification
     check("classify case-only", classify(["will"], ["Will"]) == "case-only")
     check("classify punct-only", classify(["builder"], ["builder,"]) == "punct-only")
+    check("classify punct-command",
+          classify(["question", "mark?"], ["?"]) == "punct-command")
+    check("classify exclamation park -> !",
+          classify(["exclamation", "park"], ["!"]) == "punct-command")
+    # surrounding prose: text he typed before/after the dictation is not a
+    # correction (the prefix case was a real bug: a2 < lo_a never held at lo_a=0)
+    sent_wrapped = dict(sent_pos, text="Quick note first. " + rec["text"]
+                        + " Also please run the suite.")
+    m = best_match(rec, [sent_wrapped])
+    check("typed prefix/suffix emit no pairs",
+          m is not None and not diff_pairs(m["ins"][0], m["ins"][1],
+                                           m["sent"][0], m["sent"][1], m["sm"]))
+    # confidence gate
+    check("Airtable->Fable is phonetically plausible",
+          plausibility("Airtable", "Fable") >= MIN_PLAUSIBILITY)
+    check("content edit is NOT plausible",
+          plausibility("fleet", "the three Macs") < MIN_PLAUSIBILITY)
+    check("coming on -> comma I'm is plausible",
+          plausibility("coming on", "comma I'm") >= MIN_PLAUSIBILITY)
+    m = best_match(rec, [sent_pos])
+    # An `if m:` with no check in front of it would let a best_match regression
+    # SKIP the gate tests below and still print "self-test passed." — a gate that
+    # can silently test nothing is worse than no gate.
+    check("confidence-gate fixture matched", m is not None)
+    if m:
+        pairs = diff_pairs(m["ins"][0], m["ins"][1], m["sent"][0], m["sent"][1], m["sm"])
+        aligned, rec_conf = grade(pairs, m["coverage"])
+        check("positive control grades high", aligned and rec_conf == "high")
+        check("every positive-control pair is high",
+              all(p["confidence"] == "high" for p in pairs))
+    # a long insertion = editing: the whole record drops to low even though the
+    # Airtable->Fable pair is still present and plausible
+    sent_edited = dict(sent_pos, text=sent_pos["text"].replace(
+        "in the dev account", "in the dev account because the old one is gone now"))
+    m = best_match(rec, [sent_edited])
+    check("edited-utterance fixture matched", m is not None)
+    if m:
+        pairs = diff_pairs(m["ins"][0], m["ins"][1], m["sent"][0], m["sent"][1], m["sm"])
+        aligned, rec_conf = grade(pairs, m["coverage"])
+        check("edited utterance grades low",
+              not aligned and rec_conf == "low"
+              and all(p["confidence"] == "low" for p in pairs))
+    # a content substitution inside an aligned utterance is low while the
+    # phonetic one beside it stays high (own fixture: 34 tokens, 2 unmatched, so
+    # the record clears HIGH_COVERAGE with both edits present)
+    rec_mixed = {"id": "test2", "utc": now, "duration": 10.0,
+                 "text": "Okay so for the next step I want you to open the Airtable "
+                         "project and check whether the fleet deploy script still "
+                         "restarts all three machines after the build finishes comma "
+                         "then report back"}
+    sent_mixed = dict(sent_pos, text=rec_mixed["text"]
+                      .replace("Airtable", "Fable").replace("restarts", "relaunches"))
+    m = best_match(rec_mixed, [sent_mixed])
+    check("mixed-record fixture matched", m is not None)
+    if m:
+        pairs = diff_pairs(m["ins"][0], m["ins"][1], m["sent"][0], m["sent"][1], m["sm"])
+        aligned, _ = grade(pairs, m["coverage"])
+        by_orig = {p["original"]: p["confidence"] for p in pairs}
+        check("mixed record: Airtable high, content sub low",
+              aligned and by_orig.get("Airtable") == "high"
+              and by_orig.get("restarts") == "low")
     if failures:
         sys.exit("self-test FAILED: %s" % ", ".join(failures))
     print("self-test passed.")
@@ -448,6 +609,9 @@ def main():
     ap.add_argument("--min-coverage", type=float, default=MIN_COVERAGE)
     ap.add_argument("--full-text", action="store_true",
                     help="embed complete inserted+sent texts in each record")
+    ap.add_argument("--high-confidence-only", action="store_true",
+                    help="write only high-confidence pairs (transcription labels); "
+                         "drop records left with none")
     ap.add_argument("--self-test", action="store_true",
                     help="run built-in fixtures; reads nothing from disk")
     args = ap.parse_args()
@@ -477,7 +641,7 @@ def main():
     print("sent user messages in window: %d (from %d session files)"
           % (len(messages), files_read))
 
-    results, unmatched, exact = [], [], 0
+    results, unmatched, exact, low_dropped = [], [], 0, 0
     for rec in claude_recs:
         m = best_match(rec, messages)
         if m is None:
@@ -487,6 +651,12 @@ def main():
         if not pairs:
             exact += 1        # sent verbatim; NOT approval, just no signal
             continue
+        aligned, rec_conf = grade(pairs, m["coverage"])
+        if args.high_confidence_only:
+            pairs = [p for p in pairs if p["confidence"] == "high"]
+            if not pairs:
+                low_dropped += 1
+                continue
         out_rec = {
             "recording_id": rec["id"],
             "recording_wav": rec["wav"],
@@ -498,6 +668,8 @@ def main():
             "message_uuid": m["msg"]["uuid"],
             "message_utc": m["msg"]["utc"].isoformat(),
             "match_coverage": round(m["coverage"], 3),
+            "utterance_aligned": aligned,
+            "confidence": rec_conf,
             "corrections": pairs,
         }
         if args.full_text:
@@ -512,11 +684,15 @@ def main():
             print("  inserted: %r" % rec["text"][:300])
         if results:
             for r in results:
-                print("  matched message %s (coverage %.2f) in %s/%s" %
-                      (r["message_utc"], r["match_coverage"], r["project_dir"], r["session"]))
+                print("  matched message %s (coverage %.2f, aligned=%s, confidence=%s) in %s/%s" %
+                      (r["message_utc"], r["match_coverage"], r["utterance_aligned"],
+                       r["confidence"], r["project_dir"], r["session"]))
                 for p in r["corrections"]:
-                    print("    [%s] %r -> %r  (…%s _ %s…)" %
-                          (p["kind"], p["original"], p["corrected"], p["before"], p["after"]))
+                    extra = ("  plausibility=%.2f" % p["plausibility"]
+                             if "plausibility" in p else "")
+                    print("    [%s/%s] %r -> %r  (…%s _ %s…)%s" %
+                          (p["kind"], p["confidence"], p["original"], p["corrected"],
+                           p["before"], p["after"], extra))
         elif exact:
             print("  sent verbatim — no corrections (identity is not approval)")
         else:
@@ -537,9 +713,14 @@ def main():
 
     n_pairs = sum(len(r["corrections"]) for r in results)
     kinds = Counter(p["kind"] for r in results for p in r["corrections"])
+    n_high = sum(1 for r in results for p in r["corrections"] if p["confidence"] == "high")
     print("\nmatched with corrections: %d recordings, %d pairs (%s)"
           % (len(results), n_pairs,
              ", ".join("%s×%d" % kv for kv in kinds.most_common())))
+    print("high-confidence transcription labels: %d of %d pairs; records high: %d"
+          % (n_high, n_pairs, sum(1 for r in results if r["confidence"] == "high")))
+    if args.high_confidence_only:
+        print("records dropped for having no high-confidence pair: %d" % low_dropped)
     print("matched verbatim (no signal): %d" % exact)
     print("no sent match (desktop app / non-Claude dictation / heavy rewrite): %d"
           % len(unmatched))

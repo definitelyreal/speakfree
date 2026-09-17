@@ -1,6 +1,6 @@
-# ai:processed | session: 5b06900b-1498-4764-a786-48f408c36626 | date: 2026-06-10
+# ai-processed:unverified | session:unknown | date:2026-09-17
 # SwiftLint configuration for speakfree
-# Phase: warning-only (non-blocking). Gate (exit 1 on error) comes in a later milestone.
+# CI runs this configuration with --strict as a blocking gate.
 # Rules tuned to match the current codebase style — large files, long functions, and
 # short identifier names (e.g. "fn", "p", "e") are intentional patterns here.
 
@@ -12,6 +12,8 @@ excluded:
   - Tests/SpeakFreeTests/AudioFixtures
   - Sources/CWhisper
   - Sources/CTryCatch
+  # Upstream FluidAudio implementation; keep our package manifest and iOS app linted.
+  - ios/Vendor/FluidAudioASRPackage/Sources/FluidAudio
 
 # Disabled rules — either high-noise for this codebase or stylistic choices
 # that are already intentional (long functions, long files, etc.).
@@ -48,8 +50,6 @@ disabled_rules:
   - force_cast
   - type_name
 
-# Keep all other default rules as warnings.
-# When the codebase is cleaned up, rules can be moved out of disabled_rules
-# to become active gates (remove continue-on-error from ci.yml at that point).
+# Keep all other default rules active; CI's --strict promotes warnings to failures.
 
 # Claude · 2026-06-10 · Session: 5b06900b-1498-4764-a786-48f408c36626

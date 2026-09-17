@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 // Claude · 2026-06-07 · Session: 335a0545-b347-40c8-adbc-c0364e1a9aa4
 import FluidAudio
 import XCTest
@@ -152,31 +153,65 @@ final class ParakeetEngineTests: XCTestCase {
     // MARK: - Model-gated behavioral test (skips without the real model)
 
     func testParakeetEngineTranscribesShortClip() async throws {
+        try await exerciseCachedModelLifecycle(includeVocabulary: false)
+    }
+
+    func testParakeetEngineUnloadsCachedAuxiliaryModels() async throws {
+        let ctcDirectory = CtcModels.defaultCacheDirectory(for: .ctc110m)
+        guard CtcModels.modelsExist(at: ctcDirectory),
+              FileManager.default.fileExists(atPath: ctcDirectory.appendingPathComponent("tokenizer.json").path) else {
+            throw XCTSkip("Cached CTC/tokenizer assets required; this test never acquires missing models")
+        }
+        try await exerciseCachedModelLifecycle(includeVocabulary: true)
+    }
+
+    private func exerciseCachedModelLifecycle(includeVocabulary: Bool) async throws {
         guard ParakeetModelManager.shared.isModelDownloaded(defaultModel) else {
             throw XCTSkip("Parakeet \(defaultModel) model not downloaded — skipping real-model transcription test")
+        }
+        let vadDirectory = CtcModels.defaultCacheDirectory(for: .ctc110m).deletingLastPathComponent()
+            .appendingPathComponent(Repo.vad.folderName)
+        guard ModelNames.VAD.requiredModels.allSatisfy({
+            FileManager.default.fileExists(atPath: vadDirectory.appendingPathComponent($0).path)
+        }) else {
+            throw XCTSkip("Cached VAD assets required; model loading starts endpointing in both test modes")
+        }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        let previousDirectory = Config.configDirOverride
+        Config.configDirOverride = scratch
+        defer {
+            Config.configDirOverride = previousDirectory
+            try? FileManager.default.removeItem(at: scratch)
+        }
+        if includeVocabulary {
+            // Public synthetic fixtures: never let this integration test pick up live vocabulary.
+            try Data(#"{"terms":[{"text":"Zephyr","aliases":["zefir"]}]}"#.utf8)
+                .write(to: scratch.appendingPathComponent("custom-vocabulary.json"))
+            try Data("Zephyr\n".utf8).write(to: Config.vocabularyFile)
         }
 
         let engine = ParakeetEngine()
         XCTAssertEqual(engine.engineID, "parakeet")
         XCTAssertFalse(engine.supportsStreaming, "Parakeet v1 is batch-only")
-
-        try await engine.loadModel(modelID: defaultModel)
-        XCTAssertTrue(engine.isLoaded)
-
-        // ~1 s of near-silence; engine pads short/quiet clips internally and must not crash.
-        let samples = [Float](repeating: 0.0, count: 16_000)
-        let text = try await engine.transcribe(
-            samples: samples,
-            language: "en",
-            prompt: nil,
-            suppressRegex: nil
-        )
-        // Result may legitimately be empty for silence; assert it returns without throwing
-        // and is a trimmed string (no leading/trailing whitespace per the contract).
-        XCTAssertEqual(text, text.trimmingCharacters(in: .whitespacesAndNewlines))
-
+        do {
+            try await engine.loadModel(modelID: defaultModel)
+            XCTAssertTrue(engine.isLoaded)
+            // ~1 s of near-silence; engine pads short/quiet clips internally and must not crash.
+            let text = try await engine.transcribe(samples: [Float](repeating: 0.0, count: 16_000),
+                                                   language: "en", prompt: nil, suppressRegex: nil)
+            XCTAssertEqual(text, text.trimmingCharacters(in: .whitespacesAndNewlines))
+        } catch {
+            // Async cleanup must finish before restoring the config directory, including failures.
+            await engine.unloadModel()
+            throw error
+        }
         await engine.unloadModel()
         XCTAssertFalse(engine.isLoaded)
+        let lifecycle = await engine.lifecycleStateForTesting
+        XCTAssertEqual(lifecycle.auxiliaryTasks, 0)
+        XCTAssertEqual(lifecycle.queuedOperations, 0)
+        XCTAssertFalse(lifecycle.tearingDown)
     }
 
     func testParakeetEngineRejectsStreaming() async throws {
@@ -284,9 +319,33 @@ final class ParakeetEngineTests: XCTestCase {
             [Float](repeating: 0.0004, count: 16_000), from: 0))
         XCTAssertFalse(ParakeetEngine.tailIsTrueSilence(
             [Float](repeating: 0.0016, count: 16_000), from: 0))
-        // Tail shorter than one 50ms window: nothing to inspect, trim allowed.
-        XCTAssertTrue(ParakeetEngine.tailIsTrueSilence(
+        // A partial final window can contain the start of the user's next word.
+        XCTAssertFalse(ParakeetEngine.tailIsTrueSilence(
             [Float](repeating: 0.1, count: 16_000), from: 15_500))
+    }
+
+    func testEndpointingKeepsAudioInPartialFinalWindow() {
+        let tail = [Float](repeating: 0.0003, count: 24_000)
+            + [Float](repeating: 0.006, count: 400)
+        let samples = take(speechSeconds: 2.5, tail: tail)
+        let out = ParakeetEngine.endpointedSamples(
+            samples, segments: [VadSegment(startTime: 0.2, endTime: 2.5)])
+        XCTAssertEqual(out.count, samples.count, "the last 25 ms must participate in the silence veto")
+    }
+
+    func testEndpointingStillTrimsSilentPartialFinalWindow() {
+        let samples = take(speechSeconds: 2.5, tail: [Float](repeating: 0.0003, count: 24_400))
+        let out = ParakeetEngine.endpointedSamples(
+            samples, segments: [VadSegment(startTime: 0.2, endTime: 2.5)])
+        XCTAssertEqual(out.count, 40_000)
+    }
+
+    func testNonfiniteTailCannotEstablishSilence() {
+        for value in [Float.nan, Float.infinity] {
+            var tail = [Float](repeating: 0, count: 24_001)
+            tail[24_000] = value
+            XCTAssertFalse(ParakeetEngine.tailIsTrueSilence(tail, from: 0))
+        }
     }
 
     func testStripsTrailingWordsThatStartInsidePad() {

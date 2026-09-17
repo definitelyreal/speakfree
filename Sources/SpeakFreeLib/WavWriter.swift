@@ -1,3 +1,4 @@
+// ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import Foundation
 import AVFoundation
 
@@ -16,6 +17,7 @@ import AVFoundation
 /// itself thread-safe, matching how the AVAudioFile it replaces was used.
 final class WavWriter {
     private let handle: FileHandle
+    private let activityLease: RecordingActivity.Lease
     let url: URL
     private var samplesWritten: Int = 0
     private var samplesAtLastPatch: Int = 0
@@ -24,6 +26,8 @@ final class WavWriter {
 
     init(url: URL) throws {
         self.url = url
+        // Register before the file becomes visible to a maintenance snapshot.
+        activityLease = try RecordingActivity.shared.acquire(url)
         // Owner-only before any audio lands in it (mirrors the previous AVAudioFile +
         // setAttributes sequence, without the world-readable window).
         FileManager.default.createFile(atPath: url.path, contents: nil,
@@ -39,12 +43,7 @@ final class WavWriter {
     /// Append float samples in [-1, 1]; converted to interleaved s16.
     func append(_ samples: [Float]) throws {
         guard !samples.isEmpty else { return }
-        var data = Data(capacity: samples.count * 2)
-        for s in samples {
-            let clamped = max(-1.0, min(1.0, s))
-            var v = Int16((clamped * 32767.0).rounded())
-            withUnsafeBytes(of: &v) { data.append(contentsOf: $0) }
-        }
+        let data = Self.pcmData(samples)
         try handle.write(contentsOf: data)
         samplesWritten += samples.count
         if samplesWritten - samplesAtLastPatch >= headerPatchInterval {
@@ -53,6 +52,22 @@ final class WavWriter {
             // PCM over it. Restore end-of-file positioning before continuing.
             do { try patchHeader() } catch { try? handle.seekToEnd() }
         }
+    }
+
+    /// Allocate once and fill in place. Appending a separate two-byte slice for every
+    /// sample spent most of the write queue's CPU in Data's append machinery.
+    static func pcmData(_ samples: [Float]) -> Data {
+        var data = Data(count: samples.count * MemoryLayout<Int16>.size)
+        data.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+            for (index, sample) in samples.enumerated() {
+                // A malformed device buffer should produce silence, never an invalid
+                // Float-to-Int conversion or full-scale noise in the recovery archive.
+                let clamped = sample.isFinite ? max(-1.0, min(1.0, sample)) : 0
+                let value = Int16((clamped * 32767.0).rounded()).littleEndian
+                bytes.storeBytes(of: value, toByteOffset: index * 2, as: Int16.self)
+            }
+        }
+        return data
     }
 
     /// Rewrite the RIFF + data chunk sizes to match what's on disk, then return to the end.
@@ -68,6 +83,7 @@ final class WavWriter {
 
     /// Final header patch + close. Safe to call once; the deinit also closes defensively.
     func close() {
+        defer { activityLease.release() }
         try? patchHeader()
         try? handle.close()
     }
@@ -109,6 +125,8 @@ final class WavWriter {
     /// needs no repair.
     @discardableResult
     static func repairHeader(at url: URL) -> Double? {
+        guard let activityLease = try? RecordingActivity.shared.acquireReading(url) else { return nil }
+        defer { activityLease.release() }
         guard let h = FileHandle(forUpdatingAtPath: url.path) else { return nil }
         defer { try? h.close() }
         guard let fileSize = try? h.seekToEnd(), fileSize > 44 else { return nil }

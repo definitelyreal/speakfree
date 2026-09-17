@@ -94,11 +94,21 @@ func padForBatch(_ samples: [Float]) -> [Float] {
 
 // MARK: - Result row
 
+/// One token's decode confidence + timing (for the punctuation-uncertainty study).
+struct Tok: Encodable {
+    let t: String      // token text (SentencePiece subword, ▁ = word boundary)
+    let c: Float       // confidence
+    let s: Double      // start time (s)
+    let e: Double      // end time (s)
+}
+
 struct Row: Encodable {
     let wav: String
     let seconds: Double
     var tdt: String?
     var tdtMs: Int?
+    var aggregate: Float?     // ASRResult.confidence (whole-take)
+    var tokens: [Tok]?        // per-token dump when --dump-tokens is set
     var sliding: String?
     var slidingMs: Int?
     var slideboost: String?
@@ -177,6 +187,7 @@ let vocabFile = flagValue("--vocab-file", &args)
 let aliasFile = flagValue("--alias-file", &args)
 let unguarded = boolFlag("--unguarded", &args)
 let noPrefilter = boolFlag("--no-prefilter", &args)
+let dumpTokens = boolFlag("--dump-tokens", &args)
 let wavListFile = flagValue("--wav-list", &args)
 
 var wavs = args.filter { !$0.hasPrefix("--") }
@@ -265,6 +276,12 @@ let runner = Task { () -> Int32 in
                     if paths.contains("tdt") {
                         row.tdt = r.text.trimmingCharacters(in: .whitespacesAndNewlines)
                         row.tdtMs = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+                        if dumpTokens {
+                            row.aggregate = r.confidence
+                            row.tokens = (r.tokenTimings ?? []).map {
+                                Tok(t: $0.token, c: $0.confidence, s: $0.startTime, e: $0.endTime)
+                            }
+                        }
                     }
                 }
 

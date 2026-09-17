@@ -10,7 +10,11 @@ public class SettingsViewModel: ObservableObject {
 
     @Published public var hotkeyKeyCode: UInt16
     @Published public var hotkeyModifiers: [String]
+    /// Legacy Hold/Toggle boolean, kept for back-compat readers and the round-trip tests. The
+    /// three-way `keyMode` below is the authoritative field the picker binds to; `toConfig` derives
+    /// `toggleMode` from it for downgrade safety.
     @Published public var toggleMode: Bool
+    @Published public var keyMode: KeyMode
     @Published public var modelSize: String
     @Published public var language: String
     @Published public var punctuationMode: PunctuationMode
@@ -26,6 +30,7 @@ public class SettingsViewModel: ObservableObject {
     @Published public var localAPIEnabled: Bool
     @Published public var localAPIPort: Int
     @Published public var saveRecordings: Bool
+    @Published public var saveError: String?
 
     // MARK: - Callback
 
@@ -49,10 +54,11 @@ public class SettingsViewModel: ObservableObject {
         self.hotkeyKeyCode = c.hotkey.keyCode
         self.hotkeyModifiers = c.hotkey.modifiers
         self.toggleMode = c.toggleMode?.value ?? false
+        self.keyMode = c.effectiveKeyMode
         self.modelSize = c.modelSize
         self.language = c.language
         self.punctuationMode = c.effectivePunctuationMode
-        self.maxRecordings = c.maxRecordings ?? 0  // 0 = keep everything (default)
+        self.maxRecordings = c.preserveAllRecordings?.value == true ? 0 : (c.maxRecordings ?? 0)
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
@@ -83,10 +89,11 @@ public class SettingsViewModel: ObservableObject {
         self.hotkeyKeyCode = c.hotkey.keyCode
         self.hotkeyModifiers = c.hotkey.modifiers
         self.toggleMode = c.toggleMode?.value ?? false
+        self.keyMode = c.effectiveKeyMode
         self.modelSize = c.modelSize
         self.language = c.language
         self.punctuationMode = c.effectivePunctuationMode
-        self.maxRecordings = c.maxRecordings ?? 0
+        self.maxRecordings = c.preserveAllRecordings?.value == true ? 0 : (c.maxRecordings ?? 0)
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
@@ -117,11 +124,18 @@ public class SettingsViewModel: ObservableObject {
         config.language = language
         config.spokenPunctuation = punctuationMode
         config.maxRecordings = maxRecordings
+        // The visible picker is now authoritative. Clear the legacy hidden override so
+        // choosing Last 1,000/10,000 cannot continue to behave as Keep All.
+        config.preserveAllRecordings = nil
         // PR-A: any Settings save is an explicit user choice — stamp the marker so the
         // legacy-30 migration never re-fires (a user re-picking 30 sticks; a non-30 legacy
         // value gets confirmed on next save).
         config.maxRecordingsUserConfirmed = true
-        config.toggleMode = FlexBool(toggleMode)
+        // keyMode is authoritative; keep the legacy toggleMode boolean synced so a downgrade to a
+        // keyMode-unaware build still reads Hold vs Toggle correctly (Edit downgrades to Toggle's
+        // tap behavior, the closest legacy match).
+        config.keyMode = keyMode
+        config.toggleMode = FlexBool(keyMode == .toggle)
         config.screenContext = FlexBool(screenContext)
         config.preBuffer = FlexBool(preBuffer)
         config.keepModelLoaded = keepModelLoaded
@@ -139,9 +153,22 @@ public class SettingsViewModel: ObservableObject {
     /// Save the current settings to disk and notify the callback.
     public func save() {
         let config = toConfig()
-        try? config.save()
-        baseConfig = config
-        onSave?()
+        do {
+            try config.save()
+            baseConfig = config
+            saveError = nil
+            onSave?()
+        } catch {
+            saveError = "Settings could not be saved. Your previous saved settings are still active. \(error.localizedDescription)"
+        }
+    }
+
+    func selectRecordingRetention(_ value: Int) {
+        var config = toConfig()
+        RecordingRetention.apply(value, to: &config)
+        saveRecordings = config.saveRecordings?.value == true
+        maxRecordings = config.maxRecordings ?? 0
+        save()
     }
 
     // MARK: - Punctuation modes per engine

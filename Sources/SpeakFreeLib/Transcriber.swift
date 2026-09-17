@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
+// ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import Foundation
 import AVFoundation
 
@@ -60,18 +60,46 @@ public enum HallucinationFilterTuning {
 }
 
 public class Transcriber {
+    private static let shadowSlot = DispatchSemaphore(value: 1)
     enum SecondOpinionStatus: Equatable {
-        case rechecking
-        case failed
+        /// What the audio contained, as far as the evidence can tell. Michael's copy
+        /// rule (2026-08-22): the status line is two sentences, the first describing
+        /// the audio, the second the action or outcome. This is the first sentence.
+        enum AudioDescriptor: Equatable {
+            /// Sustained or voiced speech energy, but the model got nothing usable.
+            case garbled
+            /// No sustained speech energy and no voiced pitch: the take reads as silence.
+            case silence
 
-        var message: String {
-            switch self {
-            case .rechecking:
-                return "Rechecking with whisper…"
-            case .failed:
-                return "Nothing transcribed (too noisy)"
+            var sentence: String {
+                switch self {
+                case .garbled: return "Garbled audio."
+                case .silence: return "Silence."
+                }
             }
         }
+
+        case rechecking(AudioDescriptor)
+        case failed(AudioDescriptor)
+
+        /// Full status line. No em-dashes in UI copy (Michael's standing rule).
+        var message: String {
+            switch self {
+            case .rechecking(let audio):
+                return "\(audio.sentence) Trying Whisper…"
+            case .failed(.garbled):
+                return "Garbled audio. Whisper found nothing."
+            case .failed(.silence):
+                return "Silence. Nothing to transcribe."
+            }
+        }
+    }
+
+    /// Pick the status line's audio descriptor from the take's evidence. Pure, so the
+    /// copy decision is unit-tested without a rescue run; the overlay never sees the
+    /// evidence itself (Transcriber stays UI-agnostic, the callback carries the enum).
+    static func audioDescriptor(for evidence: AudioEvidence) -> SecondOpinionStatus.AudioDescriptor {
+        (evidence.hasSustainedSpeechEnergy || evidence.hasVoicedSpeech) ? .garbled : .silence
     }
 
     struct AudioEvidence: Equatable {
@@ -101,7 +129,7 @@ public class Transcriber {
     /// Model identifier for the active engine (whisper: a size like "large-v3-turbo";
     /// parakeet: "parakeet-tdt-0.6b-v3"). Doubles as the whisper model size for the CLI path.
     let modelID: String
-    private let language: String
+    let language: String
     public var suppressAutoPunctuation: Bool = false
     var onSecondOpinionStatus: ((SecondOpinionStatus) -> Void)?
 
@@ -366,14 +394,20 @@ public class Transcriber {
 
     /// Transcribe using the in-process engine (fast, model stays loaded).
     /// Falls back to CLI (whisper only) if the engine fails or samples are not provided.
-    public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil) async throws -> String {
+    public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil,
+                           punctuationMode: PunctuationMode = .off) async throws -> String {
+        let activityLease = try RecordingActivity.shared.acquireReading(audioURL)
+        defer { activityLease.release() }
         let result: String
-        var secondOpinionAttempted = false
+        // Set when a rescue fires; carries the descriptor so the failure line can keep
+        // the same first sentence the "trying" line opened with.
+        var secondOpinionAudio: SecondOpinionStatus.AudioDescriptor?
 
         // Try engine first if we have samples
         if let samples = samples, !samples.isEmpty {
             do {
-                result = try await transcribeWithEngineRecoveringEmpty(samples: samples, prompt: prompt)
+                result = try await transcribeWithEngineRecoveringEmpty(
+                    samples: samples, prompt: prompt, punctuationMode: punctuationMode)
             } catch {
                 // CLI fallback is whisper-only; other engines rethrow.
                 if engine.engineID == "whisper" {
@@ -411,8 +445,9 @@ public class Transcriber {
             // (2026-08-19 airplane forensics; 56 empty-sentinel takes in the corpus).
             // Guarded on the whisper model actually being on disk; failure keeps empty.
             if engine.engineID != "whisper", Self.modelExists(modelSize: "large-v3-turbo") {
-                secondOpinionAttempted = true
-                onSecondOpinionStatus?(.rechecking)
+                let audio = Self.audioDescriptor(for: evidence)
+                secondOpinionAudio = audio
+                onSecondOpinionStatus?(.rechecking(audio))
                 do {
                     let rescued = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
                                                         modelOverride: "large-v3-turbo")
@@ -443,8 +478,9 @@ public class Transcriber {
             // synchronous shot and replaces ONLY when materially longer (>=2x words) and
             // under the 20s confabulation cap. Everything else is shadow-only.
             let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
-            secondOpinionAttempted = true
-            onSecondOpinionStatus?(.rechecking)
+            let audio = Self.audioDescriptor(for: evidence)
+            secondOpinionAudio = audio
+            onSecondOpinionStatus?(.rechecking(audio))
             do {
                 let swap = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
                                                  modelOverride: "large-v3-turbo")
@@ -455,8 +491,7 @@ public class Transcriber {
                    Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords),
                    Self.activeSwapVeto(parakeet: cleaned, whisper: swap,
                                        durationSeconds: duration) == nil {
-                    let sidecar = audioURL.deletingPathExtension().appendingPathExtension("parakeet.txt")
-                    try? cleaned.write(to: sidecar, atomically: true, encoding: .utf8)
+                    RecordingStore.saveAuxiliaryTranscription(text: cleaned, kind: .parakeet, for: audioURL)
                     DiagnosticLogger.shared.log(String(
                         format: "Transcriber: SPARSE whisper rescue (%.2f) — %d words replace %d over %.1fs",
                         conf, wWords, pWords, duration))
@@ -466,8 +501,7 @@ public class Transcriber {
                     DiagnosticLogger.shared.log(String(
                         format: "Transcriber: sparse rescue declined (%.2f, %d vs %d words) — whisper to sidecar",
                         conf, wWords, pWords))
-                    let sidecar = audioURL.deletingPathExtension().appendingPathExtension("whisper.txt")
-                    try? swap.write(to: sidecar, atomically: true, encoding: .utf8)
+                    RecordingStore.saveAuxiliaryTranscription(text: swap, kind: .whisper, for: audioURL)
                 }
             } catch {
                 DiagnosticLogger.shared.log(
@@ -475,7 +509,8 @@ public class Transcriber {
             }
         } else if engine.engineID != "whisper",
                   Self.secondOpinionTier(aggregateConfidence: engine.lastDiagnostics?.aggregateConfidence) == .shadow,
-                  Self.modelExists(modelSize: "large-v3-turbo") {
+                  Self.modelExists(modelSize: "large-v3-turbo"),
+                  Self.shadowSlot.wait(timeout: .now()) == .success {
             // SHADOW second opinion (2026-08-20): the take reads as suspect (corpus:
             // clean takes score >=0.94, garbled-but-fluent 0.73-0.83) but replacing text
             // automatically isn't yet earned — so whisper runs in the background, writes
@@ -484,12 +519,15 @@ public class Transcriber {
             // for an eventual active low-confidence swap.
             let parakeetText = cleaned
             let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
+            // Acquire before dispatch: the parent can finish before this worker starts.
+            let shadowLease = try? RecordingActivity.shared.acquireReading(audioURL)
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                guard let self = self else { return }
+                defer { shadowLease?.release(); Self.shadowSlot.signal() }
+                guard let self = self, shadowLease != nil else { return }
                 let shadow: String
                 do {
                     shadow = try self.transcribeWithCLI(audioURL: audioURL, prompt: prompt,
-                                                        modelOverride: "large-v3-turbo")
+                                                        modelOverride: "large-v3-turbo", background: true)
                 } catch {
                     // A failed shadow must say so — a silent guard hid the modelID bug
                     // (2026-08-20: every shadow threw modelNotFound("parakeet-tdt-0.6b-v2")
@@ -498,8 +536,7 @@ public class Transcriber {
                         "Transcriber: shadow whisper failed (\(error.localizedDescription))")
                     return
                 }
-                let sidecar = audioURL.deletingPathExtension().appendingPathExtension("whisper.txt")
-                try? shadow.write(to: sidecar, atomically: true, encoding: .utf8)
+                RecordingStore.saveAuxiliaryTranscription(text: shadow, kind: .whisper, for: audioURL)
                 let agree = TextPipeline.normalizedForComparison(shadow)
                     == TextPipeline.normalizedForComparison(parakeetText)
                 DiagnosticLogger.shared.log(String(
@@ -518,14 +555,14 @@ public class Transcriber {
                 return cleaned
             }
             print("Transcriber: filtered hallucination: \"\(cleaned)\"")
-            if secondOpinionAttempted {
-                onSecondOpinionStatus?(.failed)
+            if let audio = secondOpinionAudio {
+                onSecondOpinionStatus?(.failed(audio))
             }
             return ""
         }
-        if secondOpinionAttempted,
+        if let audio = secondOpinionAudio,
            cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            onSecondOpinionStatus?(.failed)
+            onSecondOpinionStatus?(.failed(audio))
         }
         return cleaned
     }
@@ -606,7 +643,7 @@ public class Transcriber {
     /// "Karma" was removed 2026-08-21: there is no such person (the vocab term was mined
     /// from mishears of a real name), so protecting Parakeet's "Karma" outputs only
     /// blocked whisper from fixing them.
-    /// TODO: derive from vocabulary.txt so user terms are covered automatically.
+    /// User terms from vocabulary.txt are not yet included automatically.
     static let swapProtectedTerms = [
         "Claude", "Codex", "Fable", "Opus", "Parakeet", "speakfree",
         "Anthropic", "Zander", "Airtable", "Premiere",
@@ -645,14 +682,18 @@ public class Transcriber {
     /// speech, retry up to `maxEmptyRetriesOnVoicedSpeech` times. Gated on `hasVoicedSpeech` so an
     /// accidental silent key-tap (no harmonic pitch structure) still fast-paths to empty with no
     /// added latency. Non-empty results and true-silence returns are untouched.
-    private func transcribeWithEngineRecoveringEmpty(samples: [Float], prompt: String?) async throws -> String {
-        var text = try await transcribeWithEngine(samples: samples, prompt: prompt)
+    private func transcribeWithEngineRecoveringEmpty(
+        samples: [Float], prompt: String?, punctuationMode: PunctuationMode
+    ) async throws -> String {
+        var text = try await transcribeWithEngine(
+            samples: samples, prompt: prompt, punctuationMode: punctuationMode)
         guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               Self.audioEvidence(in: samples).hasVoicedSpeech else { return text }
         for attempt in 1...Self.maxEmptyRetriesOnVoicedSpeech {
             DiagnosticLogger.shared.log(
                 "Transcriber: engine returned empty on voiced speech, retry \(attempt)/\(Self.maxEmptyRetriesOnVoicedSpeech)")
-            text = try await transcribeWithEngine(samples: samples, prompt: prompt)
+            text = try await transcribeWithEngine(
+                samples: samples, prompt: prompt, punctuationMode: punctuationMode)
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 DiagnosticLogger.shared.log(
                     "Transcriber: empty-result retry \(attempt) recovered \(text.count) chars")
@@ -662,7 +703,8 @@ public class Transcriber {
         return text
     }
 
-    private func transcribeWithEngine(samples: [Float], prompt: String?) async throws -> String {
+    private func transcribeWithEngine(samples: [Float], prompt: String?,
+                                      punctuationMode: PunctuationMode) async throws -> String {
         // Ensure model is loaded (engine resolves its own on-disk/cache location)
         if !engine.isLoaded {
             try await engine.loadModel(modelID: modelID)
@@ -670,12 +712,17 @@ public class Transcriber {
 
         let suppressRegex = suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
 
-        let raw = try await engine.transcribe(
-            samples: samples,
-            language: language,
-            prompt: prompt,
-            suppressRegex: suppressRegex
-        )
+        let raw: String
+        if let confidenceCorrectingEngine = engine as? ConfidencePunctuationCorrectingEngine {
+            raw = try await confidenceCorrectingEngine.transcribe(
+                samples: samples, language: language, prompt: prompt,
+                suppressRegex: suppressRegex,
+                enablePunctuationCommandCorrection: punctuationMode != .off)
+        } else {
+            raw = try await engine.transcribe(
+                samples: samples, language: language, prompt: prompt,
+                suppressRegex: suppressRegex)
+        }
 
         // Clean up output same way as CLI. Whisper emits one line per acoustic segment;
         // join them with a SPACE, not "\n" — a multi-segment split is not a user break.
@@ -707,7 +754,7 @@ public class Transcriber {
     /// file can only throw — which is exactly how the 2026-08-20 shadow pass silently
     /// never fired (take 135106 "Caramore Kaima", conf 0.911, no sidecar, no log).
     private func transcribeWithCLI(audioURL: URL, prompt: String? = nil,
-                                   modelOverride: String? = nil) throws -> String {
+                                   modelOverride: String? = nil, background: Bool = false) throws -> String {
         guard let whisperPath = Transcriber.findWhisperBinary() else {
             throw TranscriberError.whisperNotFound
         }
@@ -717,15 +764,13 @@ public class Transcriber {
             throw TranscriberError.modelNotFound(cliModel)
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: whisperPath)
         var args = [
             "-m", modelPath,
             "-f", audioURL.path,
             "-l", language,
             "--no-timestamps",
             "-nt",
-            "-t", "\(ProcessInfo.processInfo.activeProcessorCount)",
+            "-t", "\(background ? min(2, ProcessInfo.processInfo.activeProcessorCount) : ProcessInfo.processInfo.activeProcessorCount)",
         ]
         // Spoken mode: suppress whisper's auto-punctuation so only spoken words produce symbols
         if suppressAutoPunctuation {
@@ -740,27 +785,14 @@ public class Transcriber {
                 "Transcriber: whisper CLI fallback running promptless — dropped \(prompt.count)-char "
                 + "context prompt (no argv-free prompt path on whisper-cli)")
         }
-        process.arguments = args
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        try process.run()
-
-        let group = DispatchGroup()
-        var stderrData = Data()
-
-        group.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            group.leave()
-        }
-
-        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        group.wait()
-        process.waitUntilExit()
+        let duration = (try? AVAudioFile(forReading: audioURL)).map {
+            Double($0.length) / max(1, $0.processingFormat.sampleRate)
+        } ?? 60
+        let outputResult = try BoundedProcess.run(
+            executable: URL(fileURLWithPath: whisperPath), arguments: args,
+            timeout: Self.cliTimeout(audioDuration: duration, background: background))
+        let data = outputResult.stdout
+        let stderrData = outputResult.stderr
 
         // Whisper outputs one line per acoustic segment with leading spaces. Join with a
         // SPACE, not "\n" — a multi-segment split is not a user break, so it must never
@@ -772,13 +804,20 @@ public class Transcriber {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
 
-        if process.terminationStatus != 0 {
+        if outputResult.status != 0 {
             let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !stderr.isEmpty { fputs("whisper-cpp: \(stderr)\n", Foundation.stderr) }
             throw TranscriberError.transcriptionFailed
         }
 
         return output
+    }
+
+    static func cliTimeout(audioDuration: Double, background: Bool) -> TimeInterval {
+        // Foreground file transcription keeps a duration-aware budget (up to 30 min).
+        // Shadows are disposable diagnostics and must never occupy a worker indefinitely.
+        let duration = audioDuration.isFinite ? max(0, audioDuration) : 60
+        return min(background ? 120 : 1800, max(30, duration * 2 + 15))
     }
 
     public static func findWhisperBinary() -> String? {
@@ -865,6 +904,8 @@ public class Transcriber {
         progressHandler: @escaping (_ chunk: Int, _ totalChunks: Int, _ whisperPct: Int) -> Void,
         isCancelled: @escaping () -> Bool
     ) async throws -> String {
+        let activityLease = try RecordingActivity.shared.acquireReading(url)
+        defer { activityLease.release() }
         // Ensure model loaded
         if !engine.isLoaded {
             try await engine.loadModel(modelID: modelID)

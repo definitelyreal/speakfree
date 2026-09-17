@@ -93,6 +93,9 @@ class UsageStats {
     /// under-claims rather than over-claims.
     var estimatedTimeSaved: TimeInterval { estimatedTimeSavedRange.low }
 
+    /// Counterfactual time to type the same text at a conventional 60 WPM.
+    var estimatedTypingTime: TimeInterval { Double(data.totalCharacters) / 5.0 }
+
     static func formatDuration(_ seconds: TimeInterval) -> String {
         if seconds < 60 {
             return "\(Int(seconds)) seconds"
@@ -141,6 +144,15 @@ class UsageStats {
         return parts.joined(separator: " ")
     }
 
+    /// Compact counterfactual typing time for the Settings summary.
+    static func formatDaysHours(_ seconds: TimeInterval) -> String {
+        let totalHours = max(0, Int(seconds) / 3600)
+        let days = totalHours / 24
+        let hours = totalHours % 24
+        if days == 0 { return "\(hours) hour\(hours == 1 ? "" : "s")" }
+        return "\(days) day\(days == 1 ? "" : "s") \(hours) hour\(hours == 1 ? "" : "s")"
+    }
+
     /// Hand travel avoided: metres a typist's fingers would have moved to type the
     /// dictated characters. 2 cm per keystroke — the ~19 mm key pitch plus per-stroke
     /// vertical travel; deliberately a round, stated assumption rather than a modelled
@@ -148,12 +160,10 @@ class UsageStats {
     static let handTravelMetresPerKeystroke = 0.02
     var handTravelMetres: Double { Double(data.totalCharacters) * Self.handTravelMetresPerKeystroke }
 
-    /// Imperial: feet under a mile, then miles ("0.6 miles", "12 miles").
+    /// One consistent unit and one decimal, including zero (Michael's settings copy).
     var handTravelImperialDescription: String {
-        let feet = handTravelMetres * 3.28084
-        if feet < 5280 { return "\(Int(feet)) feet" }
-        let miles = feet / 5280
-        return String(format: miles < 10 ? "%.1f miles" : "%.0f miles", miles)
+        let miles = handTravelMetres / 1609.344
+        return String(format: "%.1f miles", miles)
     }
 
     /// Metric: metres under a kilometre, then kilometres.
