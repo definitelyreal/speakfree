@@ -1,6 +1,23 @@
 <!-- ai-suggestion:unverified | session:01a0a336-fe39-7870-bdab-33c820f98955 | date:2026-09-15 | asof:2026-09-15 -->
 # Settings and recordings review
 
+## September 17: full-size yellow folder button
+
+Michael requested a full-size folder button with a yellow Apple folder icon. The
+shared Settings/notice control now explicitly uses the native large bordered button
+and Apple's `folder.fill` symbol in system yellow. Its title, folder-opening action,
+tooltip, accessibility identifier and alignment are unchanged; the icon is decorative
+for accessibility. No recording or retention behavior changed.
+
+Three native render tests passed, generating 22 images in
+`build/release-readiness/2026-09-17-folder-button`. A follow-up size assertion passed
+for both font profiles, enforcing a minimum 30-point control height. The release
+build passed in 35.31 seconds; changed-file SwiftLint and whitespace checks passed.
+BODY20 still tests inherited text styling, not actual system Larger Text settings.
+These are implementation/render checks, not human visual approval.
+
+## September 15 review
+
 This is design feedback and a test record, not release approval. Three fresh-context reviewers challenged consent, settings clarity, and layout/accessibility. Their findings were source reviews, not independent visual approval or a cross-family verification gate.
 
 ## Overall recommendation

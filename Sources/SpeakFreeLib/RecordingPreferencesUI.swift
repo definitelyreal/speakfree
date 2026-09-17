@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-15
+// ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-17
 import AppKit
 import SwiftUI
 
@@ -77,10 +77,21 @@ struct RecordingsFolderButton: View {
             if let open { open(folderPath) }
             else { NSWorkspace.shared.open(URL(fileURLWithPath: folderPath, isDirectory: true)) }
         } label: {
-            Label("Recordings & Transcripts Folder", systemImage: "folder")
+            Label {
+                Text("Recordings & Transcripts Folder")
+            } icon: {
+                // Keep Apple's folder shape explicitly yellow; the folder emoji's
+                // color varies with the installed Apple Color Emoji version.
+                Image(systemName: "folder.fill")
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(Color(nsColor: .systemYellow))
+                    .font(.system(size: 18))
+                    .accessibilityHidden(true)
+            }
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .controlSize(.regular)
+        .buttonStyle(.bordered)
+        .controlSize(.large)
         .help(folderPath)
         .accessibilityIdentifier("recordings-folder-button")
     }

@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:unknown · 2026-09-15
+// ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-17
 import AppKit
 import SwiftUI
 import XCTest
@@ -22,6 +22,19 @@ final class RecordingsUIRenderTests: XCTestCase {
     private let recordingCount = 18_710
     private let artifactCount = 76_144
     private let sampleFolderPath = "/Users/preview/Library/Application Support/SpeakFree UI Test/recordings"
+
+    func testRenderFullSizeFolderButton() throws {
+        try withIsolatedOutput { output, _ in
+            for profile in TextProfile.allCases {
+                let button = RecordingsFolderButton(folderPath: sampleFolderPath, open: { _ in })
+                let measurement = NSHostingView(rootView: button.font(profile.font))
+                XCTAssertGreaterThanOrEqual(measurement.fittingSize.height, 30,
+                                            "The folder action must remain a full-size control")
+                let view = button.padding(16)
+                try snapshot(view, named: "folder-button", profile: profile, width: 440, output: output)
+            }
+        }
+    }
 
     func testRenderNoticeComparisons() throws {
         try withIsolatedOutput { output, _ in
