@@ -29,6 +29,14 @@ review. Publish the downloadable binary without changing latest, then merge revi
 appcast/Pages metadata before promoting latest. Do not claim the live feed has changed
 until it has actually deployed. Earlier readiness entries below are historical.
 
+Owner clarification later on September 17: Michael confirmed that the agents should
+handle review and authorized proceeding as repository owner. Astra performed independent
+source reviews; this is not represented as a separate-account GitHub approval. An
+owner-authorized administrative merge may follow passing CI without changing protection
+settings. Apple accepted notarization submission `c848a02c-3ade-48fe-b2df-84d388a83b92`
+for the DMG built from `bad54ae2703c119dc1e3a4f33b62f41b64e7264b`; stapling,
+Gatekeeper assessment and full version checks passed. Publication is not yet claimed.
+
 ## September 14: approved copy, layout and initial saving choice
 
 The release checkout now contains Michael's five saved recordings copy edits and his
