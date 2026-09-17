@@ -126,7 +126,9 @@ Any separately authorized development installation uses `scripts/dev-deploy-flee
    public. This intentionally leaves GitHub's latest release unchanged, preserving
    the old site's latest/download URL until reviewed metadata is deployed.
 6. Open a PR to main containing the candidate and signed appcast. Obtain the required
-   independent GitHub review and passing CI; do not use an administrative bypass.
+   independent review and passing CI. Do not use an administrative merge unless the
+   repository owner explicitly authorizes it for this release after those checks;
+   never weaken the repository's protection settings.
    The new site uses a version-specific URL so Pages and latest cannot race.
 7. After merge and Pages deployment, use a clean main checkout matching GitHub and
    retain the original DMG. Run `bash scripts/publish-release.sh X.Y.Z` to promote
