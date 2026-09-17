@@ -36,11 +36,14 @@ REMOTE_COMMIT=$(gh api "repos/$REPO/commits/$TAG" --jq '.sha')
 [ "$SOURCE_COMMIT" = "$REMOTE_COMMIT" ] || {
     echo "FATAL: local and GitHub release tags differ." >&2; exit 1;
 }
-git diff --quiet "$TAG" -- Sources Resources Package.swift Package.resolved scripts || {
+# Compare binary inputs. Publication tooling and CI may be repaired after packaging
+# without pretending those changes were compiled into the already signed payload.
+git diff --quiet "$TAG" -- Sources Resources Package.swift Package.resolved \
+    scripts/build.sh scripts/speakfree.entitlements scripts/vendor || {
     echo "FATAL: source/package files differ from the release tag." >&2; exit 1;
 }
 LOCAL_DIGEST="sha256:$(shasum -a 256 "$DMG" | awk '{print $1}')"
-REMOTE_DIGEST=$(gh api "repos/$REPO/releases/tags/$TAG" \
+REMOTE_DIGEST=$(gh release view "$TAG" --repo "$REPO" --json assets \
     --jq ".assets[] | select(.name == \"$DMG\") | .digest")
 [ "$LOCAL_DIGEST" = "$REMOTE_DIGEST" ] || {
     echo "FATAL: GitHub asset digest differs from the signed local DMG." >&2; exit 1;
