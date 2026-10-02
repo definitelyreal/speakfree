@@ -26,10 +26,17 @@ final class SettingsSidebarTests: XCTestCase {
                 XCTAssertEqual(model.historySettings.retention, .week)
                 let scrollViews = descendants(of: host).compactMap { $0 as? NSScrollView }
                 XCTAssertFalse(scrollViews.isEmpty, "Preferences must remain scrollable in a short window")
-                for scroll in scrollViews {
-                    if let document = scroll.documentView {
-                        XCTAssertLessThanOrEqual(document.frame.width, scroll.contentSize.width + 1,
-                                                 "A settings section must not require horizontal scrolling")
+                for style in [NSScroller.Style.overlay, .legacy] {
+                    scrollViews.forEach { $0.scrollerStyle = style }
+                    window.setContentSize(NSSize(width: 800, height: 500))
+                    settle(host)
+                    XCTAssertLessThanOrEqual(host.bounds.width, 801,
+                                             "The \(tab.title) section must fit the minimum window width")
+                    for scroll in scrollViews {
+                        if let document = scroll.documentView {
+                            XCTAssertLessThanOrEqual(document.frame.width, scroll.contentSize.width + 1,
+                                                     "The \(tab.title) section must not require horizontal scrolling (style \(style.rawValue))")
+                        }
                     }
                 }
             }

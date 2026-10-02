@@ -49,8 +49,9 @@ struct EnginePickerView: View {
                     .pickerStyle(.menu)
                     .labelsHidden()
                     .controlSize(.regular)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .frame(minWidth: 360, maxWidth: .infinity, alignment: .leading)
+                    // The sidebar and legacy scrollbars reduce the available width.
+                    // Let menu controls compress instead of widening the whole window.
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 }
 
                 if viewModel.engine == "parakeet" {
@@ -73,8 +74,7 @@ struct EnginePickerView: View {
                             .pickerStyle(.menu)
                             .labelsHidden()
                             .controlSize(.regular)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .frame(minWidth: 360, maxWidth: .infinity, alignment: .leading)
+                            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
                             parakeetDownloadBanner
                         }

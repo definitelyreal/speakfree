@@ -98,6 +98,9 @@ final class ParakeetFirstStartTests: XCTestCase {
 
     // MARK: - Orchestration (fake helper, no model)
 
+    // Stand-in scenarios select the policy explicitly; CI may have 8 GB or less.
+    // The separate not-allowed test exercises the low-memory policy.
+
     func testWithoutHelperTheLoadStaysInProcess() async {
         let engine = ParakeetEngine(compileHelper: nil)
         let recorder = PhaseRecorder()
@@ -135,7 +138,7 @@ final class ParakeetFirstStartTests: XCTestCase {
 
     func testWarmHelperNeverStartsTheStandInAndDoesNotWaitOutItsDelay() async {
         let helper = FakeHelper(finishImmediately: true)
-        let engine = ParakeetEngine(compileHelper: helper, standInDelaySeconds: 2)
+        let engine = ParakeetEngine(compileHelper: helper, standInDelaySeconds: 2, standInAllowed: true)
         let start = Date()
         await engine.prepareModel(modelID: missingModel)
         XCTAssertLessThan(Date().timeIntervalSince(start), 1, "a warm launch must not sit out the stand-in delay")
@@ -148,7 +151,7 @@ final class ParakeetFirstStartTests: XCTestCase {
         // A helper that fails at once: the stand-in must still be tried (first, because an
         // in-process compile would block its load), without waiting for the delay.
         let helper = FakeHelper(finishImmediately: false)
-        let engine = ParakeetEngine(compileHelper: helper, standInDelaySeconds: 30)
+        let engine = ParakeetEngine(compileHelper: helper, standInDelaySeconds: 30, standInAllowed: true)
         let recorder = PhaseRecorder()
         let start = Date()
         await engine.prepareModel(modelID: missingModel) { recorder.record($0) }
@@ -159,7 +162,7 @@ final class ParakeetFirstStartTests: XCTestCase {
 
     func testSlowHelperStartsTheStandInOnce() async throws {
         let helper = FakeHelper()
-        let engine = ParakeetEngine(compileHelper: helper, standInDelaySeconds: 0.01)
+        let engine = ParakeetEngine(compileHelper: helper, standInDelaySeconds: 0.01, standInAllowed: true)
         let prepare = Task { await engine.prepareModel(modelID: missingModel) }
         try await waitUntil { engine.standInAttemptsForTesting.value == 1 }
         helper.started[0].finish(true)
