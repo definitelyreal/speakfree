@@ -90,6 +90,12 @@ final class HistoryPickerModel: ObservableObject {
         return false
     }
     var rowNavigationFocused: Bool { keyboardFocus == .row || keyboardFocus == .plainText }
+    /// Row/action focus is logical: leave the text editor ready for type-to-search.
+    var editorFocus: KeyboardFocus? { rowNavigationFocused ? .search : keyboardFocus }
+    func searchChanged() {
+        keyboardFocus = .search
+        reconcileSelection()
+    }
     var visible: [HistoryEntry] {
         guard !showsClipboardDisabled else { return [] }
         return entries.filter { (filter == .all || $0.source.rawValue == filter.rawValue) && $0.matches(query) }
@@ -222,6 +228,7 @@ struct HistoryPickerView: View {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Search history", text: $model.query)
                         .textFieldStyle(.plain).focused($focusedControl, equals: .search)
+                        .simultaneousGesture(TapGesture().onEnded { model.keyboardFocus = .search })
                         .help("Search history (⌘F). Tab cycles source filters.")
                         .onSubmit { model.activate() }
                 }.padding(.horizontal, 12).frame(height: 40)
@@ -300,12 +307,12 @@ struct HistoryPickerView: View {
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 9))
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.primary.opacity(0.12)))
-        .onAppear { focusedControl = model.keyboardFocus; model.reconcileSelection() }
-        .onChange(of: model.keyboardFocus) { focusedControl = $0 }
+        .onAppear { focusedControl = model.editorFocus; model.reconcileSelection() }
+        .onChange(of: model.keyboardFocus) { _ in focusedControl = model.editorFocus }
         .onChange(of: focusedControl) { value in
-            if let value { model.keyboardFocus = value }
+            if let value, !model.rowNavigationFocused { model.keyboardFocus = value }
         }
-        .onChange(of: model.query) { _ in model.reconcileSelection() }
+        .onChange(of: model.query) { _ in model.searchChanged() }
         .onChange(of: model.filter) { _ in model.reconcileSelection() }
         .onChange(of: model.clipboardEnabled) { _ in model.reconcileSelection() }
         .onChange(of: model.preferredSize) { _ in model.resize?() }

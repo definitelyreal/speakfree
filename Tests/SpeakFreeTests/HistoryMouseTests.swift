@@ -32,6 +32,25 @@ final class HistoryMouseTests: XCTestCase {
         defer { panel.orderOut(nil) }
         panel.layoutIfNeeded(); host.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        // Confine text events to this transparent test window. No global keyboard
+        // event, application activation, or real clipboard is involved.
+        func textField(in view: NSView) -> NSTextField? {
+            if let field = view as? NSTextField, field.isEditable { return field }
+            return view.subviews.lazy.compactMap { textField(in: $0) }.first
+        }
+        let search = try XCTUnwrap(textField(in: host))
+        XCTAssertTrue(panel.makeFirstResponder(search))
+        model.move(0)
+        model.handle(.focusPlainText)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        let editor = try XCTUnwrap(search.currentEditor() as? NSTextView)
+        editor.insertText("Rich", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(model.query, "Rich", "Typing after row/action navigation must continue filtering")
+        XCTAssertEqual(model.keyboardFocus, .search)
+        model.query = ""
+        model.resetForPresentation()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         let top = model.preferredSize.height - HistoryPickerLayout.headerHeight - 1 - 4
         let firstY = top - HistoryPickerLayout.rowHeight * 0.5
         let secondY = top - HistoryPickerLayout.rowHeight * 1.5

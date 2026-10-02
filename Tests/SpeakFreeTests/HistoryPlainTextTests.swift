@@ -4,6 +4,20 @@ import XCTest
 @testable import SpeakFreeLib
 
 final class HistoryPlainTextTests: XCTestCase {
+    func testTypingAfterArrowOrHoverReturnsCaretControlToSearch() {
+        let model = HistoryPickerModel()
+        model.entries = [rich]
+        model.resetForPresentation()
+        model.move(0)
+        XCTAssertEqual(model.editorFocus, .search)
+        model.handle(.focusPlainText)
+        XCTAssertEqual(model.editorFocus, .search)
+        model.query = "Bold"
+        model.searchChanged()
+        XCTAssertEqual(model.keyboardFocus, .search)
+        XCTAssertNil(HistoryPickerKeyAction.action(keyCode: 123, modifiers: [],
+            rowNavigationFocused: model.rowNavigationFocused))
+    }
     private func entry(_ representations: [HistoryRepresentation]) -> HistoryEntry {
         HistoryEntry(source: .clipboard, items: [.init(representations: representations)])
     }
