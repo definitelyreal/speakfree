@@ -5,6 +5,9 @@ import Foundation
 /// Main-thread, memory-only, one dialog at a time. New capture is backpressured at
 /// eight pending results or 1 MiB; already-in-flight results are never discarded.
 final class DictationRecoveryQueue {
+    static func shouldRetain(_ outcome: InsertionOutcome, ownsTake: Bool) -> Bool {
+        outcome == .deliveryFailed || (!ownsTake && !TextInserter.deliveryWasSubmitted(outcome))
+    }
     var isAvailable: () -> Bool = { false }
     var present: (String, @escaping () -> Bool, @escaping (Bool) -> Void) -> Void = { _, _, finished in finished(false) }
     var schedule: (@escaping () -> Void) -> Void = { work in

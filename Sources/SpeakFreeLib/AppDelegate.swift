@@ -126,7 +126,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var skipHistoryDrainOnce = false
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !failedDictations.hasPending else { NSSound.beep(); return .terminateCancel }
+        guard !failedDictations.hasPending else {
+            NSSound.beep()
+            recordingOverlay.show(state: .error("Recover the waiting dictation before quitting. Close Edit if it is open."))
+            return .terminateCancel
+        }
         guard let historyCoordinator else { return .terminateNow }
         if historyTerminationInFlight { return .terminateLater }
         // Existing SIGTERM handling drains active work before calling terminate. A
@@ -2190,8 +2194,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let startRequestedAt = CFAbsoluteTimeGetCurrent()
 
         // A stale Secure-Input retry must never fire mid-take or after a newer dictation —
-        // starting a new recording supersedes the parked text.
-        cancelSecureInputRetry()
+        // starting a new recording parks it for explicit recovery instead.
+        cancelSecureInputRetry(retainForRecovery: true)
 
         // Microphone gate: never silently record silence. If access is missing, this prompts
         // (notDetermined) or shows an actionable alert (denied) and aborts this attempt.
@@ -2347,11 +2351,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // so the box never promises a paste the clipboard can no longer deliver.
 
     private var secureInputRetryTimer: Timer?
+    private var secureInputRetryText: String?
 
     private func beginSecureInputRetry(text: String, destination: SecureInputRetryDestination?,
                                        takeToken: TakePresentationOwnership.Token) {
         guard takePresentation.owns(takeToken) else { return }
-        cancelSecureInputRetry()
+        cancelSecureInputRetry(retainForRecovery: true)
+        secureInputRetryText = text
         statusBar.state = .secureInputCopied
         statusBar.buildMenu()
         var ownership = SecureInputRetryOwnership(targetPID: destination?.pid)
@@ -2369,6 +2375,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         secureInputRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
             guard self.takePresentation.owns(takeToken) else {
+                if let retained = self.secureInputRetryText { self.failedDictations.retain(retained) }
+                self.secureInputRetryText = nil
                 self.secureInputRetryTimer?.invalidate()
                 self.secureInputRetryTimer = nil
                 return
@@ -2402,7 +2410,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func cancelSecureInputRetry() {
+    private func cancelSecureInputRetry(retainForRecovery: Bool = false) {
+        if retainForRecovery, let text = secureInputRetryText { failedDictations.retain(text) }
+        secureInputRetryText = nil
         guard secureInputRetryTimer != nil else { return }
         secureInputRetryTimer?.invalidate()
         secureInputRetryTimer = nil
@@ -3258,7 +3268,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         _ outcome: InsertionOutcome, text: String, destination: SecureInputRetryDestination?,
         takeToken: TakePresentationOwnership.Token
     ) {
-        if outcome == .deliveryFailed {
+        if DictationRecoveryQueue.shouldRetain(outcome, ownsTake: takePresentation.owns(takeToken)) {
             failedDictations.retain(text)
             return
         }
@@ -3605,12 +3615,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func reprocess(audioURL: URL) {
-        // `.ready` is the state before the first dictation of a session, so gating on `.idle`
-        // alone made every Recent Dictations click a silent no-op until you had dictated once
-        // (2026-08-01). Both states mean "not busy"; the busy ones below are the real exclusion.
-        guard statusBar.state == .idle || statusBar.state == .ready else {
-            DiagnosticLogger.shared.log(
-                "Reprocess: ignored — status bar is \(statusBar.state), not idle/ready")
+        guard canInsertSavedText else {
+            NSSound.beep()
+            DiagnosticLogger.shared.log("Reprocess: ignored while another operation is active")
             return
         }
 
@@ -3631,11 +3638,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Recording recents and saved Edit sessions share destination, busy and recovery rules.
+    private var canInsertSavedText: Bool {
+        !isPressed && postBufferTimer == nil
+            && statusBar.state != .recording && statusBar.state != .transcribing
+            && scheduledRecentInsertionCount == 0 && !retryInFlight
+            && !inserter.hasDeferredInsertion && editSessionOpenProbe?() != true
+    }
+
     private func insertSavedText(_ text: String) {
-        guard !text.isEmpty, !isPressed, postBufferTimer == nil,
-              statusBar.state == .idle || statusBar.state == .ready,
-              scheduledRecentInsertionCount == 0, !retryInFlight,
-              !inserter.hasDeferredInsertion, editSessionOpenProbe?() != true else { return }
+        guard !text.isEmpty else { return }
+        guard canInsertSavedText else {
+            NSSound.beep()
+            DiagnosticLogger.shared.log("Saved text: ignored while another operation is active")
+            return
+        }
         lastTranscription = text
         let takeToken = takePresentation.beginTake()
         let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier

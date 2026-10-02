@@ -3,6 +3,14 @@ import XCTest
 @testable import SpeakFreeLib
 
 final class DictationRecoveryQueueTests: XCTestCase {
+    func testOlderConcealedOutcomesSurviveAutoClearWithoutHistory() {
+        for outcome: InsertionOutcome in [.secureInput, .copiedFocusLost, .axTimeoutCopied] {
+            XCTAssertTrue(DictationRecoveryQueue.shouldRetain(outcome, ownsTake: false))
+            XCTAssertFalse(DictationRecoveryQueue.shouldRetain(outcome, ownsTake: true))
+        }
+        XCTAssertTrue(DictationRecoveryQueue.shouldRetain(.deliveryFailed, ownsTake: true))
+        XCTAssertFalse(DictationRecoveryQueue.shouldRetain(.pasted, ownsTake: false))
+    }
     func testFailedOlderTakeWaitsThroughNewerTakeAndRevokedDialogWithoutLosingText() {
         let queue = DictationRecoveryQueue()
         var work: [() -> Void] = []
