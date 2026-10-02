@@ -35,8 +35,31 @@ struct HistoryPasteboardItem: Codable, Equatable {
 
     var plainText: String? {
         if let data = data(forType: .string) { return String(data: data, encoding: .utf8) }
+        if let data = representations.first(where: { $0.type == "NSStringPboardType" })?.data {
+            return String(data: data, encoding: .utf8)
+        }
         if let data = representations.first(where: { $0.type == "public.utf16-plain-text" })?.data {
             return String(data: data, encoding: .utf16)
+        }
+        return nil
+    }
+
+    var containsRichText: Bool {
+        representations.contains { HistoryEntry.richTextTypes.contains($0.type) }
+    }
+
+    /// Prefer the author's text fallback. RTF readers consume only the stored bytes;
+    /// the HTML importer is deliberately not used because it can load external resources.
+    func unformattedText() -> String? {
+        if let plainText { return plainText }
+        for representation in representations where representation.data.count <= 1_048_576 {
+            switch representation.type {
+            case "public.rtf", "NSRTFPboardType":
+                if let text = NSAttributedString(rtf: representation.data, documentAttributes: nil)?.string { return text }
+            case "com.apple.flat-rtfd", "NSRTFDPboardType":
+                if let text = NSAttributedString(rtfd: representation.data, documentAttributes: nil)?.string { return text }
+            default: break
+            }
         }
         return nil
     }
@@ -63,6 +86,7 @@ struct HistoryEntry: Codable, Equatable, Identifiable {
         let displayTitle: String
         let searchableText: String
         let searchWasTruncated: Bool
+        let unformattedItems: [HistoryPasteboardItem]?
     }
 
     init(id: UUID = UUID(), createdAt: Date = Date(), source: Source,
@@ -101,6 +125,14 @@ struct HistoryEntry: Codable, Equatable, Identifiable {
     }
 
     var containsImage: Bool { summary.containsImage }
+    var canPastePlainText: Bool { summary.unformattedItems != nil }
+
+    /// An explicit one-shot paste variant. Stored bytes, ID and search are unchanged.
+    func plainTextVariant() -> HistoryEntry? {
+        guard let items = summary.unformattedItems else { return nil }
+        return HistoryEntry(id: id, createdAt: createdAt, source: source,
+            sourceAppBundleID: sourceAppBundleID, linkedArchiveID: linkedArchiveID, items: items)
+    }
     var containsFiles: Bool { summary.containsFiles }
     var displayTitle: String { summary.displayTitle }
     var searchWasTruncated: Bool { summary.searchWasTruncated }
@@ -186,8 +218,20 @@ struct HistoryEntry: Codable, Equatable, Identifiable {
         else { title = "Clipboard item" }
         appendSearch(title)
         if let sourceAppBundleID { appendSearch(String(decoding: sourceAppBundleID.utf8.prefix(512), as: UTF8.self)) }
+        var unformattedItems: [HistoryPasteboardItem]?
+        if !files, items.contains(where: \.containsRichText) {
+            let strings = items.map { $0.unformattedText() }
+            // No partial conversion of mixed clipboard items and no image OCR.
+            if strings.allSatisfy({ $0 != nil }) {
+                unformattedItems = strings.compactMap { $0 }.map {
+                    HistoryPasteboardItem(representations: [
+                        .init(type: NSPasteboard.PasteboardType.string.rawValue, data: Data($0.utf8))])
+                }
+            }
+        }
         return Summary(byteCount: bytes, containsImage: image, containsFiles: files, displayTitle: title,
-                       searchableText: searchable, searchWasTruncated: truncated)
+                       searchableText: searchable, searchWasTruncated: truncated,
+                       unformattedItems: unformattedItems)
     }
 
     /// Creates fresh objects; NSPasteboardItem instances cannot be written to two boards.
@@ -204,6 +248,8 @@ struct HistoryEntry: Codable, Equatable, Identifiable {
     }
 
     static let imageTypes: Set<String> = ["public.tiff", "public.png", "public.jpeg", "public.heic", "com.compuserve.gif", "public.webp"]
+    static let richTextTypes: Set<String> = ["public.rtf", "com.apple.flat-rtfd", "public.html",
+                                           "NSRTFPboardType", "NSRTFDPboardType", "NSHTMLPboardType"]
     static let fileTypes: Set<String> = ["public.file-url", "NSFilenamesPboardType"]
     /// Deliberately excludes executable promises and application-private archive formats.
     /// Capture retains supported representations except alternate TIFF when PNG is supplied.

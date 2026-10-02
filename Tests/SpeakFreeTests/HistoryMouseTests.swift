@@ -5,6 +5,45 @@ import XCTest
 @testable import SpeakFreeLib
 
 final class HistoryMouseTests: XCTestCase {
+    func testRichTextButtonAndDisabledPlainTextButtonHaveSeparateHitTargets() throws {
+        guard ProcessInfo.processInfo.environment["HISTORY_MOUSE_TESTS"] == "1" else {
+            throw XCTSkip("Opt-in transparent native History interaction harness")
+        }
+        _ = NSApplication.shared
+        let model = HistoryPickerModel()
+        model.clipboardEnabled = true
+        let rich = HistoryEntry(source: .clipboard, items: [.init(representations: [
+            .init(type: "public.rtf", data: Data(#"{\rtf1\ansi Rich \b sample\b0}"#.utf8)),
+            .init(type: "public.utf8-plain-text", data: Data("Rich sample".utf8))])])
+        let plain = HistoryEntry(source: .clipboard, items: [.init(representations: [
+            .init(type: "public.utf8-plain-text", data: Data("Plain sample".utf8))])])
+        model.entries = [rich, plain]
+        model.resetForPresentation()
+        var choices: [HistoryEntry] = []
+        model.choose = { entry, copy in XCTAssertFalse(copy); choices.append(entry) }
+        let panel = HistoryPanel(contentRect: NSRect(origin: .zero, size: model.preferredSize),
+            styleMask: [.nonactivatingPanel, .fullSizeContentView], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        panel.alphaValue = 0
+        let host = HistoryHostingView(rootView: HistoryPickerView(model: model))
+        host.frame = NSRect(origin: .zero, size: model.preferredSize)
+        panel.contentView = host
+        panel.orderFront(nil)
+        defer { panel.orderOut(nil) }
+        panel.layoutIfNeeded(); host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        let top = model.preferredSize.height - HistoryPickerLayout.headerHeight - 1 - 4
+        let firstY = top - HistoryPickerLayout.rowHeight * 0.5
+        let secondY = top - HistoryPickerLayout.rowHeight * 1.5
+        try click(panel, at: NSPoint(x: model.preferredSize.width - 26, y: firstY), eventNumber: 1)
+        XCTAssertEqual(choices.count, 1)
+        XCTAssertEqual(choices.first?.items.first?.representations.map(\.type), ["public.utf8-plain-text"])
+        try click(panel, at: NSPoint(x: model.preferredSize.width - 64, y: firstY), eventNumber: 3)
+        XCTAssertEqual(choices.last, rich, "The main row must still paste every original format")
+        try click(panel, at: NSPoint(x: model.preferredSize.width - 26, y: secondY), eventNumber: 5)
+        XCTAssertEqual(choices.count, 2, "The flat disabled control must not paste anything")
+    }
+
     func testSingleMouseClickPastesSyntheticRowInNonactivatingPanel() throws {
         guard ProcessInfo.processInfo.environment["HISTORY_MOUSE_TESTS"] == "1" else {
             throw XCTSkip("HISTORY_MOUSE_TESTS=1 enables the transparent native History interaction harness")
@@ -40,7 +79,7 @@ final class HistoryMouseTests: XCTestCase {
 
         // Click the second row well away from its text/icon. Padding is part of the
         // row's hit area, and choosing it must not depend on keyboard selection.
-        let point = NSPoint(x: model.preferredSize.width - 24,
+        let point = NSPoint(x: model.preferredSize.width - 64,
                             y: model.preferredSize.height - HistoryPickerLayout.headerHeight - 1 - 4
                                 - HistoryPickerLayout.rowHeight * 1.5)
         let down = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: point,

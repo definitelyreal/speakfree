@@ -31,10 +31,11 @@ enum HistoryPickerLayout {
 enum HistoryPickerKeyAction: Equatable {
     case close, move(Int), page(Int), activate(copyOnly: Bool), preferences, focusSearch
     case cycleFilter(Int)
+    case focusPlainText, focusRow
     case filter(HistoryPickerModel.Filter)
 
     static func action(keyCode: UInt16, modifiers: NSEvent.ModifierFlags,
-                       filterNavigationFocused: Bool = false) -> Self? {
+                       filterNavigationFocused: Bool = false, rowNavigationFocused: Bool = false) -> Self? {
         let modifiers = modifiers.intersection([.command, .shift, .option, .control])
         switch (keyCode, modifiers) {
         case (53, []): return .close
@@ -42,6 +43,8 @@ enum HistoryPickerKeyAction: Equatable {
         case (48, .shift): return .cycleFilter(-1)
         case (123, []) where filterNavigationFocused: return .cycleFilter(-1)
         case (124, []) where filterNavigationFocused: return .cycleFilter(1)
+        case (124, []) where rowNavigationFocused: return .focusPlainText
+        case (123, []) where rowNavigationFocused: return .focusRow
         case (3, .command): return .focusSearch
         case (125, []): return .move(1)
         case (126, []): return .move(-1)
@@ -60,7 +63,7 @@ enum HistoryPickerKeyAction: Equatable {
 
 final class HistoryPickerModel: ObservableObject {
     enum Filter: String, CaseIterable { case all, dictation, clipboard }
-    enum KeyboardFocus: Hashable { case search, filter(Filter) }
+    enum KeyboardFocus: Hashable { case search, filter(Filter), row, plainText }
     @Published var keyboardFocus: KeyboardFocus? = .search
     @Published var entries: [HistoryEntry] = []
     @Published var query = ""
@@ -86,6 +89,7 @@ final class HistoryPickerModel: ObservableObject {
         if case .filter = keyboardFocus { return true }
         return false
     }
+    var rowNavigationFocused: Bool { keyboardFocus == .row || keyboardFocus == .plainText }
     var visible: [HistoryEntry] {
         guard !showsClipboardDisabled else { return [] }
         return entries.filter { (filter == .all || $0.source.rawValue == filter.rawValue) && $0.matches(query) }
@@ -132,6 +136,9 @@ final class HistoryPickerModel: ObservableObject {
             selectedID = visible.first?.id
             selectionScrollRevision &+= 1
         }
+        if keyboardFocus == .plainText && visible.first(where: { $0.id == selectedID })?.canPastePlainText != true {
+            keyboardFocus = .row
+        }
     }
     func select(_ id: UUID) {
         guard visible.contains(where: { $0.id == id }) else { return }
@@ -142,12 +149,14 @@ final class HistoryPickerModel: ObservableObject {
         guard location != lastPointerLocation else { return }
         lastPointerLocation = location
         select(id)
+        keyboardFocus = .row
     }
     func move(_ delta: Int) {
         selectionScrollAnchor = nil
         moveSelection(delta)
     }
     private func moveSelection(_ delta: Int) {
+        keyboardFocus = .row
         // A keyboard scroll can move another row under a stationary pointer. Its
         // new tracking area must not immediately override the keyboard selection.
         lastPointerLocation = pointerLocation()
@@ -163,13 +172,16 @@ final class HistoryPickerModel: ObservableObject {
     }
     func activate(copyOnly: Bool = false) {
         guard let entry = visible.first(where: { $0.id == selectedID }) ?? visible.first else { return }
-        activate(id: entry.id, copyOnly: copyOnly)
+        activate(id: entry.id, copyOnly: copyOnly, plainText: keyboardFocus == .plainText)
     }
-    func activate(id: UUID, copyOnly: Bool = false) {
+    func activate(id: UUID, copyOnly: Bool = false, plainText: Bool = false) {
         // A row can disappear between mouse-down and mouse-up when history refreshes.
         guard let entry = visible.first(where: { $0.id == id }) else { return }
         select(id)
-        choose?(entry, copyOnly)
+        if plainText {
+            guard let variant = entry.plainTextVariant() else { return }
+            choose?(variant, copyOnly)
+        } else { choose?(entry, copyOnly) }
     }
     func handle(_ action: HistoryPickerKeyAction) {
         switch action {
@@ -179,6 +191,11 @@ final class HistoryPickerModel: ObservableObject {
         case .activate(let copyOnly): activate(copyOnly: copyOnly)
         case .preferences: openPreferences?()
         case .focusSearch: keyboardFocus = .search
+        case .focusRow: keyboardFocus = .row
+        case .focusPlainText:
+            if visible.first(where: { $0.id == selectedID })?.canPastePlainText == true {
+                keyboardFocus = .plainText
+            }
         case .cycleFilter(let direction):
             let filters = Filter.allCases
             let current = filters.firstIndex(of: filter) ?? 0
@@ -263,7 +280,7 @@ struct HistoryPickerView: View {
             }
             VStack(spacing: 5) {
                 HStack {
-                    Text("↩ Paste   ⌘↩ Copy   ⇥ Filters   ⎋ Close").lineLimit(1)
+                    Text("↩ Paste   → Plain text   ⇥ Filters   ⎋ Close").lineLimit(1)
                     Spacer()
                     Text("⌘↑↓ Page").fixedSize()
                 }
@@ -285,7 +302,9 @@ struct HistoryPickerView: View {
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.primary.opacity(0.12)))
         .onAppear { focusedControl = model.keyboardFocus; model.reconcileSelection() }
         .onChange(of: model.keyboardFocus) { focusedControl = $0 }
-        .onChange(of: focusedControl) { model.keyboardFocus = $0 }
+        .onChange(of: focusedControl) { value in
+            if let value { model.keyboardFocus = value }
+        }
         .onChange(of: model.query) { _ in model.reconcileSelection() }
         .onChange(of: model.filter) { _ in model.reconcileSelection() }
         .onChange(of: model.clipboardEnabled) { _ in model.reconcileSelection() }
@@ -320,7 +339,8 @@ struct HistoryPickerView: View {
     }
 
     private func row(_ entry: HistoryEntry) -> some View {
-        Button { model.activate(id: entry.id) } label: {
+        HStack(spacing: 0) {
+          Button { model.activate(id: entry.id) } label: {
             HStack(spacing: 8) {
                 if entry.containsImage {
                     HistoryThumbnail(entry: entry, sideLength: 28)
@@ -343,26 +363,43 @@ struct HistoryPickerView: View {
                 }
             }
             .padding(.horizontal, 8).frame(height: HistoryPickerLayout.rowHeight)
-            .background(model.selectedID == entry.id ? Color.accentColor.opacity(0.16) : .clear,
-                        in: RoundedRectangle(cornerRadius: 5))
             .contentShape(Rectangle())
+          }.buttonStyle(.plain)
+          if entry.source == .clipboard {
+            Button { model.activate(id: entry.id, plainText: true) } label: {
+                Image(systemName: "textformat")
+                    .font(.system(size: 11, weight: .medium)).frame(width: 24, height: 24)
+                    .foregroundStyle(entry.canPastePlainText ? Color.primary : Color.secondary.opacity(0.4))
+                    .background(entry.canPastePlainText ? Color.primary.opacity(0.08) : .clear, in: Circle())
+                    .overlay(Circle().strokeBorder(
+                        model.selectedID == entry.id && model.keyboardFocus == .plainText ? Color.accentColor : .clear,
+                        lineWidth: 2))
+            }.buttonStyle(.plain).disabled(!entry.canPastePlainText)
+                .accessibilityLabel("Paste as Plain Text")
+                .help(entry.canPastePlainText ? "Paste as Plain Text (→ then ↩)" : "No convertible rich text in this item")
+                .padding(.trailing, 8)
+          }
         }
-        .buttonStyle(.plain)
-        .onHover { hovering in
+        .background(model.selectedID == entry.id ? Color.accentColor.opacity(0.16) : .clear,
+                    in: RoundedRectangle(cornerRadius: 5))
+        .contentShape(Rectangle())
+        .onContinuousHover { phase in
             // Pointer selection must never scroll a partially visible row under the
             // pointer, which would move the next click to a different history item.
-            if hovering { model.hover(entry.id, at: model.pointerLocation()) }
+            if case .active = phase { model.hover(entry.id, at: model.pointerLocation()) }
         }
         .help([entry.displayTitle, entry.representationNote,
                entry.searchWasTruncated ? "Search covers the first 64 KB; full content is kept." : nil]
             .compactMap { $0 }.joined(separator: "\n"))
         .contextMenu {
             Button("Paste") { model.activate(id: entry.id) }
+            Button("Paste as Plain Text") { model.activate(id: entry.id, plainText: true) }
+                .disabled(!entry.canPastePlainText)
             Button("Copy") { model.activate(id: entry.id, copyOnly: true) }
             Divider()
             Button("Remove from History") { model.remove?(entry.id) }
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityHint("Paste this item")
         .accessibilityAddTraits(model.selectedID == entry.id ? .isSelected : [])
     }

@@ -50,6 +50,10 @@ final class HistoryRenderTests: XCTestCase {
             model.keyboardFocus = .search
             try render(HistoryPickerView(model: model), size: model.preferredSize,
                        appearance: appearance, to: output.appendingPathComponent("history-\(name)_AI_.png"))
+            model.selectedID = model.entries[2].id
+            model.handle(.focusPlainText)
+            try render(HistoryPickerView(model: model), size: model.preferredSize,
+                       appearance: appearance, to: output.appendingPathComponent("history-plain-text-focus-\(name)_AI_.png"))
             model.handle(.cycleFilter(1))
             try render(HistoryPickerView(model: model), size: model.preferredSize,
                        appearance: appearance, to: output.appendingPathComponent("history-filter-focus-\(name)_AI_.png"))

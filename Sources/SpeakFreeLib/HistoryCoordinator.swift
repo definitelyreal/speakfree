@@ -279,7 +279,8 @@ final class HistoryCoordinator {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window === self.panel else { return event }
             guard let action = HistoryPickerKeyAction.action(keyCode: event.keyCode, modifiers: event.modifierFlags,
-                                                             filterNavigationFocused: self.model.filterNavigationFocused) else { return event }
+                                                             filterNavigationFocused: self.model.filterNavigationFocused,
+                                                             rowNavigationFocused: self.model.rowNavigationFocused) else { return event }
             self.model.handle(action)
             return nil
         }
