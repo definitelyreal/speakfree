@@ -128,19 +128,30 @@ class TextInserter {
     /// One call's result and destination survive its asynchronous refocus/remote work.
     /// Completion runs after the insertion stack unwinds, so recovery can safely copy
     /// without seeing this call's deferred-insertion guard still raised.
+    enum DestinationConstraint { case current, recorded(pid_t?) }
+
     private final class InsertionAttempt {
         let fieldOwnerPID: pid_t?
         let expectedForegroundPID: pid_t?
         let field: AXUIElement?
         let handlesRecovery: Bool
+        let requiresKnownPID: Bool
         var deferred = false
         private(set) var outcome: InsertionOutcome?
         private var completion: ((InsertionOutcome) -> Void)?
 
         init(foregroundPID: pid_t?, fieldOwnerPID: pid_t?, field: AXUIElement?, handlesRecovery: Bool,
+             destination: DestinationConstraint,
              completion: ((InsertionOutcome) -> Void)?) {
             self.fieldOwnerPID = fieldOwnerPID
-            self.expectedForegroundPID = fieldOwnerPID ?? foregroundPID
+            switch destination {
+            case .current:
+                self.expectedForegroundPID = fieldOwnerPID ?? foregroundPID
+                self.requiresKnownPID = false
+            case .recorded(let pid):
+                self.expectedForegroundPID = pid
+                self.requiresKnownPID = true
+            }
             self.field = field
             self.handlesRecovery = handlesRecovery
             self.completion = completion
@@ -550,11 +561,13 @@ class TextInserter {
     @discardableResult
     func insert(text original: String, refocusing element: AXUIElement? = nil,
                 onFocusLost: (() -> Void)? = nil, handlesRecovery: Bool = false,
+                destination: DestinationConstraint = .current,
                 completion: ((InsertionOutcome) -> Void)?) -> Bool {
         let foregroundPID = frontmostPIDProvider()
         let fieldOwnerPID = element.flatMap { elementPIDProvider($0) }
         let attempt = InsertionAttempt(foregroundPID: foregroundPID, fieldOwnerPID: fieldOwnerPID,
-                                       field: element, handlesRecovery: handlesRecovery, completion: completion)
+                                       field: element, handlesRecovery: handlesRecovery,
+                                       destination: destination, completion: completion)
         let previous = activeInsertionAttempt
         activeInsertionAttempt = attempt
         defer { activeInsertionAttempt = previous }
@@ -736,10 +749,12 @@ class TextInserter {
     private func insertionDestinationIsCurrent(attempt: InsertionAttempt? = nil) -> Bool {
         guard !isSecureInputActive() else { return false }
         guard let attempt = attempt ?? activeInsertionAttempt else { return true }
+        if attempt.requiresKnownPID && attempt.expectedForegroundPID == nil { return false }
         if let pid = attempt.expectedForegroundPID, frontmostPIDProvider() != pid { return false }
         if let field = attempt.field {
             guard attempt.expectedForegroundPID != nil,
                   let owner = attempt.fieldOwnerPID,
+                  owner == attempt.expectedForegroundPID,
                   let current = currentFocusedElement(), CFEqual(current, field),
                   elementPIDProvider(current) == owner else { return false }
         }
@@ -763,6 +778,10 @@ class TextInserter {
     }
 
     private func pasteText(_ text: String) {
+        guard insertionDestinationIsCurrent() else {
+            remoteInsertionFailed(text, message: "The original destination is no longer confirmed. Your text is available below.")
+            return
+        }
         // Note: Secure Input is checked at insert() — the entry point for all paths — so it
         // is guaranteed inactive by the time pasteText() is reached.
         let frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
@@ -900,6 +919,10 @@ class TextInserter {
                 end tell
             end tell
         """
+        guard insertionDestinationIsCurrent(), frontmostPIDProvider() == pid else {
+            remoteInsertionFailed(text, message: "The remote destination or Secure Input changed. Your text is available below.")
+            return
+        }
         if let error = executeAppleScript(source) {
             Self.logAppleEventsDenialHint(error)
             // An error does not prove that no prefix was inserted. Retrying by paste
@@ -971,7 +994,7 @@ class TextInserter {
                     ? "The clipboard could not accept your text. It is still below; try Copy again or close.\n\n" + instructions
                     : instructions
                 return alert.runModal() == .alertSecondButtonReturn
-            }, copy: { self.copyToClipboard(text) })
+            }, copy: { self.copyForManualRecovery(text) })
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
     }
@@ -984,6 +1007,7 @@ class TextInserter {
         var copyFailed = false
         while shouldPresent() {
             guard present(copyFailed) else { return }
+            guard shouldPresent() else { return }
             if copy() { return }
             copyFailed = true
         }
@@ -1907,7 +1931,12 @@ class TextInserter {
         publishConcealedCopy(text) != nil
     }
 
-    private func publishConcealedCopy(_ text: String) -> Int? {
+    /// The existing recovery UI owns failure reporting; never enqueue a nested dialog.
+    func copyForManualRecovery(_ text: String) -> Bool {
+        publishConcealedCopy(text, reportFailure: false) != nil
+    }
+
+    private func publishConcealedCopy(_ text: String, reportFailure: Bool = true) -> Int? {
         // Focus-lost fallback: mark the write Concealed + Transient exactly like the two sibling
         // clipboard paths (pasteViaClipboard / secureInputClipboardFallback) so clipboard-history
         // tools skip recording the dictated text (AX-D).
@@ -1929,8 +1958,10 @@ class TextInserter {
             } else {
                 recovery = Self.recoveryMessage(.unavailable)
             }
-            remoteInsertionFailed(text, message: "Speakfree could not copy the dictation to the clipboard. " + recovery,
-                                  title: "Check your dictation")
+            if reportFailure {
+                remoteInsertionFailed(text, message: "Speakfree could not copy the dictation to the clipboard. " + recovery,
+                                      title: "Check your dictation")
+            }
             return nil
         }
         return written

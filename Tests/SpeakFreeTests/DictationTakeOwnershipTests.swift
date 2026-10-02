@@ -109,6 +109,13 @@ final class DictationTakeOwnershipTests: XCTestCase {
 }
 
 final class ManualInsertionRecoveryTests: XCTestCase {
+    func testNewTakeWhileModalIsOpenCannotCopyOlderText() {
+        var valid = true
+        TextInserter.runManualRecovery(shouldPresent: { valid }, present: { _ in
+            valid = false
+            return true
+        }, copy: { XCTFail("Ownership changed while modal was open"); return true })
+    }
     func testFailedCopyKeepsRecoveryUntilExplicitClose() {
         var failuresShown: [Bool] = []
         var copies = 0

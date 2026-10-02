@@ -50,6 +50,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Frontmost app at record start — where the dictation will land. Persisted in
     /// .meta.json so the edit-feedback batch can find the final artifact to diff.
     private var recordingTargetBundleID: String?
+    private var recordingTargetPID: pid_t?
 
     // MARK: - Edit Mode seams (Phase 2 wires these; nil/false in Phase 1 = no behavior change)
     //
@@ -2171,6 +2172,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         guard Permissions.ensureMicrophoneForRecording() else { return }
 
         takePresentation.beginTake()
+        let frontAppAtStart = NSWorkspace.shared.frontmostApplication
+        recordingTargetPID = frontAppAtStart?.processIdentifier
         isPressed = true
         // A take starting means the user is here: give any canary's clipboard back now, before
         // the slower start-up work below.
@@ -2188,7 +2191,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Detect style mode from frontmost app before menu bar steals focus. The
         // bundle id is also kept for the .meta.json sidecar — the edit-feedback batch
         // (tune-corpus) correlates dictations with where the text landed.
-        let frontApp = NSWorkspace.shared.frontmostApplication
+        let frontApp = frontAppAtStart
         let frontBundleID = frontApp?.bundleIdentifier
         let avoidLiveWindowContext = TextInserter.shouldAvoidLiveWindowContext(
             bundleID: frontBundleID, bundleURL: frontApp?.bundleURL)
@@ -2595,6 +2598,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     ) {
         // This token belongs to the take before inference begins, never to a later completion.
         let takeToken = takePresentation.current
+        let targetPID = recordingTargetPID
         var latency = TakeLatency(keyRelease: keyReleaseTime)
         latency.finalizeStart = CFAbsoluteTimeGetCurrent()
         latency.postBuffer = postBuffer
@@ -3009,6 +3013,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             prependSpace: capturedPrependSpace,
                             contextBefore: capturedInputText,
                             element: capturedElement,
+                            targetPID: targetPID,
                             retryDestination: retryDestination,
                             takeToken: takeToken,
                             latency: finishedTiming,
@@ -3107,6 +3112,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         prependSpace: Bool,
         contextBefore: String?,
         element: AXUIElement?,
+        targetPID: pid_t?,
         retryDestination: SecureInputRetryDestination?,
         takeToken: TakePresentationOwnership.Token,
         latency: TakeLatency? = nil,
@@ -3161,6 +3167,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 },
                 handlesRecovery: true,
+                destination: .recorded(targetPID),
                 completion: { [weak self] outcome in
                     guard let self else { return }
                     // A queued refocus/remote request is not its eventual result. Stamp
@@ -3590,37 +3597,25 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         lastTranscription = text
-
-        // Insert into the frontmost window (the maintainer, 2026-07-25 — was clipboard-only).
-        // The status-bar menu has just closed; give macOS a beat to return key focus
-        // to the user's app before the AX read / synthetic paste, or the insert
-        // targets the dying menu session. Clipboard remains the fallback whenever
-        // insertion can't land (no focused element, focus lost, secure input).
+        let takeToken = takePresentation.beginTake()
+        let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         historyCoordinator?.close()
         scheduledRecentInsertionCount += 1
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            guard let self = self else { return }
+            guard let self else { return }
             defer { self.scheduledRecentInsertionCount -= 1 }
-            let copyFallback = {
-                let pasteboard = NSPasteboard.general
-                UserPasteRestoreGate.shared.writeOutsideBorrow {
-                    pasteboard.clearContents()
-                    pasteboard.setString(text, forType: .string)
-                }
-                self.statusBar.state = .copiedToClipboard
-                self.statusBar.buildMenu()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    self.statusBar.state = .idle
-                    self.statusBar.buildMenu()
-                }
-            }
-            let inserted = self.inserter.insert(text: text, onFocusLost: copyFallback)
-            if inserted {
-                DiagnosticLogger.shared.log(
-                    "Reprocess: inserted \(text.count) chars from recent dictation")
-            } else if self.statusBar.state != .copiedToClipboard {
-                copyFallback()
-            }
+            guard self.takePresentation.owns(takeToken), !self.isPressed else { return }
+            self.inserter.insert(text: text, handlesRecovery: true,
+                destination: .recorded(targetPID), completion: { [weak self] outcome in
+                    guard let self, self.takePresentation.owns(takeToken) else { return }
+                    // Preserve an existing checked concealed publication and its auto-clear.
+                    // Never rewrite it as an unmarked string or infer success from scheduling.
+                    self.handleConcealedInsertionOutcome(outcome, text: text,
+                        destination: nil, takeToken: takeToken)
+                    if TextInserter.deliveryWasSubmitted(outcome) {
+                        DiagnosticLogger.shared.log("Reprocess: insertion submitted for saved dictation")
+                    }
+                })
         }
     }
 

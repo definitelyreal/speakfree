@@ -84,6 +84,51 @@ final class NonactivatingPanelInsertionTests: XCTestCase {
         assertPublication(startForeground: foreground, expected: .deliveryFailed)
     }
 
+    func testRecordedPIDPreventsNilAXCaptureFromAdoptingAnotherApp() {
+        let (s, _) = subject()
+        s.focusedElementProvider = { nil }
+        s.frontmostPIDProvider = { 999_992 }
+        s.postPasteShortcut = { XCTFail("Recording-start app changed") }
+        let done = expectation(description: "Retained missing AX target")
+        XCTAssertFalse(s.insert(text: "Synthetic text", handlesRecovery: true,
+            destination: .recorded(999_991), completion: {
+                XCTAssertEqual($0, .deliveryFailed); done.fulfill()
+            }))
+        wait(for: [done], timeout: 2)
+        XCTAssertEqual(s.pasteboard.string(forType: .string), "Original clipboard")
+    }
+
+    func testUnknownRecordedPIDDoesNotBecomeInsertionTimePermission() {
+        let (s, _) = subject()
+        s.focusedElementProvider = { nil }
+        let done = expectation(description: "Unknown target retained")
+        XCTAssertFalse(s.insert(text: "Synthetic text", handlesRecovery: true,
+            destination: .recorded(nil), completion: {
+                XCTAssertEqual($0, .deliveryFailed); done.fulfill()
+            }))
+        wait(for: [done], timeout: 2)
+    }
+
+    func testRemoteTypingCannotBypassOriginalOwnerMismatch() {
+        let (s, field) = subject()
+        s.frontmostPIDProvider = { 999_992 }
+        s.frontmostBundleIDProvider = { "com.apple.ScreenSharing" }
+        let done = expectation(description: "Remote mismatch retained")
+        XCTAssertFalse(s.insert(text: "Synthetic remote text", refocusing: field,
+            handlesRecovery: true, completion: {
+                XCTAssertEqual($0, .deliveryFailed); done.fulfill()
+            }))
+        wait(for: [done], timeout: 2)
+    }
+
+    func testManualRecoveryPublicationFailureNeverQueuesNestedRecovery() {
+        let (s, _) = subject()
+        s.pasteboardWriter.clear = { board, _ in board.changeCount }
+        s.onRemoteInsertionFailure = { _, _ in XCTFail("Existing dialog owns failure") }
+        XCTAssertFalse(s.copyForManualRecovery("Synthetic recovery"))
+        XCTAssertEqual(s.pasteboard.string(forType: .string), "Original clipboard")
+    }
+
     func testStaleAXAfterAnAppSwitchBeforeInsertionCannotAuthorizeTheNewForeground() {
         // Recording began in the field owner's app. Before finalization the user switched
         // apps, but AX still reports that old field. These observations also describe a
