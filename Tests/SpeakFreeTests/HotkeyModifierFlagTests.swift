@@ -9,7 +9,7 @@ import XCTest
 /// The CGEventTap used to test `.maskSecondaryFn` for EVERY modifier hotkey, so only
 /// fn (63) ever fired. Selecting Right Command — or Option, Shift, Control, either
 /// side — produced a tap that received the events and did nothing, with no error
-/// anywhere (Michael, 2026-07-26: "i set it to right command and it didn't work").
+/// anywhere (the maintainer, 2026-07-26: "i set it to right command and it didn't work").
 /// Eight of the nine selectable modifier hotkeys were dead.
 ///
 /// The first fix carried an aggregate-bit fallback for remapped keyboards. Codex round 1
@@ -223,7 +223,7 @@ final class HotkeyModifierFlagTests: XCTestCase {
                        + "the other side happens to come up too")
     }
 
-    /// The same shape for every sided modifier, not just the one Michael happened to try.
+    /// The same shape for every sided modifier, not just the one the maintainer happened to try.
     func testEverySidedModifierCompletesAPressReleaseCycle() {
         for key in sidedKeys {
             guard let other = HotkeyManager.oppositeSide(of: key.code) else { continue }

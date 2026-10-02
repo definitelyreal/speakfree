@@ -9,6 +9,22 @@ import CoreML
 protocol ConfidencePunctuationCorrectingEngine: TranscriptionEngine {
     func transcribe(samples: [Float], language: String, prompt: String?, suppressRegex: String?,
                     enablePunctuationCommandCorrection: Bool) async throws -> String
+    /// Same, plus which model instance produced this very take (read from the call, not from
+    /// shared engine state, so a concurrent take cannot mislabel it).
+    func transcribeReportingPath(samples: [Float], language: String, prompt: String?,
+                                 suppressRegex: String?, enablePunctuationCommandCorrection: Bool)
+        async throws -> (text: String, inferencePath: String)
+}
+
+extension ConfidencePunctuationCorrectingEngine {
+    func transcribeReportingPath(samples: [Float], language: String, prompt: String?,
+                                 suppressRegex: String?, enablePunctuationCommandCorrection: Bool)
+        async throws -> (text: String, inferencePath: String) {
+        let text = try await transcribe(
+            samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex,
+            enablePunctuationCommandCorrection: enablePunctuationCommandCorrection)
+        return (text, engineID)
+    }
 }
 
 /// Wraps FluidAudio's Parakeet TDT ASR for in-process transcription on the Apple Neural Engine.
@@ -121,18 +137,37 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
     static let vadMinimumTailTrimSeconds = 1.0
     /// 50 ms RMS windows for the true-silence gate.
     static let energyWindowSamples = 800
-    /// A 50 ms window at or above this RMS could be Michael's quiet speech. Measured 2026-08-14:
-    /// his soft dictation sits at 0.003–0.016 RMS and is inseparable from his room tone
+    /// A 50 ms window at or above this RMS could be quiet speech. Measured 2026-08-14:
+    /// soft dictation can sit at 0.003–0.016 RMS and be inseparable from room tone
     /// (0.003–0.004), while genuine silence (mic idle) measures 0.0002–0.0004 — a clean 4x gap
     /// on either side of this threshold.
     static let trueSilenceRMSThreshold: Float = 0.0015
 
+    /// Silero segmentation settings for tail endpointing. Values are unchanged from f30cb6c:
+    /// 0.15 s minimum speech, 0.75 s minimum silence, no maximum, 0.20 s padding.
+    ///
+    /// FluidAudio's initializer carries a DEBUG-only `assert(speechPadding <= minSpeechDuration)`
+    /// ("typically", not a correctness rule; release builds never evaluate it). Passing 0.20
+    /// padding there trapped every debug build of `speakfree process` (crash 2026-09-22 9:34pm
+    /// PT, VadTypes.swift:63). Build with legal values, then set the intended padding on the
+    /// public property, so debug and release behave identically to the shipped settings.
+    static var endpointingSegmentationConfig: VadSegmentationConfig {
+        var config = VadSegmentationConfig(
+            minSpeechDuration: 0.15, minSilenceDuration: 0.75,
+            maxSpeechDuration: .infinity, speechPadding: 0.15)
+        // Relies on FluidAudio validating only in init (checked in 0.15.1: plain `var`, no
+        // didSet). When bumping FluidAudio, re-check VadTypes.swift; a setter check or a
+        // precondition would bring this trap back, in release builds for a precondition.
+        config.speechPadding = 0.20
+        return config
+    }
+
     /// Preserve the beginning/pre-roll and every internal pause; trim only a long non-speech tail
     /// after Silero's final speech segment. Empty/no-result VAD is a conservative no-op.
     ///
-    /// True-silence gate (2026-08-14): Silero stops detecting Michael's quiet voice mid-take —
-    /// rec-022227 lost 36.25 s of REAL speech (whisper hears it to the end) because the cut
-    /// trusted the model alone. His quiet speech is energy-inseparable from room tone, so no
+    /// True-silence gate (2026-08-14): Silero can stop detecting a quiet voice mid-take —
+    /// one regression take lost 36.25 s of REAL speech (whisper hears it to the end) because
+    /// the cut trusted the model alone. Quiet speech can be energy-inseparable from room tone, so no
     /// detector can find speech the VAD missed; what energy CAN prove is absence. The tail is
     /// now trimmed only when every 50 ms window in it sits at digital-silence level. Room-tone
     /// tails (where soft speech could hide) are never trimmed — the 3 s flush pad makes the kept
@@ -166,7 +201,7 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
 
     /// Drop trailing words the decoder invented over the appended silence pad
     /// (2026-07-21 corpus, confirmed against whisper-large-v3-turbo on the same wavs:
-    /// "handoff issues" → "handoff issues here.", "sending an email" → "…email
+    /// "layout issues" → "layout issues here.", "sending an email" → "…email
     /// carrier."). We KNOW where real audio ends — the pad is ours — so tokens whose
     /// startTime falls beyond it are pad artifacts. Conservative on both sides: the
     /// dropped tokens must textually match the transcript's tail (the punctuation
@@ -414,6 +449,19 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         return PunctuationCommandCorrectionResult(text: corrected, corrections: corrections)
     }
 
+    /// A word whose weakest lexical token scores below this is reported as unsure in the
+    /// dictation trace. Same ceiling the punctuation-command corrector treats as an outlier.
+    static let unsureWordConfidenceCeiling: Float = 0.60
+
+    /// Words below `unsureWordConfidenceCeiling`, in spoken order, punctuation trimmed.
+    static func lowConfidenceWords(from timings: [TokenTiming]) -> [DictationTrace.WordScore] {
+        punctuationConfidenceWords(from: timings).compactMap { w in
+            guard w.confidence < unsureWordConfidenceCeiling else { return nil }
+            let word = w.surface.trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+            return word.isEmpty ? nil : DictationTrace.WordScore(word: word, score: w.confidence)
+        }
+    }
+
     private static func punctuationConfidenceWords(from timings: [TokenTiming]) -> [ConfidenceWord] {
         var words: [ConfidenceWord] = []
         var surface = ""
@@ -515,6 +563,20 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         /// The model identifier currently loaded, e.g. "parakeet-tdt-0.6b-v3". `nil` when unloaded.
         private var loadedModelID: String?
 
+        /// CPU-only copy of the model that serves dictations while the Neural Engine model is
+        /// still being prepared at first start (see ParakeetFirstStart.swift). Never used once
+        /// `manager` is loaded; released right after. `standInActive` counts its in-flight takes
+        /// so release waits for them, the same discipline as `active` for `manager`.
+        private var standIn: AsrManager?
+        private var standInModelID: String?
+        private var standInActive = 0
+
+        /// Bumped by every unload, under the lifecycle gate. Background loads (first-start
+        /// preparation, the Neural Engine retry) pass the value they started with and are
+        /// refused once an unload has run, so nothing loads into a discarded engine.
+        private var unloadEpoch: UInt64 = 0
+        var epoch: UInt64 { unloadEpoch }
+
         /// Count of transcriptions currently in flight. `unload` (and a model-replacing `load`)
         /// drains this to 0 before tearing the manager down so an in-flight `transcribe` never sees
         /// a cleaned-up manager. Note: incrementing `active` does NOT by itself protect the manager
@@ -556,22 +618,90 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         private let onLoadedChange: @Sendable (Bool) -> Void
         private let onDiagnostics: @Sendable (TranscriptionDiagnostics?) -> Void
 
+        private let onStandInChange: @Sendable (Bool) -> Void
+
         init(onLoadedChange: @escaping @Sendable (Bool) -> Void,
-             onDiagnostics: @escaping @Sendable (TranscriptionDiagnostics?) -> Void) {
+             onDiagnostics: @escaping @Sendable (TranscriptionDiagnostics?) -> Void,
+             onStandInChange: @escaping @Sendable (Bool) -> Void = { _ in }) {
             self.onLoadedChange = onLoadedChange
             self.onDiagnostics = onDiagnostics
+            self.onStandInChange = onStandInChange
         }
 
         var isLoaded: Bool { manager != nil }
 
+        func isLoaded(modelID: String) -> Bool { manager != nil && loadedModelID == modelID }
+
+        /// True when a take for `modelID` could start now on either instance.
+        func canTranscribe(modelID: String) -> Bool {
+            guard !tearingDown else { return false }
+            return (manager != nil && loadedModelID == modelID)
+                || (standIn != nil && standInModelID == modelID)
+        }
+
+        // MARK: CPU stand-in (first start)
+
+        /// Load the CPU-only stand-in unless the Neural Engine model (or a stand-in) is already
+        /// there. Holds the lifecycle gate so it cannot race a load or unload. Returns true when
+        /// a stand-in was published.
+        func loadStandIn(modelID: String, ifEpoch epoch: UInt64,
+                         shouldStart: @Sendable () -> Bool = { true }) async throws -> Bool {
+            await acquireLifecycle()
+            defer { releaseLifecycle() }
+            try Task.checkCancellation()
+            guard epoch == unloadEpoch, shouldStart(), manager == nil, standIn == nil else { return false }
+            guard ParakeetModelManager.shared.isModelDownloaded(modelID) else {
+                throw TranscriptionEngineError.modelAssetsMissing(modelID)
+            }
+            let models: AsrModels
+            do {
+                models = try await ParakeetModelManager.shared.loadDownloadedModels(modelID, cpuOnly: true)
+            } catch let error as TranscriptionEngineError {
+                throw error
+            } catch {
+                throw TranscriptionEngineError.modelLoadFailed(modelID)
+            }
+            let mgr = AsrManager(config: .default)
+            try await mgr.loadModels(models)
+            // Canceled while native loading ran (engine discarded): never publish.
+            if Task.isCancelled || manager != nil || tearingDown {
+                await mgr.cleanup()
+                return false
+            }
+            standIn = mgr
+            standInModelID = modelID
+            onStandInChange(true)
+            return true
+        }
+
+        func releaseStandIn() async {
+            await acquireLifecycle()
+            defer { releaseLifecycle() }
+            await releaseStandInHoldingGate()
+        }
+
+        /// Caller holds the lifecycle gate. Unpublish first so no new take picks the stand-in,
+        /// then wait for its in-flight takes before freeing it.
+        private func releaseStandInHoldingGate() async {
+            guard let old = standIn else { return }
+            standIn = nil
+            standInModelID = nil
+            onStandInChange(false)
+            while standInActive > 0 { try? await Task.sleep(nanoseconds: 5_000_000) }
+            await old.cleanup()
+            DiagnosticLogger.shared.log(
+                "ParakeetEngine: CPU stand-in released (resident \(processResidentMB()) MB)")
+        }
+
         // MARK: Load (single-flight)
 
-        func load(modelID: String) async throws {
+        func load(modelID: String, ifEpoch epoch: UInt64? = nil) async throws {
             await acquireLifecycle()
             defer { releaseLifecycle() }
             // Queue admission itself is noncancellable; a canceled load releases its slot before
             // starting any native work. Unload deliberately completes cleanup despite cancellation.
             try Task.checkCancellation()
+            if let epoch, epoch != unloadEpoch { throw CancellationError() }
             try await performLoad(modelID: modelID)
         }
 
@@ -679,11 +809,35 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         private func setupEndpointing(forModelID: String, generation: UInt64) async {
             guard auxiliarySetupCanPublish(generation) else { return }
             do {
-                let vad = try await VadManager(config: VadConfig(
-                    // Silero is tiny. Keep it off the Neural Engine so it cannot evict or contend
-                    // with Parakeet + the CTC vocabulary graph. Dogfood 2026-08-13 showed a fast
-                    // median but random 1.2–5.7s release tails after adding an ANE-backed VAD.
-                    defaultThreshold: 0.85, debugMode: false, computeUnits: .cpuOnly))
+                // Silero is tiny. Keep it off the Neural Engine so it cannot evict or contend
+                // with Parakeet + the CTC vocabulary graph. Dogfood 2026-08-13 showed a fast
+                // median but random 1.2–5.7s release tails after adding an ANE-backed VAD.
+                let config = VadConfig(defaultThreshold: 0.85, debugMode: false, computeUnits: .cpuOnly)
+                let vad: VadManager
+                if ParakeetEngine.sileroModelCached() {
+                    // Cached (every Mac that has run it once): load offline, in parallel with the
+                    // vocabulary setup, exactly as before. No gate, no network.
+                    vad = try await VadManager(config: config)
+                } else if ParakeetEngine.sileroFetchFailed.value {
+                    throw TranscriptionEngineError.modelLoadFailed("silero-vad (fetch already failed this session)")
+                } else {
+                    // Missing: FluidAudio is pinned offline, so without the sanctioned gate a Mac that
+                    // never had Silero cached could never fetch it and silently ran without
+                    // endpointing (reproduced 2026-09-24 with an empty model cache: "required models
+                    // missing for silero-vad"). One attempt per session so an unreachable network
+                    // cannot hold the shared download gate on every model load.
+                    do {
+                        vad = try await ParakeetModelManager.shared.withSanctionedDownload {
+                            try await VadManager(config: config)
+                        }
+                    } catch {
+                        // A cancelled fetch (model switch mid-download) says nothing about the network.
+                        if !(error is CancellationError) && !Task.isCancelled {
+                            ParakeetEngine.sileroFetchFailed.value = true
+                        }
+                        throw error
+                    }
+                }
                 guard auxiliarySetupCanPublish(generation), loadedModelID == forModelID,
                       manager != nil else { return }
                 vadManager = vad
@@ -758,18 +912,40 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         // MARK: Transcribe
 
         func transcribe(samples: [Float], language: String,
-                        enablePunctuationCommandCorrection: Bool) async throws -> String {
+                        enablePunctuationCommandCorrection: Bool) async throws
+            -> (text: String, path: ParakeetInferencePath) {
             // Gate on `tearingDown` BEFORE bumping `active` so no transcribe begins once a teardown
             // (unload or model-replacing load) has started. This is what lets the drain loop finish.
-            guard let mgr = manager, let modelID = loadedModelID, !tearingDown else {
+            // The Neural Engine model always wins once loaded; the CPU stand-in only serves takes
+            // made while it is still being prepared at first start.
+            let mgr: AsrManager
+            let modelID: String
+            let path: ParakeetInferencePath
+            if !tearingDown, let loaded = manager, let id = loadedModelID {
+                (mgr, modelID, path) = (loaded, id, .neuralEngine)
+                active += 1
+            } else if !tearingDown, let cpu = standIn, let id = standInModelID {
+                (mgr, modelID, path) = (cpu, id, .cpuStandIn)
+                standInActive += 1
+            } else {
                 throw TranscriptionEngineError.modelNotLoaded
             }
-            active += 1
-            defer { active -= 1 }
+            defer {
+                if path == .neuralEngine { active -= 1 } else { standInActive -= 1 }
+            }
+
+            // Test seam: SPEAKFREE_WAIT_ENDPOINTING=1 awaits the background Silero setup (see
+            // SPEAKFREE_WAIT_VOCAB below) so an offline A/B never scores its first takes without
+            // endpointing. No-op in the app.
+            if ProcessInfo.processInfo.environment["SPEAKFREE_WAIT_ENDPOINTING"] == "1", vadManager == nil {
+                await vadSetupTask?.value
+                FileHandle.standardError.write(
+                    Data("SPEAKFREE_WAIT_ENDPOINTING: Silero ready = \(vadManager != nil)\n".utf8))
+            }
 
             // Trailing-silence pad. Parakeet's TDT decoder needs trailing audio to "flush"
             // its final tokens — with too little, it stops early and SILENTLY DROPS the last
-            // clause (verified 2026-06-12: a 7.8s clip lost "and happy to send a screener"
+            // clause (verified 2026-06-12: a 7.8s clip lost its final clause, "and happy to send a reply"
             // with the old 1s pad; ~3s recovers it). The pad is near-free: it's silence and
             // the ANE encoder cost is ~flat regardless of length (measured ~110ms at both
             // 7.8s and 10.8s). Pad up to `trailingSilenceSamples`, but never past the
@@ -781,9 +957,7 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
                 do {
                     let segments = try await vadManager.segmentSpeech(
                         samples,
-                        config: VadSegmentationConfig(
-                            minSpeechDuration: 0.15, minSilenceDuration: 0.75,
-                            maxSpeechDuration: .infinity, speechPadding: 0.20))
+                        config: ParakeetEngine.endpointingSegmentationConfig)
                     speechSamples = ParakeetEngine.endpointedSamples(samples, segments: segments)
                 } catch {
                     DiagnosticLogger.shared.log(
@@ -909,13 +1083,15 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
                 minimumTokenConfidence: minConfidence,
                 lowConfidenceTailTokensRemoved: confidenceStrip.removedTokenCount,
                 vadTrimmedSeconds: vadTrimmedSeconds,
-                uncertain: uncertain))
+                uncertain: uncertain,
+                lowConfidenceWords: ParakeetEngine.lowConfidenceWords(from: result.tokenTimings ?? []),
+                inferencePath: path.rawValue))
             if uncertain {
                 DiagnosticLogger.shared.log(String(
                     format: "ParakeetEngine: uncertain take (aggregate %.3f, min-token %.3f)",
                     result.confidence, minConfidence ?? -1))
             }
-            return punctuationCorrection.text
+            return (punctuationCorrection.text, path)
         }
 
         // Synthetic setup seam: exercise the same lifecycle gate/task ownership without loading
@@ -951,6 +1127,7 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         func unload() async {
             await acquireLifecycle()
             defer { releaseLifecycle() }
+            unloadEpoch &+= 1
             // Gate new transcribes first, then publish the mirror false SYNCHRONOUSLY before niling
             // the manager — this closes the stale-mirror window where isLoaded == true but the
             // manager is already gone. Only then drain in-flight transcriptions and cleanup, so none
@@ -965,6 +1142,7 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
             vocabSpotter = nil; vocabRescorer = nil; vocabContext = nil; vocabTermCount = 0
             vadManager = nil
             await m?.cleanup()
+            await releaseStandInHoldingGate()
             tearingDown = false
             DiagnosticLogger.shared.log("ParakeetEngine: model unloaded")
         }
@@ -991,17 +1169,76 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
     /// `WhisperEngine`; FluidAudio caches the compiled CoreML models on disk, so reload is cheap.
     private var keepModelLoadedStorage = "auto"
 
-    public init() {
+    /// Mirror of "a CPU stand-in is published", under `stateLock`.
+    private var standInMirror = false
+
+    // First-start preparation (ParakeetFirstStart.swift). All under `stateLock`.
+    private struct Preparation {
+        let id: UUID
+        let modelID: String
+        let signal: PreparationSignal
+        var helper: CompileHelperHandle?
+        var standInTask: Task<Void, Never>?
+        var canceled = false
+    }
+    private var preparation: Preparation?
+    /// The latest `prepareModel` phase callback, so a later Neural Engine retry can report
+    /// `.ready`. Under `stateLock`, like the retry bookkeeping below.
+    private var phaseHandler: (@Sendable (ModelPreparationPhase) -> Void)?
+    private var neuralEngineRetry: Task<Void, Never>?
+    private var lastNeuralEngineAttempt: CFAbsoluteTime = 0
+    private var neuralEngineRetries = 0
+    /// A failure that repeats every time is not retried forever (each try is a full compile).
+    static let maxNeuralEngineRetries = 3
+    /// After a failed Neural Engine load the CPU stand-in keeps serving; the Neural Engine load
+    /// is retried in the background at the next dictation at most this often (10 minutes).
+    let neuralEngineRetryIntervalSeconds: CFAbsoluteTime
+
+    /// Starts the compile helper. Nil (tests, CLI, tools) keeps today's in-process load.
+    let compileHelper: CompileHelperStarting?
+    /// How long the helper may run before we assume it is compiling and load the CPU stand-in.
+    /// A warm load takes about 0.2-0.3 s, so a helper still running at 1 s is compiling.
+    let standInDelaySeconds: Double
+    /// The stand-in holds about 1.2 GB resident (measured on a 64 GB M3 Max) for the length of
+    /// the compile, alongside the compile itself; skip it on Macs with 8 GB or less.
+    let standInAllowed: Bool
+    /// Test seam: how many times a stand-in load was started.
+    let standInAttemptsForTesting = LockedCounter()
+    /// Test seam: replaces `prepareModel`'s Neural Engine load (to make it fail).
+    let neuralEngineLoadForTesting: (@Sendable (String) async throws -> Void)?
+
+    public convenience init() {
+        self.init(compileHelper: ProcessCompileHelper.forRunningApp())
+    }
+
+    init(compileHelper: CompileHelperStarting?,
+         standInDelaySeconds: Double = 1.0,
+         standInAllowed: Bool = ProcessInfo.processInfo.physicalMemory > 8 * 1_073_741_824,
+         neuralEngineLoadForTesting: (@Sendable (String) async throws -> Void)? = nil,
+         neuralEngineRetryIntervalSeconds: CFAbsoluteTime = 600) {
+        self.compileHelper = compileHelper
+        self.neuralEngineRetryIntervalSeconds = neuralEngineRetryIntervalSeconds
+        self.neuralEngineLoadForTesting = neuralEngineLoadForTesting
+        self.standInDelaySeconds = standInDelaySeconds
+        self.standInAllowed = standInAllowed
         self.core = Core(onLoadedChange: { [weak self] loaded in
             guard let self else { return }
             self.stateLock.lock()
             self.isLoadedMirror = loaded
             self.stateLock.unlock()
         }, onDiagnostics: { [weak self] diagnostics in
+            // Runs inside the caller's task, so the take's own recorder gets exactly this
+            // pass's diagnostics (see TakeRecorder).
+            TakeRecorder.current?.engineDiagnostics = diagnostics
             guard let self else { return }
             self.diagnosticsLock.lock()
             self.diagnosticsMirror = diagnostics
             self.diagnosticsLock.unlock()
+        }, onStandInChange: { [weak self] present in
+            guard let self else { return }
+            self.stateLock.lock()
+            self.standInMirror = present
+            self.stateLock.unlock()
         })
     }
 
@@ -1026,6 +1263,21 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
         return isLoadedMirror
     }
 
+    /// Synchronous critical section on `stateLock` (callable from async code).
+    private func withState<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
+    }
+
+    /// True when a take could start right now: the Neural Engine model is loaded, or the CPU
+    /// stand-in is serving while it is prepared.
+    public var canTranscribeNow: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return isLoadedMirror || standInMirror
+    }
+
     public var keepModelLoaded: String {
         get {
             stateLock.lock()
@@ -1046,13 +1298,205 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
     /// same model is already loaded.
     ///
     /// - Parameter modelID: "parakeet-tdt-0.6b-v2" or "parakeet-tdt-0.6b-v3".
+    ///
+    /// While `prepareModel` is running for the same model this waits until a take can run (CPU
+    /// stand-in or Neural Engine ready) instead of starting a second, in-process compile, which
+    /// would also block the stand-in's load.
     public func loadModel(modelID: String) async throws {
+        let signal = withState {
+            preparation.flatMap { $0.modelID == modelID && !$0.canceled ? $0.signal : nil }
+        }
+        if let signal { await signal.wait() }
+        // A CPU stand-in that is serving (during preparation, or kept after a failed Neural
+        // Engine load) takes the dictation now; the take never waits on a compile.
+        if await core.canTranscribe(modelID: modelID) {
+            await retryNeuralEngineIfDue(modelID)
+            return
+        }
         try await core.load(modelID: modelID)
+        // Clears a "failed" menu line left by the launch-time preparation.
+        let handler = withState { phaseHandler }
+        handler?(.ready)
+    }
+
+    /// While the CPU stand-in is serving after a failed Neural Engine load, retry that load in
+    /// the background (at most every 10 minutes and 3 times per session, triggered by a
+    /// dictation). On success the stand-in is released and the menu clears. The dictation
+    /// itself never waits for it.
+    private func retryNeuralEngineIfDue(_ modelID: String) async {
+        let core: Core = self.core
+        // Read first: an unload after this point makes the retry's load refuse itself.
+        let epoch = await core.epoch
+        let now = CFAbsoluteTimeGetCurrent()
+        // The retry task is created and stored in one critical section, so its own clean-up
+        // (which takes the same lock) can never run before the handle is stored.
+        withState {
+            guard !isLoadedMirror, preparation == nil, neuralEngineRetry == nil,
+                  neuralEngineRetries < Self.maxNeuralEngineRetries,
+                  now - lastNeuralEngineAttempt >= neuralEngineRetryIntervalSeconds else { return }
+            lastNeuralEngineAttempt = now
+            neuralEngineRetries += 1
+            neuralEngineRetry = Task.detached(priority: .utility) { [weak self] in
+                do {
+                    try await core.load(modelID: modelID, ifEpoch: epoch)
+                    await core.releaseStandIn()
+                    DiagnosticLogger.shared.log("ParakeetEngine: Neural Engine load succeeded on retry; CPU stand-in released")
+                    if let self {
+                        let handler = self.withState { self.phaseHandler }
+                        handler?(.ready)
+                    }
+                } catch {
+                    DiagnosticLogger.shared.log(
+                        "ParakeetEngine: Neural Engine retry failed (\(error.localizedDescription)); CPU stand-in keeps serving")
+                }
+                if let self { self.withState { self.neuralEngineRetry = nil } }
+            }
+        }
+    }
+
+    /// First load of a launch, run in the background at app start (and so after every update).
+    /// Compiles for the Neural Engine in a helper process while a CPU-only stand-in serves any
+    /// dictation, then loads the now-warm Neural Engine model in-process and releases the
+    /// stand-in. Without a helper (tests, CLI) this is the plain in-process load. `onPhase` gets
+    /// every phase change for the menu. Safe to call again: a loaded model returns `.ready`.
+    public func prepareModel(modelID: String,
+                             onPhase: @escaping @Sendable (ModelPreparationPhase) -> Void = { _ in }) async {
+        // Registered before anything is awaited, so a take that arrives now waits for this
+        // preparation instead of starting its own in-process compile.
+        let id = UUID()
+        let signal = PreparationSignal()
+        withState {
+            if let previous = preparation { previous.helper?.cancel(); previous.standInTask?.cancel() }
+            preparation = Preparation(id: id, modelID: modelID, signal: signal)
+            phaseHandler = onPhase
+        }
+        func isCurrent() -> Bool {
+            withState { preparation?.id == id && preparation?.canceled == false }
+        }
+        func finish() async {
+            withState { if preparation?.id == id { preparation = nil } }
+            await signal.fire()
+        }
+
+        if await core.isLoaded(modelID: modelID) {
+            await finish()
+            onPhase(.ready)
+            return
+        }
+        // Every load below is refused if an unload runs after this point (engine discarded).
+        let epoch = await core.epoch
+        let start = CFAbsoluteTimeGetCurrent()
+        func elapsed() -> String { String(format: "%.2f", CFAbsoluteTimeGetCurrent() - start) }
+        guard let helper = compileHelper?.start(modelID: modelID) else {
+            onPhase(.preparing(standInReady: false))
+            var loaded = false
+            if isCurrent() { loaded = (try? await loadNeuralEngine(modelID, epoch: epoch)) != nil }
+            let canceled = !isCurrent()
+            await finish()
+            if !canceled { onPhase(loaded ? .ready : .failed) }
+            return
+        }
+        withState { if preparation?.id == id { preparation?.helper = helper } }
+        if !isCurrent() { helper.cancel() }  // unloaded while the helper was starting
+        DiagnosticLogger.shared.log("ParakeetEngine: compile helper started for \(modelID)")
+        onPhase(.preparing(standInReady: false))
+
+        let helperDone = LockedCounter()
+        let allowed = standInAllowed
+        let attempts = standInAttemptsForTesting
+        let core: Core = self.core
+        // Loads the stand-in and announces it. `shouldStart` is re-checked under the engine's
+        // lifecycle gate, so a helper that finished meanwhile never queues the Neural Engine
+        // load behind an unneeded 1.2 GB CPU load.
+        let loadStandIn: @Sendable (@escaping @Sendable () -> Bool) async -> Void = { shouldStart in
+            guard allowed else {
+                DiagnosticLogger.shared.log("ParakeetEngine: CPU stand-in skipped (8 GB of memory or less)")
+                return
+            }
+            attempts.increment()
+            let standInStart = CFAbsoluteTimeGetCurrent()
+            do {
+                if try await core.loadStandIn(modelID: modelID, ifEpoch: epoch, shouldStart: shouldStart) {
+                    DiagnosticLogger.shared.log(String(format: "ParakeetEngine: CPU stand-in ready in %.2f s (resident %d MB)",
+                        CFAbsoluteTimeGetCurrent() - standInStart, processResidentMB()))
+                    onPhase(.preparing(standInReady: true))
+                    await signal.fire()
+                }
+            } catch is CancellationError {
+                return  // preparation moved on (helper finished or engine discarded)
+            } catch {
+                DiagnosticLogger.shared.log(
+                    "ParakeetEngine: CPU stand-in unavailable (\(error.localizedDescription))")
+            }
+        }
+        let delay = standInDelaySeconds
+        let standInBegan = LockedCounter()
+        let standInTask = Task.detached(priority: .userInitiated) {
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            // A helper that finished within the delay found a warm cache: no stand-in needed.
+            guard !Task.isCancelled, !helperDone.isSet else { return }
+            standInBegan.set()
+            await loadStandIn { !helperDone.isSet }
+        }
+        withState { if preparation?.id == id { preparation?.standInTask = standInTask } }
+
+        let compiled = await helper.wait()
+        helperDone.set()
+        DiagnosticLogger.shared.log(
+            "ParakeetEngine: compile helper \(compiled ? "finished" : "failed or stopped") after \(elapsed()) s")
+        // A stand-in still sitting out its delay is not waited for: after a successful helper
+        // the warm Neural Engine load follows at once, and after a failed one the stand-in is
+        // loaded right below. One already loading is allowed to finish.
+        if !standInBegan.isSet { standInTask.cancel() }
+        await standInTask.value
+
+        var loaded = false
+        if isCurrent() {
+            if !compiled, await !core.canTranscribe(modelID: modelID) {
+                // The in-process compile below would block a stand-in load for its whole
+                // duration, so load the stand-in first; its inference is not blocked by it.
+                await loadStandIn { true }
+            }
+            // Warm after a successful helper (about 0.2 s); after a failed one, the old
+            // in-process compile. Refused (epoch) if the engine was unloaded meanwhile.
+            if isCurrent() {
+                loaded = (try? await loadNeuralEngine(modelID, epoch: epoch)) != nil
+            }
+        }
+        let canceled = !isCurrent()
+        // Release only once the Neural Engine model is there. After a failed load a working
+        // stand-in keeps serving; unload (the only other way out) releases it itself.
+        if loaded, !canceled { await core.releaseStandIn() }
+        let standInKept = await core.canTranscribe(modelID: modelID) && !loaded
+        if standInKept { withState { lastNeuralEngineAttempt = CFAbsoluteTimeGetCurrent() } }
+        await finish()
+        guard !canceled else { return }
+        DiagnosticLogger.shared.log(
+            "ParakeetEngine: first-start preparation \(loaded ? "ready" : (standInKept ? "failed, CPU stand-in kept" : "failed")) after \(elapsed()) s")
+        onPhase(loaded ? .ready : (standInKept ? .cpuFallback : .failed))
+    }
+
+    /// The Neural Engine load of `prepareModel`; tests can make it fail.
+    private func loadNeuralEngine(_ modelID: String, epoch: UInt64) async throws {
+        if let override = neuralEngineLoadForTesting {
+            try await override(modelID)
+        } else {
+            try await core.load(modelID: modelID, ifEpoch: epoch)
+        }
     }
 
     /// Release the FluidAudio models and drop the manager. Waits for in-flight loads,
-    /// transcriptions, and optional model setup before teardown.
+    /// transcriptions, and optional model setup before teardown. Stops a running first-start
+    /// preparation (its helper process is terminated).
     public func unloadModel() async {
+        withState {
+            if preparation != nil {
+                preparation?.canceled = true
+                preparation?.helper?.cancel()
+                preparation?.standInTask?.cancel()
+            }
+            neuralEngineRetry?.cancel()
+        }
         await core.unload()
     }
 
@@ -1077,6 +1521,24 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
     public func startMemoryPressureMonitoring() {}
 
     // MARK: - Transcription
+
+    /// True when every Silero model bundle FluidAudio's VadManager loads is on disk. Existence
+    /// only; a corrupt bundle still fails the offline load and logs "endpointing unavailable".
+    static func sileroModelCached(
+        modelsDirectory: URL? = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("FluidAudio/Models")
+    ) -> Bool {
+        guard let modelsDirectory else { return false }
+        let dir = modelsDirectory.appendingPathComponent(Repo.vad.folderName)
+        return ModelNames.VAD.requiredModels.allSatisfy { name in
+            FileManager.default.fileExists(
+                atPath: dir.appendingPathComponent(name).appendingPathComponent("coremldata.bin").path)
+        }
+    }
+
+    /// Set after one failed Silero fetch so later model loads skip the network (per process).
+    static let sileroFetchFailed = LockedFlag()
 
     /// Transcribe `[Float]` 16 kHz mono samples. Parakeet has no ASR equivalent of whisper's
     /// prompt / token suppression, but their spoken-punctuation mode signal gates the confidence
@@ -1103,7 +1565,16 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
                     enablePunctuationCommandCorrection: Bool) async throws -> String {
         try await core.transcribe(
             samples: samples, language: language,
+            enablePunctuationCommandCorrection: enablePunctuationCommandCorrection).text
+    }
+
+    func transcribeReportingPath(samples: [Float], language: String, prompt: String?,
+                                 suppressRegex: String?, enablePunctuationCommandCorrection: Bool)
+        async throws -> (text: String, inferencePath: String) {
+        let result = try await core.transcribe(
+            samples: samples, language: language,
             enablePunctuationCommandCorrection: enablePunctuationCommandCorrection)
+        return (result.text, result.path.rawValue)
     }
 
     /// Parakeet (batch `AsrManager`) does not support live preview. Streaming would require
@@ -1153,4 +1624,25 @@ public final class ParakeetEngine: TranscriptionEngine, ConfidencePunctuationCor
             return .transcriptionFailed
         }
     }
+}
+
+/// A thread-safe Bool for process-wide latches read from actor and nonisolated code.
+final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+    var value: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+}
+
+/// Lock-guarded counter, used as a set-once flag ("the helper has exited") and as the
+/// stand-in attempt count.
+final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return count > 0 }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func set() { lock.lock(); count = max(count, 1); lock.unlock() }
+    func increment() { lock.lock(); count += 1; lock.unlock() }
 }

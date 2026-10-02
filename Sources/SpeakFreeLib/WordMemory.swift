@@ -36,7 +36,9 @@ class WordMemory {
         let words = load()
         try? FileManager.default.removeItem(at: wordsFile)
         for right in words.values {
-            removeFromVocabulary(right)
+            // Stop at the first lock timeout so a stuck `vocab` process costs at most 1 s
+            // on main, not 1 s per word.
+            guard removeFromVocabulary(right) else { break }
         }
     }
 
@@ -74,7 +76,19 @@ class WordMemory {
 
     // MARK: - Vocabulary sync
 
-    private static func removeFromVocabulary(_ word: String) {
+    /// Returns false if the vocabulary lock could not be taken (nothing was changed).
+    @discardableResult
+    private static func removeFromVocabulary(_ word: String) -> Bool {
+        // Same lock as `speakfree vocab`, so an assistant's add is not lost to this rewrite.
+        // Bounded wait: this runs on main from the cleanup dialog.
+        if AgentCLI.withVocabularyLock(timeout: 1.0, { removeFromVocabularyLocked(word) }) == nil {
+            DiagnosticLogger.shared.log("WordMemory: vocabulary lock unavailable; vocabulary.txt left unchanged")
+            return false
+        }
+        return true
+    }
+
+    private static func removeFromVocabularyLocked(_ word: String) {
         let url = Config.vocabularyFile
         guard let content = try? String(contentsOf: url, encoding: .utf8) else { return }
 

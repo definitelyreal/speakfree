@@ -86,7 +86,7 @@ final class ParakeetEngineTests: XCTestCase {
     }
 
     func testDefaultParakeetModelIsEnglishV2() {
-        // Product default (Michael, 2026-06-11): new users get Parakeet ENGLISH (v2),
+        // Product default (2026-06-11): new users get Parakeet ENGLISH (v2),
         // written EXPLICITLY into defaultConfig.
         XCTAssertEqual(Config.defaultConfig.parakeetModel, "parakeet-tdt-0.6b-v2")
         XCTAssertEqual(
@@ -250,14 +250,14 @@ final class ParakeetEngineTests: XCTestCase {
 
     func testConfidenceGapStripsMultiwordWeakTail() {
         let out = ParakeetEngine.strippingLowConfidenceTail(
-            text: "If that doesn't work we could also do like this on that jump",
+            text: "If that doesn't fit we could also go like this on that path",
             timings: [
                 timing("▁could", 4.8, 0.99), timing("▁also", 5.1, 0.99),
-                timing("▁do", 5.5, 0.99), timing("▁like", 7.68, 0.665),
+                timing("▁go", 5.5, 0.99), timing("▁like", 7.68, 0.665),
                 timing("▁this", 11.36, 0.467), timing("▁on", 12.0, 0.254),
-                timing("▁that", 12.5, 0.317), timing("▁jump", 14.0, 0.510),
+                timing("▁that", 12.5, 0.317), timing("▁path", 14.0, 0.510),
             ])
-        XCTAssertEqual(out.text, "If that doesn't work we could also do")
+        XCTAssertEqual(out.text, "If that doesn't fit we could also go")
         XCTAssertEqual(out.removedTokenCount, 5)
     }
 
@@ -295,9 +295,9 @@ final class ParakeetEngineTests: XCTestCase {
     }
 
     func testEndpointingRefusesRoomToneTail() {
-        // Michael's soft speech (0.003-0.016 RMS) is energy-inseparable from his room tone,
-        // so a room-tone tail may hide missed speech and must never be trimmed (rec-022227
-        // lost 36s of real dictation to exactly this).
+        // Soft speech (0.003-0.016 RMS) can be energy-inseparable from room tone, so a
+        // room-tone tail may hide missed speech and must never be trimmed (one regression
+        // take lost 36s of real dictation to exactly this).
         let samples = take(speechSeconds: 2.5, tail: [Float](repeating: 0.004, count: 24_000))
         let out = ParakeetEngine.endpointedSamples(
             samples, segments: [VadSegment(startTime: 0.2, endTime: 2.5)])
@@ -349,29 +349,29 @@ final class ParakeetEngineTests: XCTestCase {
     }
 
     func testStripsTrailingWordsThatStartInsidePad() {
-        // Live case rec-130443: audio ends at 12.4s, Parakeet appended "here." over
-        // the pad. Whisper on the same wav hears no "here".
+        // Regression shape: audio ends at 12.4s, Parakeet appended "here." over
+        // the pad. Whisper on the same audio hears no "here".
         let out = ParakeetEngine.strippingPadHallucination(
-            text: "these quality and handoff issues here.",
+            text: "these color and layout issues here.",
             timings: [
-                timing("▁handoff", 10.9), timing("▁issues", 11.5),
+                timing("▁layout", 10.9), timing("▁issues", 11.5),
                 timing("▁here", 13.1), timing(".", 13.4),
             ],
             realAudioSeconds: 12.4)
-        XCTAssertEqual(out, "these quality and handoff issues")
+        XCTAssertEqual(out, "these color and layout issues")
     }
 
     func testStripsMultiWordPadPhrase() {
-        // Live case rec-154324: "being carried down." invented past the audio end.
+        // Regression shape: "being carried down." invented past the audio end.
         let out = ParakeetEngine.strippingPadHallucination(
-            text: "to avoid thought detection being carried down.",
+            text: "to avoid noise detection being carried down.",
             timings: [
                 timing("▁detection", 24.0),
                 timing("▁being", 25.6), timing("▁car", 25.9), timing("ried", 26.1),
                 timing("▁down", 26.4), timing(".", 26.6),
             ],
             realAudioSeconds: 25.1)
-        XCTAssertEqual(out, "to avoid thought detection")
+        XCTAssertEqual(out, "to avoid noise detection")
     }
 
     func testKeepsFinalWordFlushedNearTheBoundary() {

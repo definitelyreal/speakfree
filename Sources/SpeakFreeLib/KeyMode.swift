@@ -1,6 +1,6 @@
 import Foundation
 
-/// Key Mode: how the dictation hotkey behaves (Michael, 2026-08-28 — Edit Mode).
+/// Key Mode: how the dictation hotkey behaves (the maintainer, 2026-08-28 — Edit Mode).
 ///
 ///   .hold   — record while the key is held, insert on release (the historical default)
 ///   .toggle — tap to start, tap to stop, insert on stop
@@ -32,6 +32,38 @@ public enum KeyMode: String, Codable, Equatable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
+    }
+}
+
+/// What the hotkey does on key-down and key-up, per Key Mode. Pure, so Hold and Toggle can be
+/// proven unchanged by Edit Mode (AppDelegate.handleKeyDown/handleKeyUp switch on this).
+public enum HotkeyRouting {
+    public enum Action: Equatable {
+        case startRecording
+        case stopRecording
+        case routeToEditSession
+        case ignore
+    }
+
+    public static func keyDown(mode: KeyMode, isPressed: Bool, hasEditRouter: Bool) -> Action {
+        switch mode {
+        case .hold:
+            return isPressed ? .ignore : .startRecording
+        case .toggle:
+            return isPressed ? .stopRecording : .startRecording
+        case .edit:
+            // Without the controller (never in the app, which installs it at launch), Edit falls
+            // back to Toggle's tap semantics rather than bricking the hotkey.
+            if hasEditRouter { return .routeToEditSession }
+            return isPressed ? .stopRecording : .startRecording
+        }
+    }
+
+    public static func keyUp(mode: KeyMode) -> Action {
+        switch mode {
+        case .hold: return .stopRecording
+        case .toggle, .edit: return .ignore
+        }
     }
 }
 

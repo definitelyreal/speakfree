@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 // Claude · 2026-07-22 · Session: vocab-boost-eval worktree loop
 //
 // Batch-anchored custom-vocabulary boosting with a real-word guard.
@@ -5,8 +6,8 @@
 // WHY THIS EXISTS (2026-07-03 postmortem): the first vocab-boost attempt ran the
 // whole utterance through FluidAudio's SlidingWindowAsrManager with vocabulary
 // biasing and shipped whatever came back. Its first real-voice test produced five
-// word-substitutions ("Viktor" invented, spoken "colon" mangled, "new line" x2,
-// "Parakeet") because (a) the sliding-window decode itself diverges from the batch
+// word-substitutions (a vocabulary name invented, spoken "colon" mangled, "new line"
+// x2, "Parakeet") because (a) the sliding-window decode itself diverges from the batch
 // decode at window seams (~2.5% of words, measured 2026-07-22), so errors appeared
 // even where no vocabulary term was involved, and (b) the rescorer was allowed to
 // replace common English words and spoken-punctuation commands.
@@ -64,8 +65,8 @@ public enum VocabularyBoost {
 
     /// Parse `vocabulary.txt` (one term per line, `#` comments — same format the Whisper
     /// glossary prompt uses). Terms containing punctuation command words are excluded.
-    /// `curatedAliases` maps lowercased canonical term → aliases (from Michael's curated
-    /// custom-vocabulary.json, e.g. "rorlik" → Rohrlich).
+    /// `curatedAliases` maps lowercased canonical term → aliases (from the user's curated
+    /// custom-vocabulary.json, e.g. "vorbak" → Vohrbach).
     public static func loadTermSpecs(
         vocabularyFile: URL,
         curatedAliases: [String: [String]] = [:]
@@ -74,7 +75,7 @@ public enum VocabularyBoost {
         var seen = Set<String>()
         var specs: [TermSpec] = []
         for line in raw.split(separator: "\n") {
-            // Strip inline comments ("Gaubert # brain") and whitespace. NOTE: must cut at
+            // Strip inline comments ("Lambrin # manual") and whitespace. NOTE: must cut at
             // the first '#' (not split-and-take-first — Swift's split drops LEADING
             // separators, which turned full-line comments into multi-word vocab terms;
             // caught by testTermLoadingSkipsPunctuationAndComments).
@@ -275,7 +276,7 @@ public enum VocabularyBoost {
     // MARK: - The guard chain
 
     /// A capitalized token mid-utterance is the batch decoder asserting a PROPER NOUN it
-    /// recognized (Cloudflare, Instacart, Kodish=garbled-but-capitalized). Overwriting one
+    /// recognized (Cloudflare, Instacart, Pelton=garbled-but-capitalized). Overwriting one
     /// on acoustic evidence alone is the 2026-08 damage class that got past the dictionary
     /// real-word guard (brands aren't dictionary words). Sentence-initial capitals carry
     /// no such signal (everything is capitalized there), so the veto needs position.
@@ -329,13 +330,13 @@ public enum VocabularyBoost {
         }
 
         // 2. Case/punctuation-fix exemption — the span IS the term modulo case and
-        //    punctuation ("ec-2" → EC2, "rohrlich" → Rohrlich). Only presentation
+        //    punctuation ("ec-2" → EC2, "vohrbach" → Vohrbach). Only presentation
         //    changes; content is identical, so the remaining guards don't apply.
         if spanEqualsTerm { return nil }
 
         // 3. Acronym guard — a span the batch decoder emitted with ≥2 uppercase letters
         //    (AAF, ADR, LLMs, eBPF) is a recognized acronym, not a garble; never rescore
-        //    it into a different term. (it2 false positive: 'AAF' → 'Naam' while
+        //    it into a different term. (it2 false positive: 'AAF' → 'Navo' while
         //    dictating about AAF audio files.) [CX21]
         if originalSpan.contains(where: { isAcronymish($0) }), !spanEqualsTerm {
             return "acronym span '\(originalSpan.joined(separator: " "))'"
@@ -348,7 +349,7 @@ public enum VocabularyBoost {
             return "digit span '\(originalSpan.joined(separator: " "))'"
         }
 
-        // 5. Curated-alias override — Michael explicitly listed this garble for this term
+        // 5. Curated-alias override — the user explicitly listed this garble for this term
         //    (e.g. "marina" → Maryna), so the remaining guards step aside. Aliases also
         //    match their possessive/plural form ("xander" covers "Xander's" → "xanders"
         //    after normalization): NSSpellChecker knows many first names, so the
@@ -371,9 +372,9 @@ public enum VocabularyBoost {
         }
 
         // 6. Real-word guard — never rescore a span containing ANY common English word
-        //    into a vocab term on acoustic evidence alone ("Viktor" failure of
+        //    into a vocab term on acoustic evidence alone (the invented-name failure of
         //    2026-07-03). ANY (not ALL): a multi-word span must not lose its real words
-        //    to a name ("to rorlik" must not become "Rohrlich" wholesale — and mixed
+        //    to a name ("to vorbak" must not become "Vohrbach" wholesale — and mixed
         //    spans like that are exactly where alignment errors live). Multi-word garble
         //    compounds go through curated aliases ("pebble bed" → Pebblebed). [CX14]
         if let real = originalSpan.first(where: { isRealEnglishWord($0) }) {
@@ -465,9 +466,29 @@ public enum VocabularyBoost {
                           prefilterSkipped: true)
         }
 
-        // CTC forward pass (chunked internally for >15s audio).
-        let spot = try await spotter.spotKeywordsWithLogProbs(
-            audioSamples: audio, customVocabulary: vocabulary, minScore: nil)
+        let spot = try await logProbabilities(audio: audio, spotter: spotter)
+        return applyLogProbabilities(batchText: batchText, tokenTimings: tokenTimings,
+            spot: spot, rescorer: rescorer, vocabulary: vocabulary)
+    }
+
+    /// FluidAudio 0.15.1 computes vocabulary-independent CTC probabilities first, then
+    /// scans the entire audio once per vocabulary term to produce keyword detections.
+    /// This batch-anchored path never consumes those detections: its rescorer already
+    /// owns the FULL vocabulary and scores candidates around the batch token timings.
+    /// Pass an empty context only to the unused spotting stage. Keep all terms/aliases,
+    /// acoustic rescoring, eligibility checks and vetoes in the real correction path.
+    static func logProbabilities(audio: [Float], spotter: CtcKeywordSpotter) async throws
+        -> CtcKeywordSpotter.SpotKeywordsResult {
+        try await spotter.spotKeywordsWithLogProbs(
+            audioSamples: audio, customVocabulary: CustomVocabularyContext(terms: []), minScore: nil)
+    }
+
+    /// Shared completion seam lets cached-model parity tests replay the former full-spotting
+    /// result and the probabilities-only result through the identical correction/guard chain.
+    static func applyLogProbabilities(
+        batchText: String, tokenTimings: [TokenTiming], spot: CtcKeywordSpotter.SpotKeywordsResult,
+        rescorer: VocabularyRescorer, vocabulary: CustomVocabularyContext
+    ) -> Output {
         guard !spot.logProbs.isEmpty else {
             return Output(text: batchText, decisions: [], rescoredRaw: batchText)
         }

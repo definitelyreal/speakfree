@@ -1,6 +1,6 @@
 import Foundation
 
-/// Screen-aware proper-noun correction (2026-07-25, Michael's revival of the
+/// Screen-aware proper-noun correction (2026-07-25, the maintainer's revival of the
 /// screenContext feature for the Parakeet path).
 ///
 /// The ASR always picks the COMMON spelling of a homophone name — dictating about

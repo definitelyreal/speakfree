@@ -171,7 +171,7 @@ final class RecordingsNoticeTests: XCTestCase {
                       "with saving off, a finished dictation must leave zero files; found \(contents)")
     }
 
-    // Michael's September 14 edits supersede the older no-em-dash and
+    // The maintainer's September 14 edits supersede the older no-em-dash and
     // corpus-before-apology editorial assertions. Wording is reviewed in context.
 
     // MARK: - Config round-trip

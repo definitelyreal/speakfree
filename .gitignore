@@ -25,3 +25,13 @@ docs/superpowers/
 .agents/
 # Shadow-whisper sidecars the test suite writes next to audio fixtures.
 Tests/SpeakFreeTests/AudioFixtures/*.whisper.txt
+# Local fleet addresses and per-machine instructions; never committed.
+scripts/fleet.local.env
+CLAUDE.local.md
+
+# Local instructions and compatibility review notes are not release sources.
+AGENTS.md
+CLAUDE.md
+docs/CLIPBOARD-COMPATIBILITY.ai.md
+
+__pycache__/

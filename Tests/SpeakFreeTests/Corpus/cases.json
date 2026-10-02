@@ -63,10 +63,10 @@
  },
  {
   "name": "comma-before-name-keeps-comma",
-  "note": "2026-08-21: was a documented FALSE POSITIVE — the old comma->period rule turned the vocative 'Hello, Michael' into 'Hello. Michael'. Removing that rule fixes it; 'Michael' is a proper noun so step 9 leaves it untouched and the comma stays.",
+  "note": "2026-08-21: was a documented FALSE POSITIVE — the old comma->period rule turned a vocative like 'Hello, Taylor' into 'Hello. Taylor'. Removing that rule fixes it; 'Taylor' is a proper noun so step 9 leaves it untouched and the comma stays.",
   "mode": "hybrid",
-  "input": "Hello, Michael",
-  "expected": "Hello, Michael"
+  "input": "Hello, Taylor",
+  "expected": "Hello, Taylor"
  },
  {
   "name": "abbreviation-period-stays",
@@ -89,123 +89,123 @@
   "expected": "Hello, world,"
  },
  {
-  "name": "real-spoken-period-mid-and-end-2026-04-29",
-  "note": "Live capture: user said 'period' twice. Whisper added period after first 'period' word and a comma+'period' at the end. Both should resolve to period punctuation. Source: recording-2026-04-29-022153-E729F4B7.",
+  "name": "regression-spoken-period-mid-and-end",
+  "note": "Synthetic reproduction of a live failure: user said 'period' twice. Whisper added period after first 'period' word and a comma+'period' at the end. Both should resolve to period punctuation.",
   "mode": "hybrid",
-  "input": "This is a very exciting time period. I think we're going to be seeing some nice things, period.",
-  "expected": "This is a very exciting time. I think we're going to be seeing some nice things."
+  "input": "We picked a lot of apples this time period. I think we're going to be baking some nice pies, period.",
+  "expected": "We picked a lot of apples this time. I think we're going to be baking some nice pies."
  },
  {
-  "name": "real-spoken-comma-end-of-question-2026-04-29",
-  "note": "Live capture: user said 'comma' at end of a question. Whisper auto-added '?' due to intonation, plus a literal comma before the spoken word. Spoken comma should win over whisper's question mark. Source: recording-2026-04-29-022202-A2497241.",
+  "name": "regression-spoken-comma-end-of-question",
+  "note": "Synthetic reproduction of a live failure: user said 'comma' at end of a question. Whisper auto-added '?' due to intonation, plus a literal comma before the spoken word. Spoken comma should win over whisper's question mark.",
   "mode": "hybrid",
-  "input": "What are you saying, comma?",
-  "expected": "What are you saying,"
+  "input": "What are you baking, comma?",
+  "expected": "What are you baking,"
  },
  {
-  "name": "real-spoken-comma-as-trailing-2026-04-29",
-  "note": "Live capture: user explicitly said 'comma' at end of utterance. Trailing comma should be preserved (NOT converted to period by trailingCommaToPeriod rule). Source: recording-2026-04-29-022224-3363E1E4.",
+  "name": "regression-spoken-comma-as-trailing",
+  "note": "Synthetic reproduction of a live failure: user explicitly said 'comma' at end of utterance. Trailing comma should be preserved (NOT converted to period by trailingCommaToPeriod rule).",
   "mode": "hybrid",
-  "input": "Another thing is that sometimes we do want commas at the end because I might be in the middle of a sentence and end with a comma.",
-  "expected": "Another thing is that sometimes we do want commas at the end because I might be in the middle of a sentence and end with a,"
+  "input": "The other point is that sometimes we do want commas at the end because the list keeps going in a second note and might end with a comma.",
+  "expected": "The other point is that sometimes we do want commas at the end because the list keeps going in a second note and might end with a,"
  },
  {
-  "name": "real-leading-commas-spam-false-positive-2026-04-29",
-  "note": "Live capture: collapseCommaSpam fired on 'Okay, yeah, I think' (3 word-comma reps). Fixed by raising threshold to 5+ reps so leading speech-pause commas are preserved. (Note: Michael originally wanted an additional comma between 'think' and 'you' but that's beyond rule capability — whisper didn't put one in the raw input. Expected codified to what rules CAN achieve.) Source: recording-2026-04-29-024257-299F978D.",
+  "name": "regression-leading-commas-spam-false-positive",
+  "note": "Synthetic reproduction of a live failure: collapseCommaSpam fired on 'Okay, yeah, I think' (3 word-comma reps). Fixed by raising threshold to 5+ reps so leading speech-pause commas are preserved. (An additional comma between 'think' and 'you' would be beyond rule capability — whisper didn't put one in the raw input. Expected codified to what rules CAN achieve.)",
   "mode": "hybrid",
-  "input": "Okay, yeah, I think you can also just use the stems Alex delivered plus the conversation that Alex and we had on the cues sheet, comma, Alex is blue and I'm red.",
-  "expected": "Okay, yeah, I think you can also just use the stems Alex delivered plus the conversation that Alex and we had on the cues sheet, Alex is blue and I'm red."
+  "input": "Okay, yeah, I think you can also just use the photos Dana uploaded plus the notes that Dana and we wrote on the shared sheet, comma, Dana is blue and I'm red.",
+  "expected": "Okay, yeah, I think you can also just use the photos Dana uploaded plus the notes that Dana and we wrote on the shared sheet, Dana is blue and I'm red."
  },
  {
-  "name": "real-multi-spoken-period-eaten-2026-04-29",
-  "note": "Live capture: user said 'period' three times mid-utterance. Each ', period.' collapsed to just ',' — both the spoken 'period' and the whisper auto-period got dropped, leaving the wrong comma. Each 'period' should produce '.'. Source: recording-2026-04-29-024401-1D17F289. Updated 2026-06-11: pause ellipses now stripped ('So... You' -> 'So you').",
+  "name": "regression-multi-spoken-period-eaten",
+  "note": "Synthetic reproduction of a live failure: user said 'period' three times mid-utterance. Each ', period.' collapsed to just ',' — both the spoken 'period' and the whisper auto-period got dropped, leaving the wrong comma. Each 'period' should produce '.'. Updated 2026-06-11: pause ellipses now stripped ('So... You' -> 'So you').",
   "mode": "hybrid",
-  "input": "What happened was, \"composer 1\" would finish and then give everything to the next person, period. Then that person would either build on top or modify, period. Sometimes we were telling the original composer to not include a stem, comma, sometimes the second composer modified, or sometimes they just got added together, period. So... You could also do a compare per stem for further ambiguity. I think this is definitely the direction to go.",
-  "expected": "What happened was, \"composer 1\" would finish and then give everything to the next person. Then that person would either build on top or modify. Sometimes we were telling the original composer to not include a stem, sometimes the second composer modified, or sometimes they just got added together. So you could also do a compare per stem for further ambiguity. I think this is definitely the direction to go."
+  "input": "What happened was, \"baker 1\" would mix the dough and then hand everything to the next person, period. Then that person would either shape the loaves or rest them, period. Sometimes we were asking the first baker to not add any salt, comma, sometimes the second baker added it, or sometimes they both just added some, period. So... You could also do a taste test per loaf for further clarity. I think this is definitely the direction to go.",
+  "expected": "What happened was, \"baker 1\" would mix the dough and then hand everything to the next person. Then that person would either shape the loaves or rest them. Sometimes we were asking the first baker to not add any salt, sometimes the second baker added it, or sometimes they both just added some. So you could also do a taste test per loaf for further clarity. I think this is definitely the direction to go."
  },
  {
-  "name": "real-comma-before-capital-I-stays-2026-04-29",
-  "note": "Live capture: aggressive commaBeforeCapital rule fired on 'crazy, I don't', producing 'crazy. I don't'. User wants the comma kept — it's a natural speech-pause comma joining one thought, not a sentence break. Tightening the rule must not regress the cases where comma+capital IS a sentence boundary (see real-spoken-period-mid-and-end-2026-04-29 etc.). Source: recording-2026-04-29-025512-941B2366.",
+  "name": "regression-comma-before-capital-I-stays",
+  "note": "Synthetic reproduction of a live failure: aggressive commaBeforeCapital rule fired on 'odd, I don't', producing 'odd. I don't'. The comma should be kept — it's a natural speech-pause comma joining one thought, not a sentence break. Tightening the rule must not regress the cases where comma+capital IS a sentence boundary (see regression-spoken-period-mid-and-end etc.).",
   "mode": "hybrid",
-  "input": "It's crazy, I don't understand why there aren't AI models that can make one microphone sound like another or off-axis sound like on.",
-  "expected": "It's crazy, I don't understand why there aren't AI models that can make one microphone sound like another or off-axis sound like on."
+  "input": "It's odd, I don't understand why there aren't ovens that can make one small tray bake like another or a thin crust brown like thick.",
+  "expected": "It's odd, I don't understand why there aren't ovens that can make one small tray bake like another or a thin crust brown like thick."
  },
  {
-  "name": "real-literal-comma-word-not-converted-2026-05-21",
-  "note": "FALSE POSITIVE (the 'disaster'): user referenced the WORD 'comma' as a noun ('the comma issue'); convertStandaloneAmbiguous wrongly converted it to ',' producing 'the, issue'. Preceding-article guard ('the'/'a'/'an') now skips it. Source: recording-2026-05-21-190015-61C5CFC2.",
+  "name": "regression-literal-comma-word-not-converted",
+  "note": "FALSE POSITIVE (the 'disaster'): user referenced the WORD 'comma' as a noun ('the comma issue'); convertStandaloneAmbiguous wrongly converted it to ',' producing 'the, issue'. Preceding-article guard ('the'/'a'/'an') now skips it.",
   "mode": "hybrid",
-  "input": "I want you looking not at just the comma issue, but all the other issues that we might have.",
-  "expected": "I want you looking not at just the comma issue, but all the other issues that we might have."
+  "input": "I want you looking not at just the comma issue, but all the other issues on the recipe card too.",
+  "expected": "I want you looking not at just the comma issue, but all the other issues on the recipe card too."
  },
  {
-  "name": "real-number-decimal-not-split-2026-05-21",
-  "note": "ensureSpaceAfterPunctuation split the decimal '4.30' into '4. 30'. Lookbehind (?<!\\d) now leaves digit-flanked periods/commas intact. Source: recording-2026-05-21-164007-C4411897.",
+  "name": "regression-number-decimal-not-split",
+  "note": "ensureSpaceAfterPunctuation split the decimal '4.30' into '4. 30'. Lookbehind (?<!\\d) now leaves digit-flanked periods/commas intact.",
   "mode": "hybrid",
-  "input": "I may need to do it at 4.30, would that be alright?",
-  "expected": "I may need to do it at 4.30, would that be alright?"
+  "input": "The class may start at 4.30, would that be alright?",
+  "expected": "The class may start at 4.30, would that be alright?"
  },
  {
-  "name": "real-quoted-spoken-question-mark-2026-05-27",
-  "note": "Whisper sometimes wraps spoken commands in quotes (treating them as emphasized speech): `publish \"Question mark\"?`. Old boundaries didn't include quote chars so the rule wouldn't fire. Extended ws/we to include straight + curly quotes. Source: recording-2026-05-27-194533-8EBBB210.",
+  "name": "regression-quoted-spoken-question-mark",
+  "note": "Whisper sometimes wraps spoken commands in quotes (treating them as emphasized speech): `share \"Question mark\"?`. Old boundaries didn't include quote chars so the rule wouldn't fire. Extended ws/we to include straight + curly quotes.",
   "mode": "hybrid",
-  "input": "could I ask you your thoughts on a sub-tikor article I'm going to publish \"Question mark\"",
-  "expected": "could I ask you your thoughts on a sub-tikor article I'm going to publish?"
+  "input": "could I ask you your thoughts on a garden-club article I'm going to share \"Question mark\"",
+  "expected": "could I ask you your thoughts on a garden-club article I'm going to share?"
  },
  {
-  "name": "real-quoted-spoken-period-2026-05-27",
-  "note": "Same class as quoted-question-mark — whisper-quoted spoken `\"period.\"` not detected by old boundaries. Source: recording-2026-05-27-183722-A749947C.",
+  "name": "regression-quoted-spoken-period",
+  "note": "Same class as quoted-question-mark — whisper-quoted spoken `\"period.\"` not detected by old boundaries.",
   "mode": "hybrid",
-  "input": "or if I just heard non-profits etc. \"period.\"",
-  "expected": "or if I just heard non-profits etc."
+  "input": "or if I just heard co-ops etc. \"period.\"",
+  "expected": "or if I just heard co-ops etc."
  },
  {
-  "name": "real-acronym-not-split-2026-05-27",
-  "note": "ensureSpaceAfterPunctuation was shattering single-letter acronyms like 'U.S.A.' into 'U. S. A.'. Added (?![A-Z]\\.) lookahead to skip dots before an uppercase-then-dot pattern. Source: recording-2026-05-27-194737-D308CE50.",
+  "name": "regression-acronym-not-split",
+  "note": "ensureSpaceAfterPunctuation was shattering single-letter acronyms like 'U.S.A.' into 'U. S. A.'. Added (?![A-Z]\\.) lookahead to skip dots before an uppercase-then-dot pattern. The word.X.Y. shape below is the engine-written form that regressed.",
   "mode": "hybrid",
-  "input": "I'd love to ask your thoughts on a Subs.S.A. essay I was planning to publish",
-  "expected": "I'd love to ask your thoughts on a Subs.S.A. essay I was planning to publish"
+  "input": "I'd love to ask your thoughts on a Tour.U.K. guide I was planning to share",
+  "expected": "I'd love to ask your thoughts on a Tour.U.K. guide I was planning to share"
  },
  {
-  "name": "real-ellipsis-no-capitalize-2026-05-21",
-  "note": "Originally pinned '...' preservation. Overruled 2026-06-11: Michael never wants pause ellipses in output — stripPauseEllipses now joins 'could... do' to 'could do'.",
+  "name": "regression-ellipsis-no-capitalize",
+  "note": "Originally pinned '...' preservation. Overruled 2026-06-11 (product decision: pause ellipses never appear in output) — stripPauseEllipses now joins 'could... bake' to 'could bake'.",
   "mode": "hybrid",
-  "input": "Is that what you could... do together",
-  "expected": "Is that what you could do together"
+  "input": "Is that what we could... bake together",
+  "expected": "Is that what we could bake together"
  },
  {
-  "name": "real-ellipsis-pause-and-restart-2026-06-11",
-  "note": "Live capture (tiny.en fallback day): hesitation pauses became 'and... If' / a restarted word became 'are... Are'. Michael: never any pause indication. ‘I’t’ and 'come up' (comma homophone) are upstream ASR errors — not regex-fixable, expected unchanged here. Source: recording-2026-06-11-104037-A34F49FF.",
+  "name": "regression-ellipsis-pause-and-restart",
+  "note": "Synthetic reproduction of a live failure (tiny.en fallback day): hesitation pauses became 'and... If' / a restarted word became 'are... Are'. Product decision: never any pause indication. ‘I’t’ and 'come up' (comma homophone) are upstream ASR errors — not regex-fixable, expected unchanged here.",
   "mode": "hybrid",
-  "input": "I’t, if you could make it, and... If you think there are... Are other people who should be there, come up? Let's chat, period.",
-  "expected": "I’t, if you could make it, and if you think there are other people who should be there, come up? Let's chat."
+  "input": "I’t, if you could join us, and... If you think there are... Are other friends who should be there, come up? Let's plan, period.",
+  "expected": "I’t, if you could join us, and if you think there are other friends who should be there, come up? Let's plan."
  },
  {
-  "name": "real-ellipsis-trailing-2026-06-11",
-  "note": "Live capture: utterance ended on a trail-off pause; '...' must become '.'. 'Kamo' is an upstream comma-homophone — logged in the ledger, not fixable here. Source: recording-2026-06-11-103153-9940B078. 2026-08-21: with the comma->period rule removed, Parakeet's own comma before 'Kamo' is now correctly KEPT (was wrongly split to '. Kamo'); the ellipsis->period fix this case guards is unchanged.",
+  "name": "regression-ellipsis-trailing",
+  "note": "Synthetic reproduction of a live failure: utterance ended on a trail-off pause; '...' must become '.'. 'Kamo' is an upstream comma-homophone — logged in the ledger, not fixable here. 2026-08-21: with the comma->period rule removed, Parakeet's own comma before 'Kamo' is now correctly KEPT (was wrongly split to '. Kamo'); the ellipsis->period fix this case guards is unchanged.",
   "mode": "hybrid",
-  "input": "We are planning a screening in DC for America's 250th birthday as a media moment, Kamo. I think you'd have a lot of...",
-  "expected": "We are planning a screening in DC for America's 250th birthday as a media moment, Kamo. I think you'd have a lot of."
+  "input": "We are planning a picnic in the park for the town's 150th birthday as a community moment, Kamo. I think you'd have a lot of...",
+  "expected": "We are planning a picnic in the park for the town's 150th birthday as a community moment, Kamo. I think you'd have a lot of."
  },
  {
-  "name": "real-ellipsis-midsentence-spoken-comma-2026-06-11",
-  "note": "Live capture: spoken 'comma' correctly converted, trailing pause '...' stripped to '.'. Source: recording-2026-06-11-102357-DF68EA71.",
+  "name": "regression-ellipsis-midsentence-spoken-comma",
+  "note": "Synthetic reproduction of a live failure: spoken 'comma' correctly converted, trailing pause '...' stripped to '.'.",
   "mode": "hybrid",
-  "input": "If you're interested, comma, I would love to find a time to...",
-  "expected": "If you're interested, I would love to find a time to."
+  "input": "If you're free, comma, I would love to find a day to...",
+  "expected": "If you're free, I would love to find a day to."
  },
  {
   "name": "garbled-login-as-colon-not-converted",
-  "note": "2026-07-03 E9448165: Parakeet garbled 'login' into 'colon'; the standalone rule turned one recognition error into fake punctuation. Article before the word = noun usage, never a command. EXPECTATION UPDATED 2026-08-02 (Michael: 'Yes I want it on'): the pause-split softener now runs, so the engine's spurious 'at least. every' split softens to 'at least, every' instead of being recapitalized into a fake sentence. The colon assertion this case exists for is unchanged.",
+  "note": "2026-07-03: Parakeet garbled a real word into 'colon' after an article; the standalone rule turned one recognition error into fake punctuation. Article before the word = noun usage, never a command. EXPECTATION UPDATED 2026-08-02 (product decision to enable the softener): the pause-split softener now runs, so the engine's spurious 'at least. every' split softens to 'at least, every' instead of being recapitalized into a fake sentence. The colon assertion this case exists for is unchanged.",
   "mode": "hybrid",
-  "input": "I want to give authorization that doesn't become still like a colon where shadow has Parakeet access to my calendar, or at least. every six months or something, maybe once every one or two months.",
-  "expected": "I want to give authorization that doesn't become still like a colon where shadow has Parakeet access to my calendar, or at least, every six months or something, maybe once every one or two months."
+  "input": "I want to set up a sprinkler timer that doesn't become stuck like a colon where the garden gets water on a schedule, or at least. every six days or something, maybe once every one or two days.",
+  "expected": "I want to set up a sprinkler timer that doesn't become stuck like a colon where the garden gets water on a schedule, or at least, every six days or something, maybe once every one or two days."
  },
  {
   "name": "utterance-opening-colon-not-converted",
-  "note": "2026-07-03 305DF274: garbled 'Colon' opening a multi-word utterance became ': what about...'. Punctuation with nothing before it is the garble signature.",
+  "note": "2026-07-03: garbled 'Colon' opening a multi-word utterance became ': what about...'. Punctuation with nothing before it is the garble signature.",
   "mode": "hybrid",
-  "input": "Colon what about the reasons for the errors and what you think we should do about them.",
-  "expected": "Colon what about the reasons for the errors and what you think we should do about them."
+  "input": "Colon what about the reasons for the delays and what you think we should do about them.",
+  "expected": "Colon what about the reasons for the delays and what you think we should do about them."
  },
  {
   "name": "single-word-period-still-converts",
@@ -216,10 +216,10 @@
  },
  {
   "name": "negated-new-line-not-converted",
-  "note": "2026-07-03 FD2F92D7: 'didn't new line that' was a garble of 'didn't realize that'; converting ate the word and inserted a fake line break. Negation before a command word is never a command.",
+  "note": "2026-07-03: 'didn't new line that' was a garble of 'didn't realize that'; converting ate the word and inserted a fake line break. Negation before a command word is never a command.",
   "mode": "hybrid",
-  "input": "I didn't new line that it was phoning home and uploading information about my driving, period. I take privacy pretty seriously, period",
-  "expected": "I didn't new line that it was phoning home and uploading information about my driving. I take privacy pretty seriously."
+  "input": "I didn't new line that it was getting dark so early and the lamps were still off in the evening, period. I take my walks pretty seriously, period",
+  "expected": "I didn't new line that it was getting dark so early and the lamps were still off in the evening. I take my walks pretty seriously."
  },
  {
   "name": "article-comma-noun-not-converted",
@@ -269,10 +269,10 @@
  },
  {
   "name": "half-converted-question-mark-collapses",
-  "note": "2026-07-14 live repro: Parakeet converted spoken 'mark' to '?' itself, leaving 'question?'.",
+  "note": "2026-07-14 regression: Parakeet converted spoken 'mark' to '?' itself, leaving 'question?'.",
   "mode": "hybrid",
-  "input": "Where are we at with the deterministic behavior of things as they get shot at question?",
-  "expected": "Where are we at with the deterministic behavior of things as they get shot at?"
+  "input": "Where are we at with the late delivery of the chairs as they get moved at question?",
+  "expected": "Where are we at with the late delivery of the chairs as they get moved at?"
  },
  {
   "name": "genuine-noun-question-not-collapsed",
@@ -287,18 +287,18 @@
   "expected": "I talked to the person in question?"
  },
  {
-  "name": "glowing-line-quark-and-comment-garbles",
-  "note": "2026-07-14 live repro (recording-152144, MacBook mic): spoken 'question mark' garbled to 'Quark.', spoken 'comma' garbled to one-word sentence 'Comment.'",
+  "name": "faint-line-quark-and-comment-garbles",
+  "note": "2026-07-14 regression: spoken 'question mark' garbled to 'Quark.', spoken 'comma' garbled to one-word sentence 'Comment.'",
   "mode": "hybrid",
-  "input": "I see a glowing line between two videos. Period. What is that? Quark. It looks weird. Comment. I think that there should be some.",
-  "expected": "I see a glowing line between two videos. What is that? It looks weird, I think that there should be some."
+  "input": "I see a faint line between two tiles. Period. What is that? Quark. It looks odd. Comment. I think that there should be some.",
+  "expected": "I see a faint line between two tiles. What is that? It looks odd, I think that there should be some."
  },
  {
   "name": "spoken-comma-beats-preceding-engine-period",
-  "note": "2026-07-14 live repro (recording-152037): 'unreal. Kama have' must become 'unreal, have' — the user's comma outranks the engine's period on BOTH sides.",
+  "note": "2026-07-14 regression: 'unreal. Kama have' must become 'unreal, have' — the user's comma outranks the engine's period on BOTH sides.",
   "mode": "hybrid",
-  "input": "The growing glow and the shape of it make it feel unreal. Kama have the glow happen over a few frames and don't have it glow as a shape",
-  "expected": "The growing glow and the shape of it make it feel unreal, have the glow happen over a few frames and don't have it glow as a shape"
+  "input": "The sudden light and the color of it make it feel unreal. Kama have the light fade in over a few seconds and don't have it flash as a block",
+  "expected": "The sudden light and the color of it make it feel unreal, have the light fade in over a few seconds and don't have it flash as a block"
  },
  {
   "name": "genuine-comment-noun-survives",
@@ -418,32 +418,32 @@
   "expected": "He was screened. Colon cancer runs in the family."
  },
  {
-  "name": "comma-before-proper-noun-not-split-2026-08-21",
-  "note": "Live report 2026-08-21 (recording F0CBD48F). Parakeet correctly put a comma before the proper noun 'Fable'; the old comma->period rule wrongly split it to '. Fable'. Now the comma is kept and 'Fable' stays capitalized.",
+  "name": "comma-before-proper-noun-not-split",
+  "note": "Regression 2026-08-21. Parakeet correctly put a comma before the proper noun 'Jordan'; the old comma->period rule wrongly split it to '. Jordan'. Now the comma is kept and 'Jordan' stays capitalized.",
   "mode": "hybrid",
-  "input": "Even if you make decisions, Fable should double-check them.",
-  "expected": "Even if you make decisions, Fable should double-check them."
+  "input": "Even if you make decisions, Jordan should double-check them.",
+  "expected": "Even if you make decisions, Jordan should double-check them."
  },
  {
   "name": "comma-list-of-names-not-split",
   "note": "The removed rule split every list/appositive after a capitalized word. A comma-separated list of proper nouns must survive intact.",
   "mode": "hybrid",
-  "input": "It's all in Fireflies, our Zoom meetings, Slack, and my email.",
-  "expected": "It's all in Fireflies, our Zoom meetings, Slack, and my email."
+  "input": "It's all in Trello, our Teams meetings, Notion, and my email.",
+  "expected": "It's all in Trello, our Teams meetings, Notion, and my email."
  },
  {
-  "name": "mid-clause-The-lowercased-2026-08-21",
-  "note": "Live report 2026-08-21 (recording FDA00E73). Parakeet emitted a spurious mid-clause capital: 'from The large pool'. A never-opener capital mid-clause is lowercased.",
+  "name": "mid-clause-The-lowercased",
+  "note": "Regression 2026-08-21. Parakeet emitted a spurious mid-clause capital: 'from The large pile'. A never-opener capital mid-clause is lowercased.",
   "mode": "hybrid",
-  "input": "We don't want to block something from The large pool of credits.",
-  "expected": "We don't want to block something from the large pool of credits."
+  "input": "We don't want to take something from The large pile of boxes.",
+  "expected": "We don't want to take something from the large pile of boxes."
  },
  {
-  "name": "mid-clause-of-The-clips-lowercased",
-  "note": "Second instance of the same class from the corpus: 'points of The clips' -> 'of the clips'.",
+  "name": "mid-clause-of-The-tiles-lowercased",
+  "note": "Second instance of the same class: 'edges of The tiles' -> 'of the tiles'.",
   "mode": "hybrid",
-  "input": "Looking at the in and out points of The clips in the timeline.",
-  "expected": "Looking at the in and out points of the clips in the timeline."
+  "input": "Looking at the top and bottom edges of The tiles in the kitchen.",
+  "expected": "Looking at the top and bottom edges of the tiles in the kitchen."
  },
  {
   "name": "mid-clause-capital-title-protected",
@@ -454,7 +454,7 @@
  },
  {
   "name": "sentence-initial-The-stays-capital",
-  "note": "Michael's question 2026-08-21: a real sentence-initial 'The' (after '. ' or at the very start) must STAY capitalized; only a mid-CLAUSE 'The' is lowercased. Both appear in this one input.",
+  "note": "Design question 2026-08-21: a real sentence-initial 'The' (after '. ' or at the very start) must STAY capitalized; only a mid-CLAUSE 'The' is lowercased. Both appear in this one input.",
   "mode": "hybrid",
   "input": "We shipped it. The team is happy, and from The start it worked.",
   "expected": "We shipped it. The team is happy, and from the start it worked."

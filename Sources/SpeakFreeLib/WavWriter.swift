@@ -81,6 +81,16 @@ final class WavWriter {
         samplesAtLastPatch = samplesWritten
     }
 
+    /// Drop everything after the first `count` samples (a headset stretch being replaced by
+    /// the built-in microphone's audio). The header is patched so the file stays valid.
+    func truncate(toSamples count: Int) throws {
+        let keep = min(max(0, count), samplesWritten)
+        try handle.truncate(atOffset: UInt64(44 + keep * 2))
+        samplesWritten = keep
+        samplesAtLastPatch = min(samplesAtLastPatch, keep)
+        do { try patchHeader() } catch { try? handle.seekToEnd(); throw error }
+    }
+
     /// Final header patch + close. Safe to call once; the deinit also closes defensively.
     func close() {
         defer { activityLease.release() }

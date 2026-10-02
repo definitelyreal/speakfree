@@ -1,36 +1,80 @@
 [
   {
     "wav": "fixture-1-clean.wav",
-    "description": "Clean short sentence — no spoken punctuation, no comma spam. Baseline sanity.",
-    "modelSHA": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+    "description": "Synthetic eSpeak NG English-US formant speech.",
+    "sourceText": "The blue balloon floats above the garden.",
+    "voice": "en-us",
+    "wordsPerMinute": 145,
+    "provenance": "ai-suggestion:unverified",
+    "modelSHA": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+    "tailWindowMaxRMSTarget": 0.06,
     "properties": [
-      { "kind": "noCommaSpam" }
-    ]
+      {
+        "kind": "noCommaSpam"
+      }
+    ],
+    "sha256": "19b58187baa93ccc18de87dceed2df975a7ead4c4188d94dc09743c53929e186",
+    "sampleCount": 37513
   },
   {
     "wav": "fixture-2-spoken-comma.wav",
-    "description": "Spoken 'comma' correctly converted to punctuation, no comma-spam.",
-    "modelSHA": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+    "description": "Synthetic eSpeak NG English-US formant speech.",
+    "sourceText": "One comma two comma three.",
+    "voice": "en-us",
+    "wordsPerMinute": 120,
+    "provenance": "ai-suggestion:unverified",
+    "modelSHA": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+    "tailWindowMaxRMSTarget": 0.06,
     "properties": [
-      { "kind": "noCommaSpam" }
-    ]
+      {
+        "kind": "noCommaSpam"
+      },
+      {
+        "kind": "spokenCommaConverted"
+      }
+    ],
+    "sha256": "d272dbed6a6b12daa11fa4fe1753e3ae59ddbfacfc5195c18cf35ee883230458",
+    "sampleCount": 33030
   },
   {
     "wav": "fixture-3-spoken-period-end.wav",
-    "description": "Sentence ends with spoken 'period' — styled output must end with '.'.",
-    "modelSHA": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+    "description": "Synthetic eSpeak NG English-US formant speech.",
+    "sourceText": "The little green robot is ready period.",
+    "voice": "en-us",
+    "wordsPerMinute": 145,
+    "provenance": "ai-suggestion:unverified",
+    "modelSHA": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+    "tailWindowMaxRMSTarget": 0.015,
     "properties": [
-      { "kind": "noCommaSpam" },
-      { "kind": "spokenPeriodAtEnd", "expectedSpokenPeriodEnd": true }
-    ]
+      {
+        "kind": "noCommaSpam"
+      },
+      {
+        "kind": "spokenPeriodAtEnd",
+        "expectedSpokenPeriodEnd": true
+      }
+    ],
+    "sha256": "e8763e7f52ce7153b4dbf05ac2a4114d75bc343d6542879cb58af62336dbbdef",
+    "sampleCount": 36488
   },
   {
     "wav": "fixture-4-trailing-silence-period.wav",
-    "description": "T2.1 clipping canary: fixture-3 with 400ms of trailing silence appended (the realistic case where the speaker goes quiet before releasing the key). The adaptive post-buffer must NOT clip the final spoken 'period' — styled output must still end with '.'. If the adaptive buffer ever stops too early and truncates the last word, this assertion fails.",
-    "modelSHA": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+    "description": "Synthetic fixture 3 plus exactly 400 ms of digital silence.",
+    "sourceText": "The little green robot is ready period.",
+    "provenance": "ai-suggestion:unverified",
+    "modelSHA": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+    "derivedFrom": "fixture-3-spoken-period-end.wav",
+    "appendedSilenceSamples": 6400,
     "properties": [
-      { "kind": "noCommaSpam" },
-      { "kind": "spokenPeriodAtEnd", "expectedSpokenPeriodEnd": true }
-    ]
+      {
+        "kind": "noCommaSpam"
+      },
+      {
+        "kind": "spokenPeriodAtEnd",
+        "expectedSpokenPeriodEnd": true
+      }
+    ],
+    "sha256": "b271a7ee441d0fb73a6f48e0974646ccd207d95086f5c8a80dd28b5bc5279a29",
+    "sampleCount": 42888
   }
 ]

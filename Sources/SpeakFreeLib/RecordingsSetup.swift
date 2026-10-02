@@ -9,7 +9,7 @@ enum RecordingsSetup {
         guard !developerMode, config.recordingsSetupCompleted != true else { return false }
         guard config.saveRecordings == nil else { return false }
         if config.recordingsNoticeDecision == "keep" || config.recordingsNoticeDecision == "delete" { return false }
-        // Existing users who were never told about the old default receive Michael's
+        // Existing users who were never told about the old default receive the maintainer's
         // full notice, which contains both the saving toggle and the Trash choice.
         if hasRecordings && config.recordingsNoticeDecision == nil { return false }
         return true

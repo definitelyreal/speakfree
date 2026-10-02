@@ -1,9 +1,9 @@
 // Claude · 2026-08-05 · Session: 6277a78f-7ff9-4d99-b9d1-f9ee9afe952a
 //
 // "Time saved" hardcoded a 40 WPM typist (UsageStats.swift:72) and printed the result as a single
-// precise figure. Michael types 110-165 WPM (speech audit finding 18), so the number was inflated
-// 3-4x — "saving 4.9 days" was fiction. Fix: bracket the estimate across typing speeds, present it
-// as a range, and let the COUNTED keystrokes lead the UI instead of the modelled time.
+// precise figure. A fast typist reaches 110-165 WPM, so for that user the number was inflated
+// 3-4x. Fix: bracket the estimate across typing speeds, present it as a range, and let the
+// COUNTED keystrokes lead the UI instead of the modelled time.
 
 import XCTest
 @testable import SpeakFreeLib

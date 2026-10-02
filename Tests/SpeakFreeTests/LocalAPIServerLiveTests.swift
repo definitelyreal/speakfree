@@ -15,6 +15,7 @@ final class LocalAPIServerLiveTests: XCTestCase {
 
     private var server: LocalAPIServer?
     private var transcriber: Transcriber?
+    private var scratchDir: URL!
 
     /// Ephemeral per-run port (audit 2026-07-01 M0.5). The old fixed 57650 flaked:
     /// a not-yet-released socket from a prior or concurrent run blocked the bind and
@@ -25,6 +26,18 @@ final class LocalAPIServerLiveTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        // Test-safety (2026-09-25 fix/test-real-config): every test here starts a REAL
+        // LocalAPIServer, and `LocalAPIServer.start()` unconditionally calls `sweepTmpAPI()`
+        // (LocalAPIServer.swift:77) — which, without this override, sweeps files older than an
+        // hour out of the REAL ~/.config/speakfree/tmp/api, the exact directory the live app
+        // stages in-flight dictation audio in. A concurrent or crashed real request can be
+        // swept mid-flight by a test run. Every request also briefly writes/deletes a real
+        // `<uuid>.audio` file under the same directory. Redirect to a scratch dir so none of
+        // that ever touches real data (2026-06-11 rule: Config.configDirOverride in setUp).
+        scratchDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speakfree-localapi-live-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        Config.configDirOverride = scratchDir
         if ProcessInfo.processInfo.environment["SPEAKFREE_SKIP_LIVE_API"] == "1" {
             return
         }
@@ -34,6 +47,9 @@ final class LocalAPIServerLiveTests: XCTestCase {
         server?.stop()
         server = nil
         transcriber = nil
+        Config.configDirOverride = nil
+        if let scratchDir { try? FileManager.default.removeItem(at: scratchDir) }
+        scratchDir = nil
         super.tearDown()
     }
 
@@ -171,7 +187,7 @@ final class LocalAPIServerLiveTests: XCTestCase {
     //     active listener (simulating the launch path that was missing before T1.2).
     //   - When localAPI is disabled, the server is NOT started (nil / no listener).
     //
-    // The full enable→quit→relaunch→lsof dogfood is deferred to Michael (TCC constraint
+    // The full enable→quit→relaunch→lsof dogfood is deferred to the maintainer (TCC constraint
     // prevents launching the packaged .app in this environment). Code-trace + these tests
     // are the acceptance proof as noted in the task description.
 

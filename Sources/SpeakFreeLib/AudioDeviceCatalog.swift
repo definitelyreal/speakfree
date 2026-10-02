@@ -47,6 +47,7 @@ public enum AudioDeviceCatalog {
     private static let cacheLock = NSLock()
     private static var _cachedDevices: [AudioInputDevice] = []
     private static var _cachedDefault: AudioInputDevice?
+    private static var _cachedBluetoothOutputs: [AudioOutputDevice] = []
     /// Called on main after every cache refresh (AppDelegate rebuilds the menu).
     public static var onCacheRefreshed: (() -> Void)?
 
@@ -66,6 +67,14 @@ public enum AudioDeviceCatalog {
     public static var cachedDefaultInput: AudioInputDevice? {
         cacheLock.lock(); defer { cacheLock.unlock() }
         return _cachedDefault
+    }
+
+    /// Bluetooth devices that can play audio, from the same background refresh. Used to
+    /// tell "headset connected, macOS is not offering its mic" apart from "no headset",
+    /// and to find a headset's output half when checking what is playing on it.
+    public static var cachedBluetoothOutputs: [AudioOutputDevice] {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        return _cachedBluetoothOutputs
     }
 
     public static func cachedDevice(withUID uid: String) -> AudioInputDevice? {
@@ -121,10 +130,12 @@ public enum AudioDeviceCatalog {
     private static func refreshCacheNow() {
         let devices = inputDevices()
         let def = defaultInputDevice()
+        let outputs = bluetoothOutputDevices()
         cacheLock.lock()
         let previous = _cachedDevices
         _cachedDevices = devices
         _cachedDefault = def
+        _cachedBluetoothOutputs = outputs
         cacheLock.unlock()
         logDeviceListChanges(from: previous, to: devices)
         let listChanged = deviceListChanged(from: previous, to: devices)
@@ -203,6 +214,18 @@ public enum AudioDeviceCatalog {
                 nominalSampleRate: nominalSampleRate(of: id),
                 inputChannels: channels,
                 isVirtual: transport == kAudioDeviceTransportTypeVirtual || transport == kAudioDeviceTransportTypeAggregate)
+        }
+    }
+
+    public static func bluetoothOutputDevices() -> [AudioOutputDevice] {
+        allDeviceIDs().compactMap { id in
+            let transport = transportType(of: id)
+            guard transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE,
+                  channelCount(of: id, scope: kAudioDevicePropertyScopeOutput) > 0,
+                  let uid = stringProperty(id, kAudioDevicePropertyDeviceUID),
+                  let name = stringProperty(id, kAudioDevicePropertyDeviceNameCFString)
+            else { return nil }
+            return AudioOutputDevice(id: id, uid: uid, name: name)
         }
     }
 
@@ -314,8 +337,11 @@ public enum AudioDeviceCatalog {
     }
 
     private static func inputChannelCount(of id: AudioDeviceID) -> Int {
-        var addr = address(kAudioDevicePropertyStreamConfiguration,
-                           scope: kAudioDevicePropertyScopeInput)
+        channelCount(of: id, scope: kAudioDevicePropertyScopeInput)
+    }
+
+    private static func channelCount(of id: AudioDeviceID, scope: AudioObjectPropertyScope) -> Int {
+        var addr = address(kAudioDevicePropertyStreamConfiguration, scope: scope)
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr, size > 0 else { return 0 }
         let buf = UnsafeMutableRawPointer.allocate(byteCount: Int(size),
@@ -337,6 +363,29 @@ public enum AudioDeviceCatalog {
         return Double(value)
     }
 
+    /// Live rates for one device, read on a capture worker (never on main; HAL reads can block).
+    /// `stream` is the sample rate of the device's first INPUT stream, the rate its microphone
+    /// actually delivers. A Bluetooth headset's nominal rate can describe its output side
+    /// (48 kHz) while its microphone runs at 24 kHz (field forensics), so capture
+    /// is verified against the input stream. 0 when unreadable.
+    static func liveInputRates(of id: AudioDeviceID) -> CaptureFormatCheck.LiveRates {
+        var streamRate: Double = 0
+        var addr = address(kAudioDevicePropertyStreams, scope: kAudioDevicePropertyScopeInput)
+        var size: UInt32 = 0
+        if AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr, size >= UInt32(MemoryLayout<AudioStreamID>.size) {
+            var streams = [AudioStreamID](repeating: 0, count: Int(size) / MemoryLayout<AudioStreamID>.size)
+            if AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &streams) == noErr, let first = streams.first {
+                var formatAddr = address(kAudioStreamPropertyVirtualFormat)
+                var format = AudioStreamBasicDescription()
+                var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+                if AudioObjectGetPropertyData(first, &formatAddr, 0, nil, &formatSize, &format) == noErr {
+                    streamRate = format.mSampleRate
+                }
+            }
+        }
+        return CaptureFormatCheck.LiveRates(nominal: nominalSampleRate(of: id), stream: streamRate)
+    }
+
     private static func transportType(of id: AudioDeviceID) -> UInt32 {
         var addr = address(kAudioDevicePropertyTransportType)
         var size = UInt32(MemoryLayout<UInt32>.size)
@@ -344,4 +393,12 @@ public enum AudioDeviceCatalog {
         guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr else { return 0 }
         return value
     }
+}
+
+/// A Bluetooth device that can play audio (its output half).
+public struct AudioOutputDevice: Equatable, Sendable {
+    public let id: AudioDeviceID
+    public let uid: String
+    public let name: String
+    public init(id: AudioDeviceID, uid: String, name: String) { self.id = id; self.uid = uid; self.name = name }
 }

@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 import XCTest
 @testable import SpeakFreeLib
 
@@ -35,8 +36,19 @@ final class AudioGoldenTests: XCTestCase {
     }
 
     func test_allFixtures() throws {
-        // Skip if no whisper model is installed (CI without models).
-        guard Transcriber.modelExists(modelSize: Config.load().modelSize) else {
+        // Pin the synthetic fixture smoke test independently of live user settings.
+        var config = Config.defaultConfig
+        config.engine = "whisper"
+        config.modelSize = "tiny.en"
+        config.spokenPunctuation = .hybrid
+        config.whisperFallback = FlexBool(false)
+        let previousEngine = ProcessInfo.processInfo.environment["SPEAKFREE_ENGINE"]
+        setenv("SPEAKFREE_ENGINE", "whisper", 1)
+        defer {
+            if let previousEngine { setenv("SPEAKFREE_ENGINE", previousEngine, 1) }
+            else { unsetenv("SPEAKFREE_ENGINE") }
+        }
+        guard Transcriber.modelExists(modelSize: config.modelSize) else {
             throw XCTSkip("Whisper model not installed — skipping audio golden tests")
         }
 
@@ -46,7 +58,7 @@ final class AudioGoldenTests: XCTestCase {
                 XCTFail("Missing fixture: \(fixture.wav)")
                 continue
             }
-            let result = try ProcessCommand.run(wavURL: wavURL)
+            let result = try ProcessCommand.run(wavURL: wavURL, config: config)
             for prop in fixture.properties {
                 assert(property: prop, result: result, fixture: fixture.wav)
             }
@@ -74,8 +86,23 @@ final class AudioGoldenTests: XCTestCase {
             XCTAssertNil(apostropheRange,
                 "[\(fixture)] noApostropheSpace: apostrophe-space artifact in: \(result.styled)")
 
+        case "spokenCommaConverted":
+            XCTAssertTrue(result.processed.contains(","), "[\(fixture)] expected a comma")
+            XCTAssertNil(result.processed.range(of: #"\bcomma\b"#,
+                options: [.regularExpression, .caseInsensitive]))
+            for token in [#"\b(?:one|1)\b"#, #"\b(?:two|2)\b"#, #"\b(?:three|3)\b"#] {
+                XCTAssertNotNil(result.processed.range(of: token,
+                    options: [.regularExpression, .caseInsensitive]),
+                    "[\(fixture)] missing synthetic list item")
+            }
+            XCTAssertEqual(result.processed.filter { $0 == "," }.count, 2)
+
         case "spokenPeriodAtEnd":
             if property.expectedSpokenPeriodEnd == true {
+                XCTAssertTrue(result.styled.localizedCaseInsensitiveContains("robot"))
+                XCTAssertTrue(result.styled.localizedCaseInsensitiveContains("ready"))
+                XCTAssertNil(result.styled.range(of: #"\bperiod\b"#,
+                    options: [.regularExpression, .caseInsensitive]))
                 XCTAssertTrue(result.styled.hasSuffix("."),
                     "[\(fixture)] spokenPeriodAtEnd: expected trailing '.', got: \(result.styled)")
             }

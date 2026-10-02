@@ -12,7 +12,7 @@
 import AppKit
 
 /// Simulated speech envelope — a direct port of the design lab's `tickAudio`
-/// (build/26-08-12-record-icon-animation/lab.html). Silence, then syllables at
+/// (the internal animation design lab). Silence, then syllables at
 /// ~220ms with per-syllable amplitude variation and the occasional dropped breath.
 struct PreviewSpeechSimulator {
     var level: CGFloat = 0
@@ -197,7 +197,7 @@ public enum RecordingOverlayPreview {
         replay()
 
         // The full arc: hold the live end-state, then "release" into the CENTERED
-        // transcribing hold (no bottom jump — the point of Michael's ruling), then
+        // transcribing hold (no bottom jump — the point of the maintainer's ruling), then
         // "done" (the overlay would hide; here it loops).
         let recordHold: Double = 1.8
         let transcribeHold: Double = 2.6

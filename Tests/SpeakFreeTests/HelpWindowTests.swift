@@ -1,7 +1,8 @@
+// ai-processed:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 // Claude · 2026-07-26 · Session: ec24b5ef-be6a-4c4b-be38-a3b84ca63074
 //
 // Pins the Help window against STALE PROSE, which was the real 2026-07-26 audit finding
-// (build/26-07-26-help-audit/AUDIT.ai.md): the help described Whisper-only models while the
+// (an internal help audit): the help described Whisper-only models while the
 // default engine is Parakeet, and named punctuation modes and a "Max Recordings" control that
 // no longer exist. Help that names controls the user cannot find is worse than no help.
 //
@@ -141,7 +142,7 @@ final class HelpWindowTests: XCTestCase {
     /// list, not against `HelpContent.topics` — comparing the table to the same array it was
     /// built from proves only that reloadData ran.
     func test_sidebarListsTheExpectedTopics() throws {
-        let expected = ["Getting Started", "Your Hotkey", "Engines & Models", "Languages",
+        let expected = ["Getting Started", "Your Hotkey", "Edit Mode", "History & Clipboard", "Engines & Models", "Languages",
                         "Punctuation", "Vocabulary", "Recordings & Privacy",
                         "Recovering a Lost Dictation", "Transcribing Audio Files", "Microphone",
                         "Experimental Features", "Speed & Memory", "When Something Goes Wrong",
@@ -221,10 +222,10 @@ final class HelpWindowTests: XCTestCase {
         XCTAssertTrue(text.contains("Automatic Only"))
         XCTAssertTrue(text.contains("Spoken Only"))
         // Settings section names as the GroupBoxes actually label them.
-        for section in ["Settings \u{2192} General",
-                        "Settings \u{2192} Transcription",
-                        "Settings \u{2192} Performance",
-                        "Settings \u{2192} Advanced"] {
+        for section in ["Settings \u{2192} Dictation \u{2192} General",
+                        "Settings \u{2192} Dictation \u{2192} Transcription",
+                        "Settings \u{2192} Dictation \u{2192} Performance",
+                        "Settings \u{2192} Dictation \u{2192} Advanced"] {
             XCTAssertTrue(text.contains(section), "Help never points at \(section)")
         }
     }
@@ -480,6 +481,30 @@ final class HelpWindowTests: XCTestCase {
         XCTAssertEqual(facts.engineID, "whisper",
                        "Help would announce Parakeet while the app runs Whisper")
         XCTAssertFalse(facts.engineIsParakeet)
+    }
+
+    func test_helpUsesExplicitEditModeInsteadOfLegacyToggleFlag() throws {
+        var config = Config.defaultConfig
+        config.keyMode = .edit
+        config.toggleMode = FlexBool(true)
+        let live = HelpFacts.live(config: config)
+        XCTAssertTrue(live.isEditMode)
+        XCTAssertFalse(live.isToggleMode)
+        let topic = try XCTUnwrap(HelpContent.topics(live).first { $0.id == "getting-started" })
+        let text = HelpController.attributedBody(for: topic).string
+        XCTAssertTrue(text.contains("open the Edit window"))
+        XCTAssertFalse(text.contains("once to start recording"))
+        config.keyMode = .hold
+        XCTAssertFalse(HelpFacts.live(config: config).isToggleMode)
+    }
+
+    func test_privacyHelpDoesNotPromiseOptionalClaudeCleanupIsLocal() throws {
+        let topic = try XCTUnwrap(HelpContent.topics(facts()).first { $0.id == "privacy" })
+        let text = HelpController.attributedBody(for: topic).string
+        XCTAssertFalse(text.contains("entirely local"))
+        XCTAssertFalse(text.contains("ever sent anywhere"))
+        XCTAssertTrue(text.contains("paragraph text is sent"))
+        XCTAssertTrue(text.contains("consent"))
     }
 
     func test_noEmDashesInHelpProse() {

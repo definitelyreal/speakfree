@@ -15,7 +15,9 @@ func printUsage() {
 
     USAGE:
         speakfree start              Start the dictation daemon
-        speakfree prepare-update     Wait for quiet and warn before an external update
+        speakfree prepare-update [--timeout 60...3600] [--require-visible-warning]
+                                     Wait for quiet and warn before an external update
+        speakfree quit-clipy         Ask Clipy to quit normally before deployment
         speakfree process <wav>      Transcribe a wav file; prints JSON {raw, processed, styled}
         speakfree set-hotkey <key>   Set the push-to-talk hotkey
         speakfree get-hotkey         Show current hotkey
@@ -24,7 +26,23 @@ func printUsage() {
         speakfree set-engine <name>  Set the transcription engine (whisper | parakeet)
         speakfree download-parakeet [id]  Download a Parakeet model (default parakeet-tdt-0.6b-v2)
         speakfree status             Show configuration and status
+
+    FOR AI ASSISTANTS AND SCRIPTS (one JSON object on stdout, documented exit codes;
+    see docs/AGENT-CLI.md):
+        speakfree transcribe <file>  Transcribe an audio file offline (never downloads)
+        speakfree history [--limit N] [--app BUNDLE_ID]
+                                     Recent dictations, only if saving is turned on
+        speakfree vocab list | add <word> | remove <word>
+                                     Read or edit the custom vocabulary (vocabulary.txt)
+        speakfree trace decode [--clipboard]
+                                     Decode dictation traces in text on stdin (or the clipboard)
+        speakfree match [--days N] [--clipboard]
+                                     Find the saved dictations that text came from, with what
+                                     the engine heard (only if saving is turned on)
+        speakfree set-trace <off|tags|selectors>
+                                     Append an invisible dictation trace in AI apps (off by default)
         speakfree audio-check        Check microphone handover for 12 seconds (saves no audio)
+        speakfree compat scan [--tsv]  List installed apps and how dictation reaches each (read-only)
         speakfree --help             Show this help message
 
     HOTKEY EXAMPLES:
@@ -209,12 +227,81 @@ func cmdStatus() {
     }
     let toggleMode = config.toggleMode?.value ?? false
     print("Toggle:      \(toggleMode ? "on (press to start/stop)" : "off (hold to talk)")")
+    print("Trace:       \(TraceGate.encoding(forSetting: config.dictationTrace)?.rawValue ?? "off")")
+}
+
+/// Run an agent command so that stdout carries exactly one JSON object: anything the
+/// engines print while working goes to stderr, then the JSON is written to the real stdout.
+func runAgentCommand(_ produce: () -> AgentCLI.Output) -> Never {
+    fflush(stdout)
+    let savedStdout = dup(STDOUT_FILENO)
+    if savedStdout >= 0 { dup2(STDERR_FILENO, STDOUT_FILENO) }
+    let output = produce()
+    fflush(stdout)
+    // Write the JSON straight to the saved real stdout and leave fd 1 pointing at stderr,
+    // so a late print from a background thread can never land after the JSON.
+    let data = Data((output.json + "\n").utf8)
+    if savedStdout >= 0 {
+        FileHandle(fileDescriptor: savedStdout, closeOnDealloc: false).write(data)
+    } else {
+        FileHandle.standardOutput.write(data)
+    }
+    exit(output.exitCode)
+}
+
+/// Text for `trace decode` / `match`: stdin when something is piped in, otherwise (or with
+/// --clipboard) the clipboard. nil when there is none, or when it exceeds the input cap
+/// (then `agentInputTooLarge` is set).
+var agentInputTooLarge = false
+func readAgentInput(forceClipboard: Bool) -> String? {
+    if forceClipboard || isatty(STDIN_FILENO) != 0 {
+        let text = NSPasteboard.general.string(forType: .string)
+        if let text, text.utf8.count > AgentCLI.maxInputBytes {
+            agentInputTooLarge = true
+            return nil
+        }
+        return text
+    }
+    var data = Data()
+    let handle = FileHandle.standardInput
+    while true {
+        let chunk = handle.readData(ofLength: 64 * 1024)
+        if chunk.isEmpty { break }
+        data.append(chunk)
+        if data.count > AgentCLI.maxInputBytes {
+            agentInputTooLarge = true
+            return nil
+        }
+    }
+    return String(data: data, encoding: .utf8)
+}
+
+func cmdSetTrace(_ value: String) {
+    let valid = ["off", "tags", "selectors"]
+    guard valid.contains(value) else {
+        print("Usage: speakfree set-trace <off|tags|selectors>")
+        exit(1)
+    }
+    var config = Config.load()
+    config.dictationTrace = value == "off" ? nil : value
+    do {
+        try config.save()
+        print(value == "off" ? "Dictation trace: off"
+              : "Dictation trace: on (\(value)) in \(config.dictationTraceApps == nil ? "the default app list" : "\(config.dictationTraceApps!.count) listed apps")")
+    } catch {
+        print("Error saving config: \(error.localizedDescription)")
+        exit(1)
+    }
 }
 
 let args = CommandLine.arguments
 let command = args.count > 1 ? args[1] : nil
 
 switch command {
+case "quit-clipy":
+    exit(DeploymentClipyQuit.run(arguments: Array(args.dropFirst(2))))
+case "quit-legacy-installed":
+    exit(LegacyDeploymentQuit.run(arguments: Array(args.dropFirst(2))))
 case "prepare-update":
     exit(UpdatePreparation.run(arguments: Array(args.dropFirst(2))))
 case "start":
@@ -227,6 +314,39 @@ case "process":
         exit(1)
     }
     cmdProcess(args[2])
+case "transcribe":
+    runAgentCommand { AgentCLI.transcribe(arguments: Array(args.dropFirst(2))) }
+case "history":
+    runAgentCommand { AgentCLI.history(arguments: Array(args.dropFirst(2))) }
+case "vocab", "vocabulary":
+    runAgentCommand { AgentCLI.vocab(arguments: Array(args.dropFirst(2))) }
+case "trace":
+    let rest = Array(args.dropFirst(2))
+    guard rest.first == "decode", rest.dropFirst().allSatisfy({ $0 == "--clipboard" }) else {
+        runAgentCommand { AgentCLI.traceUsage() }
+    }
+    let input = readAgentInput(forceClipboard: rest.contains("--clipboard"))
+    if agentInputTooLarge { runAgentCommand { AgentCLI.inputTooLarge(schema: AgentCLI.traceSchema) } }
+    runAgentCommand { AgentCLI.traceDecode(input: input) }
+case "match":
+    let rest = Array(args.dropFirst(2))
+    if rest.contains("--hook") {
+        // Hook mode: stdin is the hook's JSON. Print only a JSON object, or nothing at all,
+        // and always exit 0 so a prompt is never blocked.
+        let output = AgentCLI.matchHook(
+            stdin: isatty(STDIN_FILENO) != 0 ? nil : readAgentInput(forceClipboard: false))
+        if !output.json.isEmpty { FileHandle.standardOutput.write(Data((output.json + "\n").utf8)) }
+        exit(0)
+    }
+    let input = readAgentInput(forceClipboard: rest.contains("--clipboard"))
+    if agentInputTooLarge { runAgentCommand { AgentCLI.inputTooLarge(schema: AgentCLI.matchSchema) } }
+    runAgentCommand { AgentCLI.match(arguments: rest, input: input) }
+case "set-trace":
+    guard args.count > 2 else {
+        print("Usage: speakfree set-trace <off|tags|selectors>")
+        exit(1)
+    }
+    cmdSetTrace(args[2])
 case "set-hotkey":
     guard args.count > 2 else {
         print("Usage: speakfree set-hotkey <key>")
@@ -257,6 +377,17 @@ case "download-parakeet":
     cmdDownloadParakeet(id)
 case "status":
     cmdStatus()
+case "compat":
+    guard args.count > 2, args[2] == "scan" else {
+        print("Usage: speakfree compat scan [--tsv]")
+        exit(1)
+    }
+    let rows = AppCompatScan.scan()
+    print(args.dropFirst(3).contains("--tsv") ? AppCompatScan.renderTSV(rows) : AppCompatScan.renderMarkdown(rows))
+case "precompile-parakeet":
+    // Internal: the app runs its own executable with this command at launch to compile the
+    // Parakeet model for the Neural Engine outside its own process (ParakeetFirstStart.swift).
+    exit(ParakeetCompileHelperCommand.run(arguments: Array(args.dropFirst(2))))
 case "notice-preview":
     // Dev-only: tile every recordings-notice design variant on screen, buttons inert.
     RecordingsNoticePreview.run()

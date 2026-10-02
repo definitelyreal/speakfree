@@ -4,11 +4,11 @@ import XCTest
 
 /// The repeat-value gate on live-AX cursor context.
 ///
-/// On 2026-07-26, 83 of the day's AX reads in VS Code returned one of exactly two constant
-/// strings (22 and 32 chars) while every genuine context length appeared once or twice.
+/// In VS Code, most AX reads over a day returned one of exactly two constant strings
+/// (22 and 32 chars) while every genuine context length appeared once or twice.
 /// speakfree treated that fixed UI string as "the text before your cursor" and therefore
-/// prepended a space and lowercased the first word: 57 wrongly-lowercased dictations that
-/// day, 63 the day before, 0 on the two days before the Electron AX unlock shipped.
+/// prepended a space and lowercased the first word. The wrong lowercasing started when the
+/// Electron AX unlock shipped and was absent before it.
 final class LiveAXContextRepeatTests: XCTestCase {
 
     override func setUp() {
@@ -33,14 +33,14 @@ final class LiveAXContextRepeatTests: XCTestCase {
         }
     }
 
-    /// Real context changes between dictations — he types, or our own insertion lands in the
+    /// Real context changes between dictations — the user types, or our own insertion lands in the
     /// field. None of these may be rejected, or the feature is dead rather than fixed.
     func testGenuinelyChangingContextIsAlwaysAccepted() {
         let app = "com.microsoft.VSCode"
         let real = [
-            "Please look at ",
-            "Please look at today's dictation. ",
-            "Please look at today's dictation. There's been ",
+            "Please check ",
+            "Please check the draft below. ",
+            "Please check the draft below. There's been ",
             "ok so ",
             "ok so now ",
         ]
@@ -80,7 +80,7 @@ final class LiveAXContextRepeatTests: XCTestCase {
 
     /// Returning to an unchanged field after visiting another app costs one skipped
     /// context. Documented deliberately: the failure direction is "no lowercase, no
-    /// prepended space", which is the safe direction and what 07-24 did all day.
+    /// prepended space", which is the safe direction and matches behavior before the unlock.
     func testReturningToAnUnchangedFieldIsRejectedAndThatIsTheSafeDirection() {
         XCTAssertFalse(AppDelegate.liveAXContextIsRepeat("Hi there ", bundleID: "com.apple.MobileSMS"))
         XCTAssertFalse(AppDelegate.liveAXContextIsRepeat("elsewhere", bundleID: "com.microsoft.VSCode"))

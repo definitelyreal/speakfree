@@ -40,9 +40,9 @@ enum RecordingRetention {
 }
 
 enum SettingsLayout {
-    static let labelWidth: CGFloat = 200
+    static let labelWidth: CGFloat = 180
     static let controlSpacing: CGFloat = 12
-    static let windowWidth: CGFloat = 900
+    static let windowWidth: CGFloat = 760
 }
 
 struct RecordingRetentionPicker: View {

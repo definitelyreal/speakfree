@@ -84,7 +84,7 @@ final class HUDVariantRenderTests: XCTestCase {
             try png.write(to: URL(fileURLWithPath:
                 String(format: "%@/p%02d.png", emergenceDir, step * 10)))
         }
-        // Armed: no speech yet, silent bars — the bare dot + ring Michael specified.
+        // Armed: no speech yet, silent bars — the bare dot + ring the maintainer specified.
         let armed = OverlayContentView(
             frame: NSRect(origin: .zero, size: OverlayContentView.emergenceSize))
         armed.overlayState = .recording

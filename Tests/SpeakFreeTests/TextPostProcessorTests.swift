@@ -253,7 +253,7 @@ final class TextPostProcessorTests: XCTestCase {
     // produces (dogfood 2026-07-02: "Hey comma where do you want to meet" → "Hey. Kamala,…").
     // Gated on preceding punctuation (the garble signature).
     func testHybrid08d_kamalaVariant() {
-        // Hybrid mode (Michael's): the mis-heard command word, preceded by a punctuation break,
+        // Hybrid mode (the default): the mis-heard command word, preceded by a punctuation break,
         // is converted to punctuation, never left as the name/word (trailing punct/casing handled
         // by later steps, so assert the garble is simply gone).
         let a = TextPostProcessor.process("Hey. Kamala, where do you want to meet?", hybrid: true)
@@ -980,12 +980,12 @@ final class TextPostProcessorTests: XCTestCase {
             "Let us discuss it at the appropriate time.")
     }
 
-    // 72. INDEFINITE / prepositional "time period" also converts, incl. Michael's corpus
-    // ground-truth (CorpusTests, recording 2026-04-29: "a very exciting time period. I think…").
+    // 72. INDEFINITE / prepositional "time period" also converts, incl. the CorpusTests
+    // spoken-period regression shape ("…this time period. I think…").
     func testHybrid72_indefiniteAndIdiomTimeConverts() {
         XCTAssertEqual(
-            TextPostProcessor.process("This is a very exciting time period", hybrid: true),
-            "This is a very exciting time.")
+            TextPostProcessor.process("This is a very busy time period", hybrid: true),
+            "This is a very busy time.")
         XCTAssertEqual(
             TextPostProcessor.process("That was a crazy time period", hybrid: true),
             "That was a crazy time.")
@@ -1016,8 +1016,8 @@ final class TextPostProcessorTests: XCTestCase {
 
     // 74. Plural "time periods" followed by an emphatic "period" is naturally safe: the
     // converter's matched token is preceded by "periods", not "time", so the emphatic
-    // period still converts while the plural noun is untouched (corpus: "…performance of
-    // these different funds at different time periods period it should offer…").
+    // period still converts while the plural noun is untouched (corpus shape: "…weather of
+    // these different towns at different time periods period it should…").
     func testHybrid74_pluralTimePeriodsThenEmphaticPeriodConverts() {
         XCTAssertEqual(
             TextPostProcessor.process(
@@ -1028,7 +1028,7 @@ final class TextPostProcessorTests: XCTestCase {
     // 75. Menstrual noun — possessive determiners that CANNOT double as object pronouns
     // (my/your/our/their/its) protect "period" in every position, including utterance-final:
     // "…got my period." reads only as the noun ("…my. Period." is ungrammatical). General
-    // English, not Michael's usage — designed for the whole user population.
+    // English, not one speaker's usage — designed for the whole user population.
     func testHybrid75_possessiveMenstrualNounSurvives() {
         XCTAssertEqual(
             TextPostProcessor.process("I think I finally got my period.", hybrid: true),
@@ -1107,18 +1107,18 @@ final class TextPostProcessorTests: XCTestCase {
     }
 }
 
-// MARK: - Phoneme-mined garble repairs (2026-08-20, build/26-08-20-punctuation-phonemes)
+// MARK: - Phoneme-mined garble repairs (2026-08-20 punctuation-phoneme study)
 
 final class PhonemeMinedGarbleTests: XCTestCase {
 
     // R1: new non-word comma-family members (kaima/gama/kamo), same positional gates
-    // as komma/kana/kanna/kama. "kima" is deliberately ABSENT: it stays Karma's alias.
+    // as komma/kana/kanna/kama. "kima" is deliberately ABSENT: it is a protected name-like token.
     func testNewNonWordCommaGarblesConvert() {
         // hybrid: true — the production path for both Automatic & Spoken and Spoken Only.
-        XCTAssertEqual(TextPostProcessor.process("in that band. Kaima so they are right", hybrid: true),
-                       "in that band, so they are right")
-        // "kamo" deliberately excluded: it is a vocative nickname in the corpus
-        // ("…media moment. Kamo. I think you'd have…" — CorpusTests fixture).
+        XCTAssertEqual(TextPostProcessor.process("in that row. Kaima so they are right", hybrid: true),
+                       "in that row, so they are right")
+        // "kamo" deliberately excluded: it is a plausible name in the corpus
+        // ("…community moment, Kamo. I think you'd have…" — CorpusTests fixture).
         XCTAssertEqual(TextPostProcessor.process("adjust the level, gama then export", hybrid: true),
                        "adjust the level, then export")
     }
@@ -1177,7 +1177,7 @@ final class PhonemeMinedGarbleTests: XCTestCase {
     }
 }
 
-// MARK: - Wide-sweep garble repairs (2026-08-20, WIDE-SWEEP.md; all 0-FP corpus-simulated)
+// MARK: - Wide-sweep garble repairs (2026-08-20; all 0-FP corpus-simulated)
 
 final class WideSweepGarbleTests: XCTestCase {
     func testQuarkIsFusedQuestionMark() {
@@ -1227,7 +1227,7 @@ final class WideSweepGarbleTests: XCTestCase {
     }
 }
 
-// MARK: - Michael-approved held rules (2026-08-21 "yes on them")
+// MARK: - Approved held rules (2026-08-21)
 
 final class ApprovedHeldRuleTests: XCTestCase {
     func testQuarterAfterQuestionMarkFinalConverts() {

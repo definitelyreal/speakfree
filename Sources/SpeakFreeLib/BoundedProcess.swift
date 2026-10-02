@@ -22,9 +22,11 @@ enum BoundedProcess {
     }
 
     static func run(executable: URL, arguments: [String], timeout: TimeInterval,
-                    maxOutputBytes: Int = 8 * 1024 * 1024) throws -> Output {
+                    maxOutputBytes: Int = 8 * 1024 * 1024,
+                    qualityOfService: QualityOfService = .default) throws -> Output {
         guard timeout.isFinite, timeout > 0 else { throw Failure.timedOut }
         let process = Process()
+        process.qualityOfService = qualityOfService
         process.executableURL = executable
         process.arguments = arguments
         process.standardInput = FileHandle.nullDevice

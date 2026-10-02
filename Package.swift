@@ -55,7 +55,10 @@ let package = Package(
         // `swift run perf-harness run` / `swift run perf-harness compare <candidate> <baseline>`.
         .executableTarget(
             name: "perf-harness",
-            dependencies: ["SpeakFreeLib"],
+            dependencies: [
+                "SpeakFreeLib",
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
             path: "Sources/PerfHarness"
         ),
         // Offline A/B harness for Parakeet vocabulary boosting (vocab-boost-eval loop).

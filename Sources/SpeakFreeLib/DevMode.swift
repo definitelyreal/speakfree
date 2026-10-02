@@ -1,7 +1,7 @@
 // Claude · 2026-07-14 · Session: c58489fa-5c7d-451c-870d-8f4f5578ed2c
 import Foundation
 
-/// Machine-scoped developer mode (Michael, 2026-07-14).
+/// Machine-scoped developer mode (the maintainer, 2026-07-14).
 ///
 /// Activated by a marker file at `~/.speakfree-dev` — deliberately OUTSIDE the config
 /// directory so it survives config resets, reinstalls, updates, and the recordings

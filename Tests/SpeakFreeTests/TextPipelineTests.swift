@@ -34,11 +34,12 @@ final class TextPipelineTests: XCTestCase {
                        "Texting style should strip a single trailing period, got: \(result.finalText)")
     }
 
-    // MARK: - Dictated trailing period survives the texting strip (Michael 2026-08-14)
+    // MARK: - Dictated trailing period survives the texting strip (product decision 2026-08-14)
 
     func test_run_textingKeepsExplicitlyDictatedTrailingPeriod() {
-        // Raw from rec-015432 (8/14): he SAID "period" — the strip must not undo it.
-        let input = TextPipeline.Input(raw: "I hope you can make it, period.",
+        // Synthetic reproduction of an 8/14 regression: the speaker SAID "period" — the strip
+        // must not undo it.
+        let input = TextPipeline.Input(raw: "I hope the bread rises, period.",
                                        punctuationMode: .hybrid, styleMode: .texting)
         let result = TextPipeline.run(input)
         XCTAssertTrue(result.finalText.hasSuffix("."),
@@ -389,7 +390,7 @@ final class TextPipelineTests: XCTestCase {
                       ".hybrid mode: processedText should end with '?' after spoken 'question mark'. Got: \(result.processedText)")
     }
 
-    // MARK: - Mid-sentence insertion lowercasing (Michael 2026-06-11)
+    // MARK: - Mid-sentence insertion lowercasing (product decision 2026-06-11)
 
     func test_isMidSentence_positions() {
         // Mid-sentence: continuing after a word, comma, colon, dash, open paren
@@ -412,11 +413,11 @@ final class TextPipelineTests: XCTestCase {
     }
 
     func test_run_midSentence_lowercasesLeadingCapital() {
-        // The exact failure Michael hit: dictating a continuation mid-sentence,
+        // The reported failure shape: dictating a continuation mid-sentence,
         // whisper sentence-cases it ("If you think…"), insertion must lowercase.
-        let input = TextPipeline.Input(raw: "If you think there are other people",
+        let input = TextPipeline.Input(raw: "If you think there are other friends",
                                        punctuationMode: .hybrid,
-                                       cursorContextText: "I'd love if you could make it, and")
+                                       cursorContextText: "I'd love if you could join us, and")
         let result = TextPipeline.run(input)
         XCTAssertTrue(result.finalText.hasPrefix("if you think"),
                       "mid-sentence insertion must start lowercase. Got: \(result.finalText)")
@@ -438,11 +439,11 @@ final class TextPipelineTests: XCTestCase {
                                                     cursorContextText: "and then "))
         XCTAssertTrue(i.finalText.hasPrefix("I'll"), "pronoun I keeps case. Got: \(i.finalText)")
         // Glossary names stay capitalized
-        let g = TextPipeline.run(TextPipeline.Input(raw: "Bexx is coming too",
+        let g = TextPipeline.run(TextPipeline.Input(raw: "Jaxx is coming too",
                                                     punctuationMode: .hybrid,
                                                     cursorContextText: "and maybe ",
-                                                    glossaryWords: "Claude, Zander, Bexx"))
-        XCTAssertTrue(g.finalText.hasPrefix("Bexx"), "glossary name keeps case. Got: \(g.finalText)")
+                                                    glossaryWords: "Claude, Zander, Jaxx"))
+        XCTAssertTrue(g.finalText.hasPrefix("Jaxx"), "glossary name keeps case. Got: \(g.finalText)")
         // All-caps and internal-caps words stay
         let a = TextPipeline.run(TextPipeline.Input(raw: "OK let's do it",
                                                     punctuationMode: .hybrid,
@@ -464,10 +465,9 @@ final class TextPipelineTests: XCTestCase {
 
     // Audit 2026-07-01, reported live during the streaming dogfood: spoken "comma"
     // garbled by Parakeet to "kama" was hijacked by the curated override
-    // "kama"→"Karma" (the contact), inserting the name instead of punctuation.
-    // Position disambiguates the two intents: a break before the word means
-    // punctuation (TextPostProcessor consumes it BEFORE overrides run); plain
-    // prose means the name (the override downstream still fixes it).
+    // "kama"→"Karma" (a vocabulary name), inserting the name instead of punctuation.
+    // 2026-09-25 ruling: "Kama" is not a name in practice, so standalone "kama" is a spoken comma in every position; TextPostProcessor consumes
+    // it BEFORE a stale "kama"->"Karma" override can claim it.
     func test_run_kamaPunctuationIntent_beatsKarmaOverride() {
         let overrides = ["kama": "Karma"]
         let punct = TextPipeline.run(
@@ -483,8 +483,8 @@ final class TextPipelineTests: XCTestCase {
                                punctuationMode: .hybrid,
                                overrides: overrides),
             isRealWord: { _ in true })
-        XCTAssertEqual(prose.finalText, "tell Karma about the plan",
-                       "prose-position 'kama' is the name — override must still fix it")
+        XCTAssertEqual(prose.finalText, "tell, about the plan",
+                       "prose-position 'kama' is a spoken comma too, not a name")
     }
 
     // MARK: - Parakeet chunk-boundary word duplication (2026-07-02)

@@ -16,13 +16,26 @@ sf_verify_staged_app() {
     "$staged_app/Contents/MacOS/speakfree" --help >/dev/null || return 1
 }
 
-sf_prepare_update() {
-    local staged_app="$1" receipt status=0
+sf_require_standard_config() {
     # Deployment targets the ordinary production app/config. A test/custom override
     # would make its quiet-state observations refer to the wrong recording history.
     [ -z "${SPEAKFREE_CONFIG_DIR:-}" ] \
         || { echo "FATAL: unset SPEAKFREE_CONFIG_DIR before deployment" >&2; return 1; }
-    receipt="$("$staged_app/Contents/MacOS/speakfree" prepare-update --timeout 600)" || status=$?
+}
+
+sf_quit_clipy() {
+    local staged_app="$1" receipt status=0
+    receipt="$("$staged_app/Contents/MacOS/speakfree" quit-clipy --timeout 30)" || status=$?
+    if [ "$status" -ne 0 ] || [ "$receipt" != SPEAKFREE_CLIPY_STOPPED ]; then
+        echo "FATAL: Clipy did not quit normally (exit $status); refusing to stop or replace speakfree" >&2
+        return 1
+    fi
+}
+
+sf_prepare_update() {
+    local staged_app="$1" receipt status=0
+    sf_require_standard_config || return 1
+    receipt="$("$staged_app/Contents/MacOS/speakfree" prepare-update --timeout 600 --require-visible-warning)" || status=$?
     if [ "$status" -ne 0 ] || [ "$receipt" != SPEAKFREE_UPDATE_READY ]; then
         echo "FATAL: update warning/quiet guard did not authorize a stop (exit $status); app left running" >&2
         return 1
@@ -45,11 +58,29 @@ sf_read_target_pids() {
     esac
 }
 
+sf_installed_build_commit() {
+    /usr/libexec/PlistBuddy -c 'Print :SFBuildCommit' "$SF_INSTALLED_APP/Contents/Info.plist"
+}
+
 sf_stop_gracefully() {
-    local pid attempt
+    local staged_app="$1" pid attempt installed_commit receipt status
     sf_read_target_pids || return 1
+    [ -n "$SF_TARGET_PIDS" ] || return 0
+    installed_commit="$(sf_installed_build_commit)" \
+        || { echo "FATAL: cannot read installed build identity; refusing to stop the app" >&2; return 1; }
     for pid in $SF_TARGET_PIDS; do
-        kill -TERM "$pid" || { echo "FATAL: graceful stop request failed; refusing replacement" >&2; return 1; }
+        if [ "$installed_commit" = 9f4f749 ]; then
+            # This exact build enters terminateLater from its main-dispatch SIGTERM
+            # callback. Normal AppKit Quit avoids starving the asynchronous drain.
+            status=0
+            receipt="$("$staged_app/Contents/MacOS/speakfree" quit-legacy-installed --pid "$pid")" || status=$?
+            if [ "$status" -ne 0 ] || [ "$receipt" != SPEAKFREE_LEGACY_QUIT_REQUESTED ]; then
+                echo "FATAL: legacy normal quit was not accepted; refusing replacement without a signal fallback" >&2
+                return 1
+            fi
+        else
+            kill -TERM "$pid" || { echo "FATAL: graceful stop request failed; refusing replacement" >&2; return 1; }
+        fi
     done
     for ((attempt=0; attempt<360; attempt++)); do
         sf_read_target_pids || return 1
@@ -77,14 +108,21 @@ sf_move_old_app_to_trash() {
 
 sf_install_staged_app() {
     local staged_app="$1" label="$2"
+    sf_require_standard_config || return 1
     sf_verify_staged_app "$staged_app" || return 1
     sf_read_target_pids || return 1
+    # Retire Clipy's competing shortcut with a normal app quit before the quiet
+    # guard, so the update authorization remains fresh.
+    sf_quit_clipy "$staged_app" || return 1
     if [ -n "$SF_TARGET_PIDS" ]; then
-        echo "== $label: waiting for quiet and the visible/audible update warning =="
+        echo "== $label: waiting for no dictation, 30 s of quiet, and a visible cancellable warning =="
         sf_prepare_update "$staged_app" || return 1
+        # A missing/locked GUI session, warning failure, or cancellation cannot supply
+        # this receipt. Also fail if the operator's output channel closed while waiting.
+        echo "== $label: visible warning completed; asking the app to quit ==" || return 1
         # Invoke immediately after the positive receipt. An older app can still accept
         # a new Fn press between the final observation and SIGTERM; this is not atomic.
-        sf_stop_gracefully || return 1
+        sf_stop_gracefully "$staged_app" || return 1
     else
         echo "== $label: app already stopped; no stop warning needed =="
         # Never signal an app that appeared after choosing the no-warning branch.

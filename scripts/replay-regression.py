@@ -35,15 +35,24 @@ PROD_BIN = "/Applications/speakfree.app/Contents/MacOS/speakfree"
 REC_DIRS = [os.path.expanduser("~/.config/speakfree/recordings"),
             os.path.expanduser("~/.config/speakfree-streaming/recordings")]
 
-# Pinned canaries: (wav basename, field, must-contain substring, why)
-CANARIES = [
-    ("recording-2026-06-12-103432-DF55B5FD.wav", "raw", "send a screener",
-     "2026-06-12 tail-clause truncation: TDT flush drops the final clause without "
-     "enough trailing pad (FluidAudio/CoreML runtime quirk, non-monotonic in pad length)"),
-    ("recording-2026-07-03-004254-56BA6A96.wav", "raw", "chat history",
-     "2026-07-03 vocab-boost regression class: 'chat history' must never become "
-     "'chat Viktor' on the plain batch path"),
-]
+# Pinned canaries live OUTSIDE the repository, because they name real local recordings.
+# Default file: ~/.config/speakfree/replay-canaries.json (override with --canary-file or
+# SPEAKFREE_REPLAY_CANARIES). Format: a JSON list of objects
+#   {"wav": "<recording basename>.wav", "field": "raw", "contains": "<substring>",
+#    "why": "<regression this pins>"}
+# Pin a clip whose expected substring is non-personal wherever possible.
+DEFAULT_CANARY_FILE = os.environ.get(
+    "SPEAKFREE_REPLAY_CANARIES",
+    os.path.expanduser("~/.config/speakfree/replay-canaries.json"))
+
+
+def load_canaries(path):
+    """Return [(wav basename, field, must-contain substring, why)], or None if absent."""
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        rows = json.load(fh)
+    return [(r["wav"], r.get("field", "raw"), r["contains"], r.get("why", "")) for r in rows]
 
 
 def norm_tokens(s):
@@ -78,9 +87,14 @@ def find_wav(basename):
     return None
 
 
-def run_canaries(binary, allow_missing=False):
+def run_canaries(binary, canary_file, allow_missing=False):
     failed = 0
-    for basename, field, needle, why in CANARIES:
+    canaries = load_canaries(canary_file)
+    if canaries is None:
+        # Fail closed: no canary list proves nothing about the regressions it would pin.
+        print(f"CANARY {'SKIP' if allow_missing else 'FAIL'} (no canary file): {canary_file}")
+        return 0 if allow_missing else 1
+    for basename, field, needle, why in canaries:
         wav = find_wav(basename)
         if not wav:
             if allow_missing:
@@ -153,13 +167,15 @@ def main():
     ap.add_argument("--corpus", type=int, metavar="N")
     ap.add_argument("--binary", default=PROD_BIN)
     ap.add_argument("--allow-missing", action="store_true",
-                     help="treat a missing canary wav as SKIP instead of FAIL")
+                     help="treat a missing canary wav (or canary file) as SKIP instead of FAIL")
+    ap.add_argument("--canary-file", default=DEFAULT_CANARY_FILE,
+                    help="local JSON list of pinned canaries (kept outside the repo)")
     args = ap.parse_args()
     if not (args.canaries or args.corpus):
         ap.error("pick --canaries and/or --corpus N")
     failed = 0
     if args.canaries:
-        failed = run_canaries(args.binary, allow_missing=args.allow_missing)
+        failed = run_canaries(args.binary, args.canary_file, allow_missing=args.allow_missing)
     if args.corpus:
         run_corpus(args.binary, args.corpus)
     sys.exit(1 if failed else 0)

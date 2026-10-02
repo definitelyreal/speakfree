@@ -245,7 +245,7 @@ class RecordingOverlay {
 
     /// Capture ONE snapshot of the screen behind the overlay at show(), off-main,
     /// and derive BOTH the adaptive outline colour (DEFECT 4) and the frosted-blur
-    /// backdrop (Michael 2026-08-12) from that single grab — never re-sampled per
+    /// backdrop (the maintainer 2026-08-12) from that single grab — never re-sampled per
     /// frame. Fails safe (locked white ring, raw backdrop) if screen-capture
     /// permission is missing or any capture step returns nil.
     private func sampleBackdrop(windowNumber: Int, cocoaFrame: NSRect,
@@ -353,14 +353,14 @@ class RecordingOverlay {
             refineScreenAsync(for: showGeneration)
         }
 
-        // Record-start and errors open as a LARGE CENTER-SCREEN banner (Michael
+        // Record-start and errors open as a LARGE CENTER-SCREEN banner (the maintainer
         // 2026-07-25): unmissable positive feedback, so NOT seeing it after a keypress
         // reliably means the press didn't land (dead tap / dead app / refused start).
         // Recording glides down to the familiar bottom pill after a beat; errors
         // auto-hide in place.
         let isError = { if case .error = state { return true }; return false }()
         let prominent = state == .recording || isError
-        // Michael's locked entry (2026-08-12) opens as a bare record mark on a fully
+        // The maintainer's locked entry (2026-08-12) opens as a bare record mark on a fully
         // transparent window, so it needs a canvas big enough for the widest ring
         // pulse — clipping one into a corner arc is the exact artifact the lab was
         // built to avoid.
@@ -420,10 +420,10 @@ class RecordingOverlay {
         startAnimation()
 
         // One off-main screen grab behind the overlay feeds BOTH the dark/light
-        // record outline (DEFECT 4) and the static frosted-blur backdrop (Michael
+        // record outline (DEFECT 4) and the static frosted-blur backdrop (the maintainer
         // 2026-08-12). Only for the emergence entry; fails safe to the locked look.
         if emergence && !avoidsLiveWindowContext {
-            // System-appearance fallback FIRST (Michael 2026-08-19: the circle should
+            // System-appearance fallback FIRST (the maintainer 2026-08-19: the circle should
             // be dark on a light screen and light on a dark one). The pixel sample
             // needs Screen Recording permission and CGWindowListCreateImage is
             // obsoleted on modern macOS, so on a denied/failed grab the old fail-safe
@@ -461,7 +461,7 @@ class RecordingOverlay {
                 }
             }
         }
-        // (No glide-to-pill: Michael 2026-07-25 — the banner stays large and centered
+        // (No glide-to-pill: the maintainer 2026-07-25 — the banner stays large and centered
         // for the whole recording; the movement was distracting.)
     }
 
@@ -471,7 +471,7 @@ class RecordingOverlay {
             return
         }
         view.overlayState = state
-        // Emergence hold (Michael 2026-08-12): the centered card stays exactly where
+        // Emergence hold (the maintainer 2026-08-12): the centered card stays exactly where
         // and how big it was during recording, all the way through transcription — no
         // move to the bottom, no shrink to the spinner pill. The draw path paints the
         // working pulse on the same card; here we just refresh and keep the geometry
@@ -571,7 +571,7 @@ class RecordingOverlay {
     /// in-place decay was the reviewers' livability centerpiece).
     private func scheduleSettle() {
         // The emergence entry has no settle phase: its end state IS the shipped
-        // purple pill at 1.2×, which stays put and keeps tracking speech (Michael:
+        // purple pill at 1.2×, which stays put and keeps tracking speech (the maintainer:
         // "once the lines are created I want it to go back to what it was").
         guard !OverlayContentView.usesEmergenceEntry(style: style) else { return }
         let generation = showGeneration
@@ -663,7 +663,7 @@ class RecordingOverlay {
                 if let recorder = self.recorder {
                     // Ambient-adaptive gate (2026-08-19, full-corpus recalibration): the
                     // 2026-08-12 absolute gate instant-fired on ambient noise alone in any
-                    // non-quiet room (airplane cabin: record icon jumped immediately).
+                    // non-quiet room (in a loud room the record icon jumped immediately).
                     // The gate tracks the live noise floor from raw unclipped RMS and
                     // requires speech to clear max(quiet-room absolute, 1.5x floor); in
                     // quiet rooms the absolute term dominates, so behavior there is
@@ -675,7 +675,7 @@ class RecordingOverlay {
                         view.heardSpeech = true
                         view.speechStartedAt = Date()
                     }
-                    // Diagnostic-gated (SPEAKFREE_OVERLAY_LEVELS=1): lets Michael watch
+                    // Diagnostic-gated (SPEAKFREE_OVERLAY_LEVELS=1): lets the maintainer watch
                     // the recalibrated levels on his live mic without a rebuild. Prints
                     // magnitudes only, never transcript content. Off by default.
                     if RecordingOverlay.levelDebugEnabled {
@@ -724,7 +724,7 @@ class OverlayContentView: NSView {
     var overlayState: RecordingOverlay.OverlayState = .recording
     /// Center-screen banner phase: big title + large bars for the first ~1.1s.
     var prominent = false
-    /// Explosion sequence (Michael 2026-07-25): the banner opens with a record icon
+    /// Explosion sequence (the maintainer 2026-07-25): the banner opens with a record icon
     /// only; the FIRST real speech "explodes" it into the live waveform. These are
     /// driven from the 30fps animation tick.
     var heardSpeech = false
@@ -742,7 +742,7 @@ class OverlayContentView: NSView {
     /// Visual variant (config `overlayStyle` 1–5); drawing dispatches on it.
     var style: Int = 1
 
-    /// Which variant gets Michael's locked record-icon entry (2026-08-12).
+    /// Which variant gets the maintainer's locked record-icon entry (2026-08-12).
     ///
     /// Style 5 is what an unset `overlayStyle` resolves to (`AppDelegate` clamps
     /// `config.overlayStyle ?? 5` into 1…5), so it is the one he actually sees.
@@ -761,7 +761,7 @@ class OverlayContentView: NSView {
         usesEmergenceEntry(style: style) && (state == .recording || state == .transcribing)
     }
 
-    /// Michael's hold ruling (2026-08-12): for the emergence style the centered card
+    /// The maintainer's hold ruling (2026-08-12): for the emergence style the centered card
     /// HOLDS through transcription rather than dropping to the bottom spinner — its
     /// presence is the "working" signal, its disappearance the only "stopped" one.
     /// True while the emergence style is transcribing, so both `update()` (skip the
@@ -841,7 +841,7 @@ class OverlayContentView: NSView {
     private static let compressedBarsAreaHeight: CGFloat = 24
 
     /// Large center-screen banner shown for the first moments of every recording
-    /// (Michael 2026-07-25: record-start must be UNMISSABLE — its absence after a
+    /// (the maintainer 2026-07-25: record-start must be UNMISSABLE — its absence after a
     /// keypress is the only reliable signal for a dead tap or dead app).
     static let prominentSize = NSSize(width: 340, height: 110)
     static let errorSize = NSSize(width: 400, height: 96)
@@ -870,7 +870,7 @@ class OverlayContentView: NSView {
             ]).width)
             // Symmetric side room (spinner + gap on the left, mirrored on the right)
             // so the text itself lands dead centre; height leaves the cymatics
-            // grains a band above and below the line (Michael 2026-08-22).
+            // grains a band above and below the line (the maintainer 2026-08-22).
             return NSSize(width: max(baseWidth, min(400, textWidth + statusSidePad * 2)),
                           height: max(baseHeight, statusHeight))
         }
@@ -966,14 +966,14 @@ class OverlayContentView: NSView {
         // Opens as a record ICON; the first real speech explodes it into the live
         // waveform. Five visual variants dispatched on `style` (config overlayStyle),
         // built 2026-07-25 for adversarial design review. All are near-opaque
-        // (Michael: "less transparency, like 1/3 of the transparency").
+        // (the maintainer: "less transparency, like 1/3 of the transparency").
         if prominent && overlayState == .recording {
             drawProminentBanner(ctx: ctx, rect: rect, pillPath: pillPath)
             return
         }
 
         // Emergence hold: the centered card stays put through transcription with a
-        // calm "working" pulse (Michael 2026-08-12). Painted before the generic
+        // calm "working" pulse (the maintainer 2026-08-12). Painted before the generic
         // transcribing/spinner path so the emergence style never falls to it.
         if prominent && Self.emergenceTranscribing(style: style, state: overlayState) {
             drawEmergenceTranscribing(ctx: ctx, rect: rect)
@@ -1422,7 +1422,7 @@ class OverlayContentView: NSView {
         ctx.strokePath()
     }
 
-    /// Michael's locked entry (build/26-08-12-record-icon-animation/LOCKED-SETTINGS.json).
+    /// The maintainer's locked entry (the locked animation settings).
     ///
     /// Paint order matches the lab exactly: bloom card, then the emergence pulses,
     /// then the bars, then the idle ring and the record mark on top. Everything is
@@ -1447,7 +1447,7 @@ class OverlayContentView: NSView {
             strokeRing(ctx, center: center, stroke: stroke, color: ringRGB)
         }
 
-        // Slimmer, softer live bars (Michael 2026-08-12: "a little bit lighter").
+        // Slimmer, softer live bars (the maintainer 2026-08-12: "a little bit lighter").
         let barW = g.barWidth * OverlayEmergence.waveformWidthScale
         let solid = OverlayEmergence.solidity(progress: p, geometry: g)
         for i in 0..<g.count where solid[i] > 0 {
@@ -1480,7 +1480,7 @@ class OverlayContentView: NSView {
         }
     }
 
-    /// Transcribing HOLD (Michael 2026-08-12): the emergence card stays centered at
+    /// Transcribing HOLD (the maintainer 2026-08-12): the emergence card stays centered at
     /// its end-state geometry (the purple pill × 1.2, the same box it held while
     /// recording) and runs a calm, indeterminate "working" pulse instead of the live
     /// waveform. The card's presence is the "working" signal, so its disappearance —
@@ -1506,13 +1506,13 @@ class OverlayContentView: NSView {
             let r = level * barW / 2
             ctx.addPath(CGPath(roundedRect: bar, cornerWidth: r, cornerHeight: r, transform: nil))
             // Steady lilac, lighter weight — the bars are done carrying the mark's
-            // red at p = 1 (Michael 2026-08-12: lighter waveform).
+            // red at p = 1 (the maintainer 2026-08-12: lighter waveform).
             setFill(ctx, OverlayEmergence.barLilac, OverlayEmergence.waveformAlpha)
             ctx.fillPath()
         }
     }
 
-    /// Draw the static frosted snapshot behind the card (Michael 2026-08-12: "blur
+    /// Draw the static frosted snapshot behind the card (the maintainer 2026-08-12: "blur
     /// the static snapshot"). The blurred backdrop image is captured ONCE at show()
     /// and clipped to the current card shape, so the overlay sits on a soft blurred
     /// version of whatever was behind it. No-op (raw look) when the snapshot is
@@ -1724,7 +1724,7 @@ class OverlayContentView: NSView {
         }
     }
 
-    /// Rescue status line (Michael 2026-08-22): the text sits dead centre in the
+    /// Rescue status line (the maintainer 2026-08-22): the text sits dead centre in the
     /// card; the spinner hangs off its left edge (the pill reserves the same room
     /// on the right, so the text, not the spinner+text group, is what centres);
     /// while the rescue is still running, cymatics grains drift out from the text

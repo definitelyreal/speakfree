@@ -6,7 +6,7 @@ import AppKit
 /// Curated, similarity-gated proper-noun corrector.
 ///
 /// Fixes near-miss ASR misspellings of user-curated glossary names
-/// (e.g. "Rorlick" → "Rohrlich", "Pesa" → "Pessah") so custom names come out
+/// (e.g. "Vorback" → "Vohrbach", "Tesa" → "Tessah") so custom names come out
 /// right — including on the default **Parakeet** engine, where prompt-biasing is
 /// impossible (Parakeet ignores the glossary prompt entirely). It runs on the
 /// transcript text, so it is engine-agnostic (Parakeet AND Whisper).
@@ -15,8 +15,8 @@ import AppKit
 /// 2026-06-11. That one *learned* pairs and accumulated garbage (truncations like
 /// `coul→could`, quote-noise `don't→don't`, common→common `selection→election`).
 /// This corrector:
-///   - contains ONLY curated proper nouns (vocabulary.txt: manual / Contacts /
-///     Brain) — it never learns;
+///   - contains ONLY curated proper nouns (vocabulary.txt: manual or imported
+///     name lists) — it never learns;
 ///   - has a **real-word guard**: a token the system spell-checker recognizes is
 ///     NEVER altered, so genuine words ("marina", "election", "could") are safe
 ///     even when similar to a name. Injectable via `isRealWord` for tests;
@@ -105,12 +105,12 @@ public enum GlossaryCorrector {
         if let forced = overrides[lower] { return forced }
 
         // Exact glossary term (any case) → normalize to the curated spelling
-        // (e.g. mid-sentence "bexx" → "Bexx"; names keep their case).
+        // (e.g. mid-sentence "jaxx" → "Jaxx"; names keep their case).
         //
         // Real-word guard applies HERE too (audit 2026-07-01). On this path the
         // token already has the same letters as the term, so the only possible
-        // "correction" is capitalization — and vocabulary comes from Contacts/
-        // Brain, where names that are also common words are routine ("Will",
+        // "correction" is capitalization — and vocabulary comes from imported name
+        // lists, where names that are also common words are routine ("Will",
         // "Mark", "Grace", "Rose"). Without the guard, "i will send it" became
         // "I Will send it" in every dictation. A token that is itself a
         // legitimate word is left alone; put it in overrides to force it.

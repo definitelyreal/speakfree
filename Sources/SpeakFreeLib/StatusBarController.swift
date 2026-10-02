@@ -34,7 +34,11 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var recentRefreshInFlight = false
     private var recentRefreshPending = false
 
+    var historyHandler: (() -> Void)?
     var reprocessHandler: ((URL) -> Void)?
+    /// Inserts an Edit session's committed text, or one ⤷ component's, into the frontmost app.
+    var insertTextHandler: ((String) -> Void)?
+    private var recentEditSessionsSnapshot: [EditRecentSession] = []
     private var crashRecoveryURL: URL?
     private var crashRecoveryHandler: ((URL) -> Void)?
 
@@ -54,12 +58,23 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     var captureMessage: String? { didSet { buildMenu() } }
 
+    /// While "Stay on <headset>" is on, the menu-bar icon carries a small monochrome
+    /// headset badge (never orange: macOS already shows an orange mic dot there).
+    var stayOnActive = false { didSet { if stayOnActive != oldValue { updateIcon() } } }
+
     var modelIsLoading = false {
         didSet {
-            modelLoadMessage = modelIsLoading ? "Loading speech model… First dictation may take longer." : nil
+            modelLoadMessage = modelIsLoading ? ModelPreparationPhase.preparing(standInReady: false).menuMessage : nil
         }
     }
     var modelLoadMessage: String? { didSet { buildMenu() } }
+    /// Whisper backup (2026-09-23): a clickable offer after a missed take, and its own progress
+    /// line while downloading, so it never collides with the speech-model loading line.
+    var backupOfferHandler: (() -> Void)? { didSet { buildMenu() } }
+    var backupDownloadMessage: String? {
+        didSet { if oldValue != backupDownloadMessage { buildMenu() } }
+    }
+    private var backupOfferTarget: MenuItemTarget?
 
     enum State: Equatable {
         case idle
@@ -113,8 +128,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
         guard let delegate = NSApplication.shared.delegate as? AppDelegate,
               let text = delegate.lastTranscription else { return }
         let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        UserPasteRestoreGate.shared.writeOutsideBorrow {
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+        }
         copiedFeedback = true
         buildMenu()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
@@ -180,6 +197,18 @@ class StatusBarController: NSObject, NSMenuDelegate {
     /// state change. The old buildMenu-triggered scan occasionally took 10–35 seconds under load;
     /// that competed with the event tap and produced the user-visible "fn did nothing, then the
     /// Globe panel opened" outage. Disk reconciliation still runs at launch and submenu-open.
+    /// A refresh can read the newest take before its transcript sidecar is written (sidecars
+    /// follow insertion since 2026-09-22); keep the text the snapshot already has for that URL
+    /// rather than showing "(no transcript)".
+    static func keepingKnownText(refreshed: [Recording], previous: [Recording]) -> [Recording] {
+        let known = Dictionary(previous.compactMap { r in r.text.map { (r.url, $0) } },
+                               uniquingKeysWith: { first, _ in first })
+        return refreshed.map { r in
+            guard r.text?.isEmpty ?? true, let text = known[r.url] else { return r }
+            return Recording(url: r.url, date: r.date, text: text)
+        }
+    }
+
     func noteFinishedRecording(url: URL, text: String) {
         if !Thread.isMainThread {
             DispatchQueue.main.async { [weak self] in
@@ -206,32 +235,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // Microphone selection moved to Settings (Michael, 2026-08-14): with the built-in
-        // mic as the honest default since 2026-08-12, one-click switching in the menu (the
-        // 2026-07-14 rationale, when AirPods degradation made fast switching matter) no
-        // longer earns its menu space. The Settings picker carries the degradation notice
-        // the menu never had room for.
-
-        // AirPods Dictation Mode (Michael 2026-08-21) — the one mic control that earns
-        // menu space: a labeled MODE, not a silent default. Shown only while a Bluetooth
-        // input is connected. Checkmark = the Bluetooth mic is the active pin. The
-        // tooltip carries the honest tradeoff the 08-14 removal note asked for.
-        if let delegate = NSApplication.shared.delegate as? AppDelegate,
-           let bt = delegate.connectedBluetoothInput() {
-            let dictTarget = MenuItemTarget {
-                (NSApplication.shared.delegate as? AppDelegate)?.toggleDictationMode()
-            }
-            menuItemTargets.append(dictTarget)
-            let dictItem = NSMenuItem(title: "Use \(bt.name) for Dictation",
-                                      action: #selector(MenuItemTarget.invoke),
-                                      keyEquivalent: "")
-            dictItem.target = dictTarget
-            dictItem.state = delegate.dictationModeActive() ? .on : .off
-            dictItem.toolTip = "Preserve pre-listening on the built-in microphone and use \(bt.name) for live dictation. Bluetooth capture rests after 30 seconds idle."
-            if delegate.dictationModeActive() && !AudioDeviceCatalog.cachedInputDevices.contains(where: { !$0.isBluetooth && !$0.isVirtual }) {
-                dictItem.isEnabled = false
-            }
-            menu.addItem(dictItem)
+        // Microphone block (2026-09-24, "Stay on <headset>"): what is recording, then
+        // CHANGE TO with the wired mics and each headset's Stay-on rows. Cache reads only.
+        if let delegate = NSApplication.shared.delegate as? AppDelegate, let model = delegate.micMenuModel() {
+            addMicBlock(model, into: menu)
             menu.addItem(NSMenuItem.separator())
         }
 
@@ -265,6 +272,22 @@ class StatusBarController: NSObject, NSMenuDelegate {
         if let message = modelLoadMessage {
             let item = NSMenuItem(title: message, action: nil, keyEquivalent: "")
             item.isEnabled = false
+            menu.addItem(item)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        if let message = backupDownloadMessage {
+            let item = NSMenuItem(title: message, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            menu.addItem(NSMenuItem.separator())
+        } else if let handler = backupOfferHandler {
+            let target = MenuItemTarget(handler: handler)
+            backupOfferTarget = target
+            let item = NSMenuItem(
+                title: "Download Backup Speech Model (\(WhisperFallback.downloadSizeDescription))\u{2026}",
+                action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
             menu.addItem(item)
             menu.addItem(NSMenuItem.separator())
         }
@@ -337,22 +360,30 @@ class StatusBarController: NSObject, NSMenuDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        // Recent Dictations submenu — populated LAZILY (M1). buildMenu() runs on every state flip;
-        // reading a transcript sidecar per recording here opened thousands of files per build on a
-        // large corpus. The submenu's own delegate reads sidecars only when it's actually opened,
-        // and only for the newest N (see populateRecentMenu).
-        let recentParent = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
-        let recentMenu = NSMenu()
-        // Placeholder so the parent shows its submenu-expand arrow before first population; replaced
-        // in menuNeedsUpdate.
-        recentMenu.addItem(NSMenuItem(title: "…", action: nil, keyEquivalent: ""))
-        let delegate = RecentMenuDelegate { [weak self] submenu in
-            self?.populateRecentMenu(submenu)
+        if let historyHandler {
+            let target = MenuItemTarget(handler: historyHandler)
+            menuItemTargets.append(target)
+            let history = NSMenuItem(title: "History…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            history.target = target
+            menu.addItem(history)
         }
-        recentMenu.delegate = delegate
-        recentMenuDelegate = delegate
-        recentParent.submenu = recentMenu
-        menu.addItem(recentParent)
+        else {
+            let recentParent = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
+            recentParent.submenu = makeSavedDictationsMenu()
+            menu.addItem(recentParent)
+        }
+
+        // Developer machines only: exercise the Edit Mode window without a microphone.
+        if DevMode.isActive {
+            let sampleTarget = MenuItemTarget {
+                (NSApplication.shared.delegate as? AppDelegate)?.openEditModeWithSample()
+            }
+            menuItemTargets.append(sampleTarget)
+            let sampleItem = NSMenuItem(title: "Edit Mode: Add Sample Paragraph",
+                                        action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            sampleItem.target = sampleTarget
+            menu.addItem(sampleItem)
+        }
 
         menu.addItem(NSMenuItem.separator())
 
@@ -369,7 +400,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(NSMenuItem.separator())
 
         // Check for Updates — wired to Sparkle's updater
-        if let delegate = NSApplication.shared.delegate as? AppDelegate {
+        if Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil,
+           let delegate = NSApplication.shared.delegate as? AppDelegate {
             let updateTarget = MenuItemTarget {
                 delegate.updaterController.checkForUpdates(nil)
             }
@@ -377,6 +409,23 @@ class StatusBarController: NSObject, NSMenuDelegate {
             let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
             updateItem.target = updateTarget
             menu.addItem(updateItem)
+        } else if Bundle.main.object(forInfoDictionaryKey: "SFBuildChannel") as? String == "alpha" {
+            let manualUpdateItem = NSMenuItem(title: "Alpha updates are manual", action: nil, keyEquivalent: "")
+            manualUpdateItem.isEnabled = false
+            menu.addItem(manualUpdateItem)
+        }
+
+        // Report a Problem with <App>… (2026-09-24): about the app that was in front when the
+        // menu opened (or the last one before a speakfree window). Hidden when there is none.
+        if let app = AppProblemWindowController.currentTargetApp() {
+            let problemTarget = MenuItemTarget { AppProblemWindowController.show(for: app) }
+            menuItemTargets.append(problemTarget)
+            let name = app.localizedName ?? app.bundleIdentifier ?? "This App"
+            let problemItem = NSMenuItem(title: "Report a Problem with \(name)…",
+                                         action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            problemItem.target = problemTarget
+            problemItem.toolTip = "Try a different insertion method for this app, mark what works, and optionally open a prefilled bug report. No dictated text is included."
+            menu.addItem(problemItem)
         }
 
         let helpTarget = MenuItemTarget { HelpController.show() }
@@ -386,6 +435,22 @@ class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(helpItem)
 
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    /// History's archive link preserves recovery and saved Edit-session actions without
+    /// adding a second competing history item to the menu bar. No sidecars are read here.
+    func showSavedDictationsMenu() {
+        let menu = makeSavedDictationsMenu()
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    private func makeSavedDictationsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Saved Dictations")
+        menu.addItem(NSMenuItem(title: "…", action: nil, keyEquivalent: ""))
+        let delegate = RecentMenuDelegate { [weak self] submenu in self?.populateRecentMenu(submenu) }
+        menu.delegate = delegate
+        recentMenuDelegate = delegate
+        return menu
     }
 
     /// M1: build the "Recent Dictations" submenu on demand (when it opens), reading transcript
@@ -430,7 +495,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
         // Refresh for the next open without delaying this one.
         requestRecentRecordingsRefresh()
 
-        if recordings.isEmpty {
+        let items = EditRecents.merge(recordings: recordings, sessions: recentEditSessionsSnapshot)
+        if items.isEmpty {
             if crashRecoveryURL == nil {
                 let emptyItem = NSMenuItem(title: "No recordings yet", action: nil, keyEquivalent: "")
                 emptyItem.isEnabled = false
@@ -439,7 +505,34 @@ class StatusBarController: NSObject, NSMenuDelegate {
             return
         }
 
-        for (index, recording) in recordings.enumerated() {
+        for (index, item) in items.enumerated() {
+            // Edit Mode session: the full text first, then each paragraph on a "⤷" line.
+            if case .session(let session) = item {
+                let age = StatusBarController.relativeTime(from: session.date)
+                let parentTarget = MenuItemTarget { [weak self] in
+                    self?.insertTextHandler?(session.text)
+                }
+                recentMenuTargets.append(parentTarget)
+                let parent = NSMenuItem(title: "\(age) — \(EditRecents.parentTitle(session))",
+                                        action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+                parent.target = parentTarget
+                menu.addItem(parent)
+                for component in session.components {
+                    let childTarget = MenuItemTarget { [weak self] in
+                        self?.insertTextHandler?(component.text)
+                    }
+                    recentMenuTargets.append(childTarget)
+                    let child = NSMenuItem(title: EditRecents.componentTitle(component),
+                                           action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+                    child.target = childTarget
+                    child.indentationLevel = 1
+                    menu.addItem(child)
+                }
+                if index == 0 && items.count > 1 { menu.addItem(NSMenuItem.separator()) }
+                continue
+            }
+            guard case .recording(let url) = item,
+                  let recording = recordings.first(where: { $0.url == url }) else { continue }
             let age = StatusBarController.relativeTime(from: recording.date)
             let preview: String
             if let t = recording.text, !t.isEmpty {
@@ -457,7 +550,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
             item.target = target
             menu.addItem(item)
             // Separator after the first (most recent) recording
-            if index == 0 && recordings.count > 1 {
+            if index == 0 && items.count > 1 {
                 menu.addItem(NSMenuItem.separator())
             }
         }
@@ -504,13 +597,16 @@ class StatusBarController: NSObject, NSMenuDelegate {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let refreshStarted = CFAbsoluteTimeGetCurrent()
             let recordings = RecordingStore.listRecordings(limit: 15)
+            let editSessions = EditRecents.list(limit: 15)
             let elapsedMs = (CFAbsoluteTimeGetCurrent() - refreshStarted) * 1_000
             DiagnosticLogger.shared.log(String(
                 format: "Recent Dictations: refreshed %d-item cache in %.1f ms",
                 recordings.count, elapsedMs))
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.recentRecordingsSnapshot = recordings
+                self.recentRecordingsSnapshot = Self.keepingKnownText(
+                    refreshed: recordings, previous: self.recentRecordingsSnapshot)
+                self.recentEditSessionsSnapshot = editSessions
                 self.hasLoadedRecentRecordings = true
                 self.recentRefreshInFlight = false
                 if self.recentRefreshPending {
@@ -531,7 +627,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         switch state {
         case .idle:
-            setIcon(StatusBarController.drawLogo(active: false))
+            setIcon(stayOnActive ? StatusBarController.drawLogoWithHeadsetBadge() : StatusBarController.drawLogo(active: false))
         case .ready:
             setIcon(StatusBarController.drawGreenLogo())
         case .recording:
@@ -551,6 +647,107 @@ class StatusBarController: NSObject, NSMenuDelegate {
         case .setupFailed:
             setIcon(StatusBarController.drawErrorIcon())
         }
+    }
+
+    // MARK: - Microphone block
+
+    private func addMicBlock(_ model: MicMenuModel, into menu: NSMenu) {
+        let first = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        first.isEnabled = false
+        let text = NSMutableAttributedString()
+        let regular = NSFont.menuFont(ofSize: 0)
+        let bold = NSFont.boldSystemFont(ofSize: regular.pointSize)
+        if let notice = model.firstRow.notice {
+            text.append(NSAttributedString(string: notice + "\n", attributes: [.font: bold, .foregroundColor: NSColor.labelColor]))
+            first.image = model.firstRow.noticeKind == .stayOn ? Self.stayOnGlyph()
+                : NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)
+        }
+        text.append(NSAttributedString(string: model.firstRow.device, attributes: [.font: regular, .foregroundColor: NSColor.labelColor]))
+        if let detail = model.firstRow.detail {
+            text.append(NSAttributedString(string: "\n" + detail, attributes: [
+                .font: NSFont.menuFont(ofSize: regular.pointSize - 2), .foregroundColor: NSColor.secondaryLabelColor]))
+        }
+        first.attributedTitle = text
+        first.toolTip = model.accessibilityLabel
+        menu.addItem(first)
+
+        guard !model.rows.isEmpty else { return }
+        menu.addItem(NSMenuItem.sectionHeader(title: "CHANGE TO"))
+        for row in model.rows {
+            switch row {
+            case .microphone(let uid, let name, let checked, let selectsAutomatic):
+                let item = actionItem(name) {
+                    (NSApplication.shared.delegate as? AppDelegate)?.selectInputDevice(uid: selectsAutomatic ? nil : uid)
+                }
+                item.state = checked ? .on : .off
+                menu.addItem(item)
+            case .stayOn(let uid, let name, let title, let enabled):
+                let item = actionItem(title) {
+                    (NSApplication.shared.delegate as? AppDelegate)?.startStayOn(uid: uid, name: name, duration: .standard)
+                }
+                item.image = Self.stayOnGlyph()
+                item.isEnabled = enabled
+                item.toolTip = "Uses the \(name) mic for dictation for 2 hours. Music on it sounds like a phone call while Stay on is on, and it may switch over from your phone."
+                menu.addItem(item)
+            case .otherDurations(let uid, let name, let checked):
+                let item = NSMenuItem(title: "Other durations", action: nil, keyEquivalent: "")
+                item.indentationLevel = 1
+                let sub = NSMenu()
+                for (i, group) in StayOnDuration.menuGroups.enumerated() {
+                    if i > 0 { sub.addItem(NSMenuItem.separator()) }
+                    for d in group {
+                        let di = actionItem(d.menuTitle) {
+                            (NSApplication.shared.delegate as? AppDelegate)?.startStayOn(uid: uid, name: name, duration: d)
+                        }
+                        di.state = d == checked ? .on : .off
+                        sub.addItem(di)
+                    }
+                }
+                item.submenu = sub
+                menu.addItem(item)
+            case .endStayOn:
+                menu.addItem(actionItem("End Stay on") {
+                    (NSApplication.shared.delegate as? AppDelegate)?.stayOn?.end(.turnedOff)
+                })
+            case .noMicOffered(let title):
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+        }
+    }
+
+    private func actionItem(_ title: String, _ handler: @escaping () -> Void) -> NSMenuItem {
+        let target = MenuItemTarget(handler: handler)
+        menuItemTargets.append(target)
+        let item = NSMenuItem(title: title, action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+        item.target = target
+        return item
+    }
+
+    /// Orange system timer symbol: orange marks Stay on, and only on this glyph. The shape
+    /// (a timer: the mode ends on its own) carries the meaning without the color.
+    static func stayOnGlyph() -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [.systemOrange]))
+        let image = NSImage(systemSymbolName: "timer", accessibilityDescription: "Stay on")?.withSymbolConfiguration(config)
+        image?.isTemplate = false
+        return image
+    }
+
+    /// The idle logo with a small monochrome headset badge, shown while Stay on is on.
+    static func drawLogoWithHeadsetBadge() -> NSImage {
+        let logo = drawLogo(active: false)
+        let badge = NSImage(systemSymbolName: "headphones", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .bold))
+        let image = NSImage(size: NSSize(width: 24, height: 18), flipped: false) { _ in
+            logo.draw(in: NSRect(x: 0, y: 0, width: 18, height: 18))
+            badge?.draw(in: NSRect(x: 15, y: 0, width: 9, height: 9))
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "speakfree, Stay on"
+        return image
     }
 
     // MARK: - Recording animation: wave

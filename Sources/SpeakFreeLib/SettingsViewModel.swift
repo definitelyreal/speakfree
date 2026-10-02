@@ -8,6 +8,9 @@ public class SettingsViewModel: ObservableObject {
 
     // MARK: - Published properties
 
+    /// Presentation only; opening Clipboard preferences never changes saved settings.
+    @Published var selectedSettingsTab = SettingsTab.dictation
+    @Published public var historySettings: HistorySettings
     @Published public var hotkeyKeyCode: UInt16
     @Published public var hotkeyModifiers: [String]
     /// Legacy Hold/Toggle boolean, kept for back-compat readers and the round-trip tests. The
@@ -15,6 +18,10 @@ public class SettingsViewModel: ObservableObject {
     /// `toggleMode` from it for downgrade safety.
     @Published public var toggleMode: Bool
     @Published public var keyMode: KeyMode
+    /// Edit Mode: Claude cleanup switch (nil in config = on), model, and the consent date.
+    @Published public var editModeCleanup: Bool
+    @Published public var editModeModel: CleanupService.Model
+    @Published public var editModeCloudConsent: String?
     @Published public var modelSize: String
     @Published public var language: String
     @Published public var punctuationMode: PunctuationMode
@@ -22,6 +29,13 @@ public class SettingsViewModel: ObservableObject {
     @Published public var screenContext: Bool
     @Published public var preBuffer: Bool
     @Published public var keepModelLoaded: String
+    /// "Load Whisper as fallback for errors" (Parakeet only; WhisperFallback). The stored value:
+    /// nil = never touched (on whenever the model is installed). Saved back as-is so an untouched
+    /// setting never becomes an explicit choice.
+    @Published public var whisperFallbackSetting: Bool?
+    /// Bumped when the backup download changes state so the Settings row redraws.
+    @Published public var whisperFallbackDownloadGeneration = 0
+    private var whisperFallbackObserver: NSObjectProtocol?
     @Published public var diagnosticLogging: Bool
     @Published public var streamingEnabled: Bool
     @Published public var languageModels: [String: String]
@@ -30,6 +44,13 @@ public class SettingsViewModel: ObservableObject {
     @Published public var localAPIEnabled: Bool
     @Published public var localAPIPort: Int
     @Published public var saveRecordings: Bool
+    /// Per-app insertion method (bundle ID -> method); never holds `.automatic`.
+    @Published public var insertionOverrides: [String: InsertionMethod]
+    @Published public var compatibilityReportEnabled: Bool
+    /// "This works" confirmations from Report a Problem (read-only here; that window saves them).
+    @Published public private(set) var insertionConfirmations: [String: InsertionConfirmation]
+    /// "off", "tags", or "selectors" (Config.dictationTrace; nil on disk = "off").
+    @Published public var dictationTrace: String
     @Published public var saveError: String?
 
     // MARK: - Callback
@@ -50,11 +71,15 @@ public class SettingsViewModel: ObservableObject {
     public init(config: Config? = nil) {
         let c = config ?? Config.load()
         self.baseConfig = c
+        self.historySettings = c.history ?? HistorySettings()
 
         self.hotkeyKeyCode = c.hotkey.keyCode
         self.hotkeyModifiers = c.hotkey.modifiers
         self.toggleMode = c.toggleMode?.value ?? false
         self.keyMode = c.effectiveKeyMode
+        self.editModeCleanup = c.editModeCleanup?.value ?? true
+        self.editModeModel = CleanupService.Model.resolve(c.editModeCleanupModel)
+        self.editModeCloudConsent = c.editModeCloudConsent
         self.modelSize = c.modelSize
         self.language = c.language
         self.punctuationMode = c.effectivePunctuationMode
@@ -62,6 +87,7 @@ public class SettingsViewModel: ObservableObject {
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
+        self.whisperFallbackSetting = c.whisperFallback?.value
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
         // Must match AppDelegate's runtime gate (`?? true`) and Config's documented
@@ -76,6 +102,17 @@ public class SettingsViewModel: ObservableObject {
         self.localAPIEnabled = c.localAPI?.value ?? false
         self.localAPIPort = c.localAPIPort ?? 5765
         self.saveRecordings = c.saveRecordings?.value ?? false
+        self.insertionOverrides = c.effectiveInsertionOverrides
+        self.compatibilityReportEnabled = c.compatibilityReport?.value ?? false
+        self.insertionConfirmations = c.insertionConfirmations?.values ?? [:]
+        self.dictationTrace = TraceGate.encoding(forSetting: c.dictationTrace)?.rawValue ?? "off"
+        whisperFallbackObserver = NotificationCenter.default.addObserver(
+            forName: WhisperFallback.downloadStateChanged, object: nil, queue: .main
+        ) { [weak self] _ in self?.whisperFallbackDownloadGeneration += 1 }
+    }
+
+    deinit {
+        if let whisperFallbackObserver { NotificationCenter.default.removeObserver(whisperFallbackObserver) }
     }
 
     /// Re-read config from disk and refresh baseConfig plus every published field.
@@ -86,10 +123,14 @@ public class SettingsViewModel: ObservableObject {
     public func refreshFromDisk() {
         let c = Config.load()
         self.baseConfig = c
+        self.historySettings = c.history ?? HistorySettings()
         self.hotkeyKeyCode = c.hotkey.keyCode
         self.hotkeyModifiers = c.hotkey.modifiers
         self.toggleMode = c.toggleMode?.value ?? false
         self.keyMode = c.effectiveKeyMode
+        self.editModeCleanup = c.editModeCleanup?.value ?? true
+        self.editModeModel = CleanupService.Model.resolve(c.editModeCleanupModel)
+        self.editModeCloudConsent = c.editModeCloudConsent
         self.modelSize = c.modelSize
         self.language = c.language
         self.punctuationMode = c.effectivePunctuationMode
@@ -97,6 +138,7 @@ public class SettingsViewModel: ObservableObject {
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
+        self.whisperFallbackSetting = c.whisperFallback?.value
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
         // Must match AppDelegate's runtime gate (`?? true`) and Config's documented
@@ -111,6 +153,25 @@ public class SettingsViewModel: ObservableObject {
         self.localAPIEnabled = c.localAPI?.value ?? false
         self.localAPIPort = c.localAPIPort ?? 5765
         self.saveRecordings = c.saveRecordings?.value ?? false
+        self.insertionOverrides = c.effectiveInsertionOverrides
+        self.compatibilityReportEnabled = c.compatibilityReport?.value ?? false
+        self.insertionConfirmations = c.insertionConfirmations?.values ?? [:]
+        self.dictationTrace = TraceGate.encoding(forSetting: c.dictationTrace)?.rawValue ?? "off"
+    }
+
+    /// The edit window's Options saved new Edit Mode settings: take them, so a Settings window
+    /// that stays open never writes the old values back. Consent first, so turning cleanup on
+    /// here never re-asks for consent that was just given.
+    public func applyEditModeSettings(from c: Config) {
+        baseConfig.editModeCloudConsent = c.editModeCloudConsent
+        baseConfig.editModeCleanup = c.editModeCleanup
+        baseConfig.editModeCleanupModel = c.editModeCleanupModel
+        baseConfig.editModeAnimation = c.editModeAnimation
+        if editModeCloudConsent != c.editModeCloudConsent { editModeCloudConsent = c.editModeCloudConsent }
+        let cleanup = c.editModeCleanup?.value ?? true
+        if editModeCleanup != cleanup { editModeCleanup = cleanup }
+        let model = CleanupService.Model.resolve(c.editModeCleanupModel)
+        if editModeModel != model { editModeModel = model }
     }
 
     // MARK: - Conversion
@@ -119,6 +180,7 @@ public class SettingsViewModel: ObservableObject {
     /// Overlays the published fields onto baseConfig — see baseConfig doc.
     public func toConfig() -> Config {
         var config = baseConfig
+        config.history = historySettings
         config.hotkey = HotkeyConfig(keyCode: hotkeyKeyCode, modifiers: hotkeyModifiers)
         config.modelSize = modelSize
         config.language = language
@@ -136,9 +198,19 @@ public class SettingsViewModel: ObservableObject {
         // tap behavior, the closest legacy match).
         config.keyMode = keyMode
         config.toggleMode = FlexBool(keyMode == .toggle)
+        // Edit Mode keys are written only once they differ from "never set", so a Settings save
+        // by someone who never touched Edit Mode leaves the config file as it was.
+        if baseConfig.editModeCleanup != nil || !editModeCleanup {
+            config.editModeCleanup = FlexBool(editModeCleanup)
+        }
+        if baseConfig.editModeCleanupModel != nil || editModeModel != .sonnet {
+            config.editModeCleanupModel = editModeModel.rawValue
+        }
+        config.editModeCloudConsent = editModeCloudConsent
         config.screenContext = FlexBool(screenContext)
         config.preBuffer = FlexBool(preBuffer)
         config.keepModelLoaded = keepModelLoaded
+        config.whisperFallback = whisperFallbackSetting.map { FlexBool($0) }
         config.diagnosticLogging = FlexBool(diagnosticLogging)
         config.streamingEnabled = FlexBool(streamingEnabled)
         config.languageModels = languageModels.isEmpty ? nil : languageModels
@@ -147,7 +219,28 @@ public class SettingsViewModel: ObservableObject {
         config.localAPI = FlexBool(localAPIEnabled)
         config.localAPIPort = localAPIPort
         config.saveRecordings = FlexBool(saveRecordings)
+        let overrides = insertionOverrides.filter { !$0.key.isEmpty && $0.value != .automatic }
+        // Keep entries a newer build wrote with a method this build does not know, unless the
+        // user has since picked a method for that app here.
+        let chosen = Set(overrides.keys.map { $0.lowercased() })
+        let unknown = (baseConfig.insertionOverrides?.unknown ?? [:])
+            .filter { !chosen.contains($0.key.lowercased()) }
+        config.insertionOverrides = overrides.isEmpty && unknown.isEmpty
+            ? nil : InsertionOverrideMap(overrides, unknown: unknown)
+        config.compatibilityReport = FlexBool(compatibilityReportEnabled)
+        config.dictationTrace = TraceGate.encoding(forSetting: dictationTrace)?.rawValue
         return config
+    }
+
+    /// Set (or, with `.automatic`, clear) the insertion method for one app and save.
+    /// Replaces any existing entry for the same bundle ID regardless of letter case.
+    public func setInsertionOverride(_ method: InsertionMethod, for bundleID: String) {
+        let trimmed = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var updated = insertionOverrides.filter { $0.key.lowercased() != trimmed.lowercased() }
+        if method != .automatic { updated[trimmed] = method }
+        insertionOverrides = updated
+        save()
     }
 
     /// Save the current settings to disk and notify the callback.

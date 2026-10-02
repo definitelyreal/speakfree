@@ -8,20 +8,41 @@ import Sparkle
 
 public class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBar: StatusBarController!
+    var historyCoordinator: HistoryCoordinator?
     var hotkeyManager: HotkeyManager?
     var recorder: AudioRecorder!
     /// Transfers to the finalization task; closing the writer alone does not end file use.
     private var recordingActivityLease: RecordingActivity.Lease?
     var transcriber: Transcriber!
     var inserter: TextInserter!
-    var config: Config!
+    var config: Config! {
+        didSet { applyCompatibilitySettings() }
+    }
+
+    /// Push the per-app insertion overrides and the compatibility-report switch from config
+    /// into the inserter (2026-09-24). Config is loaded off-main during setup, so the write
+    /// hops to main, where every insertion runs. The hop reads `config` when it RUNS, not when
+    /// it was queued, so a queued older update can never overwrite a newer one.
+    private func applyCompatibilitySettings() {
+        let apply = { [weak self] in
+            guard let self else { return }
+            self.inserter?.insertionOverrides = self.config?.effectiveInsertionOverrides ?? [:]
+            CompatibilityReport.shared.isEnabled = self.config?.compatibilityReport?.value ?? false
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    }
     private let _isPressed = OSAllocatedUnfairLock(initialState: false)
     var isPressed: Bool {
         get { _isPressed.withLock { $0 } }
         set { _isPressed.withLock { $0 = newValue } }
     }
     var isReady = false
-    public var lastTranscription: String?
+    public var lastTranscription: String? {
+        didSet { dictationSerial &+= 1 }
+    }
+    /// Bumped whenever `lastTranscription` is set, so a retry can tell that a new dictation
+    /// finished during its wait even when the new text is identical (2026-09-24).
+    private(set) var dictationSerial = 0
     private var recordingOverlay = RecordingOverlay()
     private var settingsViewModel: SettingsViewModel?
     private var localAPIServer: LocalAPIServer?
@@ -43,10 +64,85 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Routes an Edit-mode fn-tap through the EditSessionController (Phase 2). nil = fall back to
     /// toggle semantics so keyMode:"edit" still dictates before the controller exists.
     var editHotkeyRouter: (() -> Void)?
+    /// Tells the open session that a take ended with no text (too short, silent, failed, aborted),
+    /// so the window never waits on it and Return never hangs.
+    var editFinalizeFailureSink: ((UUID, UUID) -> Void)?
+    /// Edit Mode V1 (2026-09-24). Created at launch; inert unless Key Mode is Edit.
+    var editSessionController: EditSessionController?
 
     // Clean up whisper model before exit to prevent ggml Metal assertion crash.
     // The crash happens in __cxa_finalize_ranges when ggml tries to free Metal
     // residency sets that are still active during static destructor cleanup.
+    /// Clipboard canary (ClipboardCanary.swift): once a day on screen lock or long idle, never
+    /// while a take is captured, transcribed or holding the clipboard.
+    var clipboardCanaryScheduler: ClipboardCanaryScheduler?
+
+    private func startClipboardCanary() {
+        var environment = ClipboardCanary.Environment(pasteboard: .general, store: .shared)
+        environment.isBusy = { [weak self] in
+            guard let self else { return true }
+            let state = self.statusBar?.state
+            return self.isPressed || self.postBufferTimer != nil
+                || state == .recording || state == .transcribing
+                || (self.inserter?.hasPendingClipboardBorrow ?? false)
+        }
+        // Classify the running apps once off main, so the first paste's trust check is a memo hit.
+        let runningIDs = NSWorkspace.shared.runningApplications.map(\.bundleIdentifier)
+        DispatchQueue.global(qos: .utility).async { _ = ClipboardReaderCatalog.running(in: runningIDs) }
+        _ = ClipboardTrustStore.shared.state  // load the small JSON now, not on the first paste
+        environment.layoutVKeyCode = { [weak self] in self?.inserter?.layoutVKeyCodeForGate() }
+        let canary = ClipboardCanary(environment: environment)
+        inserter.clipboardCanary = canary
+        let scheduler = ClipboardCanaryScheduler(canary: canary)
+        scheduler.start()
+        clipboardCanaryScheduler = scheduler
+    }
+
+    private var scheduledRecentInsertionCount = 0
+    private var historyTerminationInFlight = false
+    private var skipHistoryDrainOnce = false
+
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let historyCoordinator else { return .terminateNow }
+        if historyTerminationInFlight { return .terminateLater }
+        // Existing SIGTERM handling drains active work before calling terminate. A
+        // direct Quit must not start a history drain while a dictation can still arrive.
+        guard !isPressed, postBufferTimer == nil,
+              statusBar?.state != .recording, statusBar?.state != .transcribing,
+              !hasPersistInFlight, scheduledRecentInsertionCount == 0,
+              inserter?.hasDeferredInsertion != true else {
+            NSSound.beep()
+            return .terminateCancel
+        }
+        if skipHistoryDrainOnce { skipHistoryDrainOnce = false; return .terminateNow }
+        cancelSecureInputRetry()
+        historyTerminationInFlight = true
+        isTerminating = true
+        historyCoordinator.prepareForTermination { [weak self, weak sender] result in
+            guard let self, let sender else { return }
+            self.historyTerminationInFlight = false
+            switch result {
+            case .success:
+                sender.reply(toApplicationShouldTerminate: true)
+            case .failure(let error):
+                self.isTerminating = false
+                sender.reply(toApplicationShouldTerminate: false)
+                let alert = NSAlert()
+                alert.messageText = "History could not be saved"
+                alert.informativeText = error.localizedDescription + " Your current history remains available in speakfree."
+                alert.addButton(withTitle: "Keep Open")
+                alert.addButton(withTitle: "Quit Without Saving")
+                if alert.runModal() == .alertSecondButtonReturn {
+                    // Explicit user choice: the next termination bypasses the history
+                    // drain, while applicationWillTerminate still performs app cleanup.
+                    self.skipHistoryDrainOnce = true
+                    ApplicationTermination.request(sender)
+                }
+            }
+        }
+        return .terminateLater
+    }
+
     public func applicationWillTerminate(_ notification: Notification) {
         // Close an in-flight recording FIRST (2026-07-25 audit F7): a clean quit
         // (Cmd-Q, logout, Sparkle relaunch) previously left the wav header uncommitted —
@@ -55,8 +151,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         if recorder?.stopRecording() != nil {
             DiagnosticLogger.shared.log("Terminate: closed in-flight recording for recovery")
         }
+        // An open Edit session stops its cleanup calls and keeps its draft (when saving is on).
+        MainActor.assumeIsolated { editSessionController?.terminate() }
         // applicationWillTerminate cannot await — bridge the async unload to sync via the
         // transcriber's synchronous passthrough (semaphore-backed inside Transcriber).
+        // Never leave a clipboard canary on the clipboard when quitting: give it back now.
+        clipboardCanaryScheduler?.canary.abort(reason: "quit")
         transcriber?.unloadModelSync()
         hotkeyManager?.stop()
         recorder?.shutdown()
@@ -82,7 +182,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // `begin()` at record-start, the background reader `publish`es when it lands, and
     // finalize `consume(waitingUpTo:)`s it (waiting briefly only if still in flight — never
     // on the start path; nil on timeout, exactly the old AX-timeout semantics).
-    private let focusCapture = FocusCaptureBox<(AXUIElement?, String?)>()
+    private let focusCapture = FocusCaptureBox<(AXUIElement?, String?, FocusCaptureBox<SecureInputRetryDestination>?)>()
     // Screen OCR text captured at recording start (opt-in). Written only on main via
     // generation-token check, so no lock needed.
     private var screenContextText: String?
@@ -111,6 +211,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // Tail of the last successful insertion (2026-07-15): feeds the cursor-context
     // fallback for AX-opaque editors. Main-only.
     private var lastInsertionTail: String?
+
+    /// The remembered cursor tail after an insertion: what was before the cursor plus what
+    /// `TextInserter.insert` actually inserted (it drops a trailing line break in every app).
+    static func insertionTail(contextBefore: String?, inserted: String) -> String {
+        String(((contextBefore ?? "") + AppCompatibility.trimmingTrailingLineBreaks(inserted))
+            .suffix(500))
+    }
     private var lastInsertionBundleID: String?
     private var lastInsertionAt: Date?
     private var lastInsertionElement: AXUIElement?
@@ -132,8 +239,26 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // energy crosses the speech threshold. This timer feeds it RMS windows from the live recorder.
     private var postBufferTimer: Timer?
     private var postBufferGeneration: UInt64 = 0
+    private var takePresentation = TakePresentationOwnership()
     /// The current press resumed a take whose previous hold had already been released.
     private var continuedReleasedTake = false
+    /// Set when key press found the model out of memory and began loading it (diagnostic only;
+    /// read and cleared by finalize for the `Latency:` line).
+    private var modelPreloadStartedAtPress = false
+    /// In-flight Whisper backup download started from the fallback offer or Settings.
+    private var whisperFallbackDownload: ModelDownloadCoordinator?
+    /// Sidecar writes still running after their text was inserted. Graceful termination waits
+    /// for these as it does for an active dictation (2026-09-22 review: exiting mid-write left
+    /// the WAV and sentinel behind, and launch recovery would transcribe it).
+    private let persistLock = NSLock()
+    private var persistInFlight = 0
+    private var hasPersistInFlight: Bool {
+        persistLock.lock(); defer { persistLock.unlock() }
+        return persistInFlight > 0
+    }
+    private func adjustPersistInFlight(_ delta: Int) {
+        persistLock.lock(); persistInFlight += delta; persistLock.unlock()
+    }
     /// Window cadence the post-buffer poll uses (matches PostBufferPolicy's default window grain).
     private let postBufferWindowMs: Double = 30.0
 
@@ -168,13 +293,19 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
 
         statusBar = StatusBarController()
+        AppProblemWindowController.startTrackingFrontmostApps()
         recorder = AudioRecorder()
         inserter = TextInserter()
+        startClipboardCanary()
+        applyCompatibilitySettings()
         installGracefulTermination()
+        setUpStayOn()
 
         // Device catalog cache: the ONLY CoreAudio the main thread ever sees. Refreshes
         // off-main at launch and on device changes; the menu rebuilds from the cache.
         AudioDeviceCatalog.onCacheRefreshed = { [weak self] in
+            self?.stayOn.devicesChanged(inputs: AudioDeviceCatalog.cachedInputDevices,
+                                        bluetoothOutputs: AudioDeviceCatalog.cachedBluetoothOutputs)
             self?.recorder.handleDeviceListChanged(AudioDeviceCatalog.cachedInputDevices)
             self?.statusBar.buildMenu()
         }
@@ -259,7 +390,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Continue Anyway")
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            NSApplication.shared.terminate(nil)
+            ApplicationTermination.request()
         }
         // If the user clicked "Continue Anyway" the app stays alive in the error state.
     }
@@ -270,7 +401,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         setup()
     }
 
-    // MARK: Legacy Parakeet model resolution (audit 2026-07-01, Michael's call)
+    // MARK: Legacy Parakeet model resolution (audit 2026-07-01, the maintainer's call)
 
     /// Test seam for the legacy model prompt — receives whether v3 is already on
     /// disk, returns the chosen model id. nil = show the real NSAlert.
@@ -360,7 +491,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         guard proceeded else {
             // Closing initial setup leaves no implicit answer. Quit gracefully so
             // the next launch asks again rather than leaving a non-recording app.
-            DispatchQueue.main.async { NSApp.terminate(nil) }
+            ApplicationTermination.request()
             return false
         }
         config = Config.load()
@@ -374,7 +505,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Ask before pruning, recovery, downloads or live capture. This single gate
         // covers both cached models and Welcome's automatic post-download restart.
         guard completeRecordingsSetupIfNeeded() else { return }
-        // One-line effective-config snapshot (Michael 2026-08-20: forensics need the
+        // One-line effective-config snapshot (the maintainer 2026-08-20: forensics need the
         // settings a session actually ran with, not a guess from the current file).
         var cfgParts: [String] = []
         cfgParts.append("engine=" + (config.engine ?? "whisper"))
@@ -411,10 +542,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         if maxRecordings > 0 {
             RecordingStore.prune(maxCount: maxRecordings)
         }
+        // `speakfree match` reads a names-only index instead of listing the whole archive;
+        // merge the folder's recent takes into it once per launch (creates it the first time).
+        if DevMode.effectiveSaveRecordings(config) {
+            DispatchQueue.global(qos: .utility).async {
+                RecordingStore.rebuildRecentIndexIfMissing()
+            }
+        }
 
         // (Prune runs FIRST — codex review #2: pruning after the sweep could delete
         // an orphan mid-recovery.)
-        // AUTO-recovery (Michael, 2026-07-25: "why should I have to click?"): orphans
+        // AUTO-recovery (the maintainer, 2026-07-25: "why should I have to click?"): orphans
         // are transcribed in the background at launch — no menu click, no clipboard
         // side effects. Results land as transcript sidecars, so recovered dictations
         // appear in Recent Dictations (where a click inserts them). Each orphan waits
@@ -427,8 +565,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             DiagnosticLogger.shared.log(String(
                 format: "Recovery: %d orphan(s) queued for background transcription (newest %@, %.0fs)",
                 orphans.count, orphans[0].url.lastPathComponent, orphans[0].seconds))
-            autoRecoverOrphans(orphans.map(\.url))
         }
+        // Started below, after warmUpEngine marks the model preparation running (see
+        // LaunchRecoveryGate). Started here, recovery could run between the transcriber's
+        // creation and the warm-up and begin its own Neural Engine compile.
+        let orphanURLs = orphans.map(\.url)
 
 
         // Recordings notice (2026-07-14; corpus framing 2026-08-21): saving shipped
@@ -564,13 +705,39 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
+        transcriber.whisperFallbackEnabled = WhisperFallback.isEnabled(config)
+        if !WhisperFallback.isEnabled(config) || effectiveEngineID != "parakeet" {
+            statusBar.backupOfferHandler = nil
+        }
         transcriber.startMemoryPressureMonitoring()
-        warmUpEngine(engineID)
+        // Recovery after the warm-up is marked running, never before (LaunchModelSequence,
+        // pinned by LaunchRecoveryGateTests).
+        LaunchModelSequence.run(orphans: orphanURLs,
+                                warmUp: { warmUpEngine(engineID) },
+                                startRecovery: { autoRecoverOrphans($0) })
 
         DispatchQueue.main.async {
             self.statusBar.reprocessHandler = { [weak self] url in
                 self?.reprocess(audioURL: url)
             }
+            self.statusBar.insertTextHandler = { [weak self] text in
+                self?.insertRecentText(text)
+            }
+            self.installEditMode()
+            self.historyCoordinator = HistoryCoordinator(config: self.config,
+                inserter: { [weak self] in self?.inserter },
+                isBusy: { [weak self] in
+                    guard let self else { return true }
+                    return self.isPressed || self.postBufferTimer != nil || self.statusBar?.state == .transcribing
+                        || self.scheduledRecentInsertionCount > 0 || self.secureInputRetryTimer != nil
+                        || (self.editSessionOpenProbe?() ?? false)
+                })
+            self.historyCoordinator?.showPreferences = { [weak self] in
+                self?.showSettings()
+                self?.settingsViewModel?.selectedSettingsTab = .clipboard
+            }
+            self.historyCoordinator?.showSavedDictations = { [weak self] in self?.statusBar.showSavedDictationsMenu() }
+            self.statusBar.historyHandler = { [weak self] in self?.historyCoordinator?.show() }
             self.statusBar.buildMenu()
         }
 
@@ -799,6 +966,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func reloadConfig() {
         if setupGate.deferReloadIfRunning() { return }
+        let historyConfig = Config.load()
+        if Thread.isMainThread { historyCoordinator?.configure(historyConfig) }
+        else { DispatchQueue.main.async { [weak self] in self?.historyCoordinator?.configure(historyConfig) } }
+        // Edit Mode cleanup/consent/model changes apply to an open session AT ONCE, even though
+        // the rest of this reload waits for the session to close: cloud-off must be immediate.
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { editSessionController?.configChanged() }
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated { self?.editSessionController?.configChanged() }
+            }
+        }
         // L1: never mutate live dictation state mid-utterance. If fn is held (a dictation is in
         // flight), defer the ENTIRE reload — not just the hotkey rebuild — because it also swaps
         // the transcriber (this utterance would finalize on the wrong engine) and flips
@@ -815,6 +994,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             pendingConfigReload = true
             DiagnosticLogger.shared.log("Config: reload deferred — dictation or edit session in flight")
             return
+        }
+
+        // Saving just turned on (or the recent-takes index is otherwise missing): build it from
+        // the folder in the background so `speakfree match` sees takes from before.
+        if DevMode.effectiveSaveRecordings(Config.load()),
+           !FileManager.default.fileExists(atPath: RecordingStore.recentIndexURL.path) {
+            let dir = RecordingStore.recordingsDir
+            DispatchQueue.global(qos: .utility).async {
+                RecordingStore.rebuildRecentIndexIfMissing(in: dir)
+            }
         }
 
         // In noModel state: only restart full setup if the user has now downloaded a model.
@@ -839,6 +1028,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             if modelAvailable {
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.setup() }
             }
+            // Per-app insertion settings still apply right away (2026-09-24).
+            inserter?.insertionOverrides = freshConfig.effectiveInsertionOverrides
+            CompatibilityReport.shared.isEnabled = freshConfig.compatibilityReport?.value ?? false
             return
         }
 
@@ -910,6 +1102,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
+        transcriber.whisperFallbackEnabled = WhisperFallback.isEnabled(config)
+        if !WhisperFallback.isEnabled(config) || effectiveEngineID != "parakeet" {
+            statusBar.backupOfferHandler = nil
+        }
         transcriber.startMemoryPressureMonitoring()
         if needsNewEngine { warmUpEngine(effectiveEngineID) }
 
@@ -924,33 +1120,168 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 switch status {
                 case .rechecking:
                     self.recordingOverlay.updateStreamingText(status.message)
-                case .failed:
+                case .failed, .staticNoise:
                     self.recordingOverlay.lingerWithMessageThenHide(status.message)
+                case .missed:
+                    self.offerWhisperFallbackDownloadIfNeeded()
+                    let hint = self.statusBar.backupOfferHandler != nil
+                        ? " A backup model is offered in the menu." : ""
+                    self.recordingOverlay.lingerWithMessageThenHide(status.message + hint, duration: 4)
                 }
             }
         }
     }
 
-    /// Warm up the Parakeet model in the background at launch / engine switch so the
-    /// first dictation isn't a ~15-20s cold ANE load. Parakeet only (Whisper's cold
-    /// load is fast and its memory profile differs); no-ops if assets aren't present.
+    /// After a missed take with no backup installed: offer the Whisper backup in the menu (then
+    /// once per cooldown). Never a modal from here: this runs inside a main-queue block, and a
+    /// modal there would hold every queued hotkey event until dismissed (2026-09-23 review), and
+    /// would steal focus from the app being dictated into.
+    private func offerWhisperFallbackDownloadIfNeeded() {
+        let current = Config.load()
+        guard WhisperFallback.shouldOfferDownload(
+            config: current, engine: activeEngineID,
+            modelPresent: Transcriber.modelExists(modelSize: WhisperFallback.modelSize),
+            downloading: whisperFallbackDownload != nil, now: Date()) else { return }
+        DiagnosticLogger.shared.log("Whisper fallback: backup offer shown in menu")
+        statusBar.backupOfferHandler = { [weak self] in self?.presentWhisperFallbackOffer() }
+    }
+
+    /// The user chose the menu offer (a menu action, not a queued main-queue block).
+    private func presentWhisperFallbackOffer() {
+        guard !isPressed else { return }
+        // The offer may have gone stale (Settings turned it off, engine switched, model installed).
+        guard WhisperFallback.shouldOfferDownload(
+            config: Config.load(), engine: activeEngineID,
+            modelPresent: Transcriber.modelExists(modelSize: WhisperFallback.modelSize),
+            downloading: whisperFallbackDownload != nil, now: Date()) else {
+            statusBar.backupOfferHandler = nil
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = WhisperFallback.offerTitle
+        alert.informativeText = WhisperFallback.offerMessage
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Download Backup")
+        alert.addButton(withTitle: "Not Now")
+        let accepted = alert.runModal() == .alertFirstButtonReturn
+        statusBar.backupOfferHandler = nil
+        var updated = Config.load()
+        if accepted {
+            DiagnosticLogger.shared.log("Whisper fallback: user accepted the backup download")
+            updated.whisperFallback = FlexBool(true)
+            try? updated.save()
+            config?.whisperFallback = FlexBool(true)
+            startWhisperFallbackDownload()
+        } else {
+            DiagnosticLogger.shared.log("Whisper fallback: user declined the backup download")
+            updated.whisperFallbackOfferDeclinedAt = Date().timeIntervalSince1970
+            try? updated.save()
+            config?.whisperFallbackOfferDeclinedAt = updated.whisperFallbackOfferDeclinedAt
+        }
+    }
+
+    public var isWhisperFallbackDownloading: Bool { whisperFallbackDownload != nil }
+
+    /// Background download of the backup model; progress on its own menu line, updated only when
+    /// the whole percent changes (URLSession reports every write).
+    func startWhisperFallbackDownload() {
+        guard whisperFallbackDownload == nil else { return }
+        statusBar.backupOfferHandler = nil
+        let coordinator = ModelDownloadCoordinator()
+        whisperFallbackDownload = coordinator
+        var lastPercent = -1
+        statusBar.backupDownloadMessage = "Downloading backup model\u{2026} 0%"
+        NotificationCenter.default.post(name: WhisperFallback.downloadStateChanged, object: nil)
+        coordinator.onProgress = { [weak self, weak coordinator] fraction, _, _ in
+            // Ignore progress queued before a cancel.
+            guard let self, let coordinator, self.whisperFallbackDownload === coordinator else { return }
+            let percent = Int(fraction * 100)
+            guard percent != lastPercent else { return }
+            lastPercent = percent
+            self.statusBar.backupDownloadMessage = "Downloading backup model\u{2026} \(percent)%"
+        }
+        coordinator.onSuccess = { [weak self] _ in
+            guard let self else { return }
+            self.whisperFallbackDownload = nil
+            self.transcriber?.whisperFallbackEnabled = WhisperFallback.isEnabled(Config.load())
+            DiagnosticLogger.shared.log("Whisper fallback: backup model installed")
+            self.showBackupStatusBriefly("Backup model ready for next time")
+            NotificationCenter.default.post(name: WhisperFallback.downloadStateChanged, object: nil)
+        }
+        coordinator.onFailure = { [weak self] error in
+            guard let self else { return }
+            self.whisperFallbackDownload = nil
+            DiagnosticLogger.shared.log("Whisper fallback: backup download failed (\(error.localizedDescription))")
+            self.showBackupStatusBriefly("Backup model download failed. Try again in Settings.", seconds: 60)
+            NotificationCenter.default.post(name: WhisperFallback.downloadStateChanged, object: nil)
+        }
+        DiagnosticLogger.shared.log("Whisper fallback: downloading \(WhisperFallback.modelSize)")
+        coordinator.start(modelSize: WhisperFallback.modelSize)
+    }
+
+    /// Settings unchecked the option mid-download.
+    func cancelWhisperFallbackDownload() {
+        guard let coordinator = whisperFallbackDownload else { return }
+        coordinator.onProgress = nil
+        coordinator.onSuccess = nil
+        coordinator.onFailure = nil
+        coordinator.cancel()
+        whisperFallbackDownload = nil
+        statusBar.backupDownloadMessage = nil
+        NotificationCenter.default.post(name: WhisperFallback.downloadStateChanged, object: nil)
+        DiagnosticLogger.shared.log("Whisper fallback: backup download cancelled from Settings")
+    }
+
+    private func showBackupStatusBriefly(_ message: String, seconds: TimeInterval = 8) {
+        statusBar.backupDownloadMessage = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            if self?.statusBar.backupDownloadMessage == message { self?.statusBar.backupDownloadMessage = nil }
+        }
+    }
+
+    /// Prepare the Parakeet model in the background at launch / engine switch, which also
+    /// covers the first launch after every update (Sparkle and the fleet installs relaunch the
+    /// app). The first load after an update compiles for the Neural Engine (16-73 s in the
+    /// logs); `Transcriber.prepare` runs that compile in a helper process while a CPU-only
+    /// stand-in serves dictations, and the menu says so. Whisper just loads in the background
+    /// (its cold load is 0.5-1 s). No-ops if assets aren't present.
     private func warmUpEngine(_ engineID: String) {
         guard let t = transcriber else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.transcriber === t else { return }
             self.statusBar.modelIsLoading = engineID == "parakeet" && !t.isLoaded
         }
-        guard engineID == "parakeet" else { return }
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let start = Date()
-            await t.warmUp()
-            let loaded = t.isLoaded
-            DiagnosticLogger.shared.log("Parakeet warm-up \(loaded ? "ready" : "failed") after \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.transcriber === t else { return }
-                self.statusBar.modelIsLoading = false
-                if !loaded { self.statusBar.modelLoadMessage = "Initial model load failed — dictation will retry" }
+        guard engineID == "parakeet" else {
+            // Whisper (2026-09-22): its cold load is 0.5 to 1 s, which doubled the first
+            // dictation after launch (logs: every first take was "waiting on model load").
+            // Load it in the background too; the ~1.6 GB it holds is what the first dictation
+            // would load anyway under the default keep-loaded setting.
+            Task.detached(priority: .utility) { [weak self] in
+                let current = await MainActor.run { [weak self] in self?.transcriber === t }
+                guard current else { return }
+                let start = Date()
+                await t.warmUp()
+                DiagnosticLogger.shared.log("Whisper warm-up \(t.isLoaded ? "ready" : "failed") after \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
             }
+            return
+        }
+        weak var weakSelf = self
+        let start = Date()
+        // Marked pending synchronously (before the task runs) so a key press right after
+        // launch leaves the load to this preparation instead of starting its own
+        // in-process Neural Engine compile (see preloadModelIfNeeded).
+        let preparation = t.startPreparation { phase in
+            DispatchQueue.main.async {
+                guard let self = weakSelf, self.transcriber === t else { return }
+                if case .preparing = phase {} else { self.statusBar.modelIsLoading = false }
+                self.statusBar.modelLoadMessage = phase.menuMessage
+            }
+        }
+        Task.detached(priority: .utility) {
+            await preparation.value
+            let state = t.isLoaded ? "ready" : (t.isReadyToTranscribe ? "on the CPU stand-in" : "failed")
+            DiagnosticLogger.shared.log("Parakeet warm-up \(state) after \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
         }
     }
 
@@ -963,10 +1294,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler { [weak self] in
-            guard let self else { NSApp.terminate(nil); return }
+            guard let self else { ApplicationTermination.request(); return }
             let busy = self.statusBar.state == .recording || self.statusBar.state == .transcribing
+                || self.hasPersistInFlight
             if !busy {
-                NSApp.terminate(nil)
+                ApplicationTermination.request()
                 return
             }
             DiagnosticLogger.shared.log("SIGTERM: dictation in flight — waiting to exit")
@@ -987,10 +1319,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// before terminating. Hard deadline so a stuck state can't make the app unkillable.
     private func terminateAfterQuiet(consecutiveIdle: Int, deadline: Date) {
         let busy = statusBar.state == .recording || statusBar.state == .transcribing
+            || hasPersistInFlight
         let idleCount = busy ? 0 : consecutiveIdle + 1
         if idleCount >= 20 || Date() > deadline {
             DiagnosticLogger.shared.log("SIGTERM: quiet — exiting now")
-            NSApp.terminate(nil)
+            ApplicationTermination.request()
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -1004,6 +1337,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     public func currentInputDeviceUID() -> String? { config?.inputDeviceUID }
 
     public func selectInputDevice(uid: String?) {
+        // Picking a microphone (a menu click, or a real change in Settings) is a choice to
+        // leave Stay on. Settings filters out its own re-save of the current pin.
+        if stayOn?.mode.isActive == true { stayOn.end(.choseOtherMic) }
         var updated = Config.load()
         updated.inputDeviceUID = uid
         try? updated.save()
@@ -1020,42 +1356,211 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         DiagnosticLogger.shared.log("Microphone selector: \(uid ?? "system default")")
     }
 
-    // MARK: - AirPods Dictation Mode (Michael 2026-08-21)
+    // MARK: - Report a Problem (2026-09-24)
 
-    /// The first connected Bluetooth input device, if any (AirPods-class).
-    public func connectedBluetoothInput() -> AudioInputDevice? {
-        AudioDeviceCatalog.cachedInputDevices.first { $0.isBluetooth }
-    }
-
-    /// Whether the current pin IS the connected Bluetooth mic (menu checkmark state).
-    public func dictationModeActive() -> Bool {
-        guard let bt = connectedBluetoothInput() else { return false }
-        return config?.inputDeviceUID == nil || config?.inputDeviceUID == bt.uid
-    }
-
-    /// Toggle: ON pins the Bluetooth mic (remembering the previous pin for restore);
-    /// OFF restores whatever was pinned before the mode engaged. A deliberate, labeled
-    /// tradeoff — best mic quality in noise, output drops to call quality while on.
-    public func toggleDictationMode() {
-        guard let bt = connectedBluetoothInput() else { return }
+    /// Save one app's insertion setting from the Report a Problem window and apply it now.
+    /// Same external-writer rules as `selectInputDevice`: write through a fresh load, keep the
+    /// in-memory config in step, and re-sync an open Settings window so its next save cannot
+    /// undo this.
+    public func setInsertionMethod(_ method: InsertionMethod, forBundleID bundleID: String) {
         var updated = Config.load()
-        if dictationModeActive() {
-            let restore = updated.preDictationModeInputUID
-                ?? AudioDeviceCatalog.cachedBuiltInInput?.uid
-                ?? AudioDeviceCatalog.cachedInputDevices.first(where: { !$0.isBluetooth && !$0.isVirtual })?.uid
-            guard let restore else { return } // No alternative mic to switch to.
-            updated.preDictationModeInputUID = nil
-            try? updated.save()
-            config?.preDictationModeInputUID = nil
-            DiagnosticLogger.shared.log("Dictation Mode: OFF — restoring input \(restore)")
-            selectInputDevice(uid: restore)
-        } else {
-            updated.preDictationModeInputUID = updated.inputDeviceUID
-            try? updated.save()
-            config?.preDictationModeInputUID = config?.inputDeviceUID
-            DiagnosticLogger.shared.log("Dictation Mode: ON — pinning \(bt.name)")
-            selectInputDevice(uid: bt.uid)
+        updated.setInsertionOverride(method, for: bundleID)
+        try? updated.save()
+        config?.insertionOverrides = updated.insertionOverrides
+        inserter?.insertionOverrides = updated.effectiveInsertionOverrides
+        if SettingsWindowController.isWindowVisible {
+            settingsViewModel?.refreshFromDisk()
         }
+        DiagnosticLogger.shared.log("Report a Problem: \(bundleID) set to \(method.rawValue)")
+    }
+
+    /// Record "This works" for an app, locally only.
+    public func recordInsertionConfirmation(_ confirmation: InsertionConfirmation, forBundleID bundleID: String) {
+        var updated = Config.load()
+        updated.recordInsertionConfirmation(confirmation, for: bundleID)
+        try? updated.save()
+        config?.insertionConfirmations = updated.insertionConfirmations
+        if SettingsWindowController.isWindowVisible {
+            settingsViewModel?.refreshFromDisk()
+        }
+    }
+
+    /// A retry from Report a Problem is waiting for its app to come forward.
+    private(set) var retryInFlight = false
+
+    /// Pure gate for "Try Last Dictation Again": never while a dictation is being recorded,
+    /// finished, transcribed or edited, and never twice at once.
+    static func retryAllowed(hasText: Bool, isPressed: Bool, postBufferActive: Bool,
+                             editSessionOpen: Bool, busy: Bool, retryInFlight: Bool) -> Bool {
+        hasText && !isPressed && !postBufferActive && !editSessionOpen && !busy && !retryInFlight
+    }
+
+    /// Is the retry allowed right now? Checked when clicked and again just before inserting.
+    var canRetryLastDictation: Bool {
+        let busy: Bool
+        switch statusBar?.state {
+        case .recording?, .transcribing?: busy = true
+        default: busy = false
+        }
+        return Self.retryAllowed(hasText: !(lastTranscription ?? "").isEmpty, isPressed: isPressed,
+                                 postBufferActive: postBufferTimer != nil,
+                                 editSessionOpen: editSessionOpenProbe?() ?? false,
+                                 busy: busy, retryInFlight: retryInFlight)
+    }
+
+    /// How a "Try Last Dictation Again" ended.
+    public enum RetryResult: Equatable {
+        case inserted
+        /// A dictation was recording, finishing, transcribing or being edited, or a new one
+        /// finished during the wait (its text is now the latest, so the old one is not inserted).
+        case skippedBusy
+        /// The app did not come to the front, or focus moved away before inserting.
+        case appNotInFront
+    }
+
+    /// Bring `app` forward and insert the most recent dictation again with its current setting.
+    /// Refuses while a dictation is in flight (re-checked right before inserting), refuses a
+    /// second click while the first is pending, and inserts only once `app` is really in front.
+    /// `completion` runs on main exactly once, on every path.
+    public func retryLastDictation(in app: NSRunningApplication, completion: @escaping (RetryResult) -> Void) {
+        guard canRetryLastDictation, let text = lastTranscription else {
+            completion(.skippedBusy)
+            return
+        }
+        retryInFlight = true
+        let serial = dictationSerial
+        app.activate()
+        func attempt(_ remaining: Int) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self else { completion(.appNotInFront); return }
+                if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
+                    // A beat more for the app to restore focus to its text field.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        self.retryInFlight = false
+                        guard self.canRetryLastDictation, self.dictationSerial == serial else {
+                            DiagnosticLogger.shared.log("Report a Problem: retry skipped, a dictation started or finished")
+                            completion(.skippedBusy)
+                            return
+                        }
+                        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
+                            DiagnosticLogger.shared.log("Report a Problem: retry skipped, focus moved")
+                            completion(.appNotInFront)
+                            return
+                        }
+                        self.inserter.insert(text: text)
+                        completion(.inserted)
+                    }
+                } else if remaining > 0 {
+                    attempt(remaining - 1)
+                } else {
+                    self.retryInFlight = false
+                    DiagnosticLogger.shared.log("Report a Problem: \(app.bundleIdentifier ?? "app") did not come forward; retry skipped")
+                    completion(.appNotInFront)
+                }
+            }
+        }
+        attempt(10)
+    }
+
+    /// Forget a "This works" record after the same method was then marked as not working.
+    public func forgetInsertionConfirmation(method: InsertionMethod, forBundleID bundleID: String) {
+        var updated = Config.load()
+        guard updated.removeInsertionConfirmation(for: bundleID, ifMethod: method) else { return }
+        try? updated.save()
+        config?.insertionConfirmations = updated.insertionConfirmations
+        if SettingsWindowController.isWindowVisible {
+            settingsViewModel?.refreshFromDisk()
+        }
+    }
+
+    // MARK: - Stay on <headset> (2026-09-24)
+
+    private(set) var stayOn: StayOnController!
+    private var stayOnObservers: [NSObjectProtocol] = []
+
+    /// The mic dictation uses when Stay on is off, from the cache (safe on main).
+    func automaticMicrophone() -> AudioInputDevice? {
+        MicrophoneCaptureCoordinator.routes(devices: AudioDeviceCatalog.cachedInputDevices,
+                                            systemDefault: AudioDeviceCatalog.cachedDefaultInput,
+                                            pin: config?.inputDeviceUID).preferred
+    }
+
+    private func setUpStayOn() {
+        let controller = StayOnController(directory: Config.configDir)
+        stayOn = controller
+        controller.isRecording = { [weak self] in self?.statusBar.state == .recording }
+        controller.currentMicName = { [weak self] in self?.automaticMicrophone()?.name ?? "this Mac's microphone" }
+        // "Yes switch" is about this Mac's own mic being too weak, never about a mic the
+        // person chose: no automatic switch away from a pinned wired or USB mic.
+        controller.autoSwitchAllowed = { [weak self] in
+            self?.automaticMicrophone()?.isBuiltIn == true
+        }
+        controller.onChange = { [weak self] in
+            guard let self else { return }
+            self.recorder.setStayOnDevice(uid: self.stayOn.routedHeadsetUID)
+            self.statusBar.buildMenu()
+            self.statusBar.stayOnActive = self.stayOn.mode.isActive
+        }
+        controller.presentNotice = { [weak self] notice in self?.showStayOnNotice(notice) }
+        let health: (String, Bool) -> Void = { [weak self] uid, healthy in
+            DispatchQueue.main.async { self?.stayOn.headsetHealth(uid: uid, healthy: healthy) }
+        }
+        // "It should flag a notice when it switches" (the maintainer, 2026-09-25).
+        let fallback: (CaptureFallback) -> Void = { [weak self] event in
+            DispatchQueue.main.async {
+                self?.showStayOnNotice(.fellBack(uid: event.uid, name: event.name,
+                                                 usingName: event.fallbackName, reason: event.reason))
+            }
+        }
+        recorder.capture.queue.sync {
+            recorder.capture.onHeadsetHealth = health
+            recorder.capture.onFallback = fallback
+        }
+        recorder.setStayOnDevice(uid: controller.routedHeadsetUID)
+        statusBar.stayOnActive = controller.mode.isActive
+        let center = NSWorkspace.shared.notificationCenter
+        var sleepNames: [(Notification.Name, Bool)] = [(NSWorkspace.willSleepNotification, true), (NSWorkspace.didWakeNotification, false)]
+        if !StayOnController.isLaptop {
+            sleepNames += [(NSWorkspace.screensDidSleepNotification, true), (NSWorkspace.screensDidWakeNotification, false)]
+        }
+        for (name, began) in sleepNames {
+            stayOnObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                if began { self?.stayOn.sleepBegan() } else { self?.stayOn.sleepEnded() }
+            })
+        }
+        // Restart and log out are detected by the boot session changing at next launch, not
+        // by willPowerOff: a restart that an app cancels must not end Stay on.
+        controller.startTimer()
+    }
+
+    private lazy var stayOnNoticePanel: StayOnNoticePanel = {
+        let panel = StayOnNoticePanel()
+        panel.statusItem = statusBar.statusItem
+        panel.startStayOn = { [weak self] uid, name, duration in self?.startStayOn(uid: uid, name: name, duration: duration) }
+        panel.undo = { [weak self] uid, startedAt in self?.stayOn.undo(uid: uid, startedAt: startedAt) }
+        panel.dismissForever = { [weak self] uid in self?.stayOn.dismissConnectNoticeForever(uid: uid) }
+        return panel
+    }()
+
+    func showStayOnNotice(_ notice: StayOnNotice) {
+        DiagnosticLogger.shared.log("Stay on notice: \(StayOnNoticeCopy.text(for: notice).message)")
+        stayOnNoticePanel.show(notice)
+    }
+
+    /// The microphone block for the menu, from cached state only. nil before setup.
+    func micMenuModel() -> MicMenuModel? {
+        guard let stayOn else { return nil }
+        let inputs = AudioDeviceCatalog.cachedInputDevices
+        let def = AudioDeviceCatalog.cachedDefaultInput
+        return MicMenuModel.build(
+            inputs: inputs, headsets: stayOn.connectedHeadsets, automatic: automaticMicrophone(),
+            automaticDefaultUID: MicrophoneCaptureCoordinator.routes(devices: inputs, systemDefault: def, pin: nil).preferred?.uid,
+            pinnedUID: config?.inputDeviceUID, stayOn: stayOn.mode, status: stayOn.status(),
+            recentEnd: stayOn.recentUnexpectedEnd(), musicOnStayOnHeadset: stayOn.musicPlayingOnStayOnHeadset)
+    }
+
+    func startStayOn(uid: String, name: String, duration: StayOnDuration) {
+        stayOn?.start(uid: uid, name: name, duration: duration)
     }
 
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
@@ -1110,8 +1615,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let pastedText = interaction == .paste
-            ? NSPasteboard.general.string(forType: .string) : nil
+        // speakfree's own read must not count as the paste target's read receipt (fast
+        // clipboard restore): if a dictation is still on the clipboard, this read is ours.
+        // And while nobody has read the dictation promise yet, do not read it at all: the
+        // pasteboard server would then cache it, the target's real read would never reach the
+        // provider, and that borrow would lose its receipt (no early restore, no user-paste
+        // restore). The tail is then unknown, so tracking is invalidated below.
+        let pastedText = interaction == .paste && !(inserter?.dictationPromiseUnread ?? false)
+            ? TextInserter.withOwnPasteboardRead { NSPasteboard.general.string(forType: .string) }
+            : nil
         guard let updatedTail = HotkeyManager.updatedCursorTail(
             tail, after: interaction, pastedText: pastedText) else {
             invalidate()
@@ -1136,7 +1648,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// idempotent, so overlapping end paths don't double-reload. reloadConfig reloads fresh
     /// Config.load() state from disk. Key-up alone does not end the take: a pending post-buffer
     /// keeps the reload deferred until its finalizer relinquishes the capture boundary.
-    private func performPendingConfigReloadIfNeeded() {
+    func performPendingConfigReloadIfNeeded() {
         guard pendingConfigReload, postBufferTimer == nil else { return }
         pendingConfigReload = false
         DiagnosticLogger.shared.log("Config: applying deferred reload — dictation finished")
@@ -1239,45 +1751,108 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    // MARK: - Edit Mode wiring (2026-09-24)
+
+    /// Wire the four Edit Mode seams to one EditSessionController. Inert unless Key Mode is Edit:
+    /// the router is consulted only from the `.edit` branch of handleKeyDown, and the sinks fire
+    /// only for takes that carry an edit target.
+    func installEditMode() {
+        MainActor.assumeIsolated {
+            let hooks = EditSessionController.Hooks(
+                setPendingTarget: { [weak self] target in self?.pendingEditFinalizeTarget = target },
+                startRecording: { [weak self] in
+                    guard let self else { return false }
+                    self.handleRecordingStart()
+                    return self.isPressed
+                },
+                stopRecording: { [weak self] in self?.handleRecordingStop() },
+                abortRecording: { [weak self] in self?.handleRecordingAbort() },
+                isInPostBuffer: { [weak self] in self?.postBufferTimer != nil },
+                inserter: { [weak self] in self?.inserter },
+                isRemoteDesktop: { bundleID in TextInserter.isRemoteDesktop(bundleID: bundleID) },
+                onSessionClosed: { [weak self] in self?.performPendingConfigReloadIfNeeded() },
+                saveConfig: { [weak self] mutate in
+                    var c = Config.load()
+                    mutate(&c)
+                    do { try c.save() } catch {
+                        DiagnosticLogger.shared.log("EditMode: could not save settings: \(error.localizedDescription)")
+                    }
+                    // Keep an open Settings window in step so its next save cannot undo this.
+                    self?.settingsViewModel?.applyEditModeSettings(from: c)
+                },
+                loadConfig: { Config.load() },
+                noteRecents: { [weak self] in self?.statusBar.buildMenu() },
+                noteCommittedText: { [weak self] text, app, sessionID in
+                    self?.historyCoordinator?.recordDictation(text, app: app, archiveID: sessionID.uuidString)
+                },
+                isRecording: { [weak self] in self?.isPressed ?? false }
+            )
+            let controller = EditSessionController(hooks: hooks)
+            editSessionController = controller
+            editHotkeyRouter = { [weak controller] in
+                MainActor.assumeIsolated { controller?.handleFnTap() }
+            }
+            editFinalizeSink = { [weak controller] payload in
+                let kept = FileManager.default.fileExists(atPath: payload.audioURL.path)
+                MainActor.assumeIsolated { controller?.deliver(payload, kept: kept) }
+            }
+            editFinalizeFailureSink = { [weak controller] sessionID, segmentID in
+                MainActor.assumeIsolated {
+                    controller?.deliverNothing(sessionID: sessionID, segmentID: segmentID)
+                }
+            }
+            editSessionOpenProbe = { [weak controller] in
+                MainActor.assumeIsolated { controller?.isOpen ?? false }
+            }
+        }
+    }
+
+    /// Recent Dictations: insert an Edit session's text (or one ⤷ component) into the frontmost
+    /// app, through the normal inserter.
+    func insertRecentText(_ text: String) {
+        guard !text.isEmpty else { return }
+        historyCoordinator?.close()
+        inserter.insert(text: text, refocusing: nil, onFocusLost: { [weak self] in
+            self?.statusBar.state = .copiedToClipboard
+            self?.statusBar.buildMenu()
+        })
+    }
+
+    /// DevMode: open the edit window with one sample paragraph (no microphone needed).
+    func openEditModeWithSample() {
+        MainActor.assumeIsolated {
+            if editSessionController?.isOpen == true {
+                editSessionController?.addSampleParagraph()
+            } else {
+                editSessionController?.openSession(sampleParagraphs: true)
+            }
+        }
+    }
+
     private func handleKeyDown() {
         guard isReady, !isTerminating else { return }
 
         // Resolve Key Mode through the one shared property (KeyMode.swift), never a site-local
         // `config.toggleMode?.value ?? false` — that is exactly the drift `effectiveKeyMode` and
         // `effectivePunctuationMode` exist to prevent.
-        switch config.effectiveKeyMode {
-        case .hold:
-            guard !isPressed else { return }
-            handleRecordingStart()
-        case .toggle:
-            if isPressed {
-                handleRecordingStop()
-            } else {
-                handleRecordingStart()
-            }
-        case .edit:
-            // Phase 2 owns the EditSessionController: the window, the fn-tap reducer routing
-            // (EditKeyReducer), and the finalize-destination target. Until it is wired, route the
-            // tap through the same toggle semantics so a manually-set keyMode:"edit" config still
-            // dictates rather than bricking the hotkey. The FinalizeDestination seam keeps edit
-            // finalization off the direct-insert path only once a target is captured (nil today).
-            if let router = editHotkeyRouter {
-                router()
-            } else if isPressed {
-                handleRecordingStop()
-            } else {
-                handleRecordingStart()
-            }
+        // The decision is the pure HotkeyRouting (KeyMode.swift), which pins Hold and Toggle to
+        // their pre-Edit-Mode behavior in tests. Edit routes to the EditSessionController.
+        switch HotkeyRouting.keyDown(mode: config.effectiveKeyMode, isPressed: isPressed,
+                                     hasEditRouter: editHotkeyRouter != nil) {
+        case .startRecording: handleRecordingStart()
+        case .stopRecording: handleRecordingStop()
+        case .routeToEditSession: editHotkeyRouter?()
+        case .ignore: return
         }
     }
 
     private func handleKeyUp() {
         // Toggle and Edit are tap-driven: the key-up is ignored (the tap already started/stopped in
         // handleKeyDown). Only Hold stops on release.
-        switch config.effectiveKeyMode {
-        case .toggle, .edit:
+        switch HotkeyRouting.keyUp(mode: config.effectiveKeyMode) {
+        case .startRecording, .routeToEditSession, .ignore:
             return
-        case .hold:
+        case .stopRecording:
             handleRecordingStop()
             // The post-buffer is still part of this take. A deferred reload waits for actual
             // finalization so a re-press can continue with the same engine, route, and key mode.
@@ -1347,6 +1922,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // still in flight). Record-start no longer waits on it at all. Pre-roll (500ms)
         // means no audio is lost by starting the recorder before the read completes.
         let token = focusCapture.begin()
+        // Retry qualification has its own deadline; it must not delay or invalidate
+        // otherwise usable normal-insertion focus/context capture.
+        let retryCapture = FocusCaptureBox<SecureInputRetryDestination>()
+        let retryToken = retryCapture.begin()
         // Snapshot the main-only fallback inputs now (we're on main) so the background
         // reader can compute the Electron cursor-context fallback without touching main state.
         let lastTail = lastInsertionTail
@@ -1357,9 +1936,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let interactionGenerationAtStart = currentUserInteractionGeneration()
         let frontApp = NSWorkspace.shared.frontmostApplication
         let frontBundle = frontApp?.bundleIdentifier
+        let capturedFrontmostPID = frontApp?.processIdentifier
         // Resolve the Electron classification on main, where `frontmostApplication` is
         // authoritative, rather than re-reading it from the background reader below.
-        let electronClass = TextInserter.prefersClipboardPaste(app: frontApp)
+        // 2026-09-24: terminals join this class. Their AX value is the whole scrollback, so a
+        // live "text before the cursor" read is the VS Code terminal problem again.
+        let electronClass = TextInserter.cursorContextUntrusted(app: frontApp)
         let avoidLiveWindowContext = TextInserter.shouldAvoidLiveWindowContext(
             bundleID: frontBundle, bundleURL: frontApp?.bundleURL)
 
@@ -1477,7 +2059,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     : " (liveAX attempted, empty)")
                 : ""
             DiagnosticLogger.shared.log("captureFocusedElement: context source=\(contextSource) len=\(capturedContext?.count ?? 0)\(noneReason)")
-            self?.focusCapture.publish((capturedElement, capturedContext), token: token)
+            self?.focusCapture.publish((capturedElement, capturedContext, retryCapture), token: token)
+            let retryDestination = SecureInputRetryDestination.capture(
+                field: capturedElement, frontmostPID: capturedFrontmostPID)
+            retryCapture.publish(retryDestination, token: retryToken)
         }
     }
 
@@ -1585,7 +2170,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // (notDetermined) or shows an actionable alert (denied) and aborts this attempt.
         guard Permissions.ensureMicrophoneForRecording() else { return }
 
+        takePresentation.beginTake()
         isPressed = true
+        // A take starting means the user is here: give any canary's clipboard back now, before
+        // the slower start-up work below.
+        clipboardCanaryScheduler?.canary.abort(reason: "take")
+        // Before anything that can touch the disk or block (health check took 2.9 s once; WAV
+        // path/sentinel/file creation up to 2.4 s): keep all audio from this moment.
+        recorder.armTake()
+        modelPreloadStartedAtPress = false
+        preloadModelIfNeeded()
 
         // Verify all subsystems before every recording
         verifySubsystems(context: "pre-recording")
@@ -1600,13 +2194,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             bundleID: frontBundleID, bundleURL: frontApp?.bundleURL)
         recordingTargetBundleID = frontBundleID
         inserter.livePrependProbeSuppressed =
-            TextInserter.prefersClipboardPaste(app: frontApp)
+            TextInserter.cursorContextUntrusted(app: frontApp)
         recordingStyleMode = TextPostProcessor.detectStyleMode(bundleID: frontBundleID)
+        // Edit Mode take: its text goes to the edit window, not to the frontmost app. No cursor
+        // context (the paragraph is a fresh unit), no screen OCR, no recording
+        // pill (the window's header shows the recording state), no live preview.
+        let isEditTake = pendingEditFinalizeTarget != nil
+        if isEditTake {
+            recordingTargetBundleID = "speakfree.edit-window"
+            recordingStyleMode = .none
+        }
         let classificationFinishedAt = CFAbsoluteTimeGetCurrent()
 
         // Capture focused element before anything else changes.
         // Skip for remote desktop — AX reads the Splashtop UI, not the remote text field.
-        if !inserter.isRemoteDesktopFrontmost() {
+        if isEditTake {
+            focusCapture.reset()
+        } else if !inserter.isRemoteDesktopFrontmost() {
             captureFocusedElement()
         } else {
             // Remote desktop: AX would read the Splashtop UI, not the remote field. Reset the
@@ -1625,7 +2229,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // feeds the screen-aware NAME corrector, which works on every engine —
         // Parakeet users get on-screen spellings (Kris vs Chris) even though the
         // engine ignores prompts.
-        if config.screenContext?.value == true && !isRemoteDesktop && !avoidLiveWindowContext {
+        if config.screenContext?.value == true && !isRemoteDesktop && !avoidLiveWindowContext
+            && !isEditTake {
             // Bump generation so any in-flight OCR from a previous recording is discarded.
             let capturedGeneration = UUID()
             screenCaptureGeneration = capturedGeneration
@@ -1639,8 +2244,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusBar.state = .recording
-        recordingOverlay.style = min(5, max(1, config.overlayStyle ?? 5))
-        recordingOverlay.show(state: .recording, recorder: recorder)
+        if !isEditTake {
+            recordingOverlay.style = min(5, max(1, config.overlayStyle ?? 5))
+            recordingOverlay.show(state: .recording, recorder: recorder)
+        }
         let overlayFinishedAt = CFAbsoluteTimeGetCurrent()
         startRecordingWatchdog()
         do {
@@ -1668,13 +2275,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             // Start streaming transcription timer — processes audio every 2s for live preview
-            startStreamingTimer()
+            if !isEditTake { startStreamingTimer() }
         } catch {
             // MUST be visible in the diagnostic log: this branch used to print only to
             // stdout, so the 2026-07-23 every-press-fails outage looked like a silent
             // no-op ("Health check: all OK" then nothing) and took a live stdout
             // capture to see. Error description only — never transcript content.
             DiagnosticLogger.shared.log("Recording start FAILED: \(error)")
+            recorder.disarmTake()
             stopRecordingWatchdog()
             print("Error: \(error.localizedDescription)")
             if let lease = recordingActivityLease {
@@ -1696,7 +2304,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Secure-Input retry dialog (Michael 2026-08-12)
+    // MARK: - Secure-Input retry dialog (the maintainer 2026-08-12)
     //
     // "A little box that says secure input activated, hit Command V to paste your
     // dictation … keeps retrying, and if it gets it, it shuts down the box."
@@ -1706,9 +2314,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var secureInputRetryTimer: Timer?
 
-    private func beginSecureInputRetry(text: String) {
+    private func beginSecureInputRetry(text: String, destination: SecureInputRetryDestination?,
+                                       takeToken: TakePresentationOwnership.Token) {
+        guard takePresentation.owns(takeToken) else { return }
         cancelSecureInputRetry()
-        let targetBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        statusBar.state = .secureInputCopied
+        statusBar.buildMenu()
+        var ownership = SecureInputRetryOwnership(targetPID: destination?.pid)
         let generalPasteboard = NSPasteboard.general
         let heldChangeCount = generalPasteboard.changeCount
         let deadline = Date().addingTimeInterval(inserter.secureInputClipboardClearDelay)
@@ -1722,11 +2334,19 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             + "\(Int(inserter.secureInputClipboardClearDelay))s")
         secureInputRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
+            guard self.takePresentation.owns(takeToken) else {
+                self.secureInputRetryTimer?.invalidate()
+                self.secureInputRetryTimer = nil
+                return
+            }
+            let matches = destination?.matchesCurrentDestination(inserter: self.inserter)
+            let mayRetry = ownership.observe(
+                currentPID: self.inserter.frontmostPIDProvider(),
+                sameWindow: matches?.window, sameField: matches?.field)
             let action = TextInserter.secureInputRetryAction(
                 secureInputActive: self.inserter.isSecureInputActive(),
                 clipboardMoved: generalPasteboard.changeCount != heldChangeCount,
-                frontmostMatchesTarget:
-                    NSWorkspace.shared.frontmostApplication?.bundleIdentifier == targetBundleID,
+                frontmostMatchesTarget: mayRetry,
                 deadlinePassed: Date() >= deadline)
             switch action {
             case .wait:
@@ -1738,9 +2358,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             case .insert:
                 self.cancelSecureInputRetry()
                 DiagnosticLogger.shared.log("SecureInputRetry: Secure Input cleared — auto-inserting")
-                self.inserter.insert(text: text)
-                self.statusBar.state = .idle
-                self.statusBar.buildMenu()
+                self.inserter.insert(text: text, refocusing: destination?.field,
+                    handlesRecovery: true, completion: { [weak self] outcome in
+                        guard let self, self.takePresentation.owns(takeToken) else { return }
+                        self.handleConcealedInsertionOutcome(outcome, text: text,
+                            destination: destination, takeToken: takeToken)
+                    })
             }
         }
     }
@@ -1782,6 +2405,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         screenContextText = nil
         screenCaptureGeneration = UUID()  // invalidate any in-flight OCR
         resetRecordingUIAfterAbort()
+        if let t = pendingEditFinalizeTarget {
+            pendingEditFinalizeTarget = nil
+            editFinalizeFailureSink?(t.sessionID, t.segmentID)
+        }
 
         // L1: the dictation ended (aborted) — apply any config reload deferred while fn was held.
         performPendingConfigReloadIfNeeded()
@@ -1848,6 +2475,47 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         watchdogSilentTicks = 0
     }
 
+    /// Key press found the model out of memory (first dictation after launch, or an idle unload
+    /// under memory pressure): start loading it now so the load overlaps speech instead of
+    /// starting after key release (the maintainer 2026-09-22: "Loading speech model" after a pause).
+    /// Runs off main so key press never waits on engine work. `isLoaded` reads false while a
+    /// load (for example the launch warm-up) is still in flight, so this can log a key-press
+    /// load that just queues behind it; loads are serialized and idempotent in both engines.
+    private func preloadModelIfNeeded() {
+        guard let t = transcriber else { return }
+        let engineID = activeEngineID
+        Task.detached(priority: .userInitiated) { [weak self] in
+            // A take can already run (Neural Engine model, or Parakeet's CPU stand-in during a
+            // first-start compile): nothing to load.
+            guard !t.isReadyToTranscribe else { return }
+            // The launch preparation owns the first Parakeet load. A second load from here
+            // would start an in-process Neural Engine compile that holds the engine's load
+            // gate and blocks the CPU stand-in. The take waits for that preparation instead
+            // (ParakeetEngine.loadModel), which serves it from the stand-in once ready.
+            guard !t.isPreparationPending else {
+                DiagnosticLogger.shared.log(
+                    "Model not in memory at key press (engine=\(engineID)); first-start preparation is loading it")
+                return
+            }
+            // Settings may have swapped the engine since the press; never load into a
+            // discarded transcriber (it would hold the model until released).
+            let current = await MainActor.run { [weak self] () -> Bool in
+                guard let self, self.transcriber === t else { return false }
+                self.modelPreloadStartedAtPress = true
+                return true
+            }
+            guard current else { return }
+            DiagnosticLogger.shared.log(
+                "Model not in memory at key press (engine=\(engineID)); loading now")
+            let start = CFAbsoluteTimeGetCurrent()
+            await t.warmUp()
+            DiagnosticLogger.shared.log(String(
+                format: "Key-press model load %@ after %.2fs",
+                t.isLoaded ? "ready" : (t.isReadyToTranscribe ? "on the CPU stand-in" : "failed"),
+                CFAbsoluteTimeGetCurrent() - start))
+        }
+    }
+
     func handleRecordingStop() {
         guard isPressed else { return }
         isPressed = false
@@ -1869,8 +2537,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // are NEVER worse than the old flat wait. The wait DECISION is the pure PostBufferPolicy
         // (unit-tested over RMS windows); this loop only feeds it the live trailing samples.
         let samplesAtRelease = recorder.currentSampleCount()
-        runAdaptivePostBuffer(samplesAtRelease: samplesAtRelease) { [weak self] in
-            self?.finalizeRecording(keyReleaseTime: keyReleaseTime)
+        runAdaptivePostBuffer(samplesAtRelease: samplesAtRelease) { [weak self] outcome in
+            self?.finalizeRecording(keyReleaseTime: keyReleaseTime, postBuffer: outcome)
         }
     }
 
@@ -1879,7 +2547,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// `finalize` on the main queue. `samplesAtRelease` marks the sample count at key-release so
     /// only audio captured AFTER the key lifted is scored as "trailing". The decision is the pure
     /// policy; this only feeds it the live trailing samples.
-    private func runAdaptivePostBuffer(samplesAtRelease: Int, finalize: @escaping () -> Void) {
+    private func runAdaptivePostBuffer(
+        samplesAtRelease: Int, finalize: @escaping (PostBufferOutcome) -> Void
+    ) {
         let windowMs = postBufferWindowMs
         // Hard deadline = the EXTENDED cap (2026-07-25): the policy's decided wait stays ≤220ms
         // for quiet releases and only exceeds it when trailing speech energy shows the speaker
@@ -1913,12 +2583,23 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             if PostBufferPolicy.postBufferShouldFinalize(elapsedMs: elapsedMs, decidedMs: decided, capMs: capMs) {
                 timer.invalidate()
                 self.postBufferTimer = nil
-                finalize()
+                finalize(PostBufferOutcome.summarize(
+                    trailingSamples: trailing, waitedMs: elapsedMs,
+                    releaseSample: samplesAtRelease, windowMs: windowMs))
             }
         }
     }
 
-    func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
+    func finalizeRecording(
+        keyReleaseTime: Double = CFAbsoluteTimeGetCurrent(), postBuffer: PostBufferOutcome? = nil
+    ) {
+        // This token belongs to the take before inference begins, never to a later completion.
+        let takeToken = takePresentation.current
+        var latency = TakeLatency(keyRelease: keyReleaseTime)
+        latency.finalizeStart = CFAbsoluteTimeGetCurrent()
+        latency.postBuffer = postBuffer
+        latency.preloadStartedAtPress = modelPreloadStartedAtPress
+        modelPreloadStartedAtPress = false
         let activityLease = recordingActivityLease
         recordingActivityLease = nil
         // Retain on every synchronous early-return path, then transfer into Task below.
@@ -1933,6 +2614,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // / abort calls via the flag guard.
         performPendingConfigReloadIfNeeded()
 
+        // C1: snapshot the edit-session target (nil for hold/toggle) FIRST, on main, and consume
+        // it: the finalize destination is decided from the target captured at record-start and
+        // never re-derived, and the next take (or a later hold/toggle dictation) can never inherit
+        // it. Every early return below tells the session its take produced nothing.
+        let editTarget = pendingEditFinalizeTarget
+        pendingEditFinalizeTarget = nil
+        let notifyEditNothing = { [weak self] in
+            guard let t = editTarget else { return }
+            self?.editFinalizeFailureSink?(t.sessionID, t.segmentID)
+        }
+
         let stopTime = keyReleaseTime
 
         guard let recording = recorder.stopRecording() else {
@@ -1942,6 +2634,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             focusCapture.reset()
             statusBar.state = .idle
             recordingOverlay.hide()
+            notifyEditNothing()
             return
         }
         let audioURL = recording.url
@@ -1999,7 +2692,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 statusBar.state = .captureFailed
                 statusBar.buildMenu()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                    if self.statusBar.state == .captureFailed {
+                    if self.takePresentation.owns(takeToken), self.statusBar.state == .captureFailed {
                         self.statusBar.state = .idle
                         self.statusBar.buildMenu()
                     }
@@ -2026,7 +2719,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 statusBar.state = .noSpeech
                 statusBar.buildMenu()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                    if self.statusBar.state == .noSpeech {
+                    if self.takePresentation.owns(takeToken), self.statusBar.state == .noSpeech {
                         self.statusBar.state = .idle
                         self.statusBar.buildMenu()
                     }
@@ -2036,6 +2729,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 statusBar.state = .idle
                 recordingOverlay.hide()
             }
+            notifyEditNothing()
             return
         }
         if gate.usedWavFallback {
@@ -2045,16 +2739,25 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 "Gate override: in-memory samples failed (count \(recording.samples.count), RMS \(FinalizePipeline.rms(of: recording.samples))) but wav passed — transcribing wav samples")
         }
         let samples = gate.samples
+        latency.gateEnd = CFAbsoluteTimeGetCurrent()
 
         statusBar.state = .transcribing
-        recordingOverlay.update(state: .transcribing)
+        if editTarget == nil { recordingOverlay.update(state: .transcribing) }
 
         // R1: consume the off-main focus capture. In the normal case it published while the
         // user was still speaking, so this returns immediately; only if the AX read is still
         // in flight does it wait briefly (0.5s budget, the same as the old synchronous
         // capture — but off the felt start path). nil on timeout is identical to the old
         // AX-timeout behavior.
-        let (capturedElement, capturedInputText) = focusCapture.consume(waitingUpTo: 0.5) ?? (nil, nil)
+        let (capturedElement, capturedRawInputText, retryCapture) =
+            focusCapture.consume(waitingUpTo: 0.5) ?? (nil, nil, nil)
+        // No additional wait for retry-only identity. Unknown means manual recovery.
+        let retryDestination = retryCapture?.consume(waitingUpTo: 0)
+        // A previous dictation's trace (dot + invisible payload) is not text the user wrote:
+        // strip it so capitalization and spacing see "Hello there." rather than a middle dot.
+        let capturedInputText = capturedRawInputText.map { raw in
+            DictationTrace.mayContainTrace(raw) ? DictationTrace.strip(raw) : raw
+        }
         let capturedScreenText = screenContextText
         screenContextText = nil
         screenCaptureGeneration = UUID()  // invalidate any late-arriving OCR
@@ -2077,7 +2780,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // struct so reads and writes are not atomic across threads.
         // Retention is deliberately NOT captured here. A user can change it while
         // inference runs; the completion must honor that newer preference.
-        // Resolved through the one shared default (Michael 2026-08-12). The full history of
+        // Resolved through the one shared default (the maintainer 2026-08-12). The full history of
         // why a missing key means `.off` — including the reverted 2026-07-26 flip to
         // `.hybrid` and the text corruption it caused — lives on
         // `Config.effectivePunctuationMode`, which every consumer (here, Settings, Help,
@@ -2091,10 +2794,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let metaEngine = activeEngineID
         let metaDevice = recorder.currentCaptureDeviceName()
         let metaTargetApp = recordingTargetBundleID
-        // C1: snapshot the edit-session target (nil for hold/toggle) on main before the async Task,
-        // so the finalize destination is decided from the target captured at record-start, never
-        // re-derived. Always nil in Phase 1 (no EditSessionController yet) → insertImmediately.
-        let editTarget = pendingEditFinalizeTarget
+        // (editTarget was snapshotted and consumed at the top of this function.)
 
         // Snapshot the transcriber on main BEFORE crossing into the async Task. A settings
         // change mid-finalize (reloadConfig) can swap self.transcriber out from under us; the
@@ -2104,6 +2804,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             RecordingStore.clearSentinel(recordingURL: audioURL)
             statusBar.state = .idle
             recordingOverlay.hide()
+            notifyEditNothing()
             return
         }
 
@@ -2134,9 +2835,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // async-only; WhisperEngine exposes async shims). The engines serialize access to
         // their own context internally, so we no longer need whisperSerialQueue to gate the
         // final pass. Results are still marshalled back to main via DispatchQueue.main.async.
-        Task { [weak self, activityLease] in
+        // Explicit priority for the whole key-release path (inference, text pipeline, handoff to
+        // the main-thread insert). A Task created on the main thread already inherits this
+        // (Swift maps the main thread's userInteractive QoS to userInitiated, verified
+        // 2026-09-24), but finalize must not depend on which thread calls it. Measured under a
+        // yes-per-core CPU load plus two ANE inference loops: userInitiated 0.096 s median vs
+        // utility 0.237 s; userInteractive (raw priority 33) 0.090 s, within noise of
+        // userInitiated, and it would compete with the main thread's own UI work.
+        Task(priority: .userInitiated) { [weak self, activityLease, latency] in
             defer { activityLease?.release() }
             guard let self = self else { return }
+            var timing = latency
             do {
                 // Build Whisper prompt + run post-processing through the shared
                 // TextPipeline core. Extracting this out of an inline closure is
@@ -2164,21 +2873,38 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                 }
 
-                if !transcriber.isLoaded {
+                timing.inferStart = CFAbsoluteTimeGetCurrent()
+                timing.qos = currentQoSName()
+                // Counts Parakeet's CPU stand-in: a take it serves during a first-start compile
+                // is not a cold start.
+                if !transcriber.isReadyToTranscribe {
+                    timing.coldLoad = true
                     DiagnosticLogger.shared.log(
-                        "Finalize: dictation waiting on model load (cold start)")
-                    DispatchQueue.main.async {
-                        self.recordingOverlay.updateStreamingText("Loading speech model…")
+                        "Finalize: dictation waiting on model load (cold start)"
+                            + (timing.preloadStartedAtPress ? ", load began at key press" : ""))
+                    if editTarget == nil {
+                        DispatchQueue.main.async {
+                            guard self.takePresentation.owns(takeToken) else { return }
+                            self.recordingOverlay.updateStreamingText("Preparing speech model…")
+                        }
                     }
                 }
 
+                // This take's own engine diagnostics and provenance (never another take's, even
+                // when a second dictation or a crash recovery transcribes concurrently).
+                let takeRecorder = TakeRecorder()
                 let (primaryRaw, reusedPartial) = try await FinalizePipeline.resolveRaw(
                     reuseDecision: reuseDecision
                 ) {
-                    try await transcriber.transcribe(
-                        audioURL: audioURL, samples: samples, prompt: prompt,
-                        punctuationMode: mode)
+                    try await TakeRecorder.$current.withValue(takeRecorder) {
+                        try await transcriber.transcribe(
+                            audioURL: audioURL, samples: samples, prompt: prompt,
+                            punctuationMode: mode, inputDevice: metaDevice)
+                    }
                 }
+                timing.inferEnd = CFAbsoluteTimeGetCurrent()
+                timing.path = takeRecorder.inferencePath
+                timing.modelWait = takeRecorder.modelWaitSeconds
                 if reusedPartial {
                     DiagnosticLogger.shared.log(
                         "T2.3: reused last streaming partial (skipped final inference)")
@@ -2186,53 +2912,113 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 let text = TextPipeline.run(
                     makeInput(primaryRaw, samples.count),
                     precomputedPrompt: .some(prompt)).finalText
+                timing.pipelineEnd = CFAbsoluteTimeGetCurrent()
                 let meta = RecordingStore.RecordingMeta(
                     appVersion: SpeakFree.version,
-                    engine: metaEngine,
-                    model: transcriber.modelID,
+                    engine: takeRecorder.engine ?? metaEngine,
+                    model: takeRecorder.model ?? transcriber.modelID,
                     inputDevice: metaDevice,
                     date: ISO8601DateFormatter().string(from: Date()),
                     durationSeconds: Double(samples.count) / 16_000.0,
                     transcriptChars: text.count,
                     targetApp: metaTargetApp,
-                    transcriptionDiagnostics: transcriber.lastDiagnostics
+                    transcriptionDiagnostics: takeRecorder.diagnosticsForMeta,
+                    postBuffer: timing.postBuffer
                 )
+                // Stay on: the lost-take trigger. Loudness math runs here, off main.
+                let takeSeconds = Double(samples.count) / 16_000.0
+                let takeFloor = takeSeconds >= LostTakeDetector.minSeconds
+                    ? LostTakeDetector.noiseFloorDBFS(samples: samples) : nil
+                let onHeadset = AudioDeviceCatalog.cachedInputDevices.contains {
+                    $0.isBluetooth && (metaDevice?.contains($0.name) ?? false)
+                }
+                let takeChars = text.count
+                DispatchQueue.main.async {
+                    self.stayOn.noteFinishedTake(durationSeconds: takeSeconds, noiseFloorDBFS: takeFloor,
+                                                 transcriptChars: takeChars, recordedOnHeadset: onHeadset)
+                }
                 let retentionConfig = Config.load()
                 let keepRecording = DevMode.effectiveSaveRecordings(retentionConfig)
                 let maxRecordings = (DevMode.isActive || !keepRecording || retentionConfig.preserveAllRecordings?.value == true)
                     ? 0 : Config.effectiveMaxRecordings(retentionConfig.maxRecordings)
-                RecordingStore.finishRecording(
-                    audioURL: audioURL, keep: keepRecording, raw: primaryRaw, text: text, meta: meta)
-                RecordingStore.clearSentinel(recordingURL: audioURL)
-                if keepRecording && maxRecordings > 0 {
-                    RecordingStore.prune(maxCount: maxRecordings)
+                // Sidecar writes + sentinel + prune. For a kept normal dictation these run AFTER the
+                // text is handed to main for insertion (2026-09-22): they touch the same
+                // 80,000-file folder whose record-start writes stalled up to 2.4 s, and nothing
+                // in insertion reads them. The activity lease is held until this Task ends, and
+                // the sentinel stays until the files are written, so a crash in between still
+                // leaves a recoverable orphan.
+                let persist = {
+                    let start = CFAbsoluteTimeGetCurrent()
+                    RecordingStore.finishRecording(
+                        audioURL: audioURL, keep: keepRecording, raw: primaryRaw, text: text, meta: meta)
+                    RecordingStore.clearSentinel(recordingURL: audioURL)
+                    if keepRecording && maxRecordings > 0 {
+                        RecordingStore.prune(maxCount: maxRecordings)
+                    }
+                    let took = CFAbsoluteTimeGetCurrent() - start
+                    if took >= 0.1 {
+                        DiagnosticLogger.shared.log(String(format: "Persist slow: %.2fs writing sidecars", took))
+                    }
                 }
                 // C1 finalize destination: hold/toggle insert immediately (today's path, unchanged);
                 // an edit segment is delivered to its session and CANNOT reach the inserter.
                 switch FinalizeDestination.resolve(editTarget: editTarget) {
                 case .returnToEditSession(let sessionID, let segmentID):
+                    // The session may read the segment's files, so they are written first.
+                    persist()
+                    timing.persistEnd = CFAbsoluteTimeGetCurrent()
                     let payload = EditFinalizePayload(
                         sessionID: sessionID, segmentID: segmentID, raw: primaryRaw,
                         pipelineText: text, audioURL: audioURL, meta: meta)
                     DispatchQueue.main.async {
                         // No presentFinalizedText, no TextInserter, no focus recapture — the session
                         // owns the segment from here.
-                        self.statusBar.state = .idle
+                        if self.takePresentation.owns(takeToken) { self.statusBar.state = .idle }
                         self.editFinalizeSink?(payload)
                     }
                 case .insertImmediately:
+                    let finishedTiming = timing
+                    // Saving off: the only file work is deleting this take's audio, and that
+                    // must not depend on the app surviving the insertion, so it stays first.
+                    let persistAfterInsert = keepRecording
+                    if persistAfterInsert {
+                        self.adjustPersistInFlight(1)
+                    } else {
+                        persist()
+                    }
+                    // Dictation trace: build the payload and read the focused page / field
+                    // off main (AX), then decide for real on main at insertion time. Settings come
+                    // from the config just read from disk, so `speakfree set-trace` applies at once.
+                    let traceSettings = TraceSettings(setting: retentionConfig.dictationTrace,
+                                                      apps: retentionConfig.dictationTraceApps,
+                                                      hosts: retentionConfig.dictationTraceWebHosts)
+                    let trace = traceSettings.isOn ? PendingTrace.prepare(
+                        settings: traceSettings, engine: takeRecorder.engine ?? metaEngine, heard: primaryRaw,
+                        unsure: takeRecorder.unsureWords,
+                        targetBundleID: metaTargetApp, element: capturedElement) : nil
                     DispatchQueue.main.async {
                         if keepRecording {
                             self.statusBar.noteFinishedRecording(url: audioURL, text: text)
                         }
+                        self.historyCoordinator?.recordDictation(text, app: metaTargetApp,
+                            archiveID: keepRecording ? audioURL.deletingPathExtension().lastPathComponent : nil)
                         self.presentFinalizedText(
                             text,
                             sampleCount: samples.count,
                             stopTime: stopTime,
                             prependSpace: capturedPrependSpace,
                             contextBefore: capturedInputText,
-                            element: capturedElement
+                            element: capturedElement,
+                            retryDestination: retryDestination,
+                            takeToken: takeToken,
+                            latency: finishedTiming,
+                            engine: metaEngine,
+                            trace: trace
                         )
+                    }
+                    if persistAfterInsert {
+                        persist()
+                        self.adjustPersistInFlight(-1)
                     }
                 }
             } catch {
@@ -2260,6 +3046,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     isModelMissing = false
                 }
                 DispatchQueue.main.async {
+                    notifyEditNothing()
+                    guard self.takePresentation.owns(takeToken) else {
+                        DiagnosticLogger.shared.log("Earlier take failed after a newer take started")
+                        return
+                    }
                     self.recordingOverlay.hide()
                     if isModelMissing {
                         let message = "Parakeet model not downloaded — open Settings to download."
@@ -2315,78 +3106,149 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         stopTime: Double,
         prependSpace: Bool,
         contextBefore: String?,
-        element: AXUIElement?
+        element: AXUIElement?,
+        retryDestination: SecureInputRetryDestination?,
+        takeToken: TakePresentationOwnership.Token,
+        latency: TakeLatency? = nil,
+        engine: String = "",
+        trace: PendingTrace? = nil
     ) {
-        recordingOverlay.hide()
+        if takePresentation.owns(takeToken) { recordingOverlay.hide() }
         if !text.isEmpty {
-            let insertText = FinalizePipeline.composeInsertText(
+            let plainInsertText = FinalizePipeline.composeInsertText(
                 text, prependSpace: prependSpace)
+            var insertText = plainInsertText
+            if let trace {
+                // Final gate on main, at insertion time: same app still frontmost, no Secure Input.
+                switch trace.decide(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                                    secureInputActive: inserter.isSecureInputActive()) {
+                case .append(let encoding):
+                    insertText = FinalizePipeline.composeInsertText(
+                        DictationTrace.append(trace.payload, encoding: encoding, to: text),
+                        prependSpace: prependSpace)
+                    DiagnosticLogger.shared.log(
+                        "DictationTrace: appended (\(encoding.rawValue), \(insertText.unicodeScalars.count - plainInsertText.unicodeScalars.count) scalars)")
+                case .skip(let reason):
+                    DiagnosticLogger.shared.log("DictationTrace: skipped (\(reason))")
+                }
+            }
             let spacing = TextInserter.spacingDiagnosis(
                 contextBefore: contextBefore, insertText: insertText)
             DiagnosticLogger.shared.log(
                 "Insertion boundary: prev=\(TextInserter.charClass(contextBefore?.last)) "
                     + "first=\(TextInserter.charClass(insertText.first)) → \(spacing.rawValue)")
-            lastTranscription = text
+            if takePresentation.owns(takeToken) { lastTranscription = text }
             let audioSeconds = Double(sampleCount) / 16_000.0
             UsageStats.shared.recordDictation(
                 characters: text.count, audioSeconds: audioSeconds)
-            inserter.onSecureInputFallback = { text, reason in
-                self.statusBar.state = .secureInputCopied
-                self.statusBar.buildMenu()
-                switch reason {
-                case .axTimeoutMayHaveCommitted:
-                    // The AX write MAY have landed — never prompt a paste or auto-retry
-                    // here, both risk a duplicate. Checkmark only, as before.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.statusBar.state = .idle
-                        self.statusBar.buildMenu()
-                    }
-                case .secureInput:
-                    // Definitely NOT inserted: show the retry dialog (Michael 2026-08-12)
-                    // and auto-insert the moment Secure Input clears.
-                    self.beginSecureInputRetry(text: text)
-                }
-            }
-            let pasted = inserter.insert(
+            // Recovery is per attempt: a later insertion cannot replace this take's identity.
+            let interactionGeneration = currentUserInteractionGeneration()
+            let destinationBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            _ = inserter.insert(
                 text: insertText,
                 refocusing: element,
-                onFocusLost: {
+                onFocusLost: { [weak self] in
+                    guard let self, self.takePresentation.owns(takeToken) else { return }
                     if self.statusBar.state != .secureInputCopied {
                         self.statusBar.state = .copiedToClipboard
                         self.statusBar.buildMenu()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                            guard let self, self.takePresentation.owns(takeToken),
+                                  self.statusBar.state == .copiedToClipboard else { return }
                             self.statusBar.state = .idle
                             self.statusBar.buildMenu()
                         }
                     }
+                },
+                handlesRecovery: true,
+                completion: { [weak self] outcome in
+                    guard let self else { return }
+                    // A queued refocus/remote request is not its eventual result. Stamp
+                    // completion after that work, and distinguish submission from receipt.
+                    let completedAt = CFAbsoluteTimeGetCurrent()
+                    let submitted = TextInserter.deliveryWasSubmitted(outcome)
+                    DiagnosticLogger.shared.log("Insertion outcome: \(outcome.rawValue)")
+                    if submitted {
+                        let elapsed = completedAt - stopTime
+                        DiagnosticLogger.shared.log(
+                            "Transcription complete: \(String(format: "%.2f", elapsed))s "
+                                + "from key-release to insertion-submitted, \(text.count) chars")
+                        if var latency {
+                            latency.insertEnd = completedAt
+                            DiagnosticLogger.shared.log(latency.logLine(
+                                chars: text.count, audioSeconds: audioSeconds, engine: engine))
+                        }
+                    }
+                    // A delayed completion must not overwrite a newer take's cursor
+                    // context or its recording/transcribing status.
+                    guard self.takePresentation.owns(takeToken) else { return }
+                    self.handleConcealedInsertionOutcome(outcome, text: DictationTrace.strip(insertText),
+                        destination: retryDestination, takeToken: takeToken)
+                    if submitted,
+                       self.currentUserInteractionGeneration() == interactionGeneration,
+                       NSWorkspace.shared.frontmostApplication?.bundleIdentifier == destinationBundleID {
+                        self.lastInsertionTail = Self.insertionTail(
+                            contextBefore: contextBefore, inserted: plainInsertText)
+                        self.lastInsertionBundleID = destinationBundleID
+                        self.lastInsertionAt = Date()
+                        self.lastInsertionElement = element
+                        self.lastInsertionInteractionGeneration = interactionGeneration
+                    }
+                    if self.statusBar.state == .transcribing {
+                        self.statusBar.state = .idle
+                        self.statusBar.buildMenu()
+                    }
                 })
-            if pasted {
-                lastInsertionTail = String(((contextBefore ?? "") + insertText).suffix(500))
-                lastInsertionBundleID =
-                    NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-                lastInsertionAt = Date()
-                lastInsertionElement = element
-                lastInsertionInteractionGeneration = currentUserInteractionGeneration()
-                let elapsed = CFAbsoluteTimeGetCurrent() - stopTime
-                DiagnosticLogger.shared.log(
-                    "Transcription complete: \(String(format: "%.2f", elapsed))s "
-                        + "from key-release to text-inserted, \(text.count) chars")
-                statusBar.state = .idle
-                statusBar.buildMenu()
-            }
         } else {
             let audioSeconds = Double(sampleCount) / 16_000.0
             DiagnosticLogger.shared.log(String(
                 format: "Transcription EMPTY, nothing inserted (%.1fs of audio)",
                 audioSeconds))
+            guard takePresentation.owns(takeToken) else { return }
             statusBar.state = .noSpeech
             statusBar.buildMenu()
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                if self.statusBar.state == .noSpeech {
+                if self.takePresentation.owns(takeToken), self.statusBar.state == .noSpeech {
                     self.statusBar.state = .idle
                     self.statusBar.buildMenu()
                 }
             }
+        }
+    }
+
+    private func handleConcealedInsertionOutcome(
+        _ outcome: InsertionOutcome, text: String, destination: SecureInputRetryDestination?,
+        takeToken: TakePresentationOwnership.Token
+    ) {
+        guard takePresentation.owns(takeToken) else { return }
+        switch outcome {
+        case .secureInput:
+            beginSecureInputRetry(text: text, destination: destination, takeToken: takeToken)
+        case .axTimeoutCopied:
+            // The AX write may have landed: no paste prompt and no automatic retry.
+            statusBar.state = .secureInputCopied
+            statusBar.buildMenu()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, self.takePresentation.owns(takeToken),
+                      self.statusBar.state == .secureInputCopied else { return }
+                self.statusBar.state = .idle
+                self.statusBar.buildMenu()
+            }
+        case .copiedFocusLost:
+            // The inserter reports this only after checked clipboard publication.
+            statusBar.state = .copiedToClipboard
+            statusBar.buildMenu()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, self.takePresentation.owns(takeToken),
+                      self.statusBar.state == .copiedToClipboard else { return }
+                self.statusBar.state = .idle
+                self.statusBar.buildMenu()
+            }
+        case .deliveryFailed:
+            inserter.presentManualRecovery(text: text,
+                message: "Delivery could not be confirmed.",
+                shouldPresent: { [weak self] in self?.takePresentation.owns(takeToken) == true })
+        default: break
         }
     }
 
@@ -2526,19 +3388,51 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         lastStreamingCompletedAt = 0
     }
 
+    /// True while a dictation is recording or finalizing (main thread).
+    private var dictationActive: Bool {
+        isPressed || statusBar.state == .recording || statusBar.state == .transcribing
+    }
+
     /// Background auto-recovery: transcribe each orphan serially, but only START one
     /// while the app is idle — the engines serialize inference, so a recovery chunk in
-    /// flight would queue a live dictation behind it. Busy → poll again in 30s.
+    /// flight would queue a live dictation behind it. Busy → poll again in 30s. Once
+    /// started, it also pauses before each chunk while a dictation is recording or
+    /// finalizing, so a live take goes first.
+    /// Recovery never loads a Parakeet model (that could be a Neural Engine compile a
+    /// dictation would wait behind) and never runs on the CPU stand-in: it waits for the
+    /// launch preparation, or after a failed one for a dictation or the background retry to
+    /// load the model (LaunchRecoveryGate, LaunchRecoveryQueue).
     private func autoRecoverOrphans(_ urls: [URL]) {
-        var queue = urls
+        var queue = LaunchRecoveryQueue(urls)
+        var loggedWaits = Set<LaunchRecoveryGate.Decision>()
+        let isLiveTakeActive: @Sendable () async -> Bool = { [weak self] in
+            await MainActor.run { self?.dictationActive ?? false }
+        }
+        func finished(_ url: URL, error: Error?, loadModelIfNeeded: Bool) {
+            let outcome = queue.finished(url, error: error, loadModelIfNeeded: loadModelIfNeeded)
+            DispatchQueue.main.asyncAfter(deadline: .now() + outcome.delaySeconds) { next() }
+        }
         func next() {
-            guard let url = queue.first else { return }
-            let busy = isPressed || statusBar.state == .recording || statusBar.state == .transcribing
-            if busy {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 30) { next() }
+            let decision = LaunchRecoveryGate.decide(dictationActive: dictationActive,
+                                                     transcriber: self.transcriber)
+            let step = queue.nextStep(decision: decision,
+                                      loadMayCompile: self.transcriber?.modelLoadMayCompile ?? false)
+            let url: URL
+            let loadModelIfNeeded: Bool
+            switch step {
+            case .done:
                 return
+            case .wait(let seconds):
+                if decision == .waitForModel, loggedWaits.insert(decision).inserted {
+                    DiagnosticLogger.shared.log("Recovery: waiting for the launch model preparation")
+                } else if decision == .waitForLoadedModel, loggedWaits.insert(decision).inserted {
+                    DiagnosticLogger.shared.log("Recovery: waiting until a dictation has loaded the speech model")
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { next() }
+                return
+            case .transcribe(let nextURL, let load):
+                (url, loadModelIfNeeded) = (nextURL, load)
             }
-            queue.removeFirst()
             guard let transcriber = self.transcriber else { return }
             guard let activityLease = try? RecordingActivity.shared.acquireReading(url) else {
                 DiagnosticLogger.shared.log("Recovery: skipped a recording currently claimed by maintenance")
@@ -2547,21 +3441,34 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
             Task.detached(priority: .utility) { [weak self, activityLease] in
                 defer { activityLease.release() }
+                var failure: Error?
                 do {
                     let text = try await transcriber.transcribeFile(
-                        url: url, progressHandler: { _, _, _ in }, isCancelled: { false })
+                        url: url, progressHandler: { _, _, _ in }, isCancelled: { false },
+                        loadModelIfNeeded: loadModelIfNeeded, isLiveTakeActive: isLiveTakeActive)
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     RecordingStore.saveTranscription(text: trimmed, for: url)
+                    if !trimmed.isEmpty { RecordingStore.noteRecentTake(audioURL: url) }
                     DiagnosticLogger.shared.log(
                         "Recovery: auto-transcribed \(url.lastPathComponent) (\(trimmed.count) chars)"
                         + (trimmed.isEmpty ? " — silent/room tone" : " — in Recent Dictations"))
+                } catch TranscriptionEngineError.modelNotLoaded where !loadModelIfNeeded {
+                    // The model went away before or during this orphan (never loaded here).
+                    failure = TranscriptionEngineError.modelNotLoaded
+                    DiagnosticLogger.shared.log(
+                        "Recovery: no loaded speech model for \(url.lastPathComponent); will retry when one is loaded")
+                } catch BackgroundTranscriptionError.gaveWayToLiveTakes {
+                    failure = BackgroundTranscriptionError.gaveWayToLiveTakes
+                    DiagnosticLogger.shared.log(
+                        "Recovery: paused for dictation too long on \(url.lastPathComponent); will retry")
                 } catch {
+                    failure = error
                     DiagnosticLogger.shared.log(
                         "Recovery: auto-transcribe FAILED for \(url.lastPathComponent): \(error.localizedDescription) — will retry next launch")
                 }
-                await MainActor.run { [weak self] in
+                await MainActor.run { [weak self, failure] in
                     guard self != nil else { return }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { next() }
+                    finished(url, error: failure, loadModelIfNeeded: loadModelIfNeeded)
                 }
             }
         }
@@ -2591,7 +3498,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusBar.state = .transcribing
         statusBar.buildMenu()
-        Task.detached { [weak self, activityLease] in
+        // The user asked for this recovery and is waiting on it.
+        Task.detached(priority: .userInitiated) { [weak self, activityLease] in
             defer { activityLease.release() }
             do {
                 let text = try await transcriber.transcribeFile(
@@ -2622,6 +3530,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         return
                     }
                     RecordingStore.saveTranscription(text: trimmed, for: audioURL)
+                    if !trimmed.isEmpty { RecordingStore.noteRecentTake(audioURL: audioURL) }
                     self.statusBar.clearCrashRecovery()
                     guard stillOurs else {
                         DiagnosticLogger.shared.log(
@@ -2629,8 +3538,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         return
                     }
                     let pasteboard = NSPasteboard.general
-                    pasteboard.clearContents()
-                    pasteboard.setString(trimmed, forType: .string)
+                    UserPasteRestoreGate.shared.writeOutsideBorrow {
+                        pasteboard.clearContents()
+                        pasteboard.setString(trimmed, forType: .string)
+                    }
                     self.lastTranscription = trimmed
                     DiagnosticLogger.shared.log(
                         "Recovery: transcribed \(audioURL.lastPathComponent) — \(trimmed.count) chars, copied to clipboard")
@@ -2680,17 +3591,22 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         lastTranscription = text
 
-        // Insert into the frontmost window (Michael, 2026-07-25 — was clipboard-only).
+        // Insert into the frontmost window (the maintainer, 2026-07-25 — was clipboard-only).
         // The status-bar menu has just closed; give macOS a beat to return key focus
         // to the user's app before the AX read / synthetic paste, or the insert
         // targets the dying menu session. Clipboard remains the fallback whenever
         // insertion can't land (no focused element, focus lost, secure input).
+        historyCoordinator?.close()
+        scheduledRecentInsertionCount += 1
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let self = self else { return }
+            defer { self.scheduledRecentInsertionCount -= 1 }
             let copyFallback = {
                 let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(text, forType: .string)
+                UserPasteRestoreGate.shared.writeOutsideBorrow {
+                    pasteboard.clearContents()
+                    pasteboard.setString(text, forType: .string)
+                }
                 self.statusBar.state = .copiedToClipboard
                 self.statusBar.buildMenu()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
@@ -2809,5 +3725,68 @@ final class FocusCaptureBox<Value> {
         semaphore = nil
         beganAt = nil
         lock.unlock()
+    }
+}
+
+// ai-suggestion:unverified · session:unknown/agent:code_audio_bluetooth · 2026-10-01
+/// UI ownership follows recording start, independently of post-buffer timer generations.
+/// Older results are still persisted/delivered; only shared presentation is conditional.
+struct TakePresentationOwnership {
+    struct Token: Equatable { fileprivate let generation: UInt64 }
+    private var generation: UInt64 = 0
+    var current: Token { Token(generation: generation) }
+    @discardableResult mutating func beginTake() -> Token {
+        generation &+= 1
+        return current
+    }
+    func owns(_ token: Token) -> Bool { token == current }
+}
+
+/// Any unknown or changed observation permanently removes automatic retry permission.
+/// Returning to the old app/field later does not turn a parked dictation into a surprise paste.
+struct SecureInputRetryOwnership {
+    let targetPID: pid_t?
+    private var unchanged = true
+    init(targetPID: pid_t?) { self.targetPID = targetPID }
+    mutating func observe(currentPID: pid_t?, sameWindow: Bool?, sameField: Bool?) -> Bool {
+        unchanged = unchanged && targetPID != nil && currentPID == targetPID
+            && sameWindow == true && sameField == true
+        return unchanged
+    }
+}
+
+private struct SecureInputRetryDestination {
+    let pid: pid_t
+    let window: AXUIElement
+    let field: AXUIElement
+
+    /// Called by the existing off-main, start-deadline-bounded focus capture.
+    static func capture(field: AXUIElement?, frontmostPID: pid_t?) -> Self? {
+        guard let field, let frontmostPID else { return nil }
+        var owner: pid_t = 0
+        guard AXUIElementGetPid(field, &owner) == .success, owner == frontmostPID,
+              let window = window(of: field) else { return nil }
+        return Self(pid: owner, window: window, field: field)
+    }
+
+    private static func window(of field: AXUIElement) -> AXUIElement? {
+        AXUIElementSetMessagingTimeout(field, 0.05)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(field, kAXWindowAttribute as CFString, &ref) == .success,
+              let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
+        return (ref as! AXUIElement)
+    }
+
+    func matchesCurrentDestination(inserter: TextInserter) -> (window: Bool?, field: Bool?) {
+        guard inserter.frontmostPIDProvider() == pid else { return (nil, nil) }
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.05)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &ref) == .success,
+              let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return (nil, nil) }
+        let focused = ref as! AXUIElement
+        guard inserter.elementPIDProvider(focused) == pid else { return (nil, nil) }
+        let currentWindow = Self.window(of: focused)
+        return (currentWindow.map { CFEqual($0, window) }, CFEqual(focused, field))
     }
 }

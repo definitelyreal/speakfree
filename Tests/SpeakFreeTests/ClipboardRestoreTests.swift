@@ -58,7 +58,7 @@ final class ClipboardRestoreTests: XCTestCase {
         let pb = makeScratchPasteboard()
         let before = pb.changeCount
 
-        let afterWrite = TextInserter.writeTransientString("dictated text", to: pb)
+        let afterWrite = TextInserter.writeTransientString("dictated text", to: pb).generation
 
         XCTAssertEqual(afterWrite, before + 1,
                        "clearContents + writeObjects must advance changeCount by exactly 1 (the old +2 guard was unreachable)")
@@ -68,9 +68,9 @@ final class ClipboardRestoreTests: XCTestCase {
 
     /// When nothing else touched the clipboard after our write, the restore must fire — the whole
     /// point of the fix (previously it never did).
-    func test_shouldRestore_whenNothingElseTouchedClipboard_isTrue() {
+    func test_shouldRestore_whenNothingElseTouchedClipboard_isTrue() throws {
         let pb = makeScratchPasteboard()
-        let writtenChangeCount = TextInserter.writeTransientString("dictated text", to: pb)
+        let writtenChangeCount = try XCTUnwrap(TextInserter.writeTransientString("dictated text", to: pb).generation)
 
         XCTAssertTrue(
             TextInserter.shouldRestoreClipboard(currentChangeCount: pb.changeCount,
@@ -80,9 +80,9 @@ final class ClipboardRestoreTests: XCTestCase {
 
     /// If the user (or another app) writes to the clipboard after our paste, we must NOT clobber
     /// their newer content — the restore is skipped.
-    func test_shouldRestore_whenUserWroteAfter_isFalse() {
+    func test_shouldRestore_whenUserWroteAfter_isFalse() throws {
         let pb = makeScratchPasteboard()
-        let writtenChangeCount = TextInserter.writeTransientString("dictated text", to: pb)
+        let writtenChangeCount = try XCTUnwrap(TextInserter.writeTransientString("dictated text", to: pb).generation)
 
         // Simulate the user copying something else after our paste.
         pb.clearContents()
@@ -110,7 +110,7 @@ final class ClipboardRestoreTests: XCTestCase {
     /// Full restore round-trip: a user's clipboard is saved, we overwrite it with dictated text,
     /// then (nothing else having touched it) we restore — and the user's original string is back.
     /// Mirrors what `pasteViaClipboard`'s delayed closure does, minus the real Cmd+V.
-    func test_roundTrip_restoresOriginalUserClipboard() {
+    func test_roundTrip_restoresOriginalUserClipboard() throws {
         let pb = makeScratchPasteboard()
 
         // User's pre-existing clipboard.
@@ -123,7 +123,7 @@ final class ClipboardRestoreTests: XCTestCase {
         let saved = inserter.savePasteboardForTest(pb)
 
         // Our dictated write.
-        let writtenChangeCount = TextInserter.writeTransientString("DICTATED-TEXT", to: pb)
+        let writtenChangeCount = try XCTUnwrap(TextInserter.writeTransientString("DICTATED-TEXT", to: pb).generation)
         XCTAssertEqual(pb.string(forType: .string), "DICTATED-TEXT")
 
         // Restore decision fires (nothing else touched it).
@@ -169,14 +169,14 @@ final class ClipboardRestoreTests: XCTestCase {
 
     /// Real save→overwrite→restore round-trip on a scratch pasteboard, exercising the restore
     /// decision the backstop uses (no timers): restore fires only when our write is still live.
-    func test_restoreRoundTrip_restoresOriginalOnlyWhenWriteStillLive() {
+    func test_restoreRoundTrip_restoresOriginalOnlyWhenWriteStillLive() throws {
         let pb = makeScratchPasteboard()
         let inserter = TextInserter()
         pb.clearContents()
         pb.setString("USER ORIGINAL", forType: .string)
         let saved = inserter.savePasteboardForTest(pb)
 
-        let written = TextInserter.writeTransientString("dictation", to: pb)
+        let written = try XCTUnwrap(TextInserter.writeTransientString("dictation", to: pb).generation)
         XCTAssertEqual(pb.string(forType: .string), "dictation")
 
         // Nobody else touched it → restore.
@@ -187,7 +187,7 @@ final class ClipboardRestoreTests: XCTestCase {
         XCTAssertEqual(pb.string(forType: .string), "USER ORIGINAL")
 
         // Now simulate the user copying AFTER our write → restore must be skipped.
-        let written2 = TextInserter.writeTransientString("dictation2", to: pb)
+        let written2 = try XCTUnwrap(TextInserter.writeTransientString("dictation2", to: pb).generation)
         pb.clearContents(); pb.setString("USER COPIED THIS", forType: .string)
         XCTAssertFalse(TextInserter.shouldRestoreClipboard(currentChangeCount: pb.changeCount,
                                                            writtenChangeCount: written2))

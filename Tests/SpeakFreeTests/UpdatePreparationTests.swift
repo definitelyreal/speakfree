@@ -315,4 +315,98 @@ final class UpdatePreparationTests: XCTestCase {
         try handle.seekToEnd()
         try handle.write(contentsOf: Data(value.utf8))
     }
+
+    // MARK: - No visible warning required (Michael 2026-09-24)
+    //
+    // "Update warning doesn't have to be visible to someone either way. If someone's not
+    // dictating, it can update." Quiet mode only: no windows, no sound. A fake clock advances
+    // 2 s per observation so the 30 s + 5 s rule runs in milliseconds.
+
+    private final class QuietHarness {
+        private let lock = NSLock()
+        private var now: TimeInterval = 1000
+        var observations = 0
+        var script: (Int) throws -> UpdateActivitySnapshot = { _ in UpdateActivitySnapshot(active: false, changed: false) }
+        var reports: [(Int32, String)] = []
+        func time() -> TimeInterval { lock.lock(); defer { lock.unlock() }; return now }
+        func observe() throws -> UpdateActivitySnapshot {
+            lock.lock()
+            now += 2
+            observations += 1
+            let n = observations
+            lock.unlock()
+            return try script(n)
+        }
+    }
+
+    private func runQuiet(_ harness: QuietHarness, timeout: TimeInterval = 600) -> Int32 {
+        let controller = UpdatePreparationController(
+            timeout: timeout, mode: .quiet,
+            observe: { try harness.observe() },
+            consoleAvailable: { false },
+            clock: { harness.time() },
+            tickInterval: 0.005,
+            report: { harness.reports.append(($0, $1)) })
+        return controller.runToCompletion()
+    }
+
+    func testNoConsoleChoosesQuietMode_consoleChoosesPanel() {
+        XCTAssertEqual(UpdateWarningMode.atStart(consoleAvailable: false), .quiet)
+        XCTAssertEqual(UpdateWarningMode.atStart(consoleAvailable: true), .panel)
+    }
+
+    func testQuietMode_noConsole_updatesAfterQuietRule() {
+        let harness = QuietHarness()
+        XCTAssertEqual(runQuiet(harness), 0, "a locked or headless Mac no longer blocks the update")
+        XCTAssertEqual(harness.reports.last?.1, "SPEAKFREE_UPDATE_READY")
+        // 30 s of quiet then the 5 s warning interval, at 2 s per observation.
+        XCTAssertGreaterThanOrEqual(harness.observations, 18)
+    }
+
+    func testQuietMode_activityRestartsTheWait() {
+        let quiet = QuietHarness()
+        _ = runQuiet(quiet)
+        let baseline = quiet.observations
+
+        let busy = QuietHarness()
+        busy.script = { n in UpdateActivitySnapshot(active: n <= 10, changed: n == 12) }
+        XCTAssertEqual(runQuiet(busy), 0)
+        XCTAssertGreaterThanOrEqual(busy.observations, 12 + baseline - 1,
+                                    "active dictation, then new activity, each restart the full quiet wait")
+    }
+
+    func testQuietMode_uncertainActivityStillAborts() {
+        let harness = QuietHarness()
+        harness.script = { _ in throw LegacyUpdateActivityObserver.Failure.unsupportedLog }
+        XCTAssertEqual(runQuiet(harness), 4)
+        XCTAssertEqual(harness.reports.last?.1, "Update blocked: activity could not be established safely.")
+    }
+
+    func testQuietMode_neverAuthorizesWhileDictationStaysActive() {
+        let harness = QuietHarness()
+        harness.script = { _ in UpdateActivitySnapshot(active: true, changed: false) }
+        XCTAssertEqual(runQuiet(harness, timeout: 60), 3, "times out instead of updating")
+        XCTAssertFalse(harness.reports.contains { $0.0 == 0 })
+    }
+
+    /// The Cmd+V restore lines (fast clipboard) never block or restart an update wait.
+    func testUserPasteRestoreLinesAreUnrelated() {
+        for message in [
+            "Clipboard restore: trigger=user-paste route=electron read=38ms pasteToRestore=212ms restored=true",
+            "Clipboard restore: trigger=user-paste restored=true superseded",
+            "Clipboard restore: trigger=user-paste skipped reason=before-read",
+            "Clipboard restore: trigger=user-paste skipped reason=early-off(syncer:com.vmware.fusion)",
+            "Clipboard restore: trigger=user-paste skipped reason=busy",
+            "Clipboard restore: trigger=user-paste skipped reason=clipboard-changed",
+        ] {
+            XCTAssertEqual(UpdateLogEvent.classify("[12:00:00] " + message), .unrelated, message)
+        }
+    }
+
+    /// Michael 2026-09-24: "Install now" skips the quiet wait but never interrupts a dictation.
+    func testInstallNowProceedsOnlyWithoutActiveDictation() {
+        XCTAssertTrue(UpdateInstallNow.shouldProceed(requested: true, dictationActive: false))
+        XCTAssertFalse(UpdateInstallNow.shouldProceed(requested: true, dictationActive: true))
+        XCTAssertFalse(UpdateInstallNow.shouldProceed(requested: false, dictationActive: false))
+    }
 }

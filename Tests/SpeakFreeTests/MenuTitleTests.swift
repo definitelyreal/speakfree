@@ -1,4 +1,4 @@
-// Claude · 2026-07-03 · Session: 6f785b82-a72f-49de-99dc-89f3a51601e4
+// ai-processed:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 //
 // Pins the MANDATORY menu-title convention (project CLAUDE.md): the dropdown title must
 // always identify which build is running, so an experimental/test build is never mistaken
@@ -10,6 +10,12 @@ import XCTest
 
 final class MenuTitleTests: XCTestCase {
     private let v = SpeakFree.version
+
+    func testAlphaDistributionClearlyIdentifiesTestingBuild() {
+        XCTAssertEqual(
+            SpeakFree.menuTitle(bundleID: "com.definitelyreal.speakfree", buildChannel: "alpha"),
+            "speakfree Alpha \(v) Testing")
+    }
 
     func testStreamingVariantIsAlwaysTagged() {
         XCTAssertEqual(

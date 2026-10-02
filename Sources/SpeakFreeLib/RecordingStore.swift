@@ -307,12 +307,22 @@ public class RecordingStore {
         public let targetApp: String?
         /// Optional engine quality signals (present for Parakeet takes recorded after P2/P3).
         public let transcriptionDiagnostics: TranscriptionDiagnostics?
+        /// Post-release wait for this take (2026-09-22). Optional: absent in older sidecars.
+        /// `keyReleaseSample` indexes the saved audio at key release so the post-release
+        /// decision can be replayed offline against the real tail.
+        public let keyReleaseSample: Int?
+        public let postBufferWaitMs: Double?
+        public let postBufferExtended: Bool?
 
         public init(appVersion: String, engine: String, model: String,
                     inputDevice: String?, date: String,
                     durationSeconds: Double, transcriptChars: Int,
                     targetApp: String? = nil,
-                    transcriptionDiagnostics: TranscriptionDiagnostics? = nil) {
+                    transcriptionDiagnostics: TranscriptionDiagnostics? = nil,
+                    postBuffer: PostBufferOutcome? = nil) {
+            self.keyReleaseSample = postBuffer?.releaseSample
+            self.postBufferWaitMs = postBuffer.map { ($0.waitedMs * 10).rounded() / 10 }
+            self.postBufferExtended = postBuffer?.extended
             self.appVersion = appVersion
             self.engine = engine
             self.model = model
@@ -408,7 +418,7 @@ public class RecordingStore {
         }
     }
 
-    private static func directoryEntryNames(atPath path: String) -> [String]? {
+    static func directoryEntryNames(atPath path: String) -> [String]? {
         guard let directory = opendir(path) else { return nil }
         defer { closedir(directory) }
 
@@ -454,8 +464,13 @@ public class RecordingStore {
                 fputs("Warning: could not remove old recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
             }
         }
+        // Edit Mode sessions follow the same cap and never outlive all of their recordings.
+        EditRecents.prune(maxCount: maxCount)
         // M2: the cached count no longer reflects disk — recompute lazily on the next read.
         invalidateCachedCount()
+        if !toRemove.isEmpty {
+            filterRecentIndexLocked(removing: Set(toRemove.map { $0.url.deletingPathExtension().lastPathComponent }))
+        }
     }
 
     // MARK: - Cached recording count (M2)
@@ -544,6 +559,7 @@ public class RecordingStore {
             saveRaw(text: raw, for: audioURL)
             saveTranscription(text: text, for: audioURL)
             saveMeta(meta, for: audioURL)
+            appendRecentIndexLocked(audioURL: audioURL)
             // M2: a kept recording adds one wav — bump the cached count (past the wav-exists guard
             // so a recording that vanished mid-finalize is never counted).
             bumpCachedCount(by: 1)
@@ -560,7 +576,7 @@ public class RecordingStore {
     /// archive holds 905 real dual-capture takes, and every one of those files must
     /// still be excluded from recording counts and still be deleted by Delete All.
     private static let artifactSuffixes = [
-        ".builtin.raw.txt", ".bt.raw.txt", ".parakeet.txt", ".whisper.txt", ".raw.txt", ".meta.json", ".bt.wav", ".wav", ".txt",
+        ".builtin.raw.txt", ".bt.raw.txt", ".parakeet.txt", ".whisper.txt", ".raw.txt", ".edit.json", ".meta.json", ".bt.wav", ".wav", ".txt",
     ]
 
     /// True only for a name that is an EXACT recording artifact: `recording-<timestamp>...` with a
@@ -587,6 +603,10 @@ public class RecordingStore {
         defer { removal.finish() }
         let result = RecordingRemoval.run(directory: recordingsDir, activity: removal, progress: progress, trash: trash)
         invalidateCachedCount()
+        // Drop the names of trashed takes from the recent-takes index.
+        mutationLock.lock()
+        filterRecentIndexLocked()
+        mutationLock.unlock()
         return result
     }
 
@@ -650,6 +670,104 @@ public class RecordingStore {
         // keeps showing the survivors rather than reporting zero and hiding the folder controls.
         // Active/new groups can remain even when every eligible removal succeeded.
         invalidateCachedCount()
+        // The recent-takes index holds only file names, but after Delete All it names nothing.
+        try? fm.removeItem(at: recentIndexURL)
         return DeletionResult(removedFiles: removed, failedFiles: failed)
+    }
+
+    // MARK: - Recent-takes index (for `speakfree match`)
+
+    /// Base names (`recording-<stamp>-<id>`, no extension) of kept takes, one per line, newest
+    /// last. `speakfree match` runs on every prompt from a hook, and listing a real archive
+    /// (80,000+ files) takes about half a second, so it reads this list instead. It holds file
+    /// NAMES only, never transcript text. A deleted take fails to read and is skipped, and
+    /// Delete All, trashing all recordings, and pruning also drop the removed names, so the
+    /// list does not keep timestamps of takes that are gone. Lives inside the 0700 recordings
+    /// folder. `match` uses it for look-backs up to `recentIndexDays`.
+    public static var recentIndexURL: URL {
+        recordingsDir.appendingPathComponent(recentIndexName)
+    }
+    public static let recentIndexName = "recent-takes.index"
+    /// Compaction keeps this many newest names once the file grows past twice that.
+    static let recentIndexKeepLines = 10_000
+    /// The launch rebuild covers this many days; longer look-backs list the folder instead.
+    public static let recentIndexDays = 30
+
+    /// Add a take published outside `finishRecording` (crash recovery) to the index.
+    public static func noteRecentTake(audioURL: URL) {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        guard FileManager.default.fileExists(atPath: audioURL.path) else { return }
+        appendRecentIndexLocked(audioURL: audioURL)
+    }
+
+    /// Drop names from the index: the given ones (after pruning, cheap), or, with nil, every
+    /// name whose recording no longer exists (after trashing all).
+    static func filterRecentIndexLocked(removing removed: Set<String>? = nil) {
+        guard let text = try? String(contentsOf: recentIndexURL, encoding: .utf8) else { return }
+        let fm = FileManager.default
+        let kept = text.split(separator: "\n").map(String.init).filter { base in
+            if let removed { return !removed.contains(base) }
+            return !base.contains("/") && fm.fileExists(atPath: recordingsDir.appendingPathComponent(base + ".wav").path)
+        }
+        if kept.isEmpty {
+            try? fm.removeItem(at: recentIndexURL)
+        } else {
+            writeRecentIndex(kept)
+        }
+    }
+
+    /// Append one kept take (called under `mutationLock` from `finishRecording`).
+    static func appendRecentIndexLocked(audioURL: URL) {
+        let base = audioURL.deletingPathExtension().lastPathComponent
+        guard base.hasPrefix(filePrefix), !base.contains("\n") else { return }
+        let path = recentIndexURL.path
+        // Earlier takes reach the index through `rebuildRecentIndexIfMissing`, which the app runs
+        // at launch and whenever settings are reloaded with saving on, off this lock.
+        let fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return }
+        let line = Array((base + "\n").utf8)
+        _ = line.withUnsafeBufferPointer { write(fd, $0.baseAddress, $0.count) }
+        var st = stat()
+        let size = fstat(fd, &st) == 0 ? Int(st.st_size) : 0
+        close(fd)
+        // ~40 bytes a line: compact once the file holds about twice the kept count.
+        if size > recentIndexKeepLines * 2 * 40 {
+            compactRecentIndexLocked()
+        }
+    }
+
+    private static func compactRecentIndexLocked() {
+        guard let text = try? String(contentsOf: recentIndexURL, encoding: .utf8) else { return }
+        let lines = text.split(separator: "\n").suffix(recentIndexKeepLines)
+        writeRecentIndex(lines.map(String.init))
+    }
+
+    private static func writeRecentIndex(_ bases: [String], in dir: URL? = nil) {
+        let url = (dir ?? recordingsDir).appendingPathComponent(recentIndexName)
+        let data = Data((bases.joined(separator: "\n") + (bases.isEmpty ? "" : "\n")).utf8)
+        try? data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    /// Launch step: merge the folder's recent takes into the index (creating it on the first launch of a
+    /// build that has it, or after Delete All), so takes from before still match. Runs off main.
+    public static func rebuildRecentIndexIfMissing(days: Int = recentIndexDays, in folder: URL? = nil) {
+        // Runs every launch (not only when the file is missing): merging the folder listing
+        // back in also restores takes the user put back from the Trash after a trash-all.
+        let dir = folder ?? recordingsDir
+        guard FileManager.default.fileExists(atPath: dir.path) else { return }
+        // List the folder (slow on a large archive) OUTSIDE the lock, so a dictation finishing
+        // meanwhile is never held up; merge under it.
+        let f = makeDateFormatter()
+        let cutoff = f.string(from: Date().addingTimeInterval(-Double(days) * 86_400))
+        guard let bases = AgentCLI.recentRecordingBases(atPath: dir.path, cutoffStamp: cutoff) else { return }
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        let url = dir.appendingPathComponent(recentIndexName)
+        let existing = ((try? String(contentsOf: url, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init)
+        let merged = Set(bases).union(existing).sorted()
+        writeRecentIndex(Array(merged.suffix(recentIndexKeepLines)), in: dir)
     }
 }

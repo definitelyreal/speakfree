@@ -1,6 +1,6 @@
 // Claude · 2026-08-05 · Session: 6277a78f-7ff9-4d99-b9d1-f9ee9afe952a
 //
-// Meaning-destroying bug from the speech audit (build/26-07-25-speech-audit, finding 3; Michael
+// Meaning-destroying bug from the speech audit (an internal speech audit, finding 3; the maintainer
 // approved fixing): the spoken-punctuation table matched `question marks?` — the trailing `s?`
 // swallowed the PLURAL NOUN. So "the people with question marks" became "the people with?",
 // deleting the subject of the sentence. ~5 of 6,571 pairs, but each one destroys content rather
@@ -9,7 +9,7 @@
 // Fix: spoken punctuation commands are dictated in the SINGULAR ("question mark", "exclamation
 // point"). The plural is essentially always the literal noun, so the command patterns no longer
 // accept it. Failure direction matters here — leaving the words visible costs a manual edit,
-// while converting them silently deletes what Michael said.
+// while converting them silently deletes what the maintainer said.
 
 import XCTest
 @testable import SpeakFreeLib

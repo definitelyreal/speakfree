@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-processed:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 import AppKit
 import SwiftUI
 
@@ -6,6 +7,11 @@ import SwiftUI
 
 class SettingsWindowController: NSWindowController {
     private static var shared: SettingsWindowController?
+    private var screenObserver: NSObjectProtocol?
+
+    deinit {
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+    }
 
     /// P2: whether the Settings window is currently on-screen. External config writers
     /// (recordings notice, menu-bar mic selector) use this to know they must re-sync the
@@ -17,7 +23,7 @@ class SettingsWindowController: NSWindowController {
     static func show(viewModel: SettingsViewModel) {
         let openStart = CFAbsoluteTimeGetCurrent()
         defer {
-            // Michael 2026-08-20: "going to the settings menu now has a solid pause."
+            // The maintainer 2026-08-20: "going to the settings menu now has a solid pause."
             // Stage-timed so a recurrence names its culprit instead of needing a profiler.
             let total = CFAbsoluteTimeGetCurrent() - openStart
             if total >= 0.1 {
@@ -45,6 +51,7 @@ class SettingsWindowController: NSWindowController {
         }
         NSApp.showDockIconIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
+        shared?.fitWindowToVisibleScreen()
         shared?.showWindow(nil)
         shared?.window?.makeKeyAndOrderFront(nil)
 
@@ -74,25 +81,55 @@ class SettingsWindowController: NSWindowController {
         let screenHeight = NSScreen.main?.visibleFrame.height ?? 900
         let windowHeight = min(screenHeight * 0.8, 900)
 
-        hostingController.preferredContentSize = NSSize(width: SettingsLayout.windowWidth, height: windowHeight)
+        hostingController.preferredContentSize = NSSize(width: SettingsSidebarLayout.windowWidth, height: windowHeight)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "speakfree Settings"
         window.styleMask = [.titled, .closable, .resizable]
-        window.setContentSize(NSSize(width: SettingsLayout.windowWidth, height: windowHeight))
-        window.minSize = NSSize(width: 800, height: 500)
-        window.maxSize = NSSize(width: 1200, height: screenHeight)
+        window.setContentSize(NSSize(width: SettingsSidebarLayout.windowWidth, height: windowHeight))
+        window.minSize = NSSize(width: SettingsSidebarLayout.minimumWindowWidth, height: 500)
+        window.maxSize = NSSize(width: 1000, height: screenHeight)
         window.center()
         window.isReleasedWhenClosed = false
 
-        // Ensure the window stays on-screen when displays change
-        NotificationCenter.default.addObserver(
+        self.init(window: window)
+        fitWindowToVisibleScreen()
+        // constrainFrameRect returns a proposed frame; it does not move the window.
+        screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
-        ) { _ in
-            window.constrainFrameRect(window.frame, to: window.screen)
-        }
+        ) { [weak self] _ in self?.fitWindowToVisibleScreen() }
+    }
 
-        self.init(window: window)
+    private func fitWindowToVisibleScreen() {
+        guard let window,
+              let visibleFrame = WindowScreenPlacement.screen(for: window.frame,
+                                                               visibleFrames: NSScreen.screens.map(\.visibleFrame)) else { return }
+        window.minSize = NSSize(width: min(SettingsSidebarLayout.minimumWindowWidth, visibleFrame.width), height: min(500, visibleFrame.height))
+        window.maxSize = NSSize(width: min(1000, visibleFrame.width), height: visibleFrame.height)
+        window.setFrame(WindowScreenPlacement.fit(window.frame, to: visibleFrame), display: false)
+    }
+}
+
+/// Shared by the resizable Settings and Edit windows. A sliver intersecting a display is not
+/// enough: keep the title bar reachable after a display is unplugged or resized.
+enum WindowScreenPlacement {
+    static func screen(for frame: NSRect, visibleFrames: [NSRect]) -> NSRect? {
+        var best = visibleFrames.first
+        var largestArea: CGFloat = 0
+        for candidate in visibleFrames {
+            let overlap = frame.intersection(candidate)
+            let area = overlap.isNull ? 0 : overlap.width * overlap.height
+            if area > largestArea { best = candidate; largestArea = area }
+        }
+        return best
+    }
+
+    static func fit(_ frame: NSRect, to visibleFrame: NSRect) -> NSRect {
+        let size = NSSize(width: min(frame.width, visibleFrame.width),
+                          height: min(frame.height, visibleFrame.height))
+        return NSRect(x: min(max(frame.minX, visibleFrame.minX), visibleFrame.maxX - size.width),
+                      y: min(max(frame.minY, visibleFrame.minY), visibleFrame.maxY - size.height),
+                      width: size.width, height: size.height)
     }
 }
 
@@ -116,8 +153,16 @@ let standardHotkeyOptions: [HotkeyOption] = [
     HotkeyOption(label: "\u{2303}  Left Control",      keyCode: 59),
 ]
 
-/// Sentinel value for the "Other..." menu item in the hotkey picker.
-private let otherHotkeyTag: UInt16 = 999
+/// Presentation values are distinct from hardware key codes. A configured modifier chord can
+/// use a standard key without sharing the same picker tag as that key's unmodified option.
+enum SettingsHotkeyChoice: Hashable {
+    case standard(UInt16), custom, other
+
+    static func current(keyCode: UInt16, modifiers: [String]) -> Self {
+        modifiers.isEmpty && standardHotkeyOptions.contains(where: { $0.keyCode == keyCode })
+            ? .standard(keyCode) : .custom
+    }
+}
 
 // MARK: - Model Helpers
 
@@ -131,7 +176,7 @@ private struct ModelInfo: Identifiable, Hashable {
     var label: String {
         var base = "\(id) (\(memory), \(speed) load)"
         if isRecommended { base += " \u{2014} Recommended" }
-        // Michael 2026-08-19: un-downloaded models must be visibly different in the
+        // The maintainer 2026-08-19: un-downloaded models must be visibly different in the
         // dropdown, so picking one is a knowing "this will download" choice.
         if !isDownloaded { base += "  (Not Downloaded)" }
         return base
@@ -156,67 +201,120 @@ private func availableModels(language: String) -> [ModelInfo] {
 
 // MARK: - Key Recorder Monitor
 
-/// Holds the NSEvent monitor reference so it can be cleaned up reliably.
-private class KeyMonitorHolder: ObservableObject {
-    var monitor: Any?
+/// The recorder waits until a modifier is released before choosing it by itself. Committing on
+/// its press made the first Command/Option key swallow every attempted multi-key shortcut.
+struct SettingsKeyRecorderState {
+    enum Action: Equatable {
+        case ignore, cancel, capture(UInt16, [String])
+    }
 
-    /// Which `modifierFlags` bit a modifier-only keyCode raises, so a `.flagsChanged` event can be
-    /// told apart as a PRESS (bit now set) from a RELEASE (bit now clear). Left/right variants of
-    /// one modifier share a bit; the keyCode is what distinguishes them, and it is the keyCode we
-    /// record.
-    private static let modifierFlagForKeyCode: [UInt16: NSEvent.ModifierFlags] = [
-        54: .command, 55: .command,      // right / left ⌘
-        56: .shift, 60: .shift,          // left / right ⇧
-        58: .option, 61: .option,        // left / right ⌥
-        59: .control, 62: .control,      // left / right ⌃
-        63: .function,                   // fn
+    private var loneModifier: UInt16?
+    private var modifierChordInProgress = false
+    private static let flagsByKey: [UInt16: NSEvent.ModifierFlags] = [
+        54: .command, 55: .command, 56: .shift, 60: .shift,
+        58: .option, 61: .option, 59: .control, 62: .control, 63: .function,
     ]
+    private static let relevantFlags: NSEvent.ModifierFlags = [.command, .shift, .option, .control, .function]
+
+    mutating func receive(type: NSEvent.EventType, keyCode: UInt16,
+                          flags: NSEvent.ModifierFlags) -> Action {
+        if type == .flagsChanged {
+            guard let flag = Self.flagsByKey[keyCode] else { return .ignore }
+            let held = flags.intersection(Self.relevantFlags)
+            if flags.contains(flag) {
+                if held == flag, !modifierChordInProgress, loneModifier == nil {
+                    loneModifier = keyCode
+                } else {
+                    loneModifier = nil
+                    modifierChordInProgress = true
+                }
+                return .ignore
+            }
+            let shouldCapture = loneModifier == keyCode && held.isEmpty && !modifierChordInProgress
+            loneModifier = nil
+            if held.isEmpty { modifierChordInProgress = false }
+            return shouldCapture ? .capture(keyCode, []) : .ignore
+        }
+        guard type == .keyDown else { return .ignore }
+        loneModifier = nil
+        modifierChordInProgress = !flags.intersection(Self.relevantFlags).isEmpty
+        if keyCode == 53 { return .cancel }
+        var modifiers: [String] = []
+        if flags.contains(.command) { modifiers.append("cmd") }
+        if flags.contains(.shift) { modifiers.append("shift") }
+        if flags.contains(.option) { modifiers.append("option") }
+        if flags.contains(.control) { modifiers.append("ctrl") }
+        return .capture(keyCode, modifiers)
+    }
+}
+
+/// Holds the NSEvent monitor reference so it can be cleaned up reliably.
+final class KeyMonitorHolder: ObservableObject {
+    typealias EventHandler = (NSEvent) -> NSEvent?
+    private let recordingGate: ShortcutRecordingGate
+    private let notificationCenter: NotificationCenter
+    private let installMonitor: (@escaping EventHandler) -> Any?
+    private let removeMonitor: (Any) -> Void
+    var monitor: Any?
+    private var state = SettingsKeyRecorderState()
+    private var recordingLease: UUID?
+    private var capturedKey: UInt16?
+    private var lifecycleObservers: [NSObjectProtocol] = []
+
+    init(recordingGate: ShortcutRecordingGate = .shared, notificationCenter: NotificationCenter = .default,
+         installMonitor: @escaping (@escaping EventHandler) -> Any? = { handler in
+             NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged], handler: handler)
+         }, removeMonitor: @escaping (Any) -> Void = NSEvent.removeMonitor) {
+        self.recordingGate = recordingGate
+        self.notificationCenter = notificationCenter
+        self.installMonitor = installMonitor
+        self.removeMonitor = removeMonitor
+    }
 
     func install(onCapture: @escaping (UInt16, [String]) -> Void, onCancel: @escaping () -> Void) {
-        // `.flagsChanged` as well as `.keyDown` (2026-08-05). A bare modifier never produces a
-        // keyDown, so listening only for keyDown made Shift and Right Control selectable from the
-        // config file and CLI but IMPOSSIBLE to pick in Settings — two of the nine supported
-        // hotkeys, unreachable through the only UI most people have. `HotkeyValidator.validate`
-        // already returns `.allowed` for a lone modifier, so the monitor was the whole gap.
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
-            if event.type == .flagsChanged {
-                guard let flag = Self.modifierFlagForKeyCode[event.keyCode] else { return nil }
-                // Capture on press only. Without this the release event immediately re-fires and
-                // the recorder would resolve twice for one physical tap.
-                guard event.modifierFlags.contains(flag) else { return nil }
-                // A modifier pressed while ANOTHER modifier is already held is a chord in
-                // progress, not a lone-modifier choice — let it settle rather than capturing ⌘
-                // the instant the user starts pressing ⌘⇧.
-                let others = Self.modifierFlagForKeyCode
-                    .filter { $0.key != event.keyCode && $0.value != flag }
-                    .values
-                if others.contains(where: { event.modifierFlags.contains($0) }) { return nil }
-                onCapture(event.keyCode, [])
-                return nil
-            }
-
-            if event.keyCode == 53 { // Escape
+        remove()
+        state = SettingsKeyRecorderState()
+        capturedKey = nil
+        recordingLease = recordingGate.begin()
+        // A retained Settings host can disappear without SwiftUI immediately destroying its
+        // overlay. Closing a window or switching apps always cancels and restores the hotkeys.
+        for name in [NSWindow.willCloseNotification, NSApplication.didResignActiveNotification] {
+            lifecycleObservers.append(notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                guard self?.monitor != nil else { return }
+                self?.remove()
                 onCancel()
-                return nil
+            })
+        }
+        monitor = installMonitor { [weak self] event in
+            guard let self else { return event }
+            guard event.type != .keyDown || !event.isARepeat else { return nil }
+            switch self.state.receive(type: event.type, keyCode: event.keyCode, flags: event.modifierFlags) {
+            case .ignore: break
+            case .cancel: onCancel()
+            case .capture(let code, let modifiers):
+                self.capturedKey = event.type == .keyDown ? code : nil
+                onCapture(code, modifiers)
             }
-
-            var mods: [String] = []
-            let flags = event.modifierFlags
-            if flags.contains(.command) { mods.append("cmd") }
-            if flags.contains(.shift) { mods.append("shift") }
-            if flags.contains(.option) { mods.append("option") }
-            if flags.contains(.control) { mods.append("ctrl") }
-
-            onCapture(event.keyCode, mods)
             return nil
+        }
+        if monitor == nil {
+            remove()
+            onCancel()
         }
     }
 
     func remove() {
         if let m = monitor {
-            NSEvent.removeMonitor(m)
+            removeMonitor(m)
             monitor = nil
         }
+        lifecycleObservers.forEach(notificationCenter.removeObserver)
+        lifecycleObservers.removeAll()
+        if let recordingLease {
+            self.recordingLease = nil
+            recordingGate.finish(recordingLease, afterKeyRelease: capturedKey)
+        }
+        capturedKey = nil
     }
 
     deinit { remove() }
@@ -254,7 +352,7 @@ private enum HotkeyValidator {
 
 // MARK: - Key Recorder Overlay
 
-private struct KeyRecorderOverlay: View {
+struct KeyRecorderOverlay: View {
     var onCapture: (_ keyCode: UInt16, _ modifiers: [String]) -> Void
     var onCancel: () -> Void
 
@@ -269,7 +367,7 @@ private struct KeyRecorderOverlay: View {
             VStack(spacing: 16) {
                 Text("Press a key or combination\u{2026}")
                     .font(.headline)
-                Text("Waiting for input\u{2026}")
+                Text("For a single modifier, press and release it.")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
 
@@ -392,7 +490,7 @@ private class InlineDownloadManager: NSObject, ObservableObject {
 
 // MARK: - Settings View
 
-struct SettingsView: View {
+struct DictationSettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     /// Rendering fixtures never touch login items, mic routing, or the user's corpus.
     var isReview = false
@@ -407,7 +505,7 @@ struct SettingsView: View {
     @State private var previousWorkingModel: String? = nil
 
     /// Tracks the picker selection separately so we can intercept "Other..." (999)
-    @State private var hotkeyPickerSelection: UInt16 = 0
+    @State private var hotkeyPickerSelection: SettingsHotkeyChoice = .standard(KeyCodes.fnKeyCode)
     /// Gates the "Open Recordings / Transcripts Folder" button (enabled only when audio
     /// files exist) and feeds the stored-count line. Refreshed on appear, on toggle
     /// flips, and after an in-app delete.
@@ -417,8 +515,34 @@ struct SettingsView: View {
     @State private var isRestoringRecordings = false
     @State private var recordingsRestoreError: String?
     /// Hand-travel units: false = miles (default), true = kilometers. Click the stats line
-    /// to flip (Michael 2026-08-20).
+    /// to flip (the maintainer 2026-08-20).
     @State private var statsMetricUnits = false
+    /// The key mode before the latest change, so cancelling the Edit Mode consent can go back.
+    @State private var lastKeyMode: KeyMode = .hold
+
+    private var editModeFootnote: String {
+        if !viewModel.editModeCleanup {
+            return "On-device only: nothing leaves this Mac."
+        }
+        return "Only each paragraph's text is sent to Claude, using your Claude account. Never audio, screen contents, or the app name."
+    }
+
+    private func showEditModeHelp() {
+        let alert = NSAlert()
+        alert.messageText = "Edit Mode"
+        alert.informativeText = """
+        Tap \(hotkeyDisplay) to open a small window and record. Tap it again to end the paragraph; its text \
+        appears at once. More taps add more paragraphs. Type anywhere to fix things. Return \
+        inserts everything where you started; Shift+Return adds a line break; Esc twice discards.
+
+        \(EditConsentSheet.explanation)
+
+        If the window says the Claude command line tool is missing, install Claude Code, or set \
+        "claudeExecutablePath" in the config file to its full path.
+        """
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
     @State private var showDeleteRecordingsSheet = false
 
     /// Empty selection means automatic live routing with independent pre-listening.
@@ -430,25 +554,25 @@ struct SettingsView: View {
 
     private var micBuiltInUID: String? { AudioDeviceCatalog.cachedBuiltInInput?.uid }
 
-    private var micDefaultLabel: String { "Automatic (AirPods for dictation)" }
+    private var micDefaultLabel: String { "Automatic (this Mac's microphone)" }
 
     private func refreshMicState() {
         micDevices = AudioDeviceCatalog.cachedInputDevices
         let pinned = (NSApplication.shared.delegate as? AppDelegate)?.currentInputDeviceUID()
-        // Keep an explicit built-in choice distinct from automatic AirPods routing.
+        // Keep an explicit built-in choice distinct from automatic routing.
         micSelection = pinned ?? ""
     }
 
     private func refreshRecordingsFolderState() {
         if isReview {
-            storedRecordingCount = 18_710
+            storedRecordingCount = 12_000
             recordingsFolderHasAudio = true
             return
         }
         // M2 + 2026-08-20: the count cache is COLD on the first Settings open each launch,
         // and cachedRecordingCount() then live-scans the recordings dir on the CALLING
         // thread — ~250ms over today's 61k files, on main, inside the window's first
-        // render (Michael: "going to the settings menu now has a solid pause"). Hop the
+        // render (the maintainer: "going to the settings menu now has a solid pause"). Hop the
         // read to a background queue; warm-cache refreshes still come back instantly.
         DispatchQueue.global(qos: .userInitiated).async {
             let count = RecordingStore.cachedRecordingCount()
@@ -543,9 +667,11 @@ struct SettingsView: View {
     }
 
     /// Whether current hotkey matches one of the standard options
-    private var isCustomHotkey: Bool {
-        !standardHotkeyOptions.contains(where: { $0.keyCode == viewModel.hotkeyKeyCode })
+    private var currentHotkeyChoice: SettingsHotkeyChoice {
+        .current(keyCode: viewModel.hotkeyKeyCode, modifiers: viewModel.hotkeyModifiers)
     }
+
+    private var isCustomHotkey: Bool { currentHotkeyChoice == .custom }
 
     /// Display string for the current hotkey
     private var hotkeyDisplay: String {
@@ -592,7 +718,7 @@ struct SettingsView: View {
                     viewModel.hotkeyKeyCode = HotkeyAdvice.globeKeyFixKeyCode
                     viewModel.hotkeyModifiers = []
                     viewModel.save()
-                    hotkeyPickerSelection = HotkeyAdvice.globeKeyFixKeyCode
+                    hotkeyPickerSelection = .standard(HotkeyAdvice.globeKeyFixKeyCode)
                 }
                 .buttonStyle(.link)
                 .font(.footnote)
@@ -614,24 +740,28 @@ struct SettingsView: View {
     var body: some View {
         ZStack {
             ScrollView {
-                VStack(spacing: 24) {
+                VStack(alignment: .leading, spacing: 24) {
+                Text("Dictation")
+                    .font(.title2.weight(.semibold))
                 if let error = viewModel.saveError {
                     Text(error).foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                // Two-line format (Michael 2026-08-20). Line 1 = counted facts (dictations,
+                // Two-line format (the maintainer 2026-08-20). Line 1 = counted facts (dictations,
                 // words, time spoken). Line 2 = savings: keystrokes are COUNTED; time keeps
                 // the honest range across typing speeds (2026-07-26 ruling); hand-travel
                 // distance uses a stated 2 cm/keystroke assumption. Clicking the stats
                 // flips the distance between miles and kilometers.
                 VStack(spacing: 6) {
-                    Text("Total: \(UsageStats.shared.totalDictations.formatted()) dictations, "
+                    Text(isReview ? "Total: 1,200 dictations, 48,000 words, 5h 20m" :
+                         "Total: \(UsageStats.shared.totalDictations.formatted()) dictations, "
                          + "\(UsageStats.shared.totalWords.formatted()) words, "
                          + "\(UsageStats.formatDaysHoursMinutes(UsageStats.shared.totalAudioSeconds))")
                         .font(.callout)
                         .fontWeight(.semibold)
                         .foregroundColor(.primary)
-                    Text("You would have typed: \(UsageStats.shared.keystrokesDescription) keystrokes, "
+                    Text(isReview ? "You would have typed: 240,000 keystrokes, 3.0 miles, and 13h" :
+                         "You would have typed: \(UsageStats.shared.keystrokesDescription) keystrokes, "
                          + (statsMetricUnits ? UsageStats.shared.handTravelMetricDescription
                                              : UsageStats.shared.handTravelImperialDescription)
                          + ", and \(UsageStats.formatDaysHours(UsageStats.shared.estimatedTypingTime))")
@@ -674,14 +804,14 @@ struct SettingsView: View {
                                 HStack(spacing: 8) {
                                     Picker("Hotkey", selection: $hotkeyPickerSelection) {
                                         if isCustomHotkey {
-                                            Text(hotkeyDisplay).tag(viewModel.hotkeyKeyCode)
+                                            Text(hotkeyDisplay).tag(SettingsHotkeyChoice.custom)
                                             Divider()
                                         }
                                         ForEach(standardHotkeyOptions) { option in
-                                            Text(option.label).tag(option.keyCode)
+                                            Text(option.label).tag(SettingsHotkeyChoice.standard(option.keyCode))
                                         }
                                         Divider()
-                                        Text("Other\u{2026}").tag(otherHotkeyTag)
+                                        Text("Other\u{2026}").tag(SettingsHotkeyChoice.other)
                                     }
                                     .pickerStyle(.menu)
                                     .labelsHidden()
@@ -689,16 +819,39 @@ struct SettingsView: View {
                                     Picker("Hotkey behavior", selection: $viewModel.keyMode) {
                                         Text("Hold").tag(KeyMode.hold)
                                         Text("Toggle").tag(KeyMode.toggle)
-                                        // Phase 1 has no edit window yet. Preserve existing
-                                        // configs honestly without advertising a missing feature.
-                                        if viewModel.keyMode == .edit {
-                                            Text("Toggle (Edit unavailable)").tag(KeyMode.edit)
-                                        }
+                                        Text("Edit").tag(KeyMode.edit)
                                     }
                                     .pickerStyle(.segmented)
                                     .controlSize(.regular)
                                     .labelsHidden()
-                                    .frame(width: viewModel.keyMode == .edit ? 260 : 150)
+                                    .frame(width: 200)
+                                    .help("Hold: talk while holding. Toggle: tap to start and stop. Edit: tap opens a window where each dictation becomes a paragraph you can fix before Return inserts it.")
+                                }
+                            }
+
+                            if viewModel.keyMode == .edit {
+                                GridRow(alignment: .firstTextBaseline) {
+                                    Text("Edit Mode")
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Toggle("Clean up with Claude (cloud)", isOn: $viewModel.editModeCleanup)
+                                            .toggleStyle(.checkbox)
+                                        HStack(spacing: 10) {
+                                            Picker("Model", selection: $viewModel.editModeModel) {
+                                                ForEach(CleanupService.Model.allCases, id: \.self) { m in
+                                                    Text(m.displayName).tag(m)
+                                                }
+                                            }
+                                            .labelsHidden()
+                                            .frame(width: 100)
+                                            .disabled(!viewModel.editModeCleanup)
+                                            Button("How it works") { showEditModeHelp() }
+                                                .buttonStyle(.link)
+                                        }
+                                        Text(editModeFootnote)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
                                 }
                             }
 
@@ -725,11 +878,15 @@ struct SettingsView: View {
                                     .labelsHidden()
                                     .frame(maxWidth: 360, alignment: .leading)
                                     .onChange(of: micSelection) { newValue in
-                                        (NSApplication.shared.delegate as? AppDelegate)?
-                                            .selectInputDevice(uid: newValue.isEmpty ? nil : newValue)
+                                        // onAppear's refreshMicState writes the current pin here too;
+                                        // re-saving the same pin is not a choice and must not end Stay on.
+                                        guard let delegate = NSApplication.shared.delegate as? AppDelegate,
+                                              StayOnController.isNewSelection(newValue, current: delegate.currentInputDeviceUID())
+                                        else { return }
+                                        delegate.selectInputDevice(uid: newValue.isEmpty ? nil : newValue)
                                     }
                                     Text(micSelection.isEmpty
-                                         ? "Uses connected AirPods for dictation; pre-listening uses a built-in or wired mic.\nAirPods rest after 30 seconds idle when another mic is available."
+                                         ? "Uses this Mac's built-in mic, or a wired mic if it has none.\nAirPods and other Bluetooth headsets are used only when you choose Stay on in the menu."
                                          : "Uses your selected microphone for dictation. If disconnected, a built-in or wired mic is used.")
                                         .font(.footnote)
                                         .foregroundColor(.secondary)
@@ -916,6 +1073,10 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 14) {
                         preBufferRow
 
+                        if viewModel.engine == "parakeet" {
+                            whisperFallbackRow
+                        }
+
                         if viewModel.engine == "whisper" {
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
                             GridRow(alignment: .firstTextBaseline) {
@@ -976,6 +1137,12 @@ struct SettingsView: View {
                         localAPIRow
 
                         screenContextRow
+
+                        insertionByAppRow
+
+                        compatibilityReportRow
+
+                        dictationTraceRow
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 4)
@@ -1007,53 +1174,79 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 12)
                 } // end VStack
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .padding(24)
             } // end ScrollView
+            .scrollContentBackground(.hidden)
 
             if isRecordingHotkey {
                 KeyRecorderOverlay(
                     onCapture: { keyCode, modifiers in
                         viewModel.hotkeyKeyCode = keyCode
                         viewModel.hotkeyModifiers = modifiers
-                        hotkeyPickerSelection = keyCode
+                        hotkeyPickerSelection = currentHotkeyChoice
                         viewModel.save()
                         isRecordingHotkey = false
                     },
                     onCancel: {
-                        hotkeyPickerSelection = viewModel.hotkeyKeyCode
+                        hotkeyPickerSelection = currentHotkeyChoice
                         isRecordingHotkey = false
                     }
                 )
             }
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .controlSize(.regular)
         .onAppear {
-            hotkeyPickerSelection = viewModel.hotkeyKeyCode
+            hotkeyPickerSelection = currentHotkeyChoice
+            lastKeyMode = viewModel.keyMode
             if !isReview { launchAtLogin = LaunchAtLogin.isEnabled }
             previousLanguage = viewModel.language
             if !isReview { refreshMicState() }
             checkPendingDownload()
         }
         .onChange(of: hotkeyPickerSelection) { newValue in
-            if newValue == otherHotkeyTag {
+            switch newValue {
+            case .other:
                 isRecordingHotkey = true
-            } else if newValue != viewModel.hotkeyKeyCode {
-                // Clearing the modifiers is correct ONLY for a real user pick of a different key.
-                // The equality guard distinguishes that from the two SYNC writes that also land
-                // here, both of which used to destroy a modifier-bearing hotkey (2026-08-01):
-                //   1. `.onAppear` assigns `hotkeyPickerSelection = viewModel.hotkeyKeyCode`,
-                //      which counts as a change — so merely OPENING Settings wiped modifiers.
-                //   2. `KeyRecorderOverlay.onCapture` sets keyCode + modifiers and then syncs the
-                //      picker, so capturing e.g. Shift+F13 immediately cleared the Shift again.
-                // Modifier-bearing hotkeys are reachable only via config file / CLI / the "Other…"
-                // recorder, which is why this survived: the GUI picker itself never sets one.
-                viewModel.hotkeyKeyCode = newValue
+            case .custom:
+                break // Syncing the custom label never changes its configured chord.
+            case .standard(let code):
+                guard code != viewModel.hotkeyKeyCode || !viewModel.hotkeyModifiers.isEmpty else { return }
+                viewModel.hotkeyKeyCode = code
                 viewModel.hotkeyModifiers = []
                 viewModel.save()
             }
         }
-        .onChange(of: viewModel.keyMode) { _ in viewModel.save() }
+        .onChange(of: viewModel.keyMode) { newMode in
+            // First switch to Edit with cleanup on and no consent yet: explain the cloud part
+            // first, with an on-device-only way in. Cancel keeps the old mode.
+            if newMode == .edit, !isReview, viewModel.editModeCleanup,
+               viewModel.editModeCloudConsent == nil {
+                switch EditConsentSheet.run(in: nil, offerOnDeviceOnly: true) {
+                case .allow:
+                    viewModel.editModeCloudConsent = ISO8601DateFormatter().string(from: Date())
+                case .onDeviceOnly:
+                    viewModel.editModeCleanup = false
+                case .cancel:
+                    viewModel.keyMode = lastKeyMode
+                    return
+                }
+            }
+            lastKeyMode = newMode
+            viewModel.save()
+        }
+        .onChange(of: viewModel.editModeCleanup) { on in
+            if on, !isReview, viewModel.editModeCloudConsent == nil {
+                if EditConsentSheet.run(in: nil) == .allow {
+                    viewModel.editModeCloudConsent = ISO8601DateFormatter().string(from: Date())
+                } else {
+                    viewModel.editModeCleanup = false
+                    return
+                }
+            }
+            viewModel.save()
+        }
+        .onChange(of: viewModel.editModeModel) { _ in viewModel.save() }
         .onChange(of: viewModel.modelSize) { newModel in
             viewModel.save()
             checkPendingDownload()
@@ -1214,6 +1407,127 @@ struct SettingsView: View {
                 .onChange(of: viewModel.localAPIEnabled) { _ in viewModel.save() }
     }
 
+    // MARK: - App compatibility rows (2026-09-24)
+
+    /// A running app someone might want to set an insertion method for.
+    private struct RunningAppChoice: Identifiable {
+        let id: String      // bundle ID
+        let name: String
+    }
+
+    /// Regular (Dock) apps that are running now, alphabetically, excluding speakfree itself.
+    /// A stranger fixing an app has it open, so this list is enough; config.json takes any ID.
+    private var runningAppChoices: [RunningAppChoice] {
+        let own = Bundle.main.bundleIdentifier
+        var seen = Set<String>()
+        return NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap { app -> RunningAppChoice? in
+                guard let id = app.bundleIdentifier, id != own, seen.insert(id.lowercased()).inserted else { return nil }
+                return RunningAppChoice(id: id, name: app.localizedName ?? id)
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private static func appDisplayName(for bundleID: String) -> String {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return FileManager.default.displayName(atPath: url.path)
+                .replacingOccurrences(of: ".app", with: "")
+        }
+        return bundleID
+    }
+
+    private static func detectedClass(for bundleID: String) -> AppClass {
+        let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+        return AppCompatibility.classify(bundleID: bundleID, bundleURL: url).appClass
+    }
+
+    /// "Detected: <class>", plus the Report a Problem confirmation while the saved setting is
+    /// still the one that was confirmed.
+    private func insertionCaption(for bundleID: String) -> String {
+        let detected = "Detected: \(Self.detectedClass(for: bundleID).label)"
+        let lower = bundleID.lowercased()
+        guard let entry = viewModel.insertionConfirmations.first(where: { $0.key.lowercased() == lower })?.value,
+              entry.setting == viewModel.insertionOverrides[bundleID]?.rawValue,
+              let method = InsertionMethod(rawValue: entry.method) else { return detected }
+        return detected + " · you marked \(method.label) as working"
+    }
+
+    private func overrideBinding(for bundleID: String) -> Binding<InsertionMethod> {
+        Binding(
+            get: { viewModel.insertionOverrides[bundleID] ?? .automatic },
+            set: { viewModel.setInsertionOverride($0, for: bundleID) })
+    }
+
+    private var insertionByAppRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("Insertion by App").frame(width: labelWidth, alignment: .leading)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(viewModel.insertionOverrides.keys.sorted(), id: \.self) { bundleID in
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(Self.appDisplayName(for: bundleID)).lineLimit(1)
+                            Text(insertionCaption(for: bundleID))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 4)
+                        Picker("Method", selection: overrideBinding(for: bundleID)) {
+                            ForEach(InsertionMethod.allCases) { method in
+                                Text(method == .automatic ? "Automatic (remove)" : method.label).tag(method)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 170)
+                        .help(viewModel.insertionOverrides[bundleID]?.detail ?? "")
+                    }
+                }
+                Menu("Add App\u{2026}") {
+                    ForEach(runningAppChoices) { app in
+                        Menu(app.name) {
+                            ForEach(InsertionMethod.allCases.filter { $0 != .automatic }) { method in
+                                Button(method.label) {
+                                    viewModel.setInsertionOverride(method, for: app.id)
+                                }
+                            }
+                        }
+                    }
+                }
+                .fixedSize()
+                Text("If dictation doesn't land in an app, choose a method for that app, or use Report a Problem in the menu bar while that app is in front. Type sends keystrokes, Paste uses the clipboard, Accessibility writes into the field directly. Every other app keeps automatic detection.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @State private var reportCopied = false
+
+    private var compatibilityReportRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            checkboxRow("Compatibility Report", selection: $viewModel.compatibilityReportEnabled,
+                        detail: "Keeps a list in memory of which method each app got and whether the text landed, for bug reports. It never includes what you said, and nothing is sent anywhere.")
+                .onChange(of: viewModel.compatibilityReportEnabled) { _ in viewModel.save() }
+            HStack(spacing: 8) {
+                Button("Copy Report") {
+                    let report = CompatibilityReport.render(
+                        events: CompatibilityReport.shared.snapshot,
+                        speakfreeVersion: SpeakFree.version,
+                        macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString)
+                    UserPasteRestoreGate.shared.writeOutsideBorrow {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(report, forType: .string)
+                    }
+                    reportCopied = true
+                }
+                .disabled(!viewModel.compatibilityReportEnabled)
+                if reportCopied {
+                    Text("Copied").font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.leading, labelWidth + 12)
+        }
+    }
+
     // MARK: - Screen Context Row
 
     private var screenContextRow: some View {
@@ -1227,6 +1541,28 @@ struct SettingsView: View {
                         _ = ScreenContext.requestPermission()
                     }
                 }
+    }
+
+    // MARK: - Dictation Trace Row
+
+    private var dictationTraceRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("Dictation Trace").frame(width: labelWidth, alignment: .leading)
+            VStack(alignment: .leading, spacing: 5) {
+                Picker("Dictation Trace", selection: $viewModel.dictationTrace) {
+                    Text("Off").tag("off")
+                    Text("Invisible tags").tag("tags")
+                    Text("Invisible dot selectors").tag("selectors")
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+                .onChange(of: viewModel.dictationTrace) { _ in viewModel.save() }
+                Text("Experimental: after each dictation into Claude, Codex, VS Code, Cursor, terminals, or Claude and ChatGPT in a browser, adds a dot carrying what the speech engine heard, so an AI can recover mis-heard words. Your raw words go wherever you dictate, including code files, commit messages, and shell commands in those apps; never added in chat or mail apps or password fields.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private func checkboxRow(_ label: String, selection: Binding<Bool>, detail: String) -> some View {
@@ -1268,6 +1604,33 @@ struct SettingsView: View {
     }
 
     // MARK: - Pre-Buffer Row
+
+    /// The maintainer 2026-09-23: "Load Whisper as fallback for errors". Shown checked only when the
+    /// fallback can actually run (model installed, or downloading), so a new user never sees a
+    /// checked box with no backup behind it. Checking it without the model starts the 1.6 GB
+    /// download (progress in the menu); unchecking cancels a download in flight.
+    private var whisperFallbackRow: some View {
+        let app = NSApp.delegate as? AppDelegate
+        _ = viewModel.whisperFallbackDownloadGeneration  // redraw when the download changes state
+        let installed = Transcriber.modelExists(modelSize: WhisperFallback.modelSize)
+        let downloading = app?.isWhisperFallbackDownloading ?? false
+        let binding = Binding<Bool>(
+            get: { (viewModel.whisperFallbackSetting ?? true) && (installed || downloading) },
+            set: { enabled in
+                viewModel.whisperFallbackSetting = enabled
+                viewModel.save()
+                if enabled, !Transcriber.modelExists(modelSize: WhisperFallback.modelSize) {
+                    app?.startWhisperFallbackDownload()
+                } else if !enabled {
+                    app?.cancelWhisperFallbackDownload()
+                }
+            })
+        let detail = "If the speech model misses a dictation, re-check it with Whisper. "
+            + (installed ? "Backup model installed."
+               : downloading ? "Downloading the backup model (progress in the menu)."
+               : "Turning this on downloads a \(WhisperFallback.downloadSizeDescription) backup model.")
+        return checkboxRow("Load Whisper as fallback for errors", selection: binding, detail: detail)
+    }
 
     private var preBufferRow: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {

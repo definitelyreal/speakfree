@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, 'codex/alpha/**']
 
 jobs:
   build:
@@ -46,7 +46,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           CHANGED=$(gh pr diff ${{ github.event.pull_request.number }} --name-only --repo ${{ github.repository }})
-          if echo "$CHANGED" | grep -qE '\.(swift)$|^Package\.swift$'; then
+          if echo "$CHANGED" | grep -qE '\.(swift)$|^Package\.swift$|^Tests/PerfBaseline/latency-ratchet\.json$|^Tests/SpeakFreeTests/AudioFixtures/'; then
             echo "swift=true" >> "$GITHUB_OUTPUT"
           else
             echo "swift=false" >> "$GITHUB_OUTPUT"
@@ -135,6 +135,36 @@ jobs:
           WATCHDOG=$!
           trap 'kill $WATCHDOG 2>/dev/null || true' EXIT
           xcrun swift test --no-parallel 2>&1 | tee swift-test.log
+
+      - name: Latency ratchet (blocking)
+        # Perf round 2 (2026-09-24). Tests/PerfBaseline/latency-ratchet.json holds key-release-to-text
+        # ceilings that may only go down. Blocking here: the deterministic layer (the post-release
+        # wait PostBufferPolicy decides on each fixture, tolerance 0) and the monotonic guard (no
+        # ceiling may rise or disappear versus the base commit). The timed layer needs a
+        # fingerprint-matched machine and is run by hand on the dev Mac; see Tests/PerfBaseline/README.md.
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && github.base_ref || '' }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          HARNESS=.build/debug/perf-harness
+          test -x "$HARNESS" || { echo "::error::perf-harness was not built by swift test"; exit 1; }
+          "$HARNESS" ratchet check --deterministic-only
+          if [ -n "$BASE_REF" ]; then
+            git fetch --depth=1 origin "$BASE_REF"
+            BASE=FETCH_HEAD
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git fetch --depth=1 origin "$BEFORE_SHA"
+            BASE=FETCH_HEAD
+          else
+            echo "No base commit to compare against; monotonic guard skipped."; exit 0
+          fi
+          if git show "$BASE:Tests/PerfBaseline/latency-ratchet.json" > ratchet-base.json 2>/dev/null; then
+            "$HARNESS" ratchet monotonic ratchet-base.json Tests/PerfBaseline/latency-ratchet.json
+          else
+            echo "Base has no latency-ratchet.json yet; monotonic guard skipped."
+          fi
 
   perf:
     # T2.0 perf-regression harness. Benchmarks the audio golden fixtures and compares against the
@@ -331,7 +361,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Version consistency check
-        run: bash scripts/check-version.sh
+        run: |
+          VERSION=$(sed -n 's/.*let version = "\([^"]*\)".*/\1/p' Sources/SpeakFreeLib/Version.swift)
+          if [[ "$VERSION" == *-alpha.* ]]; then
+            bash scripts/check-version.sh --alpha
+          else
+            bash scripts/check-version.sh
+          fi
+
+      - name: Alpha packaging safety (mocked signing and notarization)
+        run: python3 scripts/test-alpha-packaging_AI_.py
 
   install-test:
     runs-on: macos-15

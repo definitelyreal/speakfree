@@ -47,16 +47,16 @@ import Foundation
 public enum PostBufferPolicy {
 
     /// Post-buffer defaults, retuned 150→90 ms silence / 300→220 ms cap after the 2026-07-19
-    /// empirical A/B (see `build/26-07-15-adversarial-review/perf/POSTBUFFER-AB.md`): a full-corpus
+    /// empirical A/B (internal A/B notes): a full-corpus
     /// census of n=5,583 recordings with 478 transcribed A/B, showing only ~0.04% (≈2 clips)
     /// voiced-tail regressions — the shortened buffer only harms audio where a real word follows a
     /// 90–149 ms pause, and Parakeet's 3 s flush pad re-normalizes the truncated trailing silence
-    /// away (median 10 ms removed). Michael ruled GO on that evidence.
+    /// away (median 10 ms removed). The maintainer ruled GO on that evidence.
     public static let defaultSilenceNeededMs: Double = 90.0
     public static let defaultCapMs: Double = 220.0
 
     /// Speech-extension (2026-07-25): a dictation whose LAST WORD is spoken across the key
-    /// release ("…missed the last word, ⟨release⟩ selectors") dies at the 220 ms cap — the
+    /// release ("…open the settings, ⟨release⟩ panel") dies at the 220 ms cap — the
     /// word needs ~600–1000 ms. When any trailing window shows actual SPEECH energy (not
     /// breath/room tone), the cap extends to `defaultExtendedCapMs`; the 90 ms silence run
     /// still finalizes the moment the speaker stops, so quiet releases keep today's latency.
@@ -158,7 +158,8 @@ public enum PostBufferPolicy {
         windowMs: Double = defaultWindowMs,
         silenceThreshold: Float = defaultSilenceThreshold,
         silenceNeededMs: Double = defaultSilenceNeededMs,
-        capMs: Double = defaultCapMs
+        capMs: Double = defaultCapMs,
+        speechThreshold: Float = defaultSpeechThreshold
     ) -> Double {
         let windowSamples = max(1, Int((windowMs / 1000.0) * sampleRate))
         let rms = windowRMSValues(samples: samples, windowSamples: windowSamples)
@@ -169,8 +170,69 @@ public enum PostBufferPolicy {
             windowMs: windowMs,
             silenceThreshold: silenceThreshold,
             silenceNeededMs: silenceNeededMs,
-            capMs: capMs
+            capMs: capMs,
+            speechThreshold: speechThreshold
         )
+    }
+
+    // MARK: - Noise-relative thresholds (2026-09-22 speed loop, candidate W1)
+    //
+    // Field logs: ~17% of takes wait the full 1.2 s extension, up to 65% on one build, because
+    // the fixed 0.02 RMS "still speaking" bar is cleared by room tone in a cafe, on a plane, or
+    // with a fan. The overlay's speech gate solved the same problem by comparing against the
+    // take's own noise floor (OverlayEmergence.AdaptiveSpeechGate, 2026-08-19 corpus calibration).
+    // These thresholds are never LOWER than the fixed ones, so a quiet room behaves exactly as
+    // before and a noisy one can only wait less; the risk being measured is clipping a real
+    // trailing word. Not wired into the live loop until that replay passes and the maintainer agrees.
+
+    /// Silence must sit at or below this multiple of the take's noise floor.
+    public static let defaultSilenceFloorRatio: Float = 1.5
+    /// Speech energy must reach this multiple of the take's noise floor to extend the wait.
+    public static let defaultSpeechFloorRatio: Float = 2.0
+    /// Noise floor = this percentile of per-window RMS over the audio before key release. The
+    /// 500 ms pre-roll is almost always room tone, so a low percentile lands on it.
+    public static let noiseFloorPercentile: Double = 0.10
+
+    public struct Thresholds: Equatable, Sendable {
+        public var silence: Float
+        public var speech: Float
+        public init(silence: Float, speech: Float) {
+            self.silence = silence
+            self.speech = speech
+        }
+    }
+
+    public static let fixedThresholds = Thresholds(
+        silence: defaultSilenceThreshold, speech: defaultSpeechThreshold)
+
+    /// Low-percentile window RMS of the audio captured before key release. Empty → 0, which
+    /// yields the fixed thresholds.
+    public static func noiseFloor(
+        preReleaseSamples samples: [Float], sampleRate: Double = 16_000.0,
+        windowMs: Double = defaultWindowMs, percentile: Double = noiseFloorPercentile
+    ) -> Float {
+        let windowSamples = max(1, Int((windowMs / 1000.0) * sampleRate))
+        // Only whole windows: a short trailing fragment would skew a low percentile.
+        let whole = samples.count - samples.count % windowSamples
+        guard whole > 0 else { return 0 }
+        let rms = windowRMSValues(samples: Array(samples[0..<whole]), windowSamples: windowSamples)
+            .filter { $0.isFinite }
+            .sorted()
+        guard !rms.isEmpty else { return 0 }
+        let index = min(rms.count - 1, max(0, Int((Double(rms.count - 1) * percentile).rounded(.down))))
+        return rms[index]
+    }
+
+    /// Thresholds scaled to the take's noise floor, never below the fixed quiet-room values.
+    public static func noiseRelativeThresholds(
+        noiseFloor: Float,
+        silenceRatio: Float = defaultSilenceFloorRatio,
+        speechRatio: Float = defaultSpeechFloorRatio
+    ) -> Thresholds {
+        let floor = noiseFloor.isFinite ? max(0, noiseFloor) : 0
+        return Thresholds(
+            silence: max(defaultSilenceThreshold, silenceRatio * floor),
+            speech: max(defaultSpeechThreshold, speechRatio * floor))
     }
 
     /// RMS of one window of samples — sqrtf(Σx² / n), the same RMS the audio tap and dead-audio

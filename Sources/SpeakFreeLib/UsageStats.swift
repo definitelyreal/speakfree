@@ -72,7 +72,7 @@ class UsageStats {
     /// Typing speeds the saved-time estimate brackets, in characters per second (5 chars/word).
     ///
     /// The old estimate hardcoded 40 WPM — 3.3 chars/sec — and reported the result as a single
-    /// precise figure. Michael types 110-165 WPM (speech audit, finding 18), so his "time saved"
+    /// precise figure. The maintainer types 110-165 WPM (speech audit, finding 18), so his "time saved"
     /// was inflated roughly 3-4x and "saving 4.9 days" was fiction. A single number cannot be
     /// honest here because the counterfactual depends entirely on who is typing, so the estimate
     /// is a RANGE and is presented as one.
@@ -125,7 +125,7 @@ class UsageStats {
         return "\(low)-\(high)"
     }
 
-    // MARK: - Two-line stats display (Michael 2026-08-20)
+    // MARK: - Two-line stats display (the maintainer 2026-08-20)
 
     /// Words ≈ characters / 5 (the standard WPM convention; the corpus does not store
     /// per-dictation word counts).
@@ -160,7 +160,7 @@ class UsageStats {
     static let handTravelMetresPerKeystroke = 0.02
     var handTravelMetres: Double { Double(data.totalCharacters) * Self.handTravelMetresPerKeystroke }
 
-    /// One consistent unit and one decimal, including zero (Michael's settings copy).
+    /// One consistent unit and one decimal, including zero (the maintainer's settings copy).
     var handTravelImperialDescription: String {
         let miles = handTravelMetres / 1609.344
         return String(format: "%.1f miles", miles)

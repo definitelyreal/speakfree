@@ -3,8 +3,8 @@ import XCTest
 
 final class GlossaryCorrectorTests: XCTestCase {
 
-    // Curated names mirroring Michael's real glossary shape.
-    let glossary = ["Rohrlich", "Bexx", "Maryna", "Pessah", "Doxbox", "Viktor"]
+    // Invented curated names in the shape of a typical user glossary.
+    let glossary = ["Vohrbach", "Jaxx", "Maryna", "Tessah", "Zipbox", "Viktor"]
 
     // Deterministic real-word fixture: these are legitimate words the spell
     // checker would accept (so they must NEVER be corrected to a name).
@@ -18,16 +18,16 @@ final class GlossaryCorrectorTests: XCTestCase {
     // MARK: - Corrects near-miss misspellings
 
     func test_correctsNearMiss() {
-        XCTAssertEqual(correct("Rorlick"), "Rohrlich")   // 2 edits, 8-char name
-        XCTAssertEqual(correct("Pesa"), "Pessah")        // within bound
-        XCTAssertEqual(correct("Doxbox"), "Doxbox")      // 1 edit
+        XCTAssertEqual(correct("Vorback"), "Vohrbach")   // 2 edits, 8-char name
+        XCTAssertEqual(correct("Tesa"), "Tessah")        // within bound
+        XCTAssertEqual(correct("Zipbox"), "Zipbox")      // 1 edit
     }
 
     func test_correctsWithinSentence_preservesPunctuationAndSpacing() {
-        XCTAssertEqual(correct("Hey Rorlick, how are you?"),
-                       "Hey Rohrlich, how are you?")
-        XCTAssertEqual(correct("tell Pesa and Maryna"),
-                       "tell Pessah and Maryna")
+        XCTAssertEqual(correct("Hey Vorback, how are you?"),
+                       "Hey Vohrbach, how are you?")
+        XCTAssertEqual(correct("tell Tesa and Maryna"),
+                       "tell Tessah and Maryna")
     }
 
     // MARK: - The critical guard: NEVER mangle a real word
@@ -44,13 +44,13 @@ final class GlossaryCorrectorTests: XCTestCase {
     // MARK: - Exact glossary term → normalize to curated casing
 
     func test_exactTerm_normalizesCase() {
-        XCTAssertEqual(correct("bexx is coming"), "Bexx is coming")   // mid-sentence lowercased name → curated case
-        XCTAssertEqual(correct("BEXX"), "Bexx")
+        XCTAssertEqual(correct("jaxx is coming"), "Jaxx is coming")   // mid-sentence lowercased name → curated case
+        XCTAssertEqual(correct("JAXX"), "Jaxx")
         XCTAssertEqual(correct("Viktor"), "Viktor")                   // already correct
     }
 
     // MARK: - Exact-path real-word guard (audit 2026-07-01)
-    // Vocabulary comes from Contacts/Brain, so names that are also common words
+    // Vocabulary comes from imported name lists, so names that are also common words
     // are routine. The exact-match path must never recapitalize a real word:
     // with "Will" in the glossary, "i will send it" was becoming "I Will send it"
     // in every dictation.
@@ -66,10 +66,10 @@ final class GlossaryCorrectorTests: XCTestCase {
 
     func test_exactTerm_nonWordNameStillNormalized() {
         // The guard must not break the intended behavior for distinctive names.
-        let g = ["Bexx", "Will"]
+        let g = ["Jaxx", "Will"]
         let real: (String) -> Bool = { ["will", "tell", "that", "called"].contains($0.lowercased()) }
-        XCTAssertEqual(GlossaryCorrector.correct("tell bexx that will called", glossary: g, isRealWord: real),
-                       "tell Bexx that will called")
+        XCTAssertEqual(GlossaryCorrector.correct("tell jaxx that will called", glossary: g, isRealWord: real),
+                       "tell Jaxx that will called")
     }
 
     func test_exactTerm_alreadyCanonicalUntouchedEvenIfRealWord() {
@@ -92,8 +92,8 @@ final class GlossaryCorrectorTests: XCTestCase {
     // MARK: - Skips
 
     func test_skipsShortTokens() {
-        // 3 chars or fewer never eligible (avoids noise) — "Bex" stays.
-        XCTAssertEqual(correct("Bex"), "Bex")
+        // 3 chars or fewer never eligible (avoids noise) — "Jax" stays.
+        XCTAssertEqual(correct("Jax"), "Jax")
     }
 
     func test_skipsDissimilarMisspelling() {
@@ -104,10 +104,10 @@ final class GlossaryCorrectorTests: XCTestCase {
 
     func test_skipsAmbiguousMatch() {
         // A token within bound of TWO glossary terms is ambiguous → skip.
-        // "Baxx" is 1 edit from "Bexx"; craft a glossary where two terms tie.
-        let g = ["Bexx", "Baxx"]
-        XCTAssertEqual(GlossaryCorrector.correct("Boxx", glossary: g, isRealWord: { _ in false }),
-                       "Boxx", "equidistant from two terms → not corrected")
+        // "Joxx" is 1 edit from "Jaxx"; craft a glossary where two terms tie.
+        let g = ["Jaxx", "Joxx"]
+        XCTAssertEqual(GlossaryCorrector.correct("Jexx", glossary: g, isRealWord: { _ in false }),
+                       "Jexx", "equidistant from two terms → not corrected")
     }
 
     func test_emptyGlossary_noop() {
@@ -117,9 +117,9 @@ final class GlossaryCorrectorTests: XCTestCase {
 
     func test_multiWordGlossaryTermIgnored() {
         // Single-word correction only; a multi-word term is skipped entirely.
-        let g = ["San Pessah"]
-        XCTAssertEqual(GlossaryCorrector.correct("San Pesa", glossary: g, isRealWord: { _ in false }),
-                       "San Pesa")
+        let g = ["San Tessah"]
+        XCTAssertEqual(GlossaryCorrector.correct("San Tesa", glossary: g, isRealWord: { _ in false }),
+                       "San Tesa")
     }
 
     // MARK: - Curated exact overrides (the cases fuzzy can't safely fix)
@@ -144,11 +144,11 @@ final class GlossaryCorrectorTests: XCTestCase {
     }
 
     func test_override_caseInsensitiveKey_runsWithEmptyGlossary() {
-        let out = GlossaryCorrector.correct("Rohrli and ROHRLI",
+        let out = GlossaryCorrector.correct("Vohrba and VOHRBA",
                                             glossary: [],
-                                            overrides: ["rohrli": "Rohrlich"],
+                                            overrides: ["vohrba": "Vohrbach"],
                                             isRealWord: { _ in true })
-        XCTAssertEqual(out, "Rohrlich and Rohrlich")
+        XCTAssertEqual(out, "Vohrbach and Vohrbach")
     }
 
     func test_override_doesNotTouchUnlistedWords() {
@@ -161,8 +161,8 @@ final class GlossaryCorrectorTests: XCTestCase {
 
     func test_glossaryTermsSplitFromCommaJoined() {
         // TextPipeline splits Config.loadVocabulary()'s ", "-joined string back to terms.
-        XCTAssertEqual(TextPipeline.glossaryTerms("Claude, Zander, Bexx"),
-                       ["Claude", "Zander", "Bexx"])
+        XCTAssertEqual(TextPipeline.glossaryTerms("Claude, Zander, Jaxx"),
+                       ["Claude", "Zander", "Jaxx"])
         XCTAssertEqual(TextPipeline.glossaryTerms(nil), [])
         XCTAssertEqual(TextPipeline.glossaryTerms(""), [])
     }

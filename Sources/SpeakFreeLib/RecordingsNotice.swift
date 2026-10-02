@@ -3,7 +3,7 @@
 import AppKit
 import SwiftUI
 
-/// The recordings notice (Michael, 2026-07-14; copy revised same day; reframed
+/// The recordings notice (the maintainer, 2026-07-14; copy revised same day; reframed
 /// 2026-08-21).
 ///
 /// Through v1.7.1 every dictation's audio and transcript were saved to disk by
@@ -14,7 +14,7 @@ import SwiftUI
 /// It returns every launch and every few hours until acknowledged; once resolved
 /// it never shows again.
 ///
-/// Copy and layout revised by Michael, September 14: explain the earlier default,
+/// Copy and layout revised by the maintainer, September 14: explain the earlier default,
 /// keep the saving choice separate from existing files, and use recoverable Trash.
 public enum RecordingsNotice {
 
@@ -56,7 +56,7 @@ public enum RecordingsNotice {
     }
 }
 
-// MARK: - Copy (Michael's saved wording review, September 14)
+// MARK: - Copy (the maintainer's saved wording review, September 14)
 
 enum NoticeCopy {
     static let header = """
@@ -68,7 +68,7 @@ enum NoticeCopy {
     As part of developing Speakfree, I have it keep all my recordings local.
 
     It’s a POWERFUL tool in developing the product. Having real data lets me test a change to the \
-    code against 18,000 recordings — over three DAYS of speech!
+    code against thousands of recordings — DAYS of speech!
 
     I left the recording setting on for everyone, which means that everything you’ve dictated is in \
     the folder shown below. That was my mistake, and I apologize. Privacy and consent are core \
@@ -201,7 +201,7 @@ final class RecordingsTrashWindowController: NSWindowController, NSWindowDelegat
     func windowWillClose(_ notification: Notification) { Self.shared = nil }
 }
 
-// MARK: - The notice view (banner design, Michael 2026-07-14)
+// MARK: - The notice view (banner design, the maintainer 2026-07-14)
 
 struct RecordingsNoticeView: View {
     var initialRetention = 0

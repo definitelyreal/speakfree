@@ -1,10 +1,10 @@
 // Claude · 2026-07-29 · Session: 6277a78f-7ff9-4d99-b9d1-f9ee9afe952a
 //
-// Michael, 2026-07-29: "bad commas". Parakeet hears the spoken word "comma" as "comment" or
+// 2026-07-29 report: "bad commas". Parakeet hears the spoken word "comma" as "comment" or
 // "common" — 6 occurrences in one day's corpus. Both are REAL words, so they join the
 // kamala/karma rule shape (punctuation required on BOTH sides), never the loose non-word tail
 // used for kama/kana/komma. The false-positive tests below are the whole point: every negative
-// case is a real string from the 2026-07-29 corpus.
+// case is a synthetic sentence with the exact shape of a real string from the 2026-07-29 corpus.
 
 import XCTest
 @testable import SpeakFreeLib
@@ -17,11 +17,12 @@ final class CommaMishearTests: XCTestCase {
 
     // MARK: - Converts (the reported defect)
 
-    /// Real 2026-07-29 00:17 dictation into Slack. He said "cheek comma let me know".
+    /// Synthetic reproduction of a 2026-07-29 chat dictation: the speaker said
+    /// "soup comma let me know".
     func test_commentAfterPeriodBecomesComma() {
-        let out = hybrid("added some light wrap and glow on her cheek. Comment, let me know if it seems extreme")
+        let out = hybrid("added some fresh basil and salt on the soup. Comment, let me know if it seems too much")
         XCTAssertFalse(out.lowercased().contains("comment"), "got: \(out)")
-        XCTAssertTrue(out.contains("cheek, let me know"), "got: \(out)")
+        XCTAssertTrue(out.contains("soup, let me know"), "got: \(out)")
     }
 
     func test_commonAfterPeriodBecomesComma() {
@@ -36,16 +37,16 @@ final class CommaMishearTests: XCTestCase {
     }
 
     func test_trailingRealWordHomophoneAfterPunctuationBecomesComma() {
-        XCTAssertEqual(hybrid("I've always wanted to go to Turkey, comment"),
-                       "I've always wanted to go to Turkey,")
+        XCTAssertEqual(hybrid("I've always wanted to bake fresh bread, comment"),
+                       "I've always wanted to bake fresh bread,")
         XCTAssertEqual(hybrid("That is the plan: coma"), "That is the plan,")
     }
 
-    /// Real 2026-08-22 dictation: Parakeet split the spoken "comma" into two capitalised
+    /// 2026-08-22 regression: Parakeet split the spoken "comma" into two capitalised
     /// tokens "Ka Ma" ("Yeah, Ka Ma, it also becomes…"). The non-word bigram joins the loose
     /// kama/kana family (preceding-punctuation garble signature), not the both-sides real-word rule.
     func test_kaMaSplitTokenBecomesComma() {
-        let out = hybrid("Yeah, Ka Ma, it also becomes the way that we use newer models")
+        let out = hybrid("Yeah, Ka Ma, it also becomes the way that we plan weekly meals")
         XCTAssertFalse(out.contains("Ka Ma"), "got: \(out)")
         XCTAssertTrue(out.contains("Yeah, it also becomes"), "got: \(out)")
     }
@@ -57,23 +58,23 @@ final class CommaMishearTests: XCTestCase {
                        "Okay awesome, I think we're set")
     }
 
-    // MARK: - Must NOT convert — all four are real strings from the same day's corpus
+    // MARK: - Must NOT convert — all four reproduce real strings' shapes from the same day
 
-    /// "One thing is that the right comment bar and the meme should…" (00:36, Chrome)
+    /// Noun use mid-sentence: determiner + modifier + "comment" + noun.
     func test_realWordCommentMidSentenceIsUntouched() {
-        let input = "One thing is that the right comment bar and the meme should move"
+        let input = "One thing is that the right comment box and the logo should move"
         XCTAssertEqual(hybrid(input), input)
     }
 
-    /// "…and in off-handed comments I may have talked about…" (15:21)
+    /// Plural noun directly before a capitalised pronoun.
     func test_pluralCommentsIsUntouched() {
-        let input = "in off-handed comments I may have talked about it"
+        let input = "in quick comments I may have mentioned it"
         XCTAssertEqual(hybrid(input), input)
     }
 
-    /// Michael's own complaint message (15:59) — "bad comments and things that should be common in"
-    func test_michaelsComplaintTextIsUntouched() {
-        let input = "there are spaces, in fact, error sentences, and bad comments and things that should be common in favours"
+    /// A complaint-shaped message: plural "comments and" plus "should be common in".
+    func test_complaintShapedTextIsUntouched() {
+        let input = "there are typos, in fact, odd sentences, and kind comments and notes that should be common in drafts"
         XCTAssertEqual(hybrid(input), input)
     }
 
@@ -92,33 +93,33 @@ final class CommaMishearTests: XCTestCase {
         XCTAssertEqual(hybrid("Please leave a comment."), "Please leave a comment.")
     }
 
-    // MARK: - Sentence-medial shapes (2026-08-14, Michael: "yes" to looser conversion)
-    // Positive cases are verbatim raw transcripts from the 8/13-14 dogfood corpus.
+    // MARK: - Sentence-medial shapes (2026-08-14, looser conversion approved)
+    // Positive cases are synthetic sentences with the shapes of the 8/13-14 dogfood corpus.
 
-    /// Shape 1: bare word before, punctuation after. Whisper on the same wav hears
-    /// "the subject matter, comma, I would love".
+    /// Shape 1: bare word before, punctuation after. In the original failure, Whisper on the
+    /// same audio heard "…, comma, I would love".
     func test_bareBeforePunctAfterConverts() {
-        let out = hybrid("incredibly familiar with the subject matter comment, I would love to chat")
-        XCTAssertTrue(out.contains("subject matter, I would love"), "got: \(out)")
-        let out2 = hybrid("There's lots of different memory options common. Maybe that's better")
-        XCTAssertTrue(out2.contains("memory options, Maybe"), "got: \(out2)")
+        let out = hybrid("very familiar with the baking side comment, I would love to chat")
+        XCTAssertTrue(out.contains("baking side, I would love"), "got: \(out)")
+        let out2 = hybrid("There's lots of different lunch options common. Maybe that's better")
+        XCTAssertTrue(out2.contains("lunch options, Maybe"), "got: \(out2)")
     }
 
     /// Shape 2: no punctuation anywhere, clause-continuing conjunction after.
     func test_bareBothSidesBeforeConjunctionConverts() {
-        let out = hybrid("think about what gates other things comment and think about efficiency")
-        XCTAssertTrue(out.contains("gates other things, and think"), "got: \(out)")
+        let out = hybrid("think about what holds other things comment and think about cost")
+        XCTAssertTrue(out.contains("holds other things, and think"), "got: \(out)")
     }
 
     /// DELIBERATE non-conversions (VERIFY round 2): a determiner/possessive/copula two tokens
     /// back is the signature of a real noun phrase ("your GitHub comment"), and these command
-    /// garbles share it exactly ("your talk comment"). Converting them would silently delete
+    /// garbles share it exactly ("your walk comment"). Converting them would silently delete
     /// legitimate nouns, so they stay unconverted — the acoustic layer is the right fix.
     func test_nounPhraseSignatureTwoTokensBackStaysUnconverted() {
         let cases = [
-            "It looks like I'll have to miss your talk comment since we're playing",
-            "you're assuming that microphone modeling is EQ comment. There's more to it",
-            "could be from anyone at any point in the party comment, so I would suggest",
+            "It looks like I'll have to miss your walk comment since we're cooking",
+            "you're assuming that bread baking is fine comment. There's more to it",
+            "could be from anyone at any point in the yard comment, so I would suggest",
         ]
         for input in cases {
             let out = hybrid(input)
@@ -129,10 +130,10 @@ final class CommaMishearTests: XCTestCase {
 
     /// Shape 3: punctuation before (consumed), clause-starter after.
     func test_punctBeforeClauseStarterAfterConverts() {
-        let out = hybrid("I can talk at 6 for about 40 minutes. Common need to leave at 6.40 though")
-        XCTAssertTrue(out.contains("40 minutes, need to leave"), "got: \(out)")
-        let out2 = hybrid("load-bearing for my day-to-day tasks. Common to differentiate between things")
-        XCTAssertTrue(out2.contains("tasks, to differentiate"), "got: \(out2)")
+        let out = hybrid("The bread bakes for about 40 minutes. Common need to cool it at 6.40 though")
+        XCTAssertTrue(out.contains("40 minutes, need to cool"), "got: \(out)")
+        let out2 = hybrid("useful for my day-to-day chores. Common to separate the laundry")
+        XCTAssertTrue(out2.contains("chores, to separate"), "got: \(out2)")
         let out3 = hybrid("that would work too. Comment either way, period.")
         XCTAssertTrue(out3.contains("work too, either way"), "got: \(out3)")
     }
@@ -140,13 +141,14 @@ final class CommaMishearTests: XCTestCase {
     // MARK: - Sentence-medial guards: preceding word marks legitimate prose
 
     func test_precedingDeterminerBlocksMedialConversion() {
-        // All corpus-real. "a/the/this/latest" and copulas/comparatives protect the noun.
-        // The last three are the VERIFY round-1 adversarial finds (2026-08-14): compound
-        // modifiers ("long/blog/review comment") with the determiner 2+ tokens back.
+        // Corpus shapes with neutral wording. "a/the/this/latest" and copulas/comparatives
+        // protect the noun. The last three are the VERIFY round-1 adversarial finds
+        // (2026-08-14): compound modifiers ("long/blog/review comment") with the determiner
+        // 2+ tokens back.
         let cases = [
             "it's a comment by a user, not a reply",
-            "sell tickets to this comment. Would you",
-            "C this latest comment made by codex.",
+            "send replies to this comment. Would you",
+            "C this latest comment made by the bot.",
             "that was more common, period",
             "something there is common and it feels important",
             "I want you to comment, then merge it",

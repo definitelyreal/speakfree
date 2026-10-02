@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
+// ai-processed:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 //
 // Help content as DATA, separate from the window that renders it
 // ([HelpController.swift]). The previous Help was one hardcoded attributed string built
@@ -6,7 +7,7 @@
 // Whisper-only models while the default engine is Parakeet, named punctuation modes
 // ("Hybrid", "Off", "Spoken words") that no longer exist in the picker, and pointed at a
 // "Settings → Max Recordings" control that was replaced by the opt-in recordings toggle.
-// See build/26-07-26-help-audit/AUDIT.ai.md.
+// See the internal help audit.
 //
 // Two rules keep it honest:
 //   1. Anything the app already knows (version, build channel, dev mode, the hotkey the
@@ -76,6 +77,7 @@ public struct HelpFacts: Equatable {
     public var devMode: Bool
     public var hotkeyName: String
     public var isToggleMode: Bool
+    public var isEditMode: Bool
     public var engineID: String
     public var whisperModel: String
     public var parakeetModel: String
@@ -125,12 +127,14 @@ public struct HelpFacts: Equatable {
                 punctuationMode: PunctuationMode = .off,
                 recordingsPath: String,
                 vocabularyPath: String,
-                logsPath: String) {
+                logsPath: String,
+                isEditMode: Bool = false) {
         self.version = version
         self.buildDescription = buildDescription
         self.devMode = devMode
         self.hotkeyName = hotkeyName
         self.isToggleMode = isToggleMode
+        self.isEditMode = isEditMode
         self.engineID = engineID
         self.whisperModel = whisperModel
         self.parakeetModel = parakeetModel
@@ -150,7 +154,7 @@ public struct HelpFacts: Equatable {
             buildDescription: SpeakFree.menuTitle,
             devMode: DevMode.isActive,
             hotkeyName: KeyCodes.displayName(keyCode: c.hotkey.keyCode),
-            isToggleMode: c.toggleMode?.value ?? false,
+            isToggleMode: c.effectiveKeyMode == .toggle,
             // Resolve EXACTLY as the runtime does, not as `defaultConfig` does. EngineFactory
             // and AppDelegate use `?? "whisper"` / `?? "parakeet-tdt-0.6b-v3"`, and Config.swift
             // documents that split as deliberate: the NEW-install defaults must not retroactively
@@ -165,7 +169,8 @@ public struct HelpFacts: Equatable {
             punctuationMode: c.effectivePunctuationMode,
             recordingsPath: RecordingStore.recordingsDir.path,
             vocabularyPath: Config.vocabularyFile.path,
-            logsPath: Config.configDir.appendingPathComponent("logs").path
+            logsPath: Config.configDir.appendingPathComponent("logs").path,
+            isEditMode: c.effectiveKeyMode == .edit
         )
     }
 }
@@ -178,6 +183,8 @@ public enum HelpContent {
         [
             gettingStarted(facts),
             hotkey(facts),
+            editMode(facts),
+            history(facts),
             enginesAndModels(facts),
             languages(facts),
             punctuation(facts),
@@ -197,7 +204,12 @@ public enum HelpContent {
 
     private static func gettingStarted(_ f: HelpFacts) -> HelpTopic {
         var blocks: [HelpBlock] = []
-        if f.isToggleMode {
+        if f.isEditMode {
+            blocks.append(.paragraph(
+                "Tap \(f.hotkeyName) to open the Edit window and start recording. Tap again to "
+                + "stop the take. Further takes add paragraphs; review the text, then press "
+                + "Return to insert it into the original destination when it can be confirmed."))
+        } else if f.isToggleMode {
             blocks.append(.paragraph(
                 "Press \(f.hotkeyName) once to start recording, speak, then press it again to "
                 + "stop. speakfree transcribes your voice on your own Mac and types the text "
@@ -209,8 +221,9 @@ public enum HelpContent {
         }
         blocks.append(contentsOf: [
             .paragraph("A few things worth knowing early:"),
-            .bullet("If no text field is focused, the transcription goes to your clipboard "
-                    + "instead, so nothing is lost. Just paste it."),
+            .bullet("If speakfree cannot safely insert your text, it offers a clipboard copy "
+                    + "or keeps selectable text for recovery. Check the recovery message "
+                    + "before pasting; macOS can refuse a clipboard write."),
             .bullet("A recording banner appears while you speak. It shows the microphone level, "
                     + "so you can tell speakfree is hearing you."),
             .bullet("The first dictation after launch can be a moment slower while the model "
@@ -230,14 +243,16 @@ public enum HelpContent {
     private static func hotkey(_ f: HelpFacts) -> HelpTopic {
         var blocks: [HelpBlock] = [
             .paragraph("Your hotkey is currently \(f.hotkeyName), in "
-                       + "\(f.isToggleMode ? "Toggle" : "Hold") mode. Change both under "
-                       + "Settings → General → Hotkey."),
-            .paragraph("The two modes:"),
+                       + "\(f.isEditMode ? "Edit" : f.isToggleMode ? "Toggle" : "Hold") mode. Change both under "
+                       + "Settings → Dictation → General → Hotkey."),
+            .paragraph("The three modes:"),
             .row("Hold", "Hold the key down for as long as you are speaking, release to "
                  + "transcribe. Best for short dictation, and there is no way to leave a "
                  + "recording running by accident."),
             .row("Toggle", "Tap once to start, tap again to stop. Better for long dictation, "
                  + "and for anyone who finds holding a key uncomfortable."),
+            .row("Edit", "Tap to open the editing window and record. Tap again to stop a take; "
+                 + "add more takes as paragraphs and press Return when ready to insert."),
             .spacer,
             .paragraph("Any of these keys can be the hotkey:"),
             .row("Globe / fn", "The key in the bottom-left corner. The default."),
@@ -265,10 +280,52 @@ public enum HelpContent {
         return HelpTopic(id: "hotkey", title: "Your Hotkey", blocks: blocks)
     }
 
+    private static func editMode(_ f: HelpFacts) -> HelpTopic {
+        HelpTopic(id: "edit-mode", title: "Edit Mode", blocks: [
+            .paragraph("Choose Edit under Settings → Dictation → General → Hotkey. Your "
+                       + "dictation key opens the Edit window and starts a take; another tap "
+                       + "stops it. Additional takes become separate paragraphs."),
+            .paragraph("You can type corrections in the window. Return inserts the reviewed "
+                       + "text; Shift+Return adds a line break within a paragraph. Esc cancels "
+                       + "a current take, or asks for another Esc before discarding session text."),
+            .paragraph("The destination is shown at the top. If the original destination cannot "
+                       + "be confirmed, the text stays available for recovery instead of being "
+                       + "silently sent to another control."),
+            .paragraph("Options controls optional Claude cleanup. It requires your consent and "
+                       + "a signed-in Claude Code CLI; paragraph text is sent to Claude. You can "
+                       + "use the editing window with cleanup off."),
+            .paragraph("Use Changes (⌘I) to inspect Current, Previous and Original versions, "
+                       + "restore a version or undo individual changes. Review cleanup results "
+                       + "before inserting them."),
+            .action("Open Settings", .openSettings),
+        ])
+    }
+
+    private static func history(_ f: HelpFacts) -> HelpTopic {
+        HelpTopic(id: "history", title: "History & Clipboard", blocks: [
+            .paragraph("History brings recent dictations and optional clipboard items into one "
+                       + "small searchable menu. Its default shortcut is ⇧⌘V; change it under "
+                       + "Settings → Clipboard."),
+            .paragraph("Type to search, use arrow keys to select, and press Return or click a "
+                       + "row once to paste. ⌘↓ and ⌘↑ move by a page. All, Dictation and "
+                       + "Clipboard filter the same history."),
+            .paragraph("Clipboard capture is optional. When it is off, the dim Clipboard "
+                       + "filter explains how to enable it and offers a Preferences button."),
+            .paragraph("Choose Off, Until speakfree quits, or 7 days on this Mac for history "
+                       + "retention. Text, rich formatting, images and file references are "
+                       + "supported within the size limits shown in Clipboard settings. File "
+                       + "references depend on the original files staying available."),
+            .paragraph("Selecting a history item makes it the current clipboard. Temporary "
+                       + "dictation pastes use a separate save-and-restore path. Clearing "
+                       + "history does not delete saved recordings or transcript archives."),
+            .action("Open Settings", .openSettings),
+        ])
+    }
+
     private static func enginesAndModels(_ f: HelpFacts) -> HelpTopic {
         var blocks: [HelpBlock] = [
             .paragraph("speakfree can transcribe with either of two local engines, chosen under "
-                       + "Settings → Transcription. You are using \(f.engineDisplayName) with "
+                       + "Settings → Dictation → Transcription. You are using \(f.engineDisplayName) with "
                        + "\(f.activeModelName)."),
             .row(EngineCatalog.engines.first { $0.id == "parakeet" }?.displayName ?? "Parakeet",
                  "NVIDIA's model, on the Apple Neural Engine. The default for new installs: "
@@ -322,7 +379,7 @@ public enum HelpContent {
 
     private static func languages(_ f: HelpFacts) -> HelpTopic {
         HelpTopic(id: "languages", title: "Languages", blocks: [
-            .paragraph("Set your language under Settings → Transcription → Language. The row is "
+            .paragraph("Set your language under Settings → Dictation → Transcription → Language. The row is "
                        + "hidden while an English-only Parakeet model is selected, which is the "
                        + "default: there is nothing to choose. Switch to Parakeet v3 or to "
                        + "Whisper and it appears."),
@@ -343,7 +400,7 @@ public enum HelpContent {
 
     private static func punctuation(_ f: HelpFacts) -> HelpTopic {
         HelpTopic(id: "punctuation", title: "Punctuation", blocks: [
-            .paragraph("Choose under Settings → Transcription → Punctuation. You are using "
+            .paragraph("Choose under Settings → Dictation → Transcription → Punctuation. You are using "
                        + "\(f.punctuationDisplayName)."),
             .row("Automatic & Spoken", "The engine punctuates from your speech patterns, AND you "
                  + "can say \"comma\", \"period\", \"question mark\", \"new line\" and the rest "
@@ -363,7 +420,9 @@ public enum HelpContent {
             .paragraph("Spoken punctuation understands the common names, including \"period\", "
                        + "\"comma\", \"question mark\", \"exclamation point\", \"colon\", "
                        + "\"semicolon\", \"dash\", \"open quote\" and \"close quote\", plus "
-                       + "\"new line\" and \"new paragraph\"."),
+                       + "\"new line\" and \"new paragraph\". A line break at the very end of "
+                       + "a dictation is left out in every app (in a terminal it could run the "
+                       + "line); line breaks in the middle are kept."),
             .action("Open Settings", .openSettings),
         ])
     }
@@ -399,11 +458,11 @@ public enum HelpContent {
 
     private static func recordingsAndPrivacy(_ f: HelpFacts) -> HelpTopic {
         var blocks: [HelpBlock] = [
-            .paragraph("speakfree is entirely local. Your voice never leaves your Mac. There is "
-                       + "no account and no analytics: nothing about what you say, type, or "
-                       + "dictate is ever sent anywhere. The only thing it talks to the internet "
-                       + "for is downloading a model and checking whether a new version of "
-                       + "speakfree has been released."),
+            .paragraph("Speech recognition runs locally on your Mac and does not require a "
+                       + "speakfree account. Models and app updates use the internet. Optional "
+                       + "Edit Mode cleanup is different: after you consent, paragraph text "
+                       + "is sent through your signed-in Claude Code CLI to Claude. Leave "
+                       + "cleanup off to keep that text processing on your Mac."),
             .paragraph("Audio is written to a file, transcribed on your device, and then deleted "
                        + "unless you asked to keep it. It is written to the recordings folder "
                        + "rather than a temporary one on purpose, so a crash mid-dictation can "
@@ -412,7 +471,7 @@ public enum HelpContent {
                        + "evidence needed to work out why the microphone was silent."),
             .spacer,
             .paragraph("Keeping recordings is optional and OFF by default. Turn on \"Save "
-                       + "recordings and transcripts\" under Settings → General and speakfree "
+                       + "recordings and transcripts\" under Settings → Dictation → General and speakfree "
                        + "keeps each dictation's audio and its text next to it, on your Mac only. "
                        + "A \"Past Recordings\" row then appears, setting how many to keep; it is "
                        + "hidden while saving is off, because there is nothing to cap."),
@@ -430,7 +489,7 @@ public enum HelpContent {
             .paragraph(f.recordingsPath),
             .action("Open Recordings Folder", .openRecordingsFolder),
             .spacer,
-            .paragraph("Once recordings exist, Settings → General shows how many you have with a "
+            .paragraph("Once recordings exist, Settings → Dictation → General shows how many you have with a "
                        + "\"\(NoticeCopy.deleteLinkText)\" link below the count. That moves the audio "
                        + "and the transcripts together."),
             .action("Open Settings", .openSettings),
@@ -487,11 +546,17 @@ public enum HelpContent {
                        + "Splashtop) can record silence. Picking a specific device pins "
                        + "speakfree to it, so plugging in headphones or joining a call does "
                        + "not change what it records from."),
-            .paragraph("If a pinned device is unplugged, speakfree falls back to the system "
-                       + "default rather than failing to record."),
-            .paragraph("Bluetooth headsets take a moment to wake up. \"Pre-Buffer Audio\" under "
-                       + "Settings → Performance captures a little audio before you press the "
-                       + "hotkey, so the first word is not clipped."),
+            .paragraph("If a pinned device is unplugged, speakfree falls back to this Mac's own "
+                       + "microphone rather than failing to record."),
+            .paragraph("AirPods and other Bluetooth headsets are never used automatically. To dictate "
+                       + "through one, choose \"Stay on <headset>\" in the menu (2 hours by default; "
+                       + "\"Other durations\" has the rest). While Stay on is on, music on the headset "
+                       + "sounds like a phone call, because Bluetooth only carries a microphone in its "
+                       + "call mode, and AirPods may switch over from your iPhone. It lasts through "
+                       + "disconnects and ends on its own."),
+            .paragraph("If a long dictation comes back nearly empty in a noisy room and a headset is "
+                       + "connected, speakfree switches to it for 2 hours and says so, with Undo. If "
+                       + "music is playing on the headset, it asks first."),
             .spacer,
             .paragraph("If nothing is being heard at all, check that speakfree has microphone "
                        + "permission:"),
@@ -501,7 +566,7 @@ public enum HelpContent {
 
     private static func experimental(_ f: HelpFacts) -> HelpTopic {
         HelpTopic(id: "experimental", title: "Experimental Features", blocks: [
-            .paragraph("These live under Settings → Advanced, each labelled \"(Experimental)\". "
+            .paragraph("These live under Settings → Dictation → Advanced, each labelled \"(Experimental)\". "
                        + "They work, but they are rougher than the rest of the app."),
             .row("Live Preview", "Shows text in the recording banner as you speak, instead of "
                  + "only at the end. The preview revises itself as more audio arrives, so it "
@@ -521,7 +586,7 @@ public enum HelpContent {
 
     private static func performance(_ f: HelpFacts) -> HelpTopic {
         HelpTopic(id: "performance", title: "Speed & Memory", blocks: [
-            .paragraph("Under Settings → Performance."),
+            .paragraph("Under Settings → Dictation → Performance."),
             .row("Model Loading: Automatic", "Keeps the model in memory but hands it back "
                  + "whenever your Mac needs the RAM. The default, and the right answer for "
                  + "nearly everyone."),
@@ -573,13 +638,13 @@ public enum HelpContent {
                     + "sitting there."),
             .spacer,
             .paragraph("Words are missing from the start or end."),
-            .bullet("Turn on Pre-Buffer Audio under Settings → Performance for the start."),
+            .bullet("Turn on Pre-Buffer Audio under Settings → Dictation → Performance for the start."),
             .bullet("For the end, leave a beat of silence before releasing the hotkey. speakfree "
                     + "keeps capturing for a fraction of a second after you let go, and pads the "
                     + "audio for the engine, but releasing while still mid-word can still clip "
                     + "the last one."),
             .spacer,
-            .paragraph("Still wrong? Turn on Diagnostic Logging under Settings → Advanced, "
+            .paragraph("Still wrong? Turn on Diagnostic Logging under Settings → Dictation → Advanced, "
                        + "reproduce the problem, and the log will describe what happened. Logs "
                        + "stay on your Mac."),
             .action("Open Logs Folder", .openLogsFolder),

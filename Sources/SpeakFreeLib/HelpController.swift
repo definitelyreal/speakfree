@@ -5,7 +5,7 @@
 // Rewritten 2026-07-26 because the previous version's CONTENT had gone stale to the point of
 // being misleading: 8 documented false claims, including punctuation modes and a "Max
 // Recordings" control that no longer exist, and no mention of Parakeet, the default engine.
-// See build/26-07-26-help-audit/AUDIT.ai.md. The rewrite also adds what a 14-topic document
+// See the internal help audit. The rewrite also adds what a 14-topic document
 // needs and had none of: topic navigation, ⌘F, links that act, and facts read from the running
 // app instead of typed into prose.
 //
@@ -14,7 +14,7 @@
 // it is an easy mistake to repeat. The old code did compute its document height from an
 // unconstrained `sizeToFit()`, but `NSTextView` defaults to `isVerticallyResizable = true` with
 // `maxSize.height = 10_000_000`, so AppKit re-grew the document to fit on the first layout pass.
-// Measured on the old code (build/26-07-26-help-audit/verify/verify-old-help.swift): document
+// Measured on the old code (an internal verification script): document
 // 992pt vs needed 992pt, deficit 0.0, tail text reachable, and it reflowed 900pt -> 380pt fine.
 // The original probe had measured the pre-layout frame (672pt) against the post-layout
 // requirement. Lesson: never measure an AppKit view before it has been laid out in a window.

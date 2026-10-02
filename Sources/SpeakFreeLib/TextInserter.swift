@@ -42,6 +42,11 @@ class TextInserter {
     var frontmostPIDProvider: () -> pid_t? = {
         NSWorkspace.shared.frontmostApplication?.processIdentifier
     }
+    /// AX ownership is separate from the foreground app for non-activating panels.
+    var elementPIDProvider: (AXUIElement) -> pid_t? = { element in
+        var pid: pid_t = 0
+        return AXUIElementGetPid(element, &pid) == .success && pid > 0 ? pid : nil
+    }
     var executeAppleScript: (String) -> NSDictionary? = { source in
         guard let script = NSAppleScript(source: source) else {
             return ["NSAppleScriptErrorNumber": -2740]
@@ -53,11 +58,167 @@ class TextInserter {
     var performUnicodeInsertion: ((String) -> Bool)?
     var onRemoteInsertionFailure: ((String, String) -> Void)?
 
+    // MARK: - App compatibility (2026-09-24)
+
+    /// Per-app insertion overrides from config (Settings → Advanced). Set by AppDelegate on
+    /// every config load; case-insensitive on bundle ID.
+    var insertionOverrides: [String: InsertionMethod] = [:]
+
+    /// Where insertion outcomes go when the user has opted in. Off by default; tests inject a
+    /// fresh instance.
+    var compatibilityReport: CompatibilityReport = .shared
+
+    /// Bundle URL of the frontmost app, used only to probe its Info.plist and Frameworks
+    /// folder. The probe ignores a bundle whose Info.plist names a different bundle ID, so a
+    /// test that fakes the bundle ID can never be reclassified by the real frontmost app.
+    var frontmostBundleURLProvider: () -> URL? = {
+        NSWorkspace.shared.frontmostApplication?.bundleURL
+    }
+
+    /// Seam for the local clipboard paste on the routed path, so routing tests can observe a
+    /// paste without posting ⌘V or touching a pasteboard. Production leaves it nil.
+    var performPaste: ((String) -> Void)?
+
+    /// Everything routing needs to know about the frontmost app.
+    struct FrontmostProfile {
+        let bundleID: String?
+        let bundleURL: URL?
+        let classification: AppClassification
+        let override: InsertionMethod
+
+        var appClass: AppClass { classification.appClass }
+
+        /// Typing a line break here could reach a terminal as Return.
+        var typedLineBreaksUnsafe: Bool {
+            AppCompatibility.typedLineBreaksUnsafe(appClass: appClass, bundleID: bundleID,
+                                                   hasTerminalPane: classification.hasTerminalPane)
+        }
+
+        func route(for text: String) -> InsertionRoute {
+            AppCompatibility.route(for: appClass, override: override,
+                                   textHasLineBreak: AppCompatibility.hasLineBreak(text),
+                                   lineBreaksUnsafe: typedLineBreaksUnsafe)
+        }
+    }
+
+    func frontmostProfile() -> FrontmostProfile {
+        let bundleID = frontmostBundleIDProvider()
+        let bundleURL = frontmostBundleURLProvider()
+        return FrontmostProfile(
+            bundleID: bundleID,
+            bundleURL: bundleURL,
+            classification: AppCompatibility.classify(bundleID: bundleID, bundleURL: bundleURL),
+            override: AppCompatibility.override(for: bundleID, in: insertionOverrides))
+    }
+
+    /// The route this text would take into the frontmost app right now.
+    func currentRoute(for text: String) -> InsertionRoute {
+        frontmostProfile().route(for: text)
+    }
+
+    // MARK: Outcome tracking for the compatibility report
+    //
+    // One routed insertion produces one report row. Lower layers adjust it synchronously
+    // (`outcomeAdjustment`: a paste that fell back to typing, a delivery that failed), or take
+    // ownership of it (`outcomeDeferred`: the remote paste, which only knows its result 0.4 s
+    // later and records it itself with the profile captured when it was sent).
+    private var outcomeAdjustment: InsertionOutcome?
+    private var outcomeDeferred = false
+
+    /// One call's result and destination survive its asynchronous refocus/remote work.
+    /// Completion runs after the insertion stack unwinds, so recovery can safely copy
+    /// without seeing this call's deferred-insertion guard still raised.
+    private final class InsertionAttempt {
+        let fieldOwnerPID: pid_t?
+        let expectedForegroundPID: pid_t?
+        let field: AXUIElement?
+        let handlesRecovery: Bool
+        var deferred = false
+        private(set) var outcome: InsertionOutcome?
+        private var completion: ((InsertionOutcome) -> Void)?
+
+        init(foregroundPID: pid_t?, fieldOwnerPID: pid_t?, field: AXUIElement?, handlesRecovery: Bool,
+             completion: ((InsertionOutcome) -> Void)?) {
+            self.fieldOwnerPID = fieldOwnerPID
+            self.expectedForegroundPID = fieldOwnerPID ?? foregroundPID
+            self.field = field
+            self.handlesRecovery = handlesRecovery
+            self.completion = completion
+        }
+
+        func finish(_ result: InsertionOutcome) {
+            guard outcome == nil else { return }
+            outcome = result
+            if let completion {
+                self.completion = nil
+                DispatchQueue.main.async { completion(result) }
+            }
+        }
+
+        func finishIfReady() {
+            if !deferred { finish(.pasted) }
+        }
+    }
+
+    private var activeInsertionAttempt: InsertionAttempt?
+
+    /// Submission is not proof of what an inaccessible app ultimately displayed.
+    /// Known failure/copy-only outcomes must never close an Edit draft as inserted.
+    static func deliveryWasSubmitted(_ outcome: InsertionOutcome) -> Bool {
+        switch outcome {
+        case .axVerified, .axUnverifiable, .axDroppedThenPasted, .typed, .pasted, .remoteTyped, .remotePasted:
+            return true
+        case .axTimeoutCopied, .copiedFocusLost, .deliveryFailed, .secureInput:
+            return false
+        }
+    }
+
+    private func beginOutcomeTracking() {
+        outcomeAdjustment = nil
+        outcomeDeferred = false
+    }
+
+    private func recordOutcome(_ outcome: InsertionOutcome, text: String,
+                               profile: FrontmostProfile? = nil) {
+        let deferred = outcomeDeferred
+        let final = outcomeAdjustment ?? outcome
+        beginOutcomeTracking()
+        guard !deferred else { return }
+        activeInsertionAttempt?.finish(final)
+        recordDirect(final, multiLine: AppCompatibility.hasLineBreak(text),
+                     profile: profile ?? frontmostProfile())
+    }
+
+    /// Record a row now, bypassing per-insertion adjustments (used by late completions).
+    private func recordDirect(_ outcome: InsertionOutcome, multiLine: Bool, profile: FrontmostProfile) {
+        let report = compatibilityReport
+        guard report.wantsEvents else { return }
+        let info = profile.bundleURL.flatMap { AppCompatibility.infoDictionary(at: $0) }
+        let sameApp = (info?["CFBundleIdentifier"] as? String)
+            .map { $0.caseInsensitiveCompare(profile.bundleID ?? "") == .orderedSame } ?? false
+        report.record(CompatibilityEvent(
+            date: Date(),
+            bundleID: profile.bundleID ?? "unknown",
+            appName: sameApp ? (info?["CFBundleName"] as? String) : nil,
+            appVersion: sameApp ? (info?["CFBundleShortVersionString"] as? String) : nil,
+            appClass: profile.classification.appClass,
+            reason: profile.classification.reason,
+            override: profile.override,
+            outcome: outcome,
+            multiLine: multiLine))
+    }
+
     /// Seam for the pasteboard all clipboard paths write to (`pasteViaClipboard`,
     /// `copyToClipboard`, `secureInputClipboardFallback`). Production stays on
     /// `.general`; tests inject a named pasteboard so the suite never touches the
     /// developer's real clipboard (test-host-safety rule, PLAN.md P-1).
     var pasteboard: NSPasteboard = .general
+    var pasteboardWriter = PasteboardWriter()
+
+    /// Snapshot seam for permission/provider failures without reading the general clipboard.
+    var captureClipboardSnapshot: (NSPasteboard, Int) throws -> PasteboardAccess.Snapshot = {
+        try PasteboardAccess.snapshot($0, maximumBytes: $1)
+    }
 
     /// Seam for the focused-element AX lookup (`AXUIElementCopyAttributeValue` on the
     /// system-wide element). That call is a synchronous WindowServer IPC that can block
@@ -87,6 +248,23 @@ class TextInserter {
     // restores the clipboard out from under the still-unconsumed paste, causing the app to paste the
     // user's PRIOR clipboard (possibly sensitive) into the target — worse than a drop. There is no
     // way to know the app has consumed, so early restore is never safe. Backstop only.
+    //
+    // Fast restore (2026-09-24, feat/fast-clipboard): there now IS a way to know. On the local
+    // routes the dictated text goes on the clipboard as a LAZY promise (NSPasteboardItemDataProvider),
+    // so AppKit calls us at the moment a process actually reads the text. That first read is the
+    // "read receipt": restore `afterRead` seconds later instead of waiting out the backstop.
+    // Probed on a development Mac (internal clipboard research): the pasteboard server caches the text
+    // after that first read, so later reads (a second read by the target) are served without us
+    // and keep working until the restore. The risk the 08-14 reviews named is a DIFFERENT process
+    // reading first: then the receipt is not the target's. Mitigations, all measured or explicit:
+    //   - the write is `.currentHostOnly`, which stopped the one eager reader measured on the dev
+    //     Mac (Universal Clipboard: 9 of 17 plain writes read within 0.6 s, 0 of 13 host-only);
+    //   - Transient/Concealed/AutoGenerated markers, which Maccy-style managers check (types only,
+    //     no data read) before reading;
+    //   - known eager clipboard syncers (VMs, software KVMs) running → no early restore, backstop;
+    //   - speakfree's own in-process read of the clipboard never counts as a receipt;
+    //   - the remote route never restores early (remote viewers sync the clipboard eagerly).
+    // A target that is never going to read still gets the backstop, as before.
 
     /// What to hand back and the guard that says it is still safe to. `savedItems` is the user's
     /// clipboard from BEFORE the first un-restored dictation paste (never re-snapshotted while a
@@ -95,13 +273,87 @@ class TextInserter {
     struct PendingClipboardRestore {
         let savedItems: [[(NSPasteboard.PasteboardType, Data)]]
         var writtenChangeCount: Int
+        /// The lazy provider for the LATEST write (nil on the remote route, which writes eagerly).
+        /// Identity-checked so a stale provider can never schedule this restore.
+        var provider: DictationPasteProvider?
+        var route: PasteRoute = .native
+        /// Uptime when Cmd+V was sent, for the paste-to-restore log line.
+        var pastedAt: TimeInterval = 0
+        /// Uptime of the first read receipt, if any.
+        var firstReadAt: TimeInterval?
+        /// Seconds after the first read receipt to restore; nil = backstop only.
+        var restoreAfterRead: TimeInterval?
+        /// Why early restore is off, for the log ("route", "syncer:<bundle id>").
+        var earlyOffReason: String?
+        /// Frontmost app when Cmd+V was sent. A read while another app is frontmost may be the
+        /// user's own paste over there, so it is not a receipt for the dictation target.
+        var targetPID: pid_t?
+        /// The backstop already granted its one grace period for a late run.
+        var backstopGraceUsed = false
+        /// This borrow's token in `userPasteGate` (nil on the remote route, which never arms it).
+        var gateToken: Int?
+        /// The Accessibility outcome check for this paste, if one runs.
+        var pasteCheck: PasteOutcomeCheck?
+        /// Its verdict so far, for the log ("pending" while it runs, nil when none runs).
+        var pasteVerdict: String?
     }
 
     /// Which restore policy the frontmost app gets.
     enum PasteRoute: String { case remote, electron, native }
 
+    /// When to hand the user's clipboard back on one route.
+    struct ClipboardRestoreTiming: Equatable {
+        /// Ceiling when nobody reads the dictated text.
+        let backstop: TimeInterval
+        /// Delay after the first read receipt; nil means never restore early on this route.
+        let afterRead: TimeInterval?
+    }
+
+    /// Seams for the restore timing, the monotonic clock, and the running-syncer check, so the
+    /// fast-restore tests run in milliseconds without real timers of seconds or a real process
+    /// list. Production uses the static policy, system uptime, and NSWorkspace.
+    var restoreTiming: (PasteRoute) -> ClipboardRestoreTiming = { TextInserter.restoreTiming(route: $0) }
+    var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// Why the first read must not be trusted right now (an eager syncer, a clipboard manager
+    /// that ignores or may ignore the markers, or a canary that was read), or nil. Production
+    /// checks the running apps against `ClipboardReaderCatalog` and the canary verdict
+    /// (ClipboardTrust.swift); the canary's result overrides the table.
+    var clipboardTrustReason: () -> String? = { ClipboardTrustStore.shared.currentUntrustedReason() }
+
+    /// Accessibility outcome check (PasteOutcomeCheck.swift). nil turns it off (tests that do
+    /// not exercise it). All reads run on `pasteCheckQueue`, never on main.
+    var pasteFieldReader: PasteFieldReading? = AXPasteFieldReader()
+    var pasteCheckDelays: [TimeInterval] = PasteOutcome.defaultDelays
+    let pasteCheckQueue = DispatchQueue(label: "speakfree.paste-outcome-check", qos: .userInitiated)
+
+    /// The clipboard canary, ended (clipboard given back) before any clipboard borrow starts.
+    var clipboardCanary: ClipboardCanary?
+
+    /// Uptime when the last clipboard borrow ended (restored or handed back). Main only.
+    private var lastBorrowEndedAt: TimeInterval?
+    /// No Accessibility check for a paste starting within this long after the previous borrow
+    /// ended: that earlier paste may still be landing, and with the same text it would look
+    /// like this one.
+    static let pasteCheckQuietAfterBorrow: TimeInterval = 1.5
+
+    /// Seam for the local synthetic Cmd+V. Production leaves it nil (real CGEvents). Tests inject
+    /// a closure that plays the target app (reads the pasteboard now, later, twice, or never)
+    /// so the whole write → paste → receipt → restore path runs with no real keystroke.
+    var postPasteShortcut: (() -> Void)?
+
+    /// Where the paste-watch tap learns about the pending borrow so the user's own Cmd+V can
+    /// restore his clipboard first (UserPasteRestore.swift). Tests inject a private gate.
+    var userPasteGate: UserPasteRestoreGate = .shared
+
+    /// Seam for the layout's "v" key code handed to the gate (tests pin it; production asks TIS).
+    var layoutVKeyCodeProvider: (() -> CGKeyCode?)?
+
     private var pendingRestore: PendingClipboardRestore?
     private var pendingBackstop: DispatchWorkItem?
+    /// Main-thread count, rather than a flag: overlapping focus-settle callbacks each own
+    /// one deferred insertion until every exit path in their closure has completed.
+    private var deferredInsertionCount = 0
+    var hasDeferredInsertion: Bool { deferredInsertionCount > 0 }
 
     /// Pure check: should a space be prepended given the text ALREADY captured before
     /// the cursor at record-start?
@@ -135,11 +387,11 @@ class TextInserter {
     /// What actually happened at the seam between the text already in the field and the text
     /// being inserted.
     ///
-    /// 2026-07-29, Michael: "additional spaces should be tracked so that you are able to see
+    /// 2026-07-29, the maintainer: "additional spaces should be tracked so that you are able to see
     /// them." Spacing damage is invisible in the recordings corpus — the `.txt` sidecar holds
     /// only the dictation, while the defect lives in the JOIN, which exists solely in the target
     /// app. Nothing downstream could count these, so a run of spurious leading spaces was only
-    /// ever visible to Michael. This is the missing observation.
+    /// ever visible to the maintainer. This is the missing observation.
     enum SpacingDiagnosis: String {
         /// Exactly one space, or a deliberate no-space boundary. Nothing to see.
         case ok
@@ -279,7 +531,8 @@ class TextInserter {
     }
 
     // Paste text, optionally refocusing the element that was active when recording started.
-    // Returns true if text was pasted, false if focus couldn't be restored (text copied to clipboard instead).
+    // Returns false for a known synchronous failure; true can mean work was scheduled.
+    // `completion` receives this call's final submission/copy/failure outcome exactly once.
     //
     // Secure Input guard — covers ALL insertion paths (AX, keystroke, clipboard, refocus).
     // When a password field (or any app with Secure Event Input) is active, we must not
@@ -288,12 +541,51 @@ class TextInserter {
     // org.nspasteboard.ConcealedType/TransientType markers + auto-clear, so clipboard-history
     // tools skip it and the plaintext doesn't linger. The caller is notified via onFocusLost.
     @discardableResult
-    func insert(text: String, refocusing element: AXUIElement? = nil, onFocusLost: (() -> Void)? = nil) -> Bool {
+    func insert(text original: String, refocusing element: AXUIElement? = nil,
+                onFocusLost: (() -> Void)? = nil) -> Bool {
+        insert(text: original, refocusing: element, onFocusLost: onFocusLost,
+               handlesRecovery: false, completion: nil)
+    }
+
+    @discardableResult
+    func insert(text original: String, refocusing element: AXUIElement? = nil,
+                onFocusLost: (() -> Void)? = nil, handlesRecovery: Bool = false,
+                completion: ((InsertionOutcome) -> Void)?) -> Bool {
+        let foregroundPID = frontmostPIDProvider()
+        let fieldOwnerPID = element.flatMap { elementPIDProvider($0) }
+        let attempt = InsertionAttempt(foregroundPID: foregroundPID, fieldOwnerPID: fieldOwnerPID,
+                                       field: element, handlesRecovery: handlesRecovery, completion: completion)
+        let previous = activeInsertionAttempt
+        activeInsertionAttempt = attempt
+        defer { activeInsertionAttempt = previous }
+        let accepted = insertIntoTarget(text: original, refocusing: element, onFocusLost: onFocusLost)
+        attempt.finishIfReady()
+        return accepted && attempt.outcome.map(Self.deliveryWasSubmitted) != false
+    }
+
+    private func insertIntoTarget(text original: String, refocusing element: AXUIElement?,
+                                  onFocusLost: (() -> Void)?) -> Bool {
+        // A dictation never ends in a line break, in any app (the maintainer, 2026-09-24: "drop it
+        // everywhere"). A trailing spoken "new line" / "new paragraph" is dropped here, at the
+        // one entry point every insertion path shares; line breaks in the middle are kept. In a
+        // terminal whose program has no bracketed paste (bash 3.2, many REPLs) that break
+        // would also run the line.
+        let text = AppCompatibility.trimmingTrailingLineBreaks(original)
+        if text != original {
+            DiagnosticLogger.shared.log("TextInserter: dropped a trailing line break")
+        }
+        if text.isEmpty { return true }
+        // A late failure from the previous insertion (the delayed remote paste) must not
+        // suppress this insertion's report row.
+        beginOutcomeTracking()
         if isSecureInputActive() {
             DiagnosticLogger.shared.log("TextInserter: Secure Input is active — concealed clipboard fallback instead of inserting")
-            secureInputClipboardFallback(text)
-            onSecureInputFallback?(text, .secureInput)
-            onFocusLost?()
+            let copied = secureInputClipboardFallback(text)
+            recordOutcome(copied ? .secureInput : .deliveryFailed, text: text)
+            if copied {
+                notifySecureInputFallback(text, reason: .secureInput)
+                onFocusLost?()
+            }
             return false
         }
 
@@ -307,19 +599,48 @@ class TextInserter {
                     // Use non-blocking delay for focus to settle, then insert.
                     // Re-check secure input inside the closure: the system could enable it
                     // during the 150ms focus-settle window (e.g. user tabs into a password field).
+                    let attempt = activeInsertionAttempt
+                    attempt?.deferred = true
+                    deferredInsertionCount += 1
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                        guard let self = self else { return }
+                        guard let self = self else { attempt?.finish(.deliveryFailed); return }
+                        let previous = self.activeInsertionAttempt
+                        self.activeInsertionAttempt = attempt
+                        attempt?.deferred = false
+                        self.beginOutcomeTracking()
+                        defer {
+                            self.deferredInsertionCount -= 1
+                            attempt?.finishIfReady()
+                            self.activeInsertionAttempt = previous
+                        }
                         if self.isSecureInputActive() {
                             DiagnosticLogger.shared.log("TextInserter: Secure Input became active during focus-settle — concealed clipboard fallback")
-                            self.secureInputClipboardFallback(text)
-                            self.onSecureInputFallback?(text, .secureInput)
-                            onFocusLost?()
+                            let copied = self.secureInputClipboardFallback(text)
+                            self.recordOutcome(copied ? .secureInput : .deliveryFailed, text: text)
+                            if copied {
+                                self.notifySecureInputFallback(text, reason: .secureInput)
+                                onFocusLost?()
+                            }
                             return
                         }
+                        guard self.insertionDestinationIsCurrent() else {
+                            let copied = self.secureInputClipboardFallback(text)
+                            self.recordOutcome(copied ? .copiedFocusLost : .deliveryFailed, text: text)
+                            if copied { onFocusLost?() }
+                            return
+                        }
+                        // App-compat (2026-09-24): only apps routed to the Accessibility chain get
+                        // the direct AX write here. Paste-routed apps (Electron, browsers,
+                        // terminals) accept an AX write, report success and show nothing, and
+                        // this refocus path has no read-back check, so trying AX first silently
+                        // dropped their dictation whenever focus had to be restored.
+                        let route = self.currentRoute(for: text)
                         // Try direct AX insertion on the refocused element first. This targets
                         // `element` specifically, so it is safe even if focus moved.
                         let axInserted: Bool
-                        if let directAXInsert = self.directAXInsert {
+                        if route != .accessibilityChain {
+                            axInserted = false
+                        } else if let directAXInsert = self.directAXInsert {
                             axInserted = directAXInsert(element, text)
                         } else {
                             var settable: DarwinBoolean = false
@@ -336,8 +657,9 @@ class TextInserter {
                                     axInserted = true
                                 case .concealClipboard:
                                     DiagnosticLogger.shared.log("TextInserter: refocus AX set timed out (may have committed) — concealed clipboard fallback instead of blind paste")
-                                    self.secureInputClipboardFallback(text)
-                                    onFocusLost?()
+                                    let copied = self.secureInputClipboardFallback(text)
+                                    self.recordOutcome(copied ? .axTimeoutCopied : .deliveryFailed, text: text)
+                                    if copied { onFocusLost?() }
                                     return
                                 case .fallbackToKeystrokes, .retryViaPaste:
                                     // `axSetOutcome` never yields `.retryViaPaste` (that comes only
@@ -350,7 +672,10 @@ class TextInserter {
                                 axInserted = false
                             }
                         }
-                        if axInserted { return }
+                        if axInserted {
+                            self.recordOutcome(.axUnverifiable, text: text)
+                            return
+                        }
 
                         // AX insertion into the intended element failed. Before blind-pasting Cmd+V
                         // into whatever is frontmost, re-verify focus is STILL the element we
@@ -358,38 +683,43 @@ class TextInserter {
                         // would then land in the wrong app. If it moved, conceal-copy the text and
                         // notify instead of pasting (AX-C).
                         //
-                        // I2: conceal ONLY when the re-query affirmatively returns a DIFFERENT
-                        // element. A nil result means the AX query couldn't determine focus (the
-                        // 0.5s process cap or a flaky WindowServer read), NOT that focus moved — the
-                        // old `?? false` treated nil as "moved" and concealed a paste that should
-                        // have proceeded, booking a phantom success. nil now falls through to paste.
-                        let focusMovedAway = self.currentFocusedElement().map { !CFEqual($0, element) } ?? false
-                        if focusMovedAway {
-                            DiagnosticLogger.shared.log("TextInserter: focus moved during settle — concealed clipboard fallback instead of blind paste")
-                            self.secureInputClipboardFallback(text)
-                            onFocusLost?()
+                        // Unknown focus is not permission to paste into a different control.
+                        if !self.insertionDestinationIsCurrent() {
+                            DiagnosticLogger.shared.log("TextInserter: target focus could not be confirmed — concealed clipboard fallback instead of blind paste")
+                            let copied = self.secureInputClipboardFallback(text)
+                            self.recordOutcome(copied ? .copiedFocusLost : .deliveryFailed, text: text)
+                            if copied { onFocusLost?() }
                             return
                         }
                         // Fall back to clipboard paste (through the test seam so a unit test
                         // reaching this closure can never fire a real Cmd+V — PLAN.md P-1).
                         if let performInsertion = self.performInsertion {
                             performInsertion(text)
-                        } else if self.isRemoteDesktopFrontmost() {
-                            // Remote viewers need their remote-specific insertion route even
-                            // after refocusing. A blind clipboard paste requires clipboard
-                            // sharing and must not replace the single-line keystroke route.
+                        } else if route != .accessibilityChain {
+                            // Remote viewers, terminals, paste apps and per-app overrides keep
+                            // their own route after refocusing. For remote viewers a blind
+                            // clipboard paste requires clipboard sharing and must not replace
+                            // the single-line keystroke route.
                             self.pasteText(text)
+                        } else if let performLocalInsertion = self.performLocalInsertion {
+                            performLocalInsertion(text)
                         } else {
-                            (self.performLocalInsertion ?? self.pasteViaClipboard)(text)
+                            // The AX write on the refocused element already failed; paste.
+                            self.localPaste(text)
+                            self.recordOutcome(.pasted, text: text, profile: self.frontmostProfile())
                         }
                     }
                     return true
                 } else {
-                    copyToClipboard(text)
-                    onFocusLost?()
+                    let copied = copyToClipboard(text)
+                    recordOutcome(copied ? .copiedFocusLost : .deliveryFailed, text: text)
+                    if copied { onFocusLost?() }
                     return false
                 }
             } else {
+                // A mismatched foreground/field owner may be a non-activating panel OR stale
+                // AX focus after an app switch. Without a record-start pairing, do not infer
+                // an exception from insertion-time focus; the final destination guard retains.
                 (performInsertion ?? pasteText)(text)
                 return true
             }
@@ -401,6 +731,26 @@ class TextInserter {
 
     private func currentFocusedElement() -> AXUIElement? {
         focusedElementProvider()
+    }
+
+    private func insertionDestinationIsCurrent(attempt: InsertionAttempt? = nil) -> Bool {
+        guard !isSecureInputActive() else { return false }
+        guard let attempt = attempt ?? activeInsertionAttempt else { return true }
+        if let pid = attempt.expectedForegroundPID, frontmostPIDProvider() != pid { return false }
+        if let field = attempt.field {
+            guard attempt.expectedForegroundPID != nil,
+                  let owner = attempt.fieldOwnerPID,
+                  let current = currentFocusedElement(), CFEqual(current, field),
+                  elementPIDProvider(current) == owner else { return false }
+        }
+        return true
+    }
+
+    private func notifySecureInputFallback(_ text: String, reason: ConcealedFallbackReason) {
+        // Edit handles this call's recovery in its own draft. Leave AppDelegate's
+        // normal-dictation callback installed for its next call, without auto-retrying Edit.
+        guard activeInsertionAttempt?.handlesRecovery != true else { return }
+        onSecureInputFallback?(text, reason)
     }
 
     private static func queryFocusedElement() -> AXUIElement? {
@@ -416,15 +766,31 @@ class TextInserter {
         // Note: Secure Input is checked at insert() — the entry point for all paths — so it
         // is guaranteed inactive by the time pasteText() is reached.
         let frontApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
-        let isRemote = isRemoteDesktopFrontmost()
-        let isBroken = shouldUseClipboardPaste()
-        DiagnosticLogger.shared.log("TextInserter: inserting \(text.count) chars into \(frontApp) (remoteDesktop=\(isRemote), brokenApp=\(isBroken))")
+        let profile = frontmostProfile()
+        beginOutcomeTracking()
+        // `insert` already dropped any trailing line break (every app, 2026-09-25).
+        let route = profile.route(for: text)
+        DiagnosticLogger.shared.log(
+            "TextInserter: inserting \(text.count) chars into \(frontApp) "
+            + "(\(profile.bundleID ?? "?"): \(profile.classification.appClass.rawValue), "
+            + "\(profile.classification.reason); override=\(profile.override.rawValue); route=\(route.rawValue))")
 
-        // Remote desktop: type via AppleScript keystroke (clipboard sync unreliable)
-        if isRemote {
+        switch route {
+        case .remoteKeystroke:
+            // Remote desktop: type via AppleScript keystroke (clipboard sync unreliable).
+            // typeViaAppleScript itself pastes multi-line text.
             DiagnosticLogger.shared.log("TextInserter: using AppleScript keystroke (remote desktop)")
             (performRemoteInsertion ?? typeViaAppleScript)(text)
+            recordOutcome(AppCompatibility.hasLineBreak(text) ? .remotePasted : .remoteTyped,
+                          text: text, profile: profile)
             return
+        case .remotePaste:
+            DiagnosticLogger.shared.log("TextInserter: using remote clipboard paste (per-app setting)")
+            (performRemoteInsertion ?? pasteViaClipboard)(text)
+            recordOutcome(.remotePasted, text: text, profile: profile)
+            return
+        case .paste, .keystrokes, .accessibilityChain:
+            break
         }
 
         if let performLocalInsertion = performLocalInsertion {
@@ -432,55 +798,89 @@ class TextInserter {
             return
         }
 
-        // Electron / contenteditable apps: CGEvent unicode is slow or mangled.
-        // Use clipboard paste for instant insertion regardless of text length.
-        if isBroken {
-            DiagnosticLogger.shared.log("TextInserter: using clipboard paste (Electron/broken app)")
-            pasteViaClipboard(text)
+        switch route {
+        case .paste:
+            // Electron / contenteditable apps, browsers, terminals: clipboard paste. In a
+            // terminal this also carries line breaks inside bracketed paste instead of typing
+            // them as Return.
+            DiagnosticLogger.shared.log("TextInserter: using clipboard paste (\(profile.appClass.rawValue))")
+            localPaste(text)
+            recordOutcome(.pasted, text: text, profile: profile)
             return
+        case .keystrokes:
+            // The route table only yields keystrokes for multi-line text when the user chose
+            // Type for an app whose typed line breaks are safe.
+            if typeViaKeyEvents(text, allowLineBreaks: true) {
+                DiagnosticLogger.shared.log("TextInserter: used CGEvent unicode typing (per-app setting)")
+                recordOutcome(.typed, text: text, profile: profile)
+            } else {
+                DiagnosticLogger.shared.log("TextInserter: typing unavailable — clipboard paste")
+                localPaste(text)
+                recordOutcome(.pasted, text: text, profile: profile)
+            }
+            return
+        case .accessibilityChain, .remoteKeystroke, .remotePaste:
+            break
         }
 
         // Try direct AX text insertion first — no clipboard involvement
         switch insertViaAccessibility(text) {
         case .inserted:
             DiagnosticLogger.shared.log("TextInserter: used AX insertion")
+            recordOutcome(lastAXVerification == .landed ? .axVerified : .axUnverifiable,
+                          text: text, profile: profile)
             return
         case .concealClipboard:
             // L4: the AX set timed out under the 0.5s cap — it may have COMMITTED. Retyping via
             // keystrokes (or blind-pasting) would duplicate it, so conceal-copy the text and fire
             // the auto-clear notify instead, mirroring the Secure-Input fallback.
             DiagnosticLogger.shared.log("TextInserter: AX insertion timed out (may have committed) — concealed clipboard fallback instead of retyping")
-            secureInputClipboardFallback(text)
-            onSecureInputFallback?(text, .axTimeoutMayHaveCommitted)
+            let copied = secureInputClipboardFallback(text)
+            recordOutcome(copied ? .axTimeoutCopied : .deliveryFailed, text: text, profile: profile)
+            if copied { notifySecureInputFallback(text, reason: .axTimeoutMayHaveCommitted) }
             return
         case .retryViaPaste:
             // The AX set reported success but the field verifiably did NOT grow — provable
             // non-insertion (distinct from the timeout above). A real Cmd+V paste inserts the
             // text inline. Concealing without pasting was the Chrome silent-drop bug.
             DiagnosticLogger.shared.log("TextInserter: AX insertion dropped silently (field did not grow) — clipboard paste")
-            pasteViaClipboard(text)
+            localPaste(text)
+            recordOutcome(.axDroppedThenPasted, text: text, profile: profile)
             return
         case .fallbackToKeystrokes:
             break
         }
 
-        // Try typing via CGEvent unicode — works in most apps
-        if typeViaKeyEvents(text) {
+        // Try typing via CGEvent unicode — works in most apps. An automatic fallback never
+        // types a line break: an app classified native can still be an unknown terminal,
+        // where Shift+Return is Return. Multi-line text pastes instead.
+        if typeViaKeyEvents(text, allowLineBreaks: false) {
             DiagnosticLogger.shared.log("TextInserter: used CGEvent unicode typing")
+            recordOutcome(.typed, text: text, profile: profile)
             return
         }
 
         // Last resort: clipboard-based paste
         DiagnosticLogger.shared.log("TextInserter: using clipboard paste (fallback)")
-        pasteViaClipboard(text)
+        localPaste(text)
+        recordOutcome(.pasted, text: text, profile: profile)
     }
+
+    /// Local clipboard paste on the routed path, through the test seam.
+    private func localPaste(_ text: String) {
+        (performPaste ?? pasteViaClipboard)(text)
+    }
+
+    /// The read-back verdict of the most recent successful AX write (for the compatibility
+    /// report only). nil when the last AX write did not reach verification.
+    private var lastAXVerification: AXVerification?
 
     /// Type text into the frontmost app via AppleScript keystroke.
     /// Used for remote desktop apps where clipboard sync is unreliable.
     private func typeViaAppleScript(_ text: String) {
         // Multi-line text is slow and lossy as per-line keystrokes on remote desktop.
         // Clipboard insertion requires the remote viewer's clipboard sharing feature.
-        if text.contains("\n") || text.contains("\r") {
+        if AppCompatibility.hasLineBreak(text) {
             pasteViaClipboard(text)
             return
         }
@@ -518,17 +918,39 @@ class TextInserter {
 
     /// Retain text visibly without clobbering the clipboard or automatically retrying.
     /// Copying is an explicit user choice, especially important for large clipboard items.
-    private func remoteInsertionFailed(_ text: String, message: String) {
+    private func remoteInsertionFailed(_ tracedText: String, message: String,
+                                       title: String = "Check your remote dictation",
+                                       lateFor profile: FrontmostProfile? = nil,
+                                       attempt: InsertionAttempt? = nil) {
+        // The dialog shows and copies the dictation for pasting anywhere: no trace.
+        let text = Self.withoutTrace(tracedText)
+        if let profile {
+            recordDirect(.deliveryFailed, multiLine: AppCompatibility.hasLineBreak(text), profile: profile)
+        } else {
+            outcomeAdjustment = .deliveryFailed
+        }
+        let attempt = attempt ?? activeInsertionAttempt
+        attempt?.finish(.deliveryFailed)
+        guard attempt?.handlesRecovery != true else { return }
         if let onRemoteInsertionFailure = onRemoteInsertionFailure {
             onRemoteInsertionFailure(text, message)
             return
         }
+        presentManualRecovery(text: text, message: message, title: title)
+    }
+
+    /// The owner of an asynchronous insertion can suppress only a stale presentation,
+    /// while retaining that take's text through its normal history/persistence path.
+    func presentManualRecovery(text: String, message: String,
+                               title: String = "Check your dictation",
+                               shouldPresent: @escaping () -> Bool = { true }) {
         // A modal started from a main-dispatch block starves other main-queue
         // work, including clipboard restoration. Enter through the run loop.
         CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) { [weak self] in
-            guard let self = self else { return }
+            guard let self, shouldPresent() else { return }
+            let text = Self.withoutTrace(text)
             let alert = NSAlert()
-            alert.messageText = "Check your remote dictation"
+            alert.messageText = title
             alert.informativeText = message + "\n\nYour dictation is below. Check the destination before pasting to avoid duplicates."
             alert.alertStyle = .warning
             alert.addButton(withTitle: "Close")
@@ -543,11 +965,28 @@ class TextInserter {
             view.textContainerInset = NSSize(width: 8, height: 8)
             scroll.documentView = view
             alert.accessoryView = scroll
-            if alert.runModal() == .alertSecondButtonReturn {
-                Self.writeTransientString(text, to: self.pasteboard)
-            }
+            let instructions = alert.informativeText
+            Self.runManualRecovery(shouldPresent: shouldPresent, present: { copyFailed in
+                alert.informativeText = copyFailed
+                    ? "The clipboard could not accept your text. It is still below; try Copy again or close.\n\n" + instructions
+                    : instructions
+                return alert.runModal() == .alertSecondButtonReturn
+            }, copy: { self.copyToClipboard(text) })
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
+
+    /// Pure interaction seam: failed publication keeps the selectable text available,
+    /// and an owner that expired before presentation never opens a stale recovery dialog.
+    static func runManualRecovery(shouldPresent: () -> Bool,
+                                  present: (_ copyFailed: Bool) -> Bool,
+                                  copy: () -> Bool) {
+        var copyFailed = false
+        while shouldPresent() {
+            guard present(copyFailed) else { return }
+            if copy() { return }
+            copyFailed = true
+        }
     }
 
     /// -1743 = the app has no Automation (Apple Events → System Events) grant. Both remote-
@@ -673,6 +1112,7 @@ class TextInserter {
     /// caller can distinguish a clean rejection (safe to retype) from a timeout that may have
     /// committed (must NOT retype — conceal instead). See `axSetOutcome`.
     private func insertViaAccessibility(_ text: String) -> AXSetOutcome {
+        lastAXVerification = nil
         guard let element = currentFocusedElement() else { return .fallbackToKeystrokes }
 
         // Check if the element supports setting the SelectedText attribute.
@@ -711,6 +1151,7 @@ class TextInserter {
                                            insertedCount: text.count)
         }
 
+        lastAXVerification = verdict
         let verifiedOutcome = Self.outcomeForVerification(verdict)
         if verifiedOutcome == .retryViaPaste {
             // Confirmed silent drop: the set reported success but the field verifiably did not
@@ -726,72 +1167,19 @@ class TextInserter {
         return verifiedOutcome
     }
 
-    /// Remote desktop apps that don't properly forward CGEvent unicode key events.
-    private static let remoteDesktopBundleIDs: Set<String> = [
-        "com.apple.ScreenSharing",          // macOS Screen Sharing (raw key 0 becomes "a")
-        "com.splashtop.stp.macosx",          // Splashtop Personal
-        "com.splashtop.Splashtop-Streamer",  // Splashtop Streamer
-        "com.splashtop.PersonalBusiness",    // Splashtop Business
-        "com.splashtop.streamer",
-        "com.microsoft.rdc.macos",           // Microsoft Remote Desktop
-        "com.microsoft.rdc.osx",
-        "com.teamviewer.TeamViewer",         // TeamViewer
-        "com.parallels.desktop.console",     // Parallels
-        "com.vmware.fusion",                 // VMware Fusion
-        "com.realvnc.vncviewer",             // RealVNC
-        "com.citrix.receiver.icaviewer",     // Citrix
-        "com.parsec-cloud.parsec",           // Parsec
-        "com.moonlight-stream.Moonlight",    // Moonlight
-    ]
-
+    /// Is the frontmost app a remote desktop / VNC viewer / VM console, as routing sees it?
+    /// Uses the full classification (known IDs, keywords, and vnc/rdp-style URL schemes the
+    /// app registers). A per-app override changes the route, never this answer, so the remote
+    /// safety rules (no Unicode key events, System Events paste) hold under every setting.
     func isRemoteDesktopFrontmost() -> Bool {
-        Self.isRemoteDesktop(bundleID: frontmostBundleIDProvider())
+        frontmostProfile().appClass == .remoteDesktop
     }
 
+    /// Bundle-ID-only remote check (known IDs and keywords; no filesystem). The lists live in
+    /// `AppCompatibility`.
     static func isRemoteDesktop(bundleID: String?) -> Bool {
-        guard let bundleID = bundleID else { return false }
-        if Self.remoteDesktopBundleIDs.contains(where: {
-            $0.caseInsensitiveCompare(bundleID) == .orderedSame
-        }) { return true }
-        // Fuzzy match for apps with variant bundle IDs
-        let lower = bundleID.lowercased()
-        let remoteKeywords = ["splashtop", "teamviewer", "parsec", "moonlight", "vnc", "remotedesktop"]
-        return remoteKeywords.contains(where: { lower.contains($0) })
+        AppCompatibility.isRemoteDesktop(bundleID: bundleID)
     }
-
-    /// Apps that should receive text via clipboard paste rather than CGEvent unicode typing.
-    /// Covers Electron apps (where synthetic key events are slow or mangled) and
-    /// contenteditable web apps in browsers (Google Docs etc.).
-    private static let clipboardPasteApps: Set<String> = [
-        // --- Electron / CEF apps (CGEvent typing is slow — clipboard paste is instant) ---
-        "org.whispersystems.signal-desktop",   // Signal
-        "com.tinyspeck.slackmacgap",           // Slack
-        "com.microsoft.VSCode",                // VS Code
-        "com.microsoft.VSCodeInsiders",
-        "com.todesktop.230313mzl4w4u92",       // Cursor
-        "com.hnc.Discord",                     // Discord
-        "com.hnc.Discord.ptb",
-        "com.hnc.Discord.canary",
-        "notion.id",                           // Notion
-        "com.linear",                          // Linear
-        "com.figma.Desktop",                   // Figma
-        "com.spotify.client",                  // Spotify
-        "com.github.GitHubClient",             // GitHub Desktop
-        "com.1password.1password",             // 1Password
-        "md.obsidian",                         // Obsidian
-        "com.superhuman.superhuman",           // Superhuman (already caught by fuzzy match, but explicit)
-        "com.microsoft.teams2",                // Teams
-        "us.zoom.xos",                         // Zoom (chat)
-        "com.loom.desktop",                    // Loom
-        "com.openai.codex",                    // Codex/ChatGPT desktop contenteditable
-        "com.openai.chat",                     // ChatGPT Classic
-        // Claude for Desktop (2026-07-28). Electron, and its composer accepts
-        // kAXSelectedText as SETTABLE — so insertViaAccessibility returned .inserted
-        // and the text never appeared. Proven from the 2026-07-26 log: the same
-        // 188-char dictation failed three times into Claude via AX, then landed
-        // first try in Signal via clipboard paste.
-        "com.anthropic.claudefordesktop",      // Claude
-    ]
 
     /// Large image clipboards are common while dictating into creative/chat apps. A
     /// 512 KB ceiling forced a 4.6 MB clipboard in Codex back to synthetic Unicode
@@ -827,6 +1215,36 @@ class TextInserter {
         }
     }
 
+    /// Native Cocoa apps read the pasteboard synchronously while handling Cmd+V; the margin only
+    /// covers a second read in the same paste.
+    static let nativeRestoreAfterRead: TimeInterval = 0.15
+
+    /// Electron/Chromium, browsers and terminals read the text once per paste (types first, which
+    /// does not call the provider). A second read in the same paste (a page's paste handler, then
+    /// the editor's default paste) is served from the pasteboard cache while the text is still
+    /// there; the margin covers one that a slow page script delays, and, if an unknown eager
+    /// reader took the receipt first, a target that reads up to this late.
+    static let electronRestoreAfterRead: TimeInterval = 0.4
+
+    /// A backstop that runs late (speakfree's main thread was busy) while nothing has read yet
+    /// gets one grace period before restoring: a target's read request can be queued behind the
+    /// busy main thread, and restoring first would make that paste come up empty.
+    static let lateBackstopGrace: TimeInterval = 0.25
+    /// Lateness below this is ordinary timer jitter, not a busy main thread.
+    static let lateBackstopThreshold: TimeInterval = 0.05
+
+    /// Pure timing policy (unit-tested). Remote viewers sync the clipboard eagerly, so a read
+    /// there proves nothing about the remote paste: backstop only.
+    static func restoreTiming(route: PasteRoute) -> ClipboardRestoreTiming {
+        switch route {
+        case .remote: return ClipboardRestoreTiming(backstop: remoteClipboardRestoreDelay, afterRead: nil)
+        case .native: return ClipboardRestoreTiming(backstop: localClipboardRestoreDelay,
+                                                    afterRead: nativeRestoreAfterRead)
+        case .electron: return ClipboardRestoreTiming(backstop: electronClipboardRestoreDelay,
+                                                      afterRead: electronRestoreAfterRead)
+        }
+    }
+
     /// Pure saved-original decision (unit-tested). Reuse the pending snapshot ONLY while our own
     /// last write is still the live clipboard — then the live clipboard is the dictation text and
     /// re-snapshotting would save THAT as the "original". If anything else wrote since (the user
@@ -838,12 +1256,10 @@ class TextInserter {
         return pending == currentChangeCount
     }
 
+    /// Is this bundle ID on the hand-maintained paste list (Electron apps listed before the
+    /// framework probe existed, plus special cases like Superhuman)? List in `AppCompatibility`.
     static func prefersClipboardPaste(bundleID: String) -> Bool {
-        let normalizedBundleID = bundleID.lowercased()
-        if clipboardPasteApps.contains(where: { $0.lowercased() == normalizedBundleID }) {
-            return true
-        }
-        return normalizedBundleID.contains("superhuman")
+        AppCompatibility.isListedPaste(bundleID: bundleID)
     }
 
     /// The AX-unreliable contenteditable class: every known/probed Electron or CEF app, plus
@@ -853,16 +1269,16 @@ class TextInserter {
     static func shouldAvoidLiveWindowContext(bundleID: String?, bundleURL: URL?) -> Bool {
         guard let bundleID else { return false }
         if prefersClipboardPaste(bundleID: bundleID) { return true }
-        return isChromiumEmbedded(bundleID: bundleID, bundleURL: bundleURL)
+        if isChromiumEmbedded(bundleID: bundleID, bundleURL: bundleURL) { return true }
+        // 2026-09-24: also renamed Chromium builds found by the classifier's marker probe
+        // (browsers are classified separately and keep their live context).
+        return AppCompatibility.classify(bundleID: bundleID, bundleURL: bundleURL).appClass == .webRuntime
     }
 
     /// Chromium-embedding frameworks. An app shipping one of these renders its text fields
     /// as web contenteditables, which is what makes both synthetic typing and AX writes
     /// unreliable — the exact class the hand-maintained list above was approximating.
-    private static let embeddedChromiumFrameworks = [
-        "Electron Framework.framework",
-        "Chromium Embedded Framework.framework",
-    ]
+    private static let embeddedChromiumFrameworks = AppCompatibility.webRuntimeFrameworks
 
     /// Does this app bundle ship an embedded Chromium runtime? Pure over the filesystem so
     /// tests can point it at a synthetic bundle rather than a real installed app.
@@ -920,39 +1336,22 @@ class TextInserter {
         byteSize <= maxRestorableClipboardBytes
     }
 
-    private func shouldUseClipboardPaste() -> Bool {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication,
-              let bundleID = frontApp.bundleIdentifier else { return false }
-
-        // Known list, then a generic embedded-Chromium probe of the live bundle.
-        if Self.prefersClipboardPaste(app: frontApp) { return true }
-
-        // Browsers render their text fields as web contenteditables/textareas. Chromium accepts an
-        // AX SelectedText write, reports success, and applies NOTHING — and Chrome's own bundle is
-        // not caught by the embedded-Chromium probe (it ships "Google Chrome Framework", not the
-        // "Electron"/"Chromium Embedded Framework" the probe looks for). So proactively route ALL
-        // browser content to clipboard paste. This covers web contenteditables in general, not only
-        // Google Docs/Sheets/Slides (the previous narrow window-title check), and it is safe for the
-        // browser's own chrome-UI: Cmd+V works in the address bar too. (2026-08-12 Chrome silent-drop.)
-        if Self.isBrowser(bundleID: bundleID) { return true }
-
-        return false
+    /// Is this bundle ID a known browser? Kept for callers and tests; routing uses the full
+    /// classification, which also recognizes unlisted browsers by the http(s) links and HTML
+    /// files they register for. Browsers go to clipboard paste because Chromium accepts an AX
+    /// SelectedText write, reports success, and applies nothing (2026-08-12 Chrome silent-drop).
+    static func isBrowser(bundleID: String) -> Bool {
+        AppCompatibility.isKnownBrowser(bundleID: bundleID)
     }
 
-    /// Is this bundle ID a known browser? Covers Chromium forks, Safari, and Firefox. Static + pure
-    /// (lowercases internally) so the browser→clipboard-paste routing is unit-testable without a live
-    /// frontmost app.
-    static func isBrowser(bundleID: String) -> Bool {
-        let lower = bundleID.lowercased()
-        let browsers = [
-            "com.google.chrome", "com.apple.safari", "org.mozilla.firefox",
-            "company.thebrowser.browser",  // Arc
-            "com.brave.browser", "com.microsoft.edgemac",
-            "com.operasoftware.opera", "com.vivaldi.vivaldi",
-            "com.microsoft.edgemac.dev", "com.microsoft.edgemac.beta",
-            "com.kagi.kagimacos",  // Orion
-        ]
-        return browsers.contains(where: { lower.contains($0) })
+    /// Classification-based replacement for the Electron-class check at record start: true for
+    /// every class whose live AX cursor context is untrustworthy (web runtimes, the paste list,
+    /// and terminals, whose AX value is the whole scrollback).
+    static func cursorContextUntrusted(app: NSRunningApplication?) -> Bool {
+        guard let app, let bundleID = app.bundleIdentifier else { return false }
+        if prefersClipboardPaste(app: app) { return true }
+        return AppCompatibility.classify(bundleID: bundleID, bundleURL: app.bundleURL)
+            .appClass.cursorContextUntrusted
     }
 
     /// One emitted keyboard operation on the synthetic-typing path. Pure value type so the
@@ -1013,19 +1412,32 @@ class TextInserter {
     /// Works in Electron apps (VS Code, Slack, Discord) without touching the clipboard.
     /// CGEventKeyboardSetUnicodeString limits input to 20 UTF-16 code units per event.
     /// Chunks by Unicode scalars to avoid splitting surrogate pairs at chunk boundaries.
-    private func typeViaKeyEvents(_ text: String) -> Bool {
+    private func typeViaKeyEvents(_ text: String, allowLineBreaks: Bool) -> Bool {
+        // Never type a line break into a terminal (2026-09-24). The typed Shift+Return below
+        // reaches most terminals, and the shells and agent TUIs inside them, as a plain Return
+        // unless the program has enabled an extended keyboard protocol, so it would run the
+        // command or submit the prompt. Returning false sends callers to paste, where the
+        // terminal wraps the line breaks in bracketed paste.
+        if AppCompatibility.hasLineBreak(text)
+            && (!allowLineBreaks || frontmostProfile().typedLineBreaksUnsafe) {
+            DiagnosticLogger.shared.log("TextInserter: refusing to type a line break (could be Return in a terminal)")
+            return false
+        }
+        // Remote viewers may ignore the Unicode payload and forward virtualKey 0
+        // literally as "a". Never use this backend for a recognized remote viewer, under any
+        // per-app setting. Checked before the test seam so tests see the production refusal.
+        guard !isRemoteDesktopFrontmost() else { return false }
+        // AX work or clipboard snapshot providers may have yielded since the entry guard.
+        guard insertionDestinationIsCurrent() else { return false }
         if let performUnicodeInsertion = performUnicodeInsertion {
             return performUnicodeInsertion(text)
         }
-        // Remote viewers may ignore the Unicode payload and forward virtualKey 0
-        // literally as "a". Never use this backend for a recognized remote viewer.
-        guard !isRemoteDesktopFrontmost() else { return false }
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
 
         for op in Self.keystrokeOps(for: text) {
             switch op {
             case .shiftReturn:
-                // Newline policy 2b / Option B (Michael, 2026-06-10): a spoken "new line" is a
+                // Newline policy 2b / Option B (the maintainer, 2026-06-10): a spoken "new line" is a
                 // line break that NEVER sends. By the time text reaches here, every "\n" is a
                 // deliberately-spoken break (Whisper's multi-segment joins are space-joined
                 // upstream in Transcriber). Fire Shift+Return (keyCode 36 + .maskShift) — a
@@ -1038,6 +1450,8 @@ class TextInserter {
                 }
                 keyDown.flags = .maskShift
                 keyUp.flags = .maskShift
+                SyntheticEventMarker.mark(keyDown)
+                SyntheticEventMarker.mark(keyUp)
                 keyDown.post(tap: .cghidEventTap)
                 keyUp.post(tap: .cghidEventTap)
 
@@ -1051,6 +1465,8 @@ class TextInserter {
                     keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
                     keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
                 }
+                SyntheticEventMarker.mark(keyDown)
+                SyntheticEventMarker.mark(keyUp)
 
                 keyDown.post(tap: .cghidEventTap)
                 keyUp.post(tap: .cghidEventTap)
@@ -1062,8 +1478,8 @@ class TextInserter {
 
     /// Clipboard-based insertion with safety check and transient marking.
     ///
-    /// Safety check: if the clipboard holds large binary data (images, files > 512 KB),
-    /// fall back to CGEvent typing rather than clobbering precious clipboard contents.
+    /// A complete snapshot within the save limit is required before borrowing the clipboard.
+    /// Unsafe snapshots fall back to single-line typing or visible dictation recovery.
     ///
     /// Transient marking: writes org.nspasteboard.TransientType + ConcealedType so
     /// clipboard managers (Maccy, Raycast, Paste) skip recording the dictated text.
@@ -1073,80 +1489,456 @@ class TextInserter {
     /// off-main caller (e.g. FinalizePipeline.run with a real inserter) into a crash instead of a
     /// silent data race on the shared state.
     func pasteViaClipboard(_ text: String) {
+        pasteViaClipboard(text, mayRetryChangedClipboard: true)
+    }
+
+    /// One retry across both snapshot-time and pre-write generation changes. No shortcut has
+    /// been sent before either failure, so retrying cannot duplicate a previous insertion.
+    private func pasteViaClipboard(_ text: String, mayRetryChangedClipboard: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
         let pasteboard = self.pasteboard
-        let route: PasteRoute = isRemoteDesktopFrontmost() ? .remote
-            : (shouldUseClipboardPaste() ? .electron : .native)
+        let route = AppCompatibility.pasteRestoreRoute(for: frontmostProfile().appClass)
+        // A canary on the clipboard must never be saved as the user's "original".
+        clipboardCanary?.abort(reason: "clipboard-borrow")
+        pendingRestore?.pasteCheck?.cancel()
+        // An earlier borrow still pending means its paste may land after this one's "before"
+        // read; with the same text, that late paste would look like this one. So no
+        // Accessibility check for a paste that overlaps an earlier one: the timers decide.
+        // A borrow restored moments ago counts too (a restore on the first read can come before
+        // an Electron target commits that paste).
+        let overlapsEarlierBorrow = pendingRestore != nil
+            || lastBorrowEndedAt.map { uptime() - $0 < TextInserter.pasteCheckQuietAfterBorrow } ?? false
+        // Stop the paste-watch tap from acting on the previous borrow BEFORE this one touches the
+        // pasteboard: after this returns, no tap-thread restore can interleave with the snapshot
+        // and write below. (If the tap already restored it, the live clipboard is the user's
+        // again, and the reuse check below re-snapshots it.)
+        userPasteGate.claim(token: nil)
 
         // Saved-original: reuse the pending snapshot ONLY while our last dictation write is still
         // the live clipboard (else re-snapshotting would save that dictation's text). If anything
         // else wrote since — the user copied via right-click/pbcopy/a Copy button, no Command press
         // — the pending snapshot is stale, so re-snapshot the user's fresh copy instead.
+        let snapshotGeneration = pasteboard.changeCount
         let reuse = TextInserter.shouldReusePendingSnapshot(
             pendingWrittenChangeCount: pendingRestore?.writtenChangeCount,
             currentChangeCount: pasteboard.changeCount)
-        let savedItems = reuse ? pendingRestore!.savedItems : savePasteboard(pasteboard)
+        let savedItems: PasteboardAccess.Snapshot
+        if reuse {
+            savedItems = pendingRestore!.savedItems
+        } else {
+            do {
+                savedItems = try captureClipboardSnapshot(pasteboard, Self.maxRestorableClipboardBytes)
+            } catch {
+                if error as? PasteboardAccess.Failure == .changed, mayRetryChangedClipboard {
+                    pasteViaClipboard(text, mayRetryChangedClipboard: false)
+                    return
+                }
+                fallbackWithoutBorrowingClipboard(text, failure: error as? PasteboardAccess.Failure)
+                return
+            }
+        }
         let clipboardByteSize = savedItems.reduce(0) { total, item in
             total + item.reduce(0) { $0 + $1.1.count }
         }
-        if !Self.canSafelySaveClipboard(byteSize: clipboardByteSize) {
-            if route == .remote {
-                remoteInsertionFailed(text, message: "Your clipboard contains a large item. SpeakFree left it unchanged instead of sending unreliable remote keystrokes.")
-                return
+        let timing = restoreTiming(route)
+        var earlyOffReason: String?
+        if timing.afterRead == nil {
+            earlyOffReason = "route"
+        } else if let reason = clipboardTrustReason() {
+            earlyOffReason = reason
+        }
+        let restoreAfterRead = earlyOffReason == nil ? timing.afterRead : nil
+
+        // Recheck after route/trust work too. NSPasteboard has no cross-process CAS;
+        // this closes our own snapshot-to-write work window without claiming atomicity.
+        guard pasteboard.changeCount == snapshotGeneration else {
+            if mayRetryChangedClipboard {
+                pasteViaClipboard(text, mayRetryChangedClipboard: false)
+            } else {
+                fallbackWithoutBorrowingClipboard(text, failure: .changed)
             }
-            DiagnosticLogger.shared.log(
-                "TextInserter: clipboard has \(clipboardByteSize / 1024)KB of data — "
-                + "falling back to CGEvent to avoid clobbering it"
-            )
-            _ = typeViaKeyEvents(text)
             return
         }
 
-        // Write the dictated text (transient/concealed-marked) and snapshot changeCount AFTER the
-        // write. A `clearContents()` + `writeObjects()` sequence advances `changeCount` by exactly
-        // ONE generation, so the restore guard compares against THIS returned value (equality).
-        let writtenChangeCount = TextInserter.writeTransientString(text, to: pasteboard)
+        // Publish dictated text only after a successful clear, and require writeObjects
+        // to confirm the write in that same generation before sending a paste shortcut.
+        // Local routes write a host-only LAZY promise whose first read is the receipt; the remote
+        // route keeps the eager write it was tuned with (remote viewers sync it immediately).
+        var provider: DictationPasteProvider?
+        let publication: PasteboardWriter.Result
+        if route == .remote {
+            publication = TextInserter.writeTransientString(text, to: pasteboard, writer: pasteboardWriter,
+                                                          expectedGeneration: snapshotGeneration)
+        } else {
+            let lazy = DictationPasteProvider(text: text)
+            lazy.onRead = { [weak self, weak lazy] in
+                guard let self, let lazy else { return }
+                self.noteReadReceipt(from: lazy, pasteboard: pasteboard)
+            }
+            provider = lazy
+            publication = TextInserter.writeLazyDictation(provider: lazy, to: pasteboard, writer: pasteboardWriter,
+                                                        expectedGeneration: snapshotGeneration)
+        }
 
-        simulatePaste(text, expectedChangeCount: writtenChangeCount)
+        guard let writtenChangeCount = publication.generation else {
+            pendingBackstop?.cancel()
+            pendingBackstop = nil
+            pendingRestore = nil
+            lastBorrowEndedAt = uptime()
+            let recovery = Self.recoveryMessage(pasteboardWriter.recover(savedItems, after: publication, on: pasteboard))
+            remoteInsertionFailed(text,
+                message: "Speakfree could not publish your dictation, so no paste shortcut was sent. " + recovery,
+                title: "Check your dictation")
+            return
+        }
 
+        let pastedAt = uptime()
+        let targetPID = frontmostPIDProvider()
+        var gateToken: Int?
+        if provider != nil {
+            gateToken = userPasteGate.arm(
+                pasteboard: pasteboard, savedItems: savedItems,
+                writtenChangeCount: writtenChangeCount,
+                layoutVKeyCode: (layoutVKeyCodeProvider?() ?? vKeyCode()).map { Int64($0) },
+                restore: { [writer = pasteboardWriter] pb, items in
+                    writer.restore(items, on: pb, expectedGeneration: writtenChangeCount).generation != nil
+                },
+                onOutcome: { [weak self] outcome in self?.handleUserPasteOutcome(outcome) })
+        }
         pendingRestore = PendingClipboardRestore(savedItems: savedItems,
-                                                 writtenChangeCount: writtenChangeCount)
-        let delay = TextInserter.restoreBackstopDelay(route: route)
+                                                 writtenChangeCount: writtenChangeCount,
+                                                 provider: provider,
+                                                 route: route,
+                                                 pastedAt: pastedAt,
+                                                 firstReadAt: nil,
+                                                 restoreAfterRead: restoreAfterRead,
+                                                 earlyOffReason: earlyOffReason,
+                                                 targetPID: targetPID,
+                                                 gateToken: gateToken)
+        // Accessibility outcome check: local lazy writes only, with a known target app. Main
+        // only creates the check and queues work; every AX call runs on `pasteCheckQueue`.
+        var pasteCheck: PasteOutcomeCheck?
+        if provider != nil, !overlapsEarlierBorrow, let reader = pasteFieldReader, let pid = targetPID,
+           !pasteCheckDelays.isEmpty {
+            let check = PasteOutcomeCheck(text: text, pid: pid, reader: reader, queue: pasteCheckQueue)
+            check.captureBefore()
+            pendingRestore?.pasteCheck = check
+            pendingRestore?.pasteVerdict = "pending"
+            pasteCheck = check
+        }
         DiagnosticLogger.shared.log(
             "TextInserter: clipboard paste route=\(route.rawValue) len=\(text.count) "
-            + "clip=\(clipboardByteSize / 1024)KB backstop=\(String(format: "%.1f", delay))s")
-        armRestoreBackstop(pasteboard: pasteboard, delay: delay)
+            + "clip=\(clipboardByteSize / 1024)KB backstop=\(String(format: "%.1f", timing.backstop))s "
+            + "early=\(restoreAfterRead.map { String(format: "%.2fs", $0) } ?? "off(\(earlyOffReason ?? "?"))")")
+        // Arm the backstop BEFORE the paste: a target that reads synchronously during the paste
+        // shortcut replaces it with the (shorter) after-read timer, never the other way round.
+        armRestore(pasteboard: pasteboard, delay: timing.backstop, trigger: "backstop")
+
+        simulatePaste(text, expectedChangeCount: writtenChangeCount)
+        pasteCheck?.start(delays: pasteCheckDelays) { [weak self, weak pasteCheck] verdict in
+            guard let self, let pasteCheck else { return }
+            self.notePasteOutcome(verdict, from: pasteCheck, pasteboard: pasteboard)
+        }
     }
 
-    private func armRestoreBackstop(pasteboard: NSPasteboard, delay: TimeInterval) {
+    private static func recoveryMessage(_ recovery: PasteboardWriter.Recovery) -> String {
+        switch recovery {
+        case .restored: return "Your previous clipboard was restored."
+        case .changed: return "A newer clipboard change was left alone."
+        case .unavailable: return "The current clipboard was left alone."
+        case .failed: return "macOS also refused to restore your previous clipboard."
+        }
+    }
+
+    /// Never destroy clipboard data to recover from a failed snapshot. Our typing backend
+    /// emits Shift+Return for line breaks, which can submit a command in an unknown app or a
+    /// browser's terminal. Multiline text stays selectable in the recovery dialog instead.
+    private func fallbackWithoutBorrowingClipboard(_ text: String, failure: PasteboardAccess.Failure?) {
+        // Snapshot providers can block while focus changes or Secure Input starts. Typing
+        // bypasses the normal final paste guard, so check again before emitting any key event.
+        guard insertionDestinationIsCurrent() else {
+            remoteInsertionFailed(text,
+                message: "The destination or Secure Input changed while speakfree was preparing your dictation. Your clipboard was left unchanged. Review the dictation below; Copy Dictation will replace the clipboard only if you choose it.",
+                title: "Check your dictation")
+            return
+        }
+        if typeViaKeyEvents(text, allowLineBreaks: false) {
+            outcomeAdjustment = .typed
+            return
+        }
+        let reason: String
+        switch failure {
+        case .changed: reason = "Your clipboard changed again while speakfree was preparing the paste."
+        case .tooLarge: reason = "Your clipboard holds an item too large to safely preserve."
+        case .denied: reason = "Speakfree could not read your clipboard to safely preserve it."
+        default: reason = "Your clipboard could not be completely preserved."
+        }
+        remoteInsertionFailed(text,
+            message: reason + " Your clipboard was left unchanged. Review the dictation below; Copy Dictation will replace the clipboard only if you choose it.",
+            title: "Check your dictation")
+    }
+
+    /// Main thread: the Accessibility check's final verdict for the LIVE borrow. Confirmed means
+    /// the target pasted the text, whoever read the clipboard first: restore now.
+    private func notePasteOutcome(_ verdict: PasteOutcomeVerdict, from check: PasteOutcomeCheck,
+                                  pasteboard: NSPasteboard) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard var pending = pendingRestore, pending.pasteCheck === check else { return }
+        pending.pasteVerdict = verdict == .notYet ? "unconfirmed" : verdict.rawValue
+        pendingRestore = pending
+        guard verdict == .confirmed else { return }
         pendingBackstop?.cancel()
+        pendingBackstop = nil
+        performPendingRestore(pasteboard: pasteboard, trigger: "ax")
+    }
+
+    private func armRestore(pasteboard: NSPasteboard, delay: TimeInterval, trigger: String) {
+        pendingBackstop?.cancel()
+        let due = uptime() + delay
         let work = DispatchWorkItem { [weak self] in
-            self?.performPendingRestore(pasteboard: pasteboard)
+            guard let self else { return }
+            if trigger == "backstop", self.shouldGraceLateBackstop(due: due) {
+                self.armRestore(pasteboard: pasteboard, delay: TextInserter.lateBackstopGrace,
+                                trigger: "backstop")
+                return
+            }
+            self.performPendingRestore(pasteboard: pasteboard, trigger: trigger)
         }
         pendingBackstop = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    /// Restore the saved clipboard (once) when the backstop fires, and log the outcome. Restores
-    /// only if OUR latest write is still live; if the user or another app wrote in the meantime,
-    /// their content is left alone.
-    private func performPendingRestore(pasteboard: NSPasteboard) {
-        pendingBackstop = nil
-        guard let pending = pendingRestore else { return }
-        pendingRestore = nil
-        let restored = TextInserter.shouldRestoreClipboard(
-            currentChangeCount: pasteboard.changeCount, writtenChangeCount: pending.writtenChangeCount)
-        if restored {
-            restorePasteboard(pasteboard, items: pending.savedItems)
-        }
-        DiagnosticLogger.shared.log("TextInserter: clipboard restore restored=\(restored)")
+    /// A backstop that fires well after its due time means main was blocked; a target's read of
+    /// the lazy text may be queued behind it. Grant ONE grace period, and only while nothing has
+    /// read yet (after a read, the text is cached by the pasteboard server and safe to replace).
+    private func shouldGraceLateBackstop(due: TimeInterval) -> Bool {
+        guard var pending = pendingRestore, pending.provider != nil,
+              pending.firstReadAt == nil, !pending.backstopGraceUsed,
+              uptime() - due > TextInserter.lateBackstopThreshold else { return false }
+        pending.backstopGraceUsed = true
+        pendingRestore = pending
+        DiagnosticLogger.shared.log(
+            "TextInserter: clipboard restore backstop ran late; waiting one grace period for a queued read")
+        return true
     }
 
-    private func copyToClipboard(_ text: String) {
+    /// Main-thread bookkeeping for a read receipt from the LIVE dictation's provider. A stale
+    /// provider (a superseded dictation) is ignored; only the first receipt counts; speakfree's
+    /// own read (`withOwnPasteboardRead`) was already filtered out by the provider.
+    private func noteReadReceipt(from provider: DictationPasteProvider, pasteboard: NSPasteboard) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard var pending = pendingRestore, pending.provider === provider,
+              pending.firstReadAt == nil else { return }
+        // A reader can start after the write. Recheck before treating the first read as a
+        // receipt, while preserving an earlier reason for distrust for this entire borrow.
+        if pending.earlyOffReason == nil, let reason = clipboardTrustReason() {
+            pending.earlyOffReason = reason
+            pending.restoreAfterRead = nil
+        }
+        // Unknown focus is not evidence that the target is still frontmost. The text is now
+        // cached, so subsequent reads cannot establish the missing identity: backstop decides.
+        let front = frontmostPIDProvider()
+        guard let target = pending.targetPID, let front, front == target else {
+            pending.firstReadAt = uptime()
+            pending.restoreAfterRead = nil
+            let reason = pending.targetPID == nil || front == nil
+                ? "read-with-unknown-target-or-focus" : "read-while-other-app-frontmost"
+            pending.earlyOffReason = pending.earlyOffReason ?? reason
+            pendingRestore = pending
+            if let token = pending.gateToken {
+                userPasteGate.markUntrustedRead(token: token, reason: pending.earlyOffReason ?? "?")
+            }
+            return
+        }
+        let now = uptime()
+        pending.firstReadAt = now
+        pendingRestore = pending
+        guard let afterRead = pending.restoreAfterRead else {
+            if let token = pending.gateToken {
+                userPasteGate.markUntrustedRead(token: token, reason: pending.earlyOffReason ?? "?")
+            }
+            return
+        }
+        // The target read the dictation: from now on the user's own Cmd+V may restore first.
+        if let token = pending.gateToken { userPasteGate.markTrustedRead(token: token) }
+        // Replaces the backstop. Normally this is much sooner; if the read itself came close to
+        // the backstop, the margin still applies, which is safer than restoring right after a read.
+        armRestore(pasteboard: pasteboard, delay: afterRead, trigger: "read")
+    }
+
+    /// Restore the saved clipboard (once) and log the outcome with its timing. Restores only if
+    /// OUR latest write is still live; if the user or another app wrote in the meantime, their
+    /// content is left alone.
+    private func performPendingRestore(pasteboard: NSPasteboard, trigger: String) {
+        pendingBackstop = nil
+        // `pending` keeps the provider alive through the restore below.
+        guard let pending = pendingRestore else { return }
+        // Take the borrow back from the paste-watch tap. If the tap already restored it (the
+        // user's Cmd+V won the race), its outcome is on the way to `handleUserPasteOutcome`,
+        // which finishes the bookkeeping; restoring again here could clobber a newer copy.
+        if let token = pending.gateToken, !userPasteGate.claim(token: token) { return }
+        pendingRestore = nil
+        lastBorrowEndedAt = uptime()
+        pending.pasteCheck?.cancel()
+        let restored = pasteboardWriter.restore(pending.savedItems, on: pasteboard,
+            expectedGeneration: pending.writtenChangeCount).generation != nil
+        let record = ClipboardRestoreRecord(
+            route: pending.route, trigger: trigger, lazy: pending.provider != nil,
+            pasteToRead: pending.firstReadAt.map { $0 - pending.pastedAt },
+            pasteToRestore: uptime() - pending.pastedAt, restored: restored,
+            earlyOffReason: pending.earlyOffReason, pasteCheck: pending.pasteVerdict)
+        DiagnosticLogger.shared.log(record.logLine)
+        onClipboardRestore?(record)
+    }
+
+    /// Main thread: what the paste-watch tap did with the user's Cmd+V (UserPasteRestore.swift).
+    private func handleUserPasteOutcome(_ outcome: UserPasteRestoreGate.Outcome) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        switch outcome {
+        case .restored(let token), .restoreFailed(let token):
+            let restored: Bool
+            if case .restored = outcome { restored = true } else { restored = false }
+            userPasteGate.claim(token: token)  // clears the tap's "already restored" mark
+            let now = uptime()
+            if let pending = pendingRestore, pending.gateToken == token {
+                pending.pasteCheck?.cancel()
+                lastBorrowEndedAt = now
+                pendingBackstop?.cancel()
+                pendingBackstop = nil
+                pendingRestore = nil
+                let record = ClipboardRestoreRecord(
+                    route: pending.route, trigger: "user-paste", lazy: true,
+                    pasteToRead: pending.firstReadAt.map { $0 - pending.pastedAt },
+                    pasteToRestore: now - pending.pastedAt, restored: restored,
+                    earlyOffReason: pending.earlyOffReason, pasteCheck: pending.pasteVerdict)
+                DiagnosticLogger.shared.log(record.userPasteLogLine)
+                onClipboardRestore?(record)
+            } else {
+                // A newer borrow already replaced it (the next paste started first).
+                DiagnosticLogger.shared.log("Clipboard restore: trigger=user-paste restored=\(restored) superseded")
+            }
+        case .skipped(_, let reason):
+            DiagnosticLogger.shared.log("Clipboard restore: trigger=user-paste skipped reason=\(reason)")
+        case .clipboardChanged:
+            // The backstop or after-read timer still runs and logs restored=false.
+            DiagnosticLogger.shared.log("Clipboard restore: trigger=user-paste skipped reason=clipboard-changed")
+        case .notPaste, .ownSynthetic, .idle:
+            break
+        }
+    }
+
+    /// One finished clipboard borrow, as logged: which route, what triggered the restore, how
+    /// long from Cmd+V to the first read and to the restore, and whether the user's clipboard was
+    /// put back (false = something else wrote to the clipboard first, which is left alone).
+    /// On the remote route the times count from the clipboard write; its Cmd+V goes 0.4 s later.
+    struct ClipboardRestoreRecord: Equatable {
+        let route: PasteRoute
+        let trigger: String
+        let lazy: Bool
+        let pasteToRead: TimeInterval?
+        let pasteToRestore: TimeInterval
+        let restored: Bool
+        let earlyOffReason: String?
+        /// The Accessibility outcome check's verdict (confirmed, unconfirmed, unreadable,
+        /// pending), nil when none ran. A verdict only, never field text.
+        var pasteCheck: String? = nil
+
+        var logLine: String {
+            func ms(_ seconds: TimeInterval) -> String { "\(Int((seconds * 1000).rounded()))ms" }
+            let read = lazy ? (pasteToRead.map(ms) ?? "none") : "n/a"
+            return "TextInserter: clipboard restore route=\(route.rawValue) trigger=\(trigger) "
+                + "read=\(read) pasteToRestore=\(ms(pasteToRestore)) restored=\(restored)"
+                + (earlyOffReason.map { " early=off(\($0))" } ?? "")
+                + (pasteCheck.map { " ax=\($0)" } ?? "")
+        }
+
+        /// The user-paste trigger's line: "Clipboard restore: trigger=user-paste route=... ".
+        var userPasteLogLine: String {
+            func ms(_ seconds: TimeInterval) -> String { "\(Int((seconds * 1000).rounded()))ms" }
+            return "Clipboard restore: trigger=\(trigger) route=\(route.rawValue) "
+                + "read=\(pasteToRead.map(ms) ?? "none") pasteToRestore=\(ms(pasteToRestore)) "
+                + "restored=\(restored)"
+        }
+    }
+
+    /// Observer for finished clipboard borrows (tests; nil in production, which only logs).
+    var onClipboardRestore: ((ClipboardRestoreRecord) -> Void)?
+
+    /// True while a dictation promise is on the clipboard and no process has read it yet.
+    /// speakfree must not read it then (see AppDelegate.noteUserInteraction).
+    var dictationPromiseUnread: Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        return pendingRestore?.provider.map { $0.provideCount == 0 } ?? false
+    }
+
+    /// The layout's "v" key code as the paste-watch gate wants it (the clipboard canary arms the
+    /// same gate). Main thread.
+    func layoutVKeyCodeForGate() -> Int64? {
+        (layoutVKeyCodeProvider?() ?? vKeyCode()).map { Int64($0) }
+    }
+
+    /// True while speakfree has the user's clipboard borrowed (a restore is pending). Main only.
+    var hasPendingClipboardBorrow: Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        return pendingRestore != nil
+    }
+
+    /// A reader can skip our current borrow without suppressing a later external copy.
+    var ownsCurrentClipboard: Bool {
+        pendingRestore?.writtenChangeCount == pasteboard.changeCount
+    }
+
+    /// Test seam: the live dictation's lazy provider, if a borrow is pending.
+    var pendingDictationProviderForTest: DictationPasteProvider? { pendingRestore?.provider }
+
+    /// Run `body` (a read of the clipboard by speakfree itself) without it counting as the
+    /// target's read receipt. Main thread only; the provider consults the flag synchronously.
+    static func withOwnPasteboardRead<T>(_ body: () -> T) -> T {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let previous = DictationPasteProvider.ownReadInProgress
+        DictationPasteProvider.ownReadInProgress = true
+        defer { DictationPasteProvider.ownReadInProgress = previous }
+        // Never overlap a paste-watch tap restore on the shared NSPasteboard object (this read
+        // typically runs right after the user's Cmd+V, which is exactly when the tap writes).
+        return UserPasteRestoreGate.shared.excludingTapRestore(body)
+    }
+
+    private func copyToClipboard(_ text: String) -> Bool {
+        publishConcealedCopy(text) != nil
+    }
+
+    private func publishConcealedCopy(_ text: String) -> Int? {
         // Focus-lost fallback: mark the write Concealed + Transient exactly like the two sibling
         // clipboard paths (pasteViaClipboard / secureInputClipboardFallback) so clipboard-history
         // tools skip recording the dictated text (AX-D).
-        TextInserter.writeTransientString(text, to: pasteboard)
+        // A dictation trace is for the app it was dictated into; a copy the user may paste
+        // anywhere (a message to someone) never carries one.
+        clipboardCanary?.abort(reason: "clipboard-write")
+        userPasteGate.claim(token: nil)
+        let before = pasteboard.changeCount
+        let saved = pendingRestore?.writtenChangeCount == before ? pendingRestore?.savedItems
+            : try? captureClipboardSnapshot(pasteboard, Self.maxRestorableClipboardBytes)
+        let publication = Self.writeTransientString(Self.withoutTrace(text), to: pasteboard,
+            writer: pasteboardWriter, expectedGeneration: before)
+        guard let written = publication.generation else {
+            let recovery: String
+            if let saved {
+                recovery = Self.recoveryMessage(pasteboardWriter.recover(saved, after: publication, on: pasteboard))
+            } else if publication.recoveryGeneration != nil {
+                recovery = "The previous clipboard could not be preserved."
+            } else {
+                recovery = Self.recoveryMessage(.unavailable)
+            }
+            remoteInsertionFailed(text, message: "Speakfree could not copy the dictation to the clipboard. " + recovery,
+                                  title: "Check your dictation")
+            return nil
+        }
+        return written
+    }
+
+    /// `text` with any dictation trace removed (cheap no-op for ordinary text).
+    static func withoutTrace(_ text: String) -> String {
+        DictationTrace.mayContainTrace(text) ? DictationTrace.strip(text) : text
     }
 
     /// How long dictated text may sit on the clipboard after a Secure-Input fallback before it
@@ -1165,7 +1957,7 @@ class TextInserter {
     /// inserting text directly. Unlike `onFocusLost` (which fires for any focus failure), this
     /// fires ONLY for the concealed-copy cases so the UI can react (Secure-Input retry
     /// dialog / auto-clear notification). Carries the dictated text so the `.secureInput`
-    /// case can auto-retry the insertion once Secure Input clears (Michael 2026-08-12).
+    /// case can auto-retry the insertion once Secure Input clears (the maintainer 2026-08-12).
     /// Set by the caller (AppDelegate) before each insertion.
     var onSecureInputFallback: ((String, ConcealedFallbackReason) -> Void)?
 
@@ -1178,26 +1970,23 @@ class TextInserter {
     ///     something else in the meantime we leave their clipboard alone.
     /// It does NOT restore the prior clipboard (the user explicitly invoked dictation expecting
     /// the text to be available to paste); the concealment + auto-clear are the protection.
-    func secureInputClipboardFallback(_ text: String) {
+    @discardableResult
+    func secureInputClipboardFallback(_ text: String) -> Bool {
         let pasteboard = self.pasteboard
-        pasteboard.clearContents()
-
-        let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
-        let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
-        let item = NSPasteboardItem()
-        item.setString(text, forType: .string)
-        item.setData(Data(), forType: transientType)
-        item.setData(Data(), forType: concealedType)
-        pasteboard.writeObjects([item])
-
-        let writtenChangeCount = pasteboard.changeCount
+        let gate = userPasteGate
+        guard let writtenChangeCount = publishConcealedCopy(text) else { return false }
+        let writer = pasteboardWriter
         DispatchQueue.main.asyncAfter(deadline: .now() + secureInputClipboardClearDelay) {
-            // Only clear if our concealed write is still the live clipboard content.
-            if pasteboard.changeCount == writtenChangeCount {
-                pasteboard.clearContents()
-                DiagnosticLogger.shared.log("TextInserter: auto-cleared concealed Secure-Input clipboard text")
+            guard pasteboard.changeCount == writtenChangeCount else { return }
+            // Recheck inside the gate and helper, not just before taking the gate lock.
+            gate.writeOutsideBorrow {
+                let cleared = writer.replace([], on: pasteboard, expectedGeneration: writtenChangeCount)
+                if cleared.generation != nil {
+                    DiagnosticLogger.shared.log("TextInserter: auto-cleared concealed Secure-Input clipboard text")
+                }
             }
         }
+        return true
     }
 
     /// Name of the app holding Secure Input, read from IOHIDSystem's
@@ -1218,7 +2007,7 @@ class TextInserter {
         return NSRunningApplication(processIdentifier: pid_t(pid))?.localizedName
     }
 
-    /// One tick of the Secure-Input retry loop (Michael 2026-08-12: "a little box that
+    /// One tick of the Secure-Input retry loop (the maintainer 2026-08-12: "a little box that
     /// says secure input activated, hit Command V … keeps retrying, and if it gets it,
     /// it shuts down the box"). Pure so the policy is testable:
     ///   - the dictation leaving the clipboard (user copied something else, or the
@@ -1237,24 +2026,37 @@ class TextInserter {
         return frontmostMatchesTarget ? .insert : .wait
     }
 
-    /// Write `text` to `pasteboard` exactly as `pasteViaClipboard` does (clearContents +
-    /// transient/concealed-marked writeObjects) and return the `changeCount` AFTER the write.
-    ///
-    /// Extracted so the changeCount contract that drives clipboard restore is unit-testable on a
-    /// named (non-general) pasteboard without simulating a real Cmd+V. The key invariant the F4
-    /// regression test pins: this whole sequence advances `changeCount` by exactly ONE, so the
-    /// restore guard must compare against THIS returned value (equality), never `before + 2`.
+    /// Publish transient/concealed text with a checked result. A successful result carries
+    /// the exact clear generation; failure never supplies a generation usable for a paste.
     @discardableResult
-    static func writeTransientString(_ text: String, to pasteboard: NSPasteboard) -> Int {
-        pasteboard.clearContents()
+    static func writeTransientString(_ text: String, to pasteboard: NSPasteboard,
+                                     writer: PasteboardWriter = PasteboardWriter(),
+                                     expectedGeneration: Int? = nil) -> PasteboardWriter.Result {
         let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
         let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
         let item = NSPasteboardItem()
         item.setString(text, forType: .string)
         item.setData(Data(), forType: transientType)
         item.setData(Data(), forType: concealedType)
-        pasteboard.writeObjects([item])
-        return pasteboard.changeCount
+        return writer.replace([item], on: pasteboard, expectedGeneration: expectedGeneration)
+    }
+
+    /// Write the dictation as a LAZY, host-only promise: `prepareForNewContents(.currentHostOnly)`
+    /// keeps it off Universal Clipboard (no broadcast to the user's other devices, and no eager
+    /// read by it), the three nspasteboard.org markers are real (empty) data so clipboard managers
+    /// can skip the item from its type list alone, and the text itself is supplied by `provider`
+    /// only when a process reads it. Only a confirmed publication supplies a generation.
+    /// The item retains the provider until it has served the text.
+    @discardableResult
+    static func writeLazyDictation(provider: DictationPasteProvider, to pasteboard: NSPasteboard,
+                                   writer: PasteboardWriter = PasteboardWriter(),
+                                   expectedGeneration: Int? = nil) -> PasteboardWriter.Result {
+        let item = NSPasteboardItem()
+        item.setDataProvider(provider, forTypes: [.string])
+        for marker in DictationPasteProvider.markerTypes {
+            item.setData(Data(), forType: marker)
+        }
+        return writer.replace([item], on: pasteboard, expectedGeneration: expectedGeneration, hostOnly: true)
     }
 
     /// The restore decision: restore the prior clipboard only if OUR write is still live, i.e. the
@@ -1276,6 +2078,11 @@ class TextInserter {
     }
 
     private func savePasteboard(_ pasteboard: NSPasteboard) -> [[(NSPasteboard.PasteboardType, Data)]] {
+        TextInserter.snapshotPasteboard(pasteboard)
+    }
+
+    /// Every item, every type that yields data, in order. Shared with the clipboard canary.
+    static func snapshotPasteboard(_ pasteboard: NSPasteboard) -> [[(NSPasteboard.PasteboardType, Data)]] {
         guard let items = pasteboard.pasteboardItems else { return [] }
         return items.map { item in
             item.types.compactMap { type in
@@ -1286,16 +2093,76 @@ class TextInserter {
     }
 
     private func restorePasteboard(_ pasteboard: NSPasteboard, items: [[(NSPasteboard.PasteboardType, Data)]]) {
-        pasteboard.clearContents()
-        guard !items.isEmpty else { return }
-        let pasteboardItems = items.map { entries -> NSPasteboardItem in
-            let item = NSPasteboardItem()
-            for (type, data) in entries {
-                item.setData(data, forType: type)
-            }
-            return item
+        TextInserter.writeBack(items, to: pasteboard)
+    }
+
+    /// Write saved clipboard items back. Thread-agnostic (no main-only state): the paste-watch
+    /// tap calls it on its own thread.
+    @discardableResult
+    static func writeBack(_ items: [[(NSPasteboard.PasteboardType, Data)]], to pasteboard: NSPasteboard) -> Bool {
+        PasteboardWriter().restore(items, on: pasteboard).generation != nil
+    }
+
+    /// A queued paste must finish consuming its dictation before another explicit copy can
+    /// replace it. This follows the current borrow's receipt policy, without waiting out its
+    /// after-read timer. An untrusted/own read or an eager remote write is not a receipt.
+    var isWaitingForClipboardConsumption: Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !hasDeferredInsertion else { return true }
+        guard let pending = pendingRestore else { return false }
+        if pending.pasteVerdict == PasteOutcomeVerdict.confirmed.rawValue { return false }
+        guard pending.provider != nil, pending.firstReadAt != nil,
+              pending.restoreAfterRead != nil, pending.earlyOffReason == nil else { return true }
+        // A reader may have started since the earlier receipt; never silently keep trusting
+        // that receipt when the current reader policy now says it is uncertain.
+        return clipboardTrustReason() != nil
+    }
+
+    /// An explicit user copy supersedes a consumed automatic dictation borrow. Consumers
+    /// supply raw representations; this API does not depend on the history feature.
+    @discardableResult
+    func replaceClipboardForUser(with items: [NSPasteboardItem]) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !items.isEmpty, !isWaitingForClipboardConsumption else { return false }
+        clipboardCanary?.abort(reason: "explicit-user-copy")
+        userPasteGate.claim(token: nil)
+        let before = pasteboard.changeCount
+        let saved: PasteboardAccess.Snapshot?
+        if let pending = pendingRestore, pending.writtenChangeCount == before {
+            saved = pending.savedItems
+        } else {
+            // This is an explicit replacement, so unreadable/oversized existing data
+            // does not prohibit the user's copy. Preserve it for failure recovery when possible.
+            saved = try? captureClipboardSnapshot(pasteboard, Self.maxRestorableClipboardBytes)
         }
-        pasteboard.writeObjects(pasteboardItems)
+        let result = pasteboardWriter.replace(items, on: pasteboard, expectedGeneration: before)
+        guard result.generation != nil else {
+            if let saved { _ = pasteboardWriter.recover(saved, after: result, on: pasteboard) }
+            return false
+        }
+        pendingBackstop?.cancel()
+        pendingBackstop = nil
+        pendingRestore?.pasteCheck?.cancel()
+        pendingRestore = nil
+        lastBorrowEndedAt = uptime()
+        return true
+    }
+
+    /// Replay the user's selected clipboard verbatim, with no text-pipeline pass.
+    /// Remote viewers use their own clipboard synchronization; let the user paste
+    /// there explicitly instead of guessing when rich content has crossed hosts.
+    @discardableResult
+    func pasteCurrentClipboard(expectedChangeCount: Int) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard pasteboard.changeCount == expectedChangeCount,
+              !isSecureInputActive(), !isRemoteDesktopFrontmost() else { return false }
+        if let postPasteShortcut { postPasteShortcut(); return true }
+        guard let key = vKeyCode(), let events = Self.makeSyntheticPasteEvents(vKey: key) else { return false }
+        events.0.post(tap: .cghidEventTap)
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.01) {
+            events.1.post(tap: .cghidEventTap)
+        }
+        return true
     }
 
     private func simulatePaste(_ text: String, expectedChangeCount: Int) {
@@ -1315,18 +2182,23 @@ class TextInserter {
             }
             let bundleID = frontmostBundleIDProvider()
             let focusedElement = currentFocusedElement()
+            let sentProfile = frontmostProfile()
+            let attempt = activeInsertionAttempt
+            attempt?.deferred = true
+            outcomeDeferred = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                guard let self = self else { return }
+                guard let self = self else { attempt?.finish(.deliveryFailed); return }
                 let focusUnchanged = focusedElement.map { expected in
                     self.currentFocusedElement().map { CFEqual(expected, $0) } ?? false
                 } ?? true
                 guard self.frontmostPIDProvider() == pid,
                       self.frontmostBundleIDProvider() == bundleID,
                       self.pasteboard.changeCount == expectedChangeCount,
-                      !self.isSecureInputActive(), focusUnchanged else {
+                      self.insertionDestinationIsCurrent(attempt: attempt), focusUnchanged else {
                     // A rapid second dictation owns the newer clipboard and its own paste.
                     // Do not paste any newer user copy or send input into changed focus.
-                    self.remoteInsertionFailed(text, message: "The clipboard or focused field changed before the remote paste. SpeakFree did not send the paste shortcut.")
+                    self.remoteInsertionFailed(text, message: "The clipboard or focused field changed before the remote paste. SpeakFree did not send the paste shortcut.",
+                                               lateFor: sentProfile, attempt: attempt)
                     return
                 }
                 let source = """
@@ -1339,22 +2211,30 @@ class TextInserter {
                 if let error = self.executeAppleScript(source) {
                     Self.logAppleEventsDenialHint(error)
                     DiagnosticLogger.shared.log("TextInserter: remote paste failed; offering recovery")
-                    self.remoteInsertionFailed(text, message: Self.remoteScriptFailureMessage(error))
+                    self.remoteInsertionFailed(text, message: Self.remoteScriptFailureMessage(error),
+                                               lateFor: sentProfile, attempt: attempt)
+                } else {
+                    self.recordDirect(.remotePasted, multiLine: AppCompatibility.hasLineBreak(text),
+                                      profile: sentProfile)
+                    attempt?.finish(.remotePasted)
                 }
             }
             return
         }
 
-        guard let vKey = vKeyCode() else { return }
-        guard let source = CGEventSource(stateID: .hidSystemState),
-            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true),
-            let keyUp = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false) else {
+        if let postPasteShortcut {
+            guard validateClipboardBeforePaste(text, expectedChangeCount: expectedChangeCount) else { return }
+            postPasteShortcut()
+            return
+        }
+        guard let vKey = vKeyCode(),
+              let (keyDown, keyUp) = TextInserter.makeSyntheticPasteEvents(vKey: vKey) else {
+            remoteInsertionFailed(text, message: "macOS could not create the paste shortcut. Your dictation was not sent.",
+                                  title: "Check your dictation")
             return
         }
 
-        keyDown.flags = .maskCommand
-        keyUp.flags = .maskCommand
-
+        guard validateClipboardBeforePaste(text, expectedChangeCount: expectedChangeCount) else { return }
         keyDown.post(tap: .cghidEventTap)
         // Schedule the key-up on a background queue, not main: if the main thread is stalled the
         // synthetic Cmd+V key-DOWN would otherwise be left held (Command stuck) until main drains,
@@ -1362,6 +2242,51 @@ class TextInserter {
         DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.05) {
             keyUp.post(tap: .cghidEventTap)
         }
+    }
+
+    /// Check after route/event setup as well as publication. AppKit cannot atomically
+    /// couple this check to another application's eventual handling of the key event.
+    private func validateClipboardBeforePaste(_ text: String, expectedChangeCount: Int) -> Bool {
+        let clipboardChanged = pasteboard.changeCount != expectedChangeCount
+        let destinationChanged = !insertionDestinationIsCurrent()
+        guard clipboardChanged || destinationChanged else { return true }
+        // Only retire the operation whose shortcut is being abandoned; a newer borrow
+        // has its own snapshot, timer and gate token. Never write an old snapshot here.
+        if let pending = pendingRestore, pending.writtenChangeCount == expectedChangeCount {
+            pendingBackstop?.cancel()
+            if destinationChanged && !clipboardChanged {
+                // No shortcut was sent; restore only our exact temporary generation.
+                performPendingRestore(pasteboard: pasteboard, trigger: "destination-changed")
+            } else {
+                if let token = pending.gateToken { userPasteGate.claim(token: token) }
+                pendingBackstop = nil
+                pending.pasteCheck?.cancel()
+                pendingRestore = nil
+                lastBorrowEndedAt = uptime()
+            }
+        }
+        remoteInsertionFailed(text,
+            message: (clipboardChanged ? "The clipboard changed before the paste." : "The original destination could not be confirmed before the paste.")
+                + " Speakfree did not send the paste shortcut.",
+            title: "Check your dictation")
+        return false
+    }
+
+    /// speakfree's own Cmd+V, marked (`SyntheticEventMarker`) so the paste-watch tap never takes
+    /// it for the user's. Built here, not inline, so a test can check the marking.
+    static func makeSyntheticPasteEvents(vKey: CGKeyCode,
+                                         source: CGEventSource? = CGEventSource(stateID: .hidSystemState))
+        -> (CGEvent, CGEvent)? {
+        guard let source,
+              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false) else {
+            return nil
+        }
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        SyntheticEventMarker.mark(keyDown)
+        SyntheticEventMarker.mark(keyUp)
+        return (keyDown, keyUp)
     }
 
     /// Returns the key code for 'v', using a cached value when the input source hasn't changed.

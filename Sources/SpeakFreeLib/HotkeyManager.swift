@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:019fecb2-8ac5-7423-90a3-d70aac039387 · 2026-08-10
+// ai-processed:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 import AppKit
 import Foundation
 import CoreGraphics
@@ -17,6 +18,7 @@ class HotkeyManager {
     private var onAbort: (() -> Void)?
     private var onUserInteraction: ((CursorInteraction) -> Void)?
     private var modifierPressed = false
+    private var normalKeyPressed = false
     /// Consecutive swallowed phantom fn-ups (failsafe cap 4; reset on honored release).
     private var phantomUpStreak = 0
     /// When fn was pressed — used to distinguish keyboard shortcuts (key within 300ms) from dictation
@@ -26,10 +28,30 @@ class HotkeyManager {
     private var tapReEnableWindowStart: UInt64 = 0
     /// Track tap creation retries after TCC propagation delay
     private var tapRetryCount = 0
+    /// Paste-watch tap (keyDown only), on its own thread, ENABLED only while a clipboard borrow
+    /// is pending (see startPasteWatchTap).
+    private var pasteTap: CFMachPort?
+    /// What the paste-watch callback reads on the tap thread. Its `tap` is set once, before the
+    /// run loop source is attached, and never changes, so the callback never reads a property
+    /// main may be mutating.
+    private final class PasteTapContext {
+        let gate: UserPasteRestoreGate
+        var tap: CFMachPort?
+        init(gate: UserPasteRestoreGate) { self.gate = gate }
+    }
+    private var pasteTapContext: PasteTapContext?
+    private var pasteTapSource: CFRunLoopSource?
+    private var pasteTapRunLoop: CFRunLoop?
+    private let pasteGate: UserPasteRestoreGate
+    private let shortcutRecordingGate: ShortcutRecordingGate
+    private var pasteTapFailureLogged = false
 
-    init(keyCode: UInt16, modifiers: UInt64 = 0) {
+    init(keyCode: UInt16, modifiers: UInt64 = 0, pasteGate: UserPasteRestoreGate = .shared,
+         shortcutRecordingGate: ShortcutRecordingGate = .shared) {
         self.keyCode = keyCode
         self.requiredModifiers = modifiers
+        self.pasteGate = pasteGate
+        self.shortcutRecordingGate = shortcutRecordingGate
     }
 
     func start(
@@ -52,6 +74,7 @@ class HotkeyManager {
         } else {
             startGlobalMonitor()
         }
+        startPasteWatchTap()
     }
 
     func stop() {
@@ -65,8 +88,9 @@ class HotkeyManager {
         // deliberate trade against the old behavior (a silently stranded one). At app
         // termination this async block never runs and the recorder is already stopped
         // (applicationWillTerminate), so this exists for teardown races, not quit.
-        if modifierPressed {
+        if modifierPressed || normalKeyPressed {
             modifierPressed = false
+            normalKeyPressed = false
             phantomUpStreak = 0
             DiagnosticLogger.shared.log("HotkeyManager: stopped while pressed — force-ending take")
             let keyUp = onKeyUp
@@ -74,6 +98,7 @@ class HotkeyManager {
         }
         stopLifecycleObservers()
         tearDownEventTap()
+        tearDownPasteWatchTap()
         if let monitor = globalMonitor {
             NSEvent.removeMonitor(monitor)
             globalMonitor = nil
@@ -100,9 +125,10 @@ class HotkeyManager {
     /// path — which is the right way round: a truncated take is recoverable, a stranded one
     /// silently eats a dictation.
     private func reconcilePressedState(_ reason: String) {
-        guard Self.shouldReconcile(modifierPressed: modifierPressed,
+        guard Self.shouldReconcile(modifierPressed: modifierPressed || normalKeyPressed,
                                    physicallyDown: physicallyDownRead(keyCode)) else { return }
         modifierPressed = false
+        normalKeyPressed = false
         phantomUpStreak = 0
         DiagnosticLogger.shared.log(
             "HotkeyManager: release missed during \(reason) — key is physically up, ending take")
@@ -139,6 +165,14 @@ class HotkeyManager {
     /// two branches were exactly the recovery paths that never reconciled (the 30s
     /// health poll was also gated off during a take, so a stranded take could not heal).
     func ensureTapHealthy() {
+        if tapRepairOverride == nil {
+            if let tap = pasteTap, !CFMachPortIsValid(tap) {
+                DiagnosticLogger.shared.log("HotkeyManager: paste-watch tap invalid, recreating")
+                startPasteWatchTap()
+            } else if pasteTap == nil {
+                startPasteWatchTap()
+            }
+        }
         switch repairTapIfNeeded() {
         case .none:
             break
@@ -231,6 +265,11 @@ class HotkeyManager {
         self.modifierPressed = pressed
     }
 
+    func setKeyCallbacksForTesting(onKeyDown: @escaping () -> Void, onKeyUp: @escaping () -> Void) {
+        self.onKeyDown = onKeyDown
+        self.onKeyUp = onKeyUp
+    }
+
     /// Test-only: swap the key-up callback WITHOUT touching `modifierPressed`, so a test
     /// can observe the pressed state a previous phase actually left behind (adversarial
     /// round 2: re-priming `pressed: false` overwrote the very state under observation).
@@ -303,7 +342,7 @@ class HotkeyManager {
                     manager.reconcilePressedState("tap disable")
                     return Unmanaged.passUnretained(event)
                 }
-                return manager.handleCGEvent(proxy: proxy, type: type, event: event)
+                return manager.handleCGEvent(type: type, event: event)
             },
             userInfo: selfPtr.toOpaque()
         )
@@ -379,7 +418,117 @@ class HotkeyManager {
         runLoopSource = nil
     }
 
-    private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    // MARK: - Paste-watch tap (the user's Cmd+V during a clipboard borrow)
+
+    /// A keyDown tap that lets the user's own Cmd+V put his clipboard back before it is pasted
+    /// (UserPasteRestore.swift). It is a SEPARATE tap from the fn tap above, for two reasons:
+    ///   - a live tap's event mask cannot change, and keeping keyDown in the fn tap's mask
+    ///     permanently would route every keystroke on the Mac through speakfree forever (the
+    ///     March 2026 note above records keyDown interception breaking option+delete; that tap
+    ///     then ran on the main run loop and over-retained each event, both since fixed, but
+    ///     the blast radius argument stands);
+    ///   - this one is DISABLED except while a clipboard borrow is pending (a fraction of a
+    ///     second to 3 s after each clipboard paste), so an idle speakfree adds nothing to
+    ///     typing, and it exists for every hotkey type, not only fn.
+    /// The callback never modifies or swallows the event, never blocks on main (the gate only
+    /// try-locks), and its one write is the saved clipboard (at most 16 MB, about 6 ms).
+    /// A test process must never install a live keyDown tap (tests never touch real keystrokes),
+    /// even through a path like the real-repair watchdog test that calls `ensureTapHealthy`.
+    static let isRunningUnderXCTest = NSClassFromString("XCTestCase") != nil
+
+    private func startPasteWatchTap() {
+        guard !Self.isRunningUnderXCTest else { return }
+        tearDownPasteWatchTap()
+        let context = PasteTapContext(gate: pasteGate)
+        let mask = CGEventMask(
+            (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.tapDisabledByTimeout.rawValue) |
+            (1 << CGEventType.tapDisabledByUserInput.rawValue)
+        )
+        // The thread closure below retains `context` until its run loop exits, so this pointer
+        // stays valid for every callback.
+        let contextPtr = Unmanaged.passUnretained(context)
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { _, type, event, userInfo -> Unmanaged<CGEvent>? in
+                guard let userInfo else { return Unmanaged.passUnretained(event) }
+                let context = Unmanaged<PasteTapContext>.fromOpaque(userInfo).takeUnretainedValue()
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    // Re-enable only while there is something to watch; otherwise it stays off.
+                    if let tap = context.tap, context.gate.isWatchingWithoutWaiting() {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                    return Unmanaged.passUnretained(event)
+                }
+                if type == .keyDown {
+                    _ = context.gate.handleKeyDown(event, type: type)
+                }
+                return Unmanaged.passUnretained(event)  // always delivered, unchanged
+            },
+            userInfo: contextPtr.toOpaque()
+        ) else {
+            // Accessibility not granted yet, most likely; the 30 s health poll retries (logged
+            // once per failure streak, not every 30 s).
+            if !pasteTapFailureLogged {
+                pasteTapFailureLogged = true
+                DiagnosticLogger.shared.log("HotkeyManager: paste-watch tap creation failed; will retry")
+            }
+            return
+        }
+        pasteTapFailureLogged = false
+        CGEvent.tapEnable(tap: tap, enable: false)
+        context.tap = tap
+        pasteTap = tap
+        pasteTapContext = context
+        let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        pasteTapSource = src
+        let startSema = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            withExtendedLifetime(context) {}
+            self.pasteTapRunLoop = CFRunLoopGetCurrent()
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), src, .commonModes)
+            startSema.signal()
+            CFRunLoopRun()
+            withExtendedLifetime(context) {}
+        }
+        thread.name = "com.speakfree.paste-watch-tap"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+        startSema.wait()
+
+        pasteGate.onWatchingChanged = { [weak self] watching in
+            guard let self, let tap = self.pasteTap else { return }
+            CGEvent.tapEnable(tap: tap, enable: watching)
+        }
+        CGEvent.tapEnable(tap: tap, enable: pasteGate.isWatching)
+        DiagnosticLogger.shared.log("HotkeyManager: paste-watch tap created (off until a clipboard paste)")
+    }
+
+    private func tearDownPasteWatchTap() {
+        if let tap = pasteTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            pasteTap = nil
+            pasteGate.onWatchingChanged = nil
+            CFMachPortInvalidate(tap)
+            pasteTapContext = nil
+        }
+        if let src = pasteTapSource, let rl = pasteTapRunLoop {
+            CFRunLoopRemoveSource(rl, src, .commonModes)
+            CFRunLoopStop(rl)
+            pasteTapRunLoop = nil
+        }
+        pasteTapSource = nil
+    }
+
+    // Internal for synthetic-event tests; calling this never posts an event or installs a tap.
+    func handleCGEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        let capture = shortcutRecordingGate.snapshot
+        // A press that already started must still receive its release; new presses belong to
+        // the Settings recorder and must reach it without starting or swallowing dictation.
+        if capture.isActive && !modifierPressed { return Unmanaged.passUnretained(event) }
         guard type == .flagsChanged else { return Unmanaged.passUnretained(event) }
         guard event.getIntegerValueField(.keyboardEventKeycode) == Int64(keyCode) else {
             // IMPORTANT: pass through ALL non-fn flagsChanged events unmodified.
@@ -416,6 +565,7 @@ class HotkeyManager {
             modifierPressed = true
             modifierPressedAt = mach_absolute_time()
             DispatchQueue.main.async {
+                guard self.shortcutRecordingGate.permitsDelivery(from: capture) else { return }
                 self.startKeyDownMonitor()
                 self.onKeyDown?()
             }
@@ -428,7 +578,7 @@ class HotkeyManager {
             // the key is really still down — .hidSystemState, NOT .combinedSessionState:
             // this tap CONSUMES the events, so the session state never sees releases
             // and reported "still down" for every genuine up, stranding a recording
-            // that could never stop (Michael, 00:52). Failsafe: never swallow more
+            // that could never stop (the maintainer, 00:52). Failsafe: never swallow more
             // than 4 consecutive ups — if the HID read is ever wrong on some
             // keyboard, the release goes through rather than recording forever.
             if Self.releaseIsPhantom(physicallyDown: Self.hotkeyIsPhysicallyDown(keyCode: keyCode),
@@ -488,15 +638,12 @@ class HotkeyManager {
         //     gated off during a take), every rung of `startEventTap`'s retry ladder plus its
         //     success path, and the sleep-wake / fast-user-switch resume handlers. `stop()`
         //     force-ends an in-flight take outright — a stopped manager can never deliver the
-        //     release. THREE residual gaps, all deliberate or pre-existing: (1) a healthy-looking
+        //     release. TWO residual gaps, all deliberate or pre-existing: (1) a healthy-looking
         //     tap with a stuck `modifierPressed` (this fall-through's phantom-swallow edge) is NOT
         //     reconciled by the poll, so a hardware misread cannot truncate a live take; that case
-        //     costs the extra tap(s) described below. (2) Non-modifier ("Other…") hotkeys never
-        //     set `modifierPressed` (handleNSEvent calls the callbacks directly), so the whole
-        //     watchdog — reconcile AND stop()'s force-end — is inert for them; a release lost
-        //     while their global monitor is down is still stranded until the next press. Fixing
-        //     that needs pressed-state tracking plus a keyState-based hardware read for regular
-        //     keycodes — separate work. (3) `modifierPressed` is an unsynchronized Bool with
+        //     costs the extra tap(s) described below. Regular keys now track their own accepted
+        //     press and share reconciliation/stop recovery (2026-10-01). (2) `modifierPressed` is
+        //     an unsynchronized Bool with
         //     tap-thread and main-thread writers, so two racing reconcile paths can both dispatch
         //     onKeyUp; the user-visible double-stop is prevented by `guard isPressed` in
         //     AppDelegate.handleRecordingStop, not by anything in this file.
@@ -761,19 +908,28 @@ class HotkeyManager {
         physicallyDown && phantomUpStreak < 4
     }
 
-    private func handleNSEvent(_ event: NSEvent) {
+    // Also used by synthetic-event tests; this path does not create event infrastructure.
+    func handleNSEvent(_ event: NSEvent) {
+        let capture = shortcutRecordingGate.snapshot
+        if capture.isActive && (event.type == .keyDown || !modifierPressed && event.type == .flagsChanged) { return }
         if event.type == .flagsChanged {
             handleModifierFlagsChanged(event)
             return
         }
         guard event.keyCode == keyCode else { return }
-        if requiredModifiers != 0 {
-            let currentMods = UInt64(event.modifierFlags.rawValue) & 0x00FF0000
-            guard currentMods & requiredModifiers == requiredModifiers else { return }
-        }
         if event.type == .keyDown {
+            guard !normalKeyPressed else { return }
+            if requiredModifiers != 0 {
+                let currentMods = UInt64(event.modifierFlags.rawValue) & 0x00FF0000
+                guard currentMods & requiredModifiers == requiredModifiers else { return }
+            }
+            normalKeyPressed = true
             onKeyDown?()
         } else if event.type == .keyUp {
+            // Command may have been released before the letter. Only an accepted press owns a
+            // release, and its release must stop the take regardless of current modifier flags.
+            guard normalKeyPressed else { return }
+            normalKeyPressed = false
             onKeyUp?()
         }
     }
@@ -825,7 +981,7 @@ class HotkeyManager {
     /// 2026-07-26 — `handleCGEvent` tested `.maskSecondaryFn` for EVERY modifier
     /// hotkey, so only fn (63) ever worked. Right Command raises `.maskCommand`, never
     /// the fn bit, so the press branch could not fire and selecting it silently did
-    /// nothing (Michael: "i set it to right command and it didn't work"). Same for
+    /// nothing (the maintainer: "i set it to right command and it didn't work"). Same for
     /// Option, Shift and Control — 8 of the 9 selectable modifier hotkeys were dead.
     ///
     /// These are the DEVICE-dependent bits, not the aggregate ones, so left and right
@@ -885,8 +1041,8 @@ class HotkeyManager {
 
     /// True when the hotkey's physical key is really held, per the HID hardware state.
     ///
-    /// Used ONLY by the phantom-release guard, which needs hardware truth rather than
-    /// what the event claimed. `CGEventSource.flagsState` returns `CGEventFlags`, whose
+    /// Used by the phantom-release guard and outage recovery, which need hardware truth rather
+    /// than what the event claimed. Ordinary accepted key presses use the same key-state read. `CGEventSource.flagsState` returns `CGEventFlags`, whose
     /// public contract covers only the device-INDEPENDENT bits, so side-specific device
     /// bits are not guaranteed to be present there. `keyState(_:key:)` is the primitive
     /// that is side-specific by construction, so sided modifiers ask it directly. If it
@@ -897,7 +1053,6 @@ class HotkeyManager {
             // Unchanged, proven path: fn is not exposed as a normal key state.
             return CGEventSource.flagsState(.hidSystemState).contains(.maskSecondaryFn)
         }
-        guard modifierFlagBit(for: keyCode) != 0 else { return false }
         return CGEventSource.keyState(.hidSystemState, key: CGKeyCode(keyCode))
     }
 }

@@ -62,7 +62,7 @@ struct EnginePickerView: View {
                                 ForEach(EngineCatalog.parakeetModels, id: \.id) { model in
                                     // Un-downloaded models are greyed and labeled, so
                                     // picking one is a knowing "this will download"
-                                    // choice (Michael 2026-08-19).
+                                    // choice (the maintainer 2026-08-19).
                                     let downloaded = ParakeetModelManager.shared.isModelDownloaded(model.id)
                                     Text(model.displayName
                                          + (downloaded ? "" : " · Download needed"))

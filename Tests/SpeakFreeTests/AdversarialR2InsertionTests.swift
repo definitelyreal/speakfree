@@ -1,7 +1,8 @@
+// ai-processed:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b/agent:code_elegance_audit · 2026-10-01
 // Claude · 2026-07-15 · Session: ed573fa2-e6e0-4a72-b0e5-8eab0a7411b1
 //
 // Round-2 adversarial-review fixes for the insertion / AX / UI surface (Agent A):
-//   I2  focus re-check concealment fires ONLY on a DIFFERENT element; a nil re-query proceeds to paste
+//   I2  updated Oct 1: missing focus identity retains the draft instead of authorizing a blind paste
 //   I5  global-monitor fallback handles fn (flagsChanged) via the pure fnTransition decision
 //   I6  onboarding engine picker index is derived from the applied suggestion, not hard-selected to 0
 //
@@ -27,17 +28,16 @@ final class AdversarialR2InsertionTests: XCTestCase {
 
     private let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
 
-    // MARK: - I2: nil re-query is NOT "focus moved" — proceed to paste, don't conceal
+    // MARK: - I2: nil re-query cannot confirm the original control
 
-    /// The false-negative the fix targets: the async re-check returns nil (the 0.5s AX cap or a
-    /// flaky WindowServer read couldn't determine focus). The OLD `?? false` treated nil as "moved"
-    /// and concealed — booking a phantom success while the text was never inserted. Post-fix, nil
-    /// falls through to the normal paste path (performInsertion) and does NOT fire onFocusLost.
-    func test_i2_nilRequeryProceedsToPaste() {
-        let exp = expectation(description: "async paste path runs on nil re-query")
+    /// The earlier test explicitly allowed blind paste on nil. The maintainer's current original-control
+    /// requirement supersedes that choice: unknown focus is retained and reported, never success.
+    func test_i2_nilRequeryRetainsInsteadOfBlindPasting() {
+        let exp = expectation(description: "unknown focus retains the draft")
         let inserter = TextInserter()
         inserter.pasteboard = makeTestPasteboard()
         inserter.isSecureInputActive = { false }
+        inserter.frontmostPIDProvider = { 999_991 }
         inserter.focusedElementProvider = { nil }   // nil on sync check AND closure re-check
         inserter.refocusElement = { _ in true }      // schedule the async closure
         inserter.directAXInsert = { _, _ in false }  // force the post-AX fallback branch, no real AX IPC
@@ -45,18 +45,20 @@ final class AdversarialR2InsertionTests: XCTestCase {
         var pasted: String?
         inserter.performInsertion = {
             pasted = $0
-            exp.fulfill()
         }
         var focusLostFired = false
-        let target = AXUIElementCreateSystemWide()
-        _ = inserter.insert(text: "hello world", refocusing: target, onFocusLost: { focusLostFired = true })
+        let target = AXUIElementCreateApplication(999_991)
+        _ = inserter.insert(text: "hello world", refocusing: target, onFocusLost: {
+            focusLostFired = true
+            exp.fulfill()
+        })
 
         wait(for: [exp], timeout: 2.0)
-        XCTAssertEqual(pasted, "hello world", "a nil re-query must proceed to paste, not conceal")
-        XCTAssertFalse(focusLostFired, "onFocusLost must NOT fire when focus is merely indeterminate (nil)")
-        // Nothing concealed on the clipboard — the paste path went through performInsertion.
+        XCTAssertNil(pasted, "a nil re-query cannot authorize a paste into an unknown control")
+        XCTAssertTrue(focusLostFired, "the caller must retain the draft when focus cannot be confirmed")
         let types = inserter.pasteboard.pasteboardItems?.first?.types ?? []
-        XCTAssertFalse(types.contains(concealed), "nil re-query must not write a concealed clipboard item")
+        XCTAssertTrue(types.contains(concealed))
+        XCTAssertEqual(inserter.pasteboard.string(forType: .string), "hello world")
         inserter.pasteboard.clearContents()
     }
 

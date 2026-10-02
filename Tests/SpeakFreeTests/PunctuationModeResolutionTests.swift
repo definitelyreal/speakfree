@@ -3,7 +3,7 @@ import XCTest
 @testable import SpeakFreeLib
 
 /// Pins the single shared resolution of a missing `spokenPunctuation` key
-/// (Michael's ruling 2026-08-12: "build the shared function and align the CLI").
+/// (the maintainer's ruling 2026-08-12: "build the shared function and align the CLI").
 ///
 /// The drift this ends: four sites resolved the missing key independently, ProcessCommand
 /// said `.hybrid` while the app said `.off`, and Settings once displayed "Automatic &

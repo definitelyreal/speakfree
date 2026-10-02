@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-17
+# ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 # check-version.sh — assert that EVERY version-bearing surface agrees:
 #   Version.swift, Resources/Info.plist, docs/appcast.xml, and the GitHub Pages
 #   site (docs/index.html: download URL, visible label, and newest changelog entry).
@@ -14,10 +14,16 @@
 # one human step this check enforces.
 set -euo pipefail
 SOURCE_ONLY=0
+ALPHA=0
+if [ "$#" -gt 1 ]; then
+    echo "Usage: check-version.sh [--source-only|--alpha]" >&2
+    exit 1
+fi
 case "${1:-}" in
     "") ;;
     --source-only) SOURCE_ONLY=1 ;;
-    *) echo "Usage: check-version.sh [--source-only]" >&2; exit 1 ;;
+    --alpha) ALPHA=1 ;;
+    *) echo "Usage: check-version.sh [--source-only|--alpha]" >&2; exit 1 ;;
 esac
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,6 +38,30 @@ VERSION_PLIST=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
     "$REPO_DIR/Resources/Info.plist")
 VERSION_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" \
     "$REPO_DIR/Resources/Info.plist")
+
+# Alpha packaging derives its bundle versions from the alpha source constant.
+# The tracked plist/feed/site continue to describe the stable release. Verify
+# those surfaces still agree rather than stamping an alpha into the stable feed.
+EXPECTED_VERSION="$VERSION_SWIFT"
+if [ "$ALPHA" -eq 1 ]; then
+    if [[ ! "$VERSION_SWIFT" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.([1-9][0-9]*)$ ]]; then
+        echo "FATAL: --alpha requires an X.Y.Z-alpha.N source version." >&2
+        exit 1
+    fi
+    ALPHA_NUMBER="${BASH_REMATCH[1]}"
+    if [ "${#ALPHA_NUMBER}" -gt 3 ] || [ "$ALPHA_NUMBER" -gt 255 ]; then
+        echo "FATAL: alpha sequence must be between 1 and 255." >&2
+        exit 1
+    fi
+    if [[ ! "$VERSION_PLIST" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "FATAL: the tracked bundle template must retain a stable X.Y.Z version." >&2
+        exit 1
+    fi
+    EXPECTED_VERSION="$VERSION_PLIST"
+elif [[ ! "$VERSION_SWIFT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "FATAL: prerelease source requires the explicit --alpha version check." >&2
+    exit 1
+fi
 
 # Newest <item> is the first one in the file (build.sh always prepends).
 # Match the first sparkle:shortVersionString value.
@@ -73,8 +103,8 @@ echo "index.html changelog top : $VERSION_PAGES_CHANGELOG"
 # --- Check ---
 MISMATCH=0
 check() {  # check <name> <value>
-    if [ "$2" != "$VERSION_SWIFT" ]; then
-        echo "ERROR: Version.swift ($VERSION_SWIFT) != $1 ($2)" >&2
+    if [ "$2" != "$EXPECTED_VERSION" ]; then
+        echo "ERROR: expected version ($EXPECTED_VERSION) != $1 ($2)" >&2
         MISMATCH=1
     fi
 }
@@ -91,13 +121,15 @@ check "index.html changelog top" "$VERSION_PAGES_CHANGELOG"
 
 if [ "$MISMATCH" -ne 0 ]; then
     echo "" >&2
-    echo "FATAL: version surfaces are inconsistent. All must equal Version.swift ($VERSION_SWIFT)." >&2
+    echo "FATAL: version surfaces are inconsistent. Expected $EXPECTED_VERSION." >&2
     echo "  - Mechanical surfaces (plist, appcast top, index.html URL/label/heading) are stamped by build.sh." >&2
     echo "  - The index.html changelog needs a hand-written <h3>v${VERSION_SWIFT}</h3> entry at the top." >&2
     exit 1
 fi
 
-if [ "$SOURCE_ONLY" -eq 1 ]; then
+if [ "$ALPHA" -eq 1 ]; then
+    echo "OK: alpha source $VERSION_SWIFT; stable bundle/feed/site remain $EXPECTED_VERSION"
+elif [ "$SOURCE_ONLY" -eq 1 ]; then
     echo "OK: source version surfaces agree ($VERSION_SWIFT); signed appcast checked after packaging"
 else
     echo "OK: all version surfaces agree ($VERSION_SWIFT)"

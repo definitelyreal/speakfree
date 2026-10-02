@@ -63,6 +63,7 @@ final class ScreenSharingInsertionTests: XCTestCase {
             delivered.fulfill()
         }
         XCTAssertTrue(inserter.insert(text: "Remote refocus test", refocusing: target))
+        inserter.focusedElementProvider = { target }
         wait(for: [delivered], timeout: 2)
         XCTAssertNil(inserter.pasteboard.string(forType: .string))
     }

@@ -262,7 +262,7 @@ final class AudioResilienceTests: XCTestCase {
     func testBluetoothInputRateBelowNominalIsUsable() {
         // AirPods Pro mic runs at 24 kHz while the device's nominal rate (the A2DP
         // output side) reads 48 kHz. Rejecting that split as "stale" made every
-        // pin-to-AirPods start fail (2026-08-19 airplane logs: "the microphone
+        // pin-to-AirPods start fail (field logs: "the microphone
         // couldn't be used", recovering only after the retry budget ran out).
         XCTAssertTrue(AudioRecorder.isCaptureFormatUsable(
             engineRate: 24000, engineChannels: 1, deviceRate: 48000, deviceChannels: 1,
@@ -274,7 +274,7 @@ final class AudioResilienceTests: XCTestCase {
     }
 
     func testBluetoothInputRateAboveNominalIsStillStale() {
-        // The other direction IS the stale trap even on Bluetooth: 2026-08-19 17:56 EDT,
+        // The other direction IS the stale trap even on Bluetooth: in one field take,
         // a unit stuck on 48 kHz against a 24 kHz AirPods nominal captured 16 s of
         // structurally garbled audio (Parakeet and whisper both returned nothing).
         XCTAssertFalse(AudioRecorder.isCaptureFormatUsable(

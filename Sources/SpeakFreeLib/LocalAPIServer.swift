@@ -520,7 +520,24 @@ final class LocalAPIServer {
     // MARK: - Temp-file housekeeping
 
     /// Directory where in-flight upload audio is staged before decode.
-    static var tmpAPIDir: URL { Config.configDir.appendingPathComponent("tmp/api") }
+    ///
+    /// Permanent regression guard (2026-09-25 fix/test-real-config): every `LocalAPIServer.start()`
+    /// unconditionally calls `sweepTmpAPI()`, which deletes files here older than an hour, and every
+    /// request briefly writes/removes a `<uuid>.audio` file here. Without `Config.configDirOverride`
+    /// set, a test run swept and raced the live app's real in-flight dictation uploads under
+    /// ~/.config/speakfree/tmp/api (root cause of a whisper-cli "input file not found" failure
+    /// against the real app while the test suite ran). Fail loudly instead of touching real data.
+    static var tmpAPIDir: URL {
+        if Config.isResolvingRealDirUnderTest {
+            fatalError(
+                "LocalAPIServer.tmpAPIDir resolved to the REAL ~/.config/speakfree/tmp/api under " +
+                "XCTest. This directory is swept and written to on every request — set " +
+                "Config.configDirOverride to a scratch directory in setUp() and reset it to nil " +
+                "in tearDown()."
+            )
+        }
+        return Config.configDir.appendingPathComponent("tmp/api")
+    }
 
     /// NW-A / P4: remove STALE files left in tmp/api (last-modified more than `maxAge` ago).
     /// Called at server start. The naive "delete everything" version deleted another instance's

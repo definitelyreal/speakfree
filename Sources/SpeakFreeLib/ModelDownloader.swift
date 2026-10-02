@@ -72,6 +72,7 @@ public class ModelDownloader {
     // MARK: - Download
 
     public static func download(modelSize: String) throws {
+        try ParakeetModelManager.assertNetworkAllowed()
         let modelFileName = "ggml-\(modelSize).bin"
         let modelsDir = Config.configDir.appendingPathComponent("models")
         let destPath = modelsDir.appendingPathComponent(modelFileName)

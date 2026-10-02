@@ -2,6 +2,7 @@
 import Foundation
 
 public struct Config: Codable {
+    public var history: HistorySettings?
     public var hotkey: HotkeyConfig
     public var modelPath: String?
     public var modelSize: String
@@ -22,6 +23,17 @@ public struct Config: Codable {
     /// behavior. Settings writes BOTH keyMode AND a synced `toggleMode` so a downgrade to a
     /// keyMode-unaware build still reads the right Hold/Toggle. JSON key: "keyMode".
     public var keyMode: KeyMode?
+    // Edit Mode (2026-09-24). All optional; nil keeps each default.
+    /// Claude cleanup in the edit window. nil = on (still gated by `editModeCloudConsent`).
+    public var editModeCleanup: FlexBool?
+    /// "sonnet" | "opus" | "haiku"; nil or unknown = sonnet.
+    public var editModeCleanupModel: String?
+    /// ISO date the cloud explanation was accepted. nil = never; no text leaves the Mac until set.
+    public var editModeCloudConsent: String?
+    /// "settle" | "quiet"; nil = settle. Reduce Motion always shows quiet.
+    public var editModeAnimation: String?
+    /// Absolute path to the `claude` CLI, when it is not in a known location. Config-file only.
+    public var claudeExecutablePath: String?
     public var screenContext: FlexBool?
     /// Recording banner visual variant 1-5 (2026-07-25 design shotgun); nil = 1.
     public var overlayStyle: Int?
@@ -37,7 +49,8 @@ public struct Config: Codable {
     public var keepModelLoaded: String?  // "auto", "always", "off" — nil = "auto"
     public var diagnosticLogging: FlexBool?  // nil = default (off for production, on for beta)
     public var streamingEnabled: FlexBool?  // nil = default (true) — show live preview while recording
-    /// The input pin to restore when AirPods Dictation Mode turns OFF (Michael 2026-08-21:
+    /// Legacy (unused since "Stay on" replaced Dictation Mode, 2026-09-24; kept so old
+    /// configs round-trip). The input pin to restore when AirPods Dictation Mode turned OFF (the maintainer 2026-08-21:
     /// a deliberate, labeled mode — "if you want good quality, use dictation mode" — instead
     /// of a silent default change; output drops to call quality while it is on).
     public var preDictationModeInputUID: String?
@@ -54,7 +67,7 @@ public struct Config: Codable {
     public var localAPIAllowBrowser: FlexBool?  // nil = false — gate any CORS (Access-Control-*) headers
     public var localAPIToken: String?           // nil = no auth — when set, require "Authorization: Bearer <token>"
 
-    // Recordings privacy (Michael, 2026-07-14): persisting dictation audio + transcript
+    // Recordings privacy (the maintainer, 2026-07-14): persisting dictation audio + transcript
     // sidecars is OPT-IN. nil/false = nothing persists — the wav is deleted once the
     // dictation finalizes and no sidecars are written. Saving was accidentally
     // on-by-default for every user through v1.7.1 (it was meant as a dev-machine
@@ -67,16 +80,48 @@ public struct Config: Codable {
     // Explicit new-user saving choice completed; nil remains backward compatible.
     public var recordingsSetupCompleted: Bool?
 
-    // Preferred dictation microphone UID. nil selects Automatic: a connected Bluetooth
-    // input when available, otherwise the coordinator's base microphone. The built-in
-    // microphone supplies continuous pre-listening when available. A missing pinned
-    // device falls back to the base without erasing the pin. See coordinator.routes.
+    // Preferred dictation microphone UID. nil selects Automatic: this Mac's own
+    // microphone (built-in, else a wired mic). Bluetooth headsets are never chosen
+    // automatically (2026-09-24); they are used only when pinned here or through
+    // "Stay on <headset>" (StayOnMode). A missing pinned device falls back to the base
+    // without erasing the pin. See coordinator.routes.
     public var inputDeviceUID: String?
 
     // Legacy simultaneous-transcript-comparison flag; retained only for config round-trip.
     // Nothing reads it. The current coordinator's built-in pre-listening + preferred-mic
     // handover is controlled by inputDeviceUID/preBuffer, independently of this old flag.
     public var dualMicCapture: FlexBool?
+
+    /// Parakeet only (the maintainer 2026-09-23, "Load Whisper as fallback for errors"): re-check a
+    /// take with Whisper when Parakeet returns nothing or far too little. nil = on whenever the
+    /// Whisper model is on disk (the behavior before the setting existed); false = never.
+    public var whisperFallback: FlexBool?
+    /// When the user last chose "Not Now" on the backup-model download offer (Unix seconds).
+    public var whisperFallbackOfferDeclinedAt: Double?
+
+    // App compatibility (2026-09-24). Per-app insertion method chosen in Settings → Advanced,
+    // keyed by bundle ID (matched case-insensitively). Absent or "automatic" = speakfree's own
+    // detection. Lets someone fix an app nobody has tested without a code change.
+    public var insertionOverrides: InsertionOverrideMap?
+    // Opt-in, in-memory compatibility report (no dictated text). nil/false = off.
+    public var compatibilityReport: FlexBool?
+    // "This works" confirmations from Report a Problem (2026-09-24), keyed by bundle ID. Local
+    // only; shown next to the app in Settings → Insertion by App.
+    public var insertionConfirmations: InsertionConfirmationMap?
+
+    /// The overrides that actually change anything (drops "automatic" and empty keys).
+    public var effectiveInsertionOverrides: [String: InsertionMethod] {
+        (insertionOverrides?.values ?? [:]).filter { !$0.key.isEmpty && $0.value != .automatic }
+    }
+    // Dictation trace (2026-09-24, off by default). "tags" or "selectors" appends an invisible
+    // record of what the speech engine heard after each dictation, only in listed apps; nil or
+    // "off" = never. See DictationTrace / TraceGate and docs/DICTATION-TRACE.md.
+    public var dictationTrace: String?
+    /// Bundle ids that get a trace. nil = TraceGate.defaultApps. Listing a chat or mail app
+    /// here is the only way it can ever get one.
+    public var dictationTraceApps: [String]?
+    /// Web hosts where a trace is allowed inside a browser. nil = TraceGate.defaultWebHosts.
+    public var dictationTraceWebHosts: [String]?
 
     // Recordings are kept forever by DEFAULT — they are the dictation corpus that
     // makes accuracy regressions diagnosable (and ~1 MB per 30 s of speech is cheap).
@@ -87,7 +132,7 @@ public struct Config: Codable {
         return raw
     }
 
-    /// THE single resolution of a missing `spokenPunctuation` key (Michael's ruling
+    /// THE single resolution of a missing `spokenPunctuation` key (the maintainer's ruling
     /// 2026-08-12: "build the shared function and align the CLI"). A config predating the
     /// key keeps its historical runtime behavior: automatic engine punctuation, no
     /// spoken-word conversion (`.off`). Resolving to `.hybrid` was tried 2026-07-26 and
@@ -100,7 +145,7 @@ public struct Config: Codable {
     /// happened, and how the CLI drifted from the app.
     public var effectivePunctuationMode: PunctuationMode { spokenPunctuation ?? .off }
 
-    // MARK: - Product defaults (Michael, 2026-06-11)
+    // MARK: - Product defaults (the maintainer, 2026-06-11)
     //
     // The default engine for NEW users is Parakeet ENGLISH: parakeet-tdt-0.6b-v2.
     // v2 is the English-only variant (faster, more accurate for English); v3 is
@@ -155,6 +200,25 @@ public struct Config: Codable {
             dirName = "speakfree"
         }
         return home.appendingPathComponent(".config/\(dirName)")
+    }
+
+    /// Permanent regression guard (2026-09-25 fix/test-real-config): true when the calling code
+    /// is running under XCTest with neither `configDirOverride` nor `SPEAKFREE_CONFIG_DIR` set —
+    /// i.e. `configDir` is about to resolve to the REAL ~/.config/speakfree. Callers that own a
+    /// mutating (write/delete) chokepoint on a real-data path — LocalAPIServer.tmpAPIDir,
+    /// EditSessionDraftStore.draftURL — check this and fail loudly instead of silently touching
+    /// live data. Deliberately NOT checked inside `configDir` itself: several tests (the pinned
+    /// whisper golden-fixture suites) intentionally do a READ-ONLY lookup of real installed
+    /// models under ~/.config/speakfree/models, which is safe and by design.
+    ///
+    /// Detected via NSClassFromString("XCTestCase") — the only signal that works here: `swift
+    /// test` (unlike an Xcode-hosted run) sets no XCTest-named environment variable at all
+    /// (verified empirically 2026-09-25: zero "xctest"-ish ProcessInfo keys under `swift test`).
+    /// Cheap: one Objective-C class lookup, no I/O.
+    public static var isResolvingRealDirUnderTest: Bool {
+        configDirOverride == nil
+            && (ProcessInfo.processInfo.environment["SPEAKFREE_CONFIG_DIR"] ?? "").isEmpty
+            && NSClassFromString("XCTestCase") != nil
     }
 
     public static var configFile: URL {
@@ -262,6 +326,21 @@ public struct Config: Codable {
             return String(l[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
         }
         return l
+    }
+
+    /// Read-only variant of `load()` for commands that must not touch disk (the agent-facing
+    /// `transcribe` and `history` commands). A missing file yields the defaults WITHOUT
+    /// creating it, and an unparseable file yields the defaults WITHOUT writing a backup.
+    /// `exists` tells the caller whether a config file was actually read.
+    public static func loadWithoutCreating() -> (config: Config, exists: Bool) {
+        guard let data = try? Data(contentsOf: configFile) else {
+            return (Config.defaultConfig, false)
+        }
+        guard var config = try? JSONDecoder().decode(Config.self, from: data) else {
+            return (Config.defaultConfig, true)
+        }
+        migrateLegacyMaxRecordings(&config)
+        return (config, true)
     }
 
     public static func load() -> Config {

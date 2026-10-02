@@ -173,6 +173,37 @@ func transcribeSliding(
 // MARK: - Main
 
 var args = Array(CommandLine.arguments.dropFirst())
+
+// text-replay: deterministic, audio-free replay of stored engine output through the
+// production punctuation layer. Input JSONL rows {"id","raw"}; output JSONL rows
+// {"id","processed"}: TextPipeline.run's processedText in Automatic & Spoken mode (an
+// optional "dur" in seconds enables the same seam-dedup gate as production). Used to measure
+// a punctuation-rule change against a corpus before and after (same raw in, diff out).
+if args.first == "text-replay" {
+    args.removeFirst()
+    guard let inPath = flagValue("--in", &args), let outPath = flagValue("--out", &args) else {
+        fail("usage: vocab-eval text-replay --in rows.jsonl --out processed.jsonl")
+    }
+    guard let data = FileManager.default.contents(atPath: inPath),
+          let body = String(data: data, encoding: .utf8) else { fail("cannot read \(inPath)") }
+    var out = ""
+    for line in body.split(separator: "\n") where !line.isEmpty {
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let id = obj["id"] as? String, let raw = obj["raw"] as? String else { continue }
+        // TextPipeline.run, not TextPostProcessor alone, so sanitize / bracket stripping /
+        // seam dedup run exactly as in production; `processedText` is the punctuation layer's
+        // output before style, glossary and screen-name correction (which need live context).
+        let input = TextPipeline.Input(raw: raw, punctuationMode: .hybrid,
+                                       audioDurationSeconds: obj["dur"] as? Double)
+        let processed = TextPipeline.run(input, isRealWord: { _ in true }).processedText
+        let row = try JSONSerialization.data(withJSONObject: ["id": id, "processed": processed],
+                                             options: [.sortedKeys])
+        out += String(decoding: row, as: UTF8.self) + "\n"
+    }
+    try out.write(toFile: outPath, atomically: true, encoding: .utf8)
+    exit(0)
+}
+
 guard args.first == "run" else {
     fail("usage: vocab-eval run --paths tdt,sliding,slideboost,batchboost --out results.jsonl [--model id] [--vocab-file f] [--alias-file f] [--unguarded] [--wav-list f] wav...")
 }

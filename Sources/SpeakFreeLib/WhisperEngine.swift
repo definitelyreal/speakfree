@@ -7,7 +7,8 @@ import CWhisper
 /// Conforms to `TranscriptionEngine`. The protocol surface is `async`, but whisper.cpp
 /// is synchronous and runs under a serial `engineQueue`. The async members below are thin
 /// shims that hop the existing serial-queue + `*Locked` machinery; the UAF/Metal-assert
-/// safety (single owner of `context`, deinit drains the queue) is unchanged.
+/// safety (single owner of `context`; deinit unloads on the queue, inline if it is already
+/// running there) is unchanged.
 class WhisperEngine: TranscriptionEngine {
     private var context: OpaquePointer?  // whisper_context*
     private var loadedModelPath: String?
@@ -20,23 +21,75 @@ class WhisperEngine: TranscriptionEngine {
     /// queue; private *Locked methods run only from within the queue to prevent re-entrancy.
     private let engineQueue = DispatchQueue(label: "com.speakfree.engine", qos: .userInitiated)
 
+    /// Marks `engineQueue` so code can tell it is already running on it. Per instance, so one
+    /// engine's queue is never mistaken for another's.
+    private let engineQueueKey = DispatchSpecificKey<Bool>()
+
+    init() {
+        engineQueue.setSpecific(key: engineQueueKey, value: true)
+    }
+
+    /// Run `body` serialized on `engineQueue`. Runs inline when already on that queue, because
+    /// `sync` onto the current serial queue traps. Crash 2026-09-22 10:07pm PT: blocks queued
+    /// with `engineQueue.async { self... }` hold the engine strongly, so after an engine switch
+    /// the LAST release happened inside such a block and `deinit`'s `engineQueue.sync` hit
+    /// "dispatch_sync called on queue already owned by current thread".
+    private func onEngineQueue<T>(_ body: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: engineQueueKey) == true {
+            return try body()
+        }
+        return try engineQueue.sync(execute: body)
+    }
+
     /// How the model should be managed: "auto", "always", "off"
     var keepModelLoaded: String = "auto"
 
     // MARK: - TranscriptionEngine identity
 
     var engineID: String { "whisper" }
+
+    /// Per-take quality signals (today: the unsure words for the dictation trace). Written on
+    /// `engineQueue` by the batch path, read from any thread, hence the lock. Reset at the
+    /// start of every batch transcription so a failed take never reports the previous one's.
+    private let diagnosticsLock = NSLock()
+    private var diagnosticsMirror: TranscriptionDiagnostics?
+    var lastDiagnostics: TranscriptionDiagnostics? {
+        diagnosticsLock.lock()
+        defer { diagnosticsLock.unlock() }
+        return diagnosticsMirror
+    }
+    private func setDiagnostics(_ d: TranscriptionDiagnostics?) {
+        diagnosticsLock.lock()
+        diagnosticsMirror = d
+        diagnosticsLock.unlock()
+    }
+    /// Segments `collectSegments` kept on the latest pass (engineQueue only).
+    private var lastKeptSegments: [Int32] = []
     var supportsStreaming: Bool { true }
     var supportsPrompt: Bool { true }
 
+    /// Mirror of `context != nil`, written only on `engineQueue` right after the context
+    /// changes. Reading it never waits on the queue (2026-09-22): the old `engineQueue.sync`
+    /// read blocked the main thread for a whole model load when key press started one, and
+    /// reported "loaded" to finalize after waiting, hiding the cold load from the latency log.
+    /// A load in flight therefore reads as not loaded, which is what callers mean.
+    private let loadedLock = NSLock()
+    private var loadedMirror = false
+
     var isLoaded: Bool {
-        var result = false
-        engineQueue.sync { result = self.context != nil }
-        return result
+        loadedLock.lock()
+        defer { loadedLock.unlock() }
+        return loadedMirror
+    }
+
+    private func setLoadedMirror(_ loaded: Bool) {
+        loadedLock.lock()
+        loadedMirror = loaded
+        loadedLock.unlock()
     }
 
     deinit {
-        engineQueue.sync { unloadModelLocked() }
+        onEngineQueue { unloadModelLocked() }
     }
 
     // MARK: - Model Lifecycle
@@ -65,7 +118,7 @@ class WhisperEngine: TranscriptionEngine {
     /// Load a GGML model from disk. Metal GPU is used automatically.
     func loadModel(path: String) throws {
         var thrownError: Error?
-        engineQueue.sync {
+        onEngineQueue {
             do { try loadModelLocked(path: path) } catch { thrownError = error }
         }
         if let e = thrownError { throw e }
@@ -125,6 +178,10 @@ class WhisperEngine: TranscriptionEngine {
 
         self.context = ctx
         self.loadedModelPath = path
+        setLoadedMirror(true)
+        // A fresh load counts as use: a model warmed at launch or key press must not look idle
+        // "forever" to the memory-pressure handler and be dropped by the first warning.
+        lastTranscriptionTime = Date()
         DispatchQueue.main.async { [weak self] in self?.startMemoryPressureMonitoring() }
     }
 
@@ -141,14 +198,22 @@ class WhisperEngine: TranscriptionEngine {
         }
     }
 
+    /// Test seam: queue `work` on `engineQueue` exactly as the async shims do, so a test can
+    /// make a queued block the engine's last owner (the 2026-09-22 deinit crash).
+    func enqueueOnEngineQueueForTesting(_ work: @escaping () -> Void) {
+        engineQueue.async(execute: work)
+    }
+
     private func unloadModelLocked() {
         memoryPressureSource?.cancel()
         memoryPressureSource = nil
         if let ctx = context {
             whisper_free(ctx)
+            DiagnosticLogger.shared.log("WhisperEngine: model unloaded")
         }
         context = nil
         loadedModelPath = nil
+        setLoadedMirror(false)
     }
 
     // MARK: - Transcription
@@ -165,10 +230,14 @@ class WhisperEngine: TranscriptionEngine {
     ) async throws -> String {
         // Dispatch the serial-queue body via `async` + continuation so we don't block a
         // Swift-concurrency cooperative thread for the full inference (pool starvation).
+        // Task-locals do not cross into GCD, so capture the recorder here and fill it on the
+        // queue right after inference: this take's diagnostics, whatever runs next.
+        let recorder = TakeRecorder.current
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             engineQueue.async {
                 do {
                     let result = try self.transcribeLocked(samples: samples, language: language, prompt: prompt, suppressRegex: suppressRegex, threadCount: nil)
+                    recorder?.engineDiagnostics = self.lastDiagnostics
                     continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)
@@ -219,6 +288,7 @@ class WhisperEngine: TranscriptionEngine {
         progressHandler: ((Int) -> Void)? = nil,
         isCancelled: (() -> Bool)? = nil
     ) throws -> String {
+        setDiagnostics(nil)
         guard let ctx = context else {
             throw WhisperEngineError.modelNotLoaded
         }
@@ -299,6 +369,7 @@ class WhisperEngine: TranscriptionEngine {
             }
             let nSegments = whisper_full_n_segments(ctx)
             let text = collectSegments(ctx: ctx, nSegments: nSegments)
+            recordWordDiagnostics(ctx: ctx)
             checkLanguageMismatch(ctx: ctx, configuredLanguage: language)
             lastTranscriptionTime = Date()
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -322,6 +393,7 @@ class WhisperEngine: TranscriptionEngine {
         // Collect output segments, filtering by no-speech probability
         let nSegments = whisper_full_n_segments(ctx)
         let text = collectSegments(ctx: ctx, nSegments: nSegments)
+        recordWordDiagnostics(ctx: ctx)
 
         // Check detected language for mismatch
         checkLanguageMismatch(ctx: ctx, configuredLanguage: language)
@@ -478,6 +550,7 @@ class WhisperEngine: TranscriptionEngine {
     /// Collect whisper segments, filtering by no-speech probability.
     /// If all segments are filtered, salvages the highest-confidence one (prob < 0.9).
     private func collectSegments(ctx: OpaquePointer, nSegments: Int32) -> String {
+        lastKeptSegments = []
         var text = ""
         var bestSalvageSeg: Int32 = -1
         var bestSalvageProb: Float = 1.0
@@ -496,6 +569,7 @@ class WhisperEngine: TranscriptionEngine {
             }
             if let cStr = whisper_full_get_segment_text(ctx, i) {
                 text += String(cString: cStr)
+                lastKeptSegments.append(i)
             }
         }
 
@@ -504,12 +578,64 @@ class WhisperEngine: TranscriptionEngine {
         if text.isEmpty, bestSalvageSeg >= 0, bestSalvageProb < 0.9 {
             if let cStr = whisper_full_get_segment_text(ctx, bestSalvageSeg) {
                 let salvaged = String(cString: cStr)
+                lastKeptSegments = [bestSalvageSeg]
                 DiagnosticLogger.shared.log("WhisperEngine: salvaged segment (p=\(String(format: "%.2f", bestSalvageProb)), \(salvaged.count) chars)")
                 text = salvaged
             }
         }
 
         return text
+    }
+
+    // MARK: - Word confidence (dictation trace)
+
+    /// A word whose weakest token has probability below this is reported as unsure.
+    static let unsureWordProbabilityCeiling: Float = 0.50
+
+    /// Read token probabilities for the kept segments and store the unsure words.
+    private func recordWordDiagnostics(ctx: OpaquePointer) {
+        let eot = whisper_token_eot(ctx)
+        var tokens: [(bytes: [UInt8], p: Float)] = []
+        for seg in lastKeptSegments {
+            let n = whisper_full_n_tokens(ctx, seg)
+            for t in 0..<n {
+                // Special tokens (timestamps, end of text, language) sort at or above EOT.
+                guard whisper_full_get_token_id(ctx, seg, t) < eot,
+                      let cText = whisper_full_get_token_text(ctx, seg, t) else { continue }
+                let bytes = Array(UnsafeBufferPointer(start: UnsafeRawPointer(cText)
+                    .assumingMemoryBound(to: UInt8.self), count: strlen(cText)))
+                tokens.append((bytes, whisper_full_get_token_p(ctx, seg, t)))
+            }
+        }
+        setDiagnostics(TranscriptionDiagnostics(
+            lowConfidenceWords: Self.lowConfidenceWords(tokens: tokens)))
+    }
+
+    /// Group whisper tokens into words (a token whose text starts with a space starts a new
+    /// word; bytes are joined before UTF-8 decoding because one character can span two
+    /// tokens) and return the words whose weakest letter-bearing token is below the ceiling.
+    static func lowConfidenceWords(tokens: [(bytes: [UInt8], p: Float)]) -> [DictationTrace.WordScore] {
+        var words: [(bytes: [UInt8], p: Float)] = []
+        for token in tokens {
+            guard !token.bytes.isEmpty else { continue }
+            let startsWord = token.bytes.first == 0x20
+            let body = startsWord ? Array(token.bytes.dropFirst()) : token.bytes
+            // Pure punctuation pieces never lower a word's score.
+            let lexical = body.contains { ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x41 && $0 <= 0x5A)
+                || ($0 >= 0x61 && $0 <= 0x7A) || $0 >= 0x80 }
+            if startsWord || words.isEmpty {
+                words.append((body, lexical ? token.p : 1))
+            } else {
+                words[words.count - 1].bytes += body
+                if lexical { words[words.count - 1].p = min(words[words.count - 1].p, token.p) }
+            }
+        }
+        return words.compactMap { w in
+            guard w.p < unsureWordProbabilityCeiling else { return nil }
+            let word = String(decoding: w.bytes, as: UTF8.self)
+                .trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+            return word.isEmpty ? nil : DictationTrace.WordScore(word: word, score: w.p)
+        }
     }
 
     // MARK: - Language Mismatch Detection
@@ -629,21 +755,28 @@ class WhisperEngine: TranscriptionEngine {
             if pressureLevel.contains(.critical) {
                 // Critical: always unload — async to avoid re-entering engineQueue from main
                 DiagnosticLogger.shared.log("WhisperEngine: critical memory pressure — unloading model")
-                print("WhisperEngine: unloading model (critical memory pressure)")
                 self.engineQueue.async { [weak self] in self?.unloadModelLocked() }
             } else if pressureLevel.contains(.warning) {
                 // Warning: unload if idle for > 60 seconds
                 let idleSeconds = self.lastTranscriptionTime.map { Date().timeIntervalSince($0) } ?? Double.infinity
+                // Logged (2026-09-22): this unload used to print to stdout only, so the next
+                // dictation's cold load had no visible cause in the diagnostic log.
                 if idleSeconds > 60 {
-                    print("WhisperEngine: unloading model (memory pressure warning, idle \(Int(idleSeconds))s)")
+                    DiagnosticLogger.shared.log(
+                        "WhisperEngine: memory pressure warning — unloading model (idle \(Self.idleDescription(idleSeconds)))")
                     self.engineQueue.async { [weak self] in self?.unloadModelLocked() }
                 } else {
-                    print("WhisperEngine: keeping model loaded (memory pressure warning, but used \(Int(idleSeconds))s ago)")
+                    DiagnosticLogger.shared.log(
+                        "WhisperEngine: memory pressure warning — keeping model (used \(Int(idleSeconds))s ago)")
                 }
             }
         }
         source.resume()
         memoryPressureSource = source
+    }
+
+    static func idleDescription(_ seconds: Double) -> String {
+        seconds.isFinite ? "\(Int(seconds))s" : "never used"
     }
 
     /// Call when system is under memory pressure to free the model.
@@ -657,7 +790,7 @@ class WhisperEngine: TranscriptionEngine {
     /// Approximate RSS of the loaded model in bytes, or 0 if unloaded.
     var estimatedMemoryUsage: UInt64 {
         var path: String?
-        engineQueue.sync { path = self.loadedModelPath }
+        onEngineQueue { path = self.loadedModelPath }
         guard let path = path else { return 0 }
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         let diskSize = attrs?[.size] as? UInt64 ?? 0

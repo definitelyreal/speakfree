@@ -19,7 +19,7 @@ public enum HotkeyAdvice {
     /// open. Those are error paths measured in fractions of a second, and hedging the sentence
     /// would cost more clarity than it buys.
     ///
-    /// Surfaced for TOGGLE mode only, by Michael's call (2026-07-26). The suppression is real
+    /// Surfaced for TOGGLE mode only, by the maintainer's call (2026-07-26). The suppression is real
     /// in both modes, but only toggle mode makes it noticeable: macOS fires the globe action on
     /// a quick TAP, and a tap is exactly what toggle mode asks the user to do, so that is the
     /// configuration where someone reaches for emoji and finds the key inert. Warning every
@@ -33,7 +33,7 @@ public enum HotkeyAdvice {
     /// The mode is not the cause — HotkeyManager has no concept of it and consumes fn in both.
     /// A user would read that, switch to Hold (one click away, in the same row), watch the banner
     /// vanish, and still have a dead emoji key with nothing left to explain it. The condition
-    /// stays toggle-only per Michael; the sentence now blames the right thing.
+    /// stays toggle-only per the maintainer; the sentence now blames the right thing.
     public static let globeKeyNotice =
         "speakfree is using the fn key, so it can't open the \u{1F310} emoji drawer."
 

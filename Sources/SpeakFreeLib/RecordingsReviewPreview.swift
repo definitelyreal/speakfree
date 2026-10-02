@@ -29,7 +29,7 @@ public enum RecordingsNoticePreview {
         window.minSize = NSSize(width: 700, height: 500)
         let measure = NSHostingView(rootView: RecordingsNoticeView(
             folderPath: directory.appendingPathComponent("recordings").path,
-            recordingCount: 18_710, artifactCount: 76_144, noteText: draft.values.note,
+            recordingCount: 12_000, artifactCount: 48_000, noteText: draft.values.note,
             onCommit: { _, _ in }, onContinue: { _ in }))
         let desiredHeight = ceil(measure.fittingSize.height) + 46
         window.setContentSize(NSSize(width: 700, height: min(desiredHeight, (NSScreen.main?.visibleFrame.height ?? 900) - 80)))
@@ -99,7 +99,7 @@ private struct NoticeReviewControls: View {
             ScrollView {
                 RecordingsNoticeView(
                     folderPath: directory.appendingPathComponent("recordings").path,
-                    recordingCount: 18_710, artifactCount: 76_144,
+                    recordingCount: 12_000, artifactCount: 48_000,
                     choiceIsBold: draft.values.choiceIsBold,
                     folderAlignment: folderAlignment,
                     noteText: draft.values.note,
@@ -110,7 +110,7 @@ private struct NoticeReviewControls: View {
                             Thread.sleep(forTimeInterval: 0.15)
                             progress(.init(phase: .moving, completed: step, total: 10, elapsedSeconds: 0))
                         }
-                        return .init(removedFiles: 76_140, removedRecordings: 18_709, failedFiles: 0,
+                        return .init(removedFiles: 47_996, removedRecordings: 11_999, failedFiles: 0,
                                      retainedRecordings: 1, enumerationFailed: false,
                                      recoveryDirectory: nil, trashDirectory: nil, elapsedSeconds: 0)
                     })
@@ -122,7 +122,7 @@ private struct NoticeReviewControls: View {
         }
         .sheet(isPresented: $editing) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Edit Michael’s note").font(.headline)
+                Text("Edit the author’s note").font(.headline)
                 Text("Saved edits map to NoticeCopy.note; saving this draft does not change the running app.")
                     .font(.callout).foregroundStyle(.secondary)
                 TextEditor(text: $draft.values.note).font(.body).frame(minHeight: 400)

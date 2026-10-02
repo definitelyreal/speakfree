@@ -8,7 +8,7 @@ import XCTest
 final class WhisperRescueTests: XCTestCase {
     typealias Status = Transcriber.SecondOpinionStatus
 
-    /// Michael's copy rule (2026-08-22): two sentences, the first says what the audio
+    /// The maintainer's copy rule (2026-08-22): two sentences, the first says what the audio
     /// contained, the second the action or outcome.
     func testSecondOpinionStatusMessages() {
         XCTAssertEqual(Status.rechecking(.garbled).message, "Garbled audio. Trying Whisper…")
@@ -103,7 +103,7 @@ final class WhisperRescueTests: XCTestCase {
     }
 }
 
-// MARK: - Active-swap tiers (Michael approved the swap 2026-08-20)
+// MARK: - Active-swap tiers (the maintainer approved the swap 2026-08-20)
 
 final class SecondOpinionTierTests: XCTestCase {
     func testConfidenceAloneNeverSwaps() {
@@ -126,7 +126,7 @@ final class SecondOpinionTierTests: XCTestCase {
         // Short takes are excluded — 2 words in 3s is a normal quick command.
         XCTAssertFalse(Transcriber.sparseRescueEligible(
             parakeetWordCount: 2, durationSeconds: 3, speechDurationSeconds: 3))
-        // Regression (rec-2026-08-21-172840): 6 words in a 19s take that carried only
+        // Regression (a production take): 6 words in a 19s take that carried only
         // 2.5s of actual speech (16.5s silence, 0.98 conf). Density against speech is
         // 2.4 words/s — a clean short utterance, NOT a dropped sentence. Must not rescue.
         XCTAssertFalse(Transcriber.sparseRescueEligible(
@@ -135,8 +135,8 @@ final class SecondOpinionTierTests: XCTestCase {
         // so the empty-recovery catches (both historical accepts were 0-word) are preserved.
         XCTAssertTrue(Transcriber.sparseRescueEligible(
             parakeetWordCount: 0, durationSeconds: 12, speechDurationSeconds: 1.0))
-        // Adjudication row 0048940D: whisper collapsed to "Oh!" — a SHORTER candidate
-        // must never replace (this row was PARAKEET_BETTER).
+        // Adjudication case: whisper collapsed to a one-word interjection — a SHORTER
+        // candidate must never replace (that case was PARAKEET_BETTER).
         XCTAssertFalse(Transcriber.sparseRescueAccepts(parakeetWordCount: 6, whisperWordCount: 1))
         XCTAssertTrue(Transcriber.sparseRescueAccepts(parakeetWordCount: 6, whisperWordCount: 14))
     }
@@ -153,7 +153,7 @@ final class SecondOpinionTierTests: XCTestCase {
     }
 }
 
-// MARK: - Stats display helpers (Michael 2026-08-20 two-line format)
+// MARK: - Stats display helpers (the maintainer 2026-08-20 two-line format)
 
 final class UsageStatsDisplayTests: XCTestCase {
     func testDaysHoursMinutesFormatting() {
@@ -178,25 +178,25 @@ final class ActiveSwapVetoTests: XCTestCase {
     }
 
     func testWhisperLosingCommandWordsIsVetoed() {
-        // Adjudication row 19E56FFF: whisper normalized spoken "comma" away.
+        // Adjudication shape: whisper normalized spoken "comma" away.
         XCTAssertNotNil(Transcriber.activeSwapVeto(
-            parakeet: "mark what you need comma then send it",
-            whisper: "mark what you need, then send it",
+            parakeet: "open the file you need comma then save it",
+            whisper: "open the file you need, then save it",
             durationSeconds: 8))
     }
 
     func testWhisperLosingProtectedTermIsVetoed() {
-        // Adjudication row 1FD7F685: Fable -> "favorable", Codex -> "codecs".
+        // Adjudication shape: Fable -> "favorable", Codex -> "codecs".
         XCTAssertNotNil(Transcriber.activeSwapVeto(
-            parakeet: "use the Fable credits in Codex",
-            whisper: "use the favorable credits in codecs",
+            parakeet: "send the Fable notes over to Codex",
+            whisper: "send the favorable notes over to codecs",
             durationSeconds: 8))
     }
 
     func testCleanShortSwapIsAllowed() {
         XCTAssertNil(Transcriber.activeSwapVeto(
-            parakeet: "Okay climb up I will go to my lab at this fear",
-            whisper: "Okay, so I'm in an airplane and I switched my input to AirPods",
+            parakeet: "Okay so we'll fix the tail in a sec and then cheap it",
+            whisper: "Okay, so we'll fix the test in a second and then ship it",
             durationSeconds: 15))
     }
 }

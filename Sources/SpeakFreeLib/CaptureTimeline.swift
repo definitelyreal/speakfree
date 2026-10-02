@@ -14,11 +14,27 @@ struct CaptureTimeline {
     private(set) var cursor: Double?
     private(set) var prefersSecondary = false
     private var fallback: [CapturePacket] = []
+    /// While a take is recorded, built-in history back to this host time is kept (not just the
+    /// last 3 s), so a headset found to be sending static can be replaced by what the Mac's own
+    /// microphone heard over the same stretch (`rewind`). Capped at `maxHistorySeconds`.
+    var keepFrom: Double?
+    static let maxHistorySeconds: Double = 180
+    /// Start of the oldest built-in packet still held.
+    var oldestHeld: Double? { fallback.first?.start }
 
     mutating func receiveBase(_ packet: CapturePacket) -> [Float] {
         fallback.append(packet)
-        fallback.removeAll { $0.end < packet.end - 3 }
+        let cutoff = max(min(packet.end - 3, keepFrom ?? .infinity), packet.end - Self.maxHistorySeconds)
+        fallback.removeAll { $0.end < cutoff }
         return prefersSecondary ? [] : commit(packet)
+    }
+
+    /// Go back to host time `time` and return the built-in audio from there on. Samples
+    /// already delivered after `time` are the caller's to discard.
+    mutating func rewind(to time: Double) -> [Float] {
+        prefersSecondary = false
+        cursor = time
+        return drainFallback(until: .infinity)
     }
 
     mutating func receiveSecondary(_ packet: CapturePacket) -> [Float] {
@@ -46,6 +62,8 @@ struct CaptureTimeline {
         var result: [Float] = []
         for packet in fallback {
             guard packet.start < end else { break }
+            // Already delivered: skip without copying (a take can hold 180 s of history).
+            if let cursor, packet.end <= cursor { continue }
             let count = min(packet.samples.count, max(0, Int(((end - packet.start) * 16_000).rounded(.down).clampedToSampleCount)))
             result += commit(CapturePacket(start: packet.start, samples: Array(packet.samples.prefix(count))))
         }

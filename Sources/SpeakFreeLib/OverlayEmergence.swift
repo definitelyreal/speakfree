@@ -2,12 +2,12 @@
 //
 // Recording-overlay ENTRY animation — pure math.
 //
-// Michael locked this sequence on 2026-08-12 ("I like it a lot."):
-// build/26-08-12-record-icon-animation/LOCKED-SETTINGS.json — the "Ring Pulses"
+// The maintainer locked this sequence on 2026-08-12 ("I like it a lot."):
+// the locked animation settings file — the "Ring Pulses"
 // emergence mechanic crossed with the "Purple bloom" red→purple transition, at
 // endScale 1.2. Every constant below is a dial value from that file, and every
 // function below is a direct port of the corresponding function in the design
-// lab (build/26-08-12-record-icon-animation/lab.html).
+// lab (internal, not in this repo).
 //
 // The sequence, in order:
 //   1. Armed (p = 0): a bare red record dot with a thin white ring that fires two
@@ -40,7 +40,7 @@ public enum OverlayEmergence {
     // The record mark and its ring. NOT scaled by endScale (the lab does not
     // scale them either — the mark is the same size regardless of the end card).
     //
-    // Size bump 2026-08-12 (Michael, dogfooding: "the record should be bigger"):
+    // Size bump 2026-08-12 (the maintainer, dogfooding: "the record should be bigger"):
     // dotR 9 → 16, ringGap 4.5 → 6, ringW 1.2 → 1.6 — the whole mark cluster grows
     // ~1.8×, keeping the ring/dot proportion the locked design was judged at. The
     // end pill is governed by `endScale` (below) and is UNCHANGED by this: the card
@@ -342,7 +342,7 @@ public enum OverlayEmergence {
     //
     // The old gate (`gated = max(currentLevel - 0.08, 0) / 0.92`, trigger at
     // `audioLevel > 0.25`) was tuned for a hot mic and almost never fired on
-    // Michael's quiet built-in microphone: the record stayed a static dot and the
+    // The maintainer's quiet built-in microphone: the record stayed a static dot and the
     // waveform bars sat flat for the whole recording (his 2026-08-12 dogfood report).
     //
     // These constants were measured, not guessed, against 15 of his real dictations
@@ -386,7 +386,7 @@ public enum OverlayEmergence {
     // quiet-room dictations. Measured against the full corpus (14,605 recordings,
     // corpus_levels analysis, 2026-08-19), that absolute gate instant-fires on ambient
     // noise alone in 97% of medium environments (floor 0.005–0.02 RMS) and 100% of
-    // very loud ones (airplane cabin, floor ≥ 0.08) — Michael's report: "jumps to the
+    // very loud ones (floor ≥ 0.08) — a field report: "jumps to the
     // record icon when I speak in a quiet room, but immediately in a loud one."
     //
     // Corpus tuning ranges (frame-RMS, fraction of full scale):
@@ -490,21 +490,21 @@ public enum OverlayEmergence {
         }
     }
 
-    // MARK: - Live waveform weight (2026-08-12, Michael: "a little bit lighter")
+    // MARK: - Live waveform weight (2026-08-12, the maintainer: "a little bit lighter")
     //
     // Dials down the visual weight of the LIVE waveform bars (the emergence
     // end-state and the transcribing pulse) without touching the locked geometry,
     // the purple pill, or the lilac colour. Lower opacity + slimmer bars read as a
     // lighter, softer animation. The locked `barAlpha` (0.75) is kept for the
     // record-start explosion's born-red bars; these apply once the bars are the
-    // steady live waveform. Michael judges the final weight.
+    // steady live waveform. The maintainer judges the final weight.
 
     /// Opacity of the live waveform bars (was the locked `barAlpha` 0.75).
     public static let waveformAlpha: CGFloat = 0.5
     /// Width multiplier on the live waveform bars — slimmer reads lighter.
     public static let waveformWidthScale: CGFloat = 0.82
 
-    // MARK: - Frosted backdrop (2026-08-12, Michael: "blur the static snapshot")
+    // MARK: - Frosted backdrop (2026-08-12, the maintainer: "blur the static snapshot")
     //
     // ONE screen snapshot of the region behind the overlay is captured at show()
     // (the same off-main CGWindowListCreateImage grab that feeds the adaptive
@@ -523,10 +523,10 @@ public enum OverlayEmergence {
                width: cocoaFrame.width, height: cocoaFrame.height)
     }
 
-    // MARK: - Transcribing "working" pulse (2026-08-12, Michael's hold ruling)
+    // MARK: - Transcribing "working" pulse (2026-08-12, the maintainer's hold ruling)
     //
     // On key-release the emergence card HOLDS centered through the whole
-    // transcription phase — Michael: "The centered card should hold for all
+    // transcription phase — the maintainer: "The centered card should hold for all
     // transcription... it's really important to notice when it's not transcribing."
     // The card's presence is the "working" signal, so it must not jump to the
     // bottom spinner. To read as distinct from live recording, the bars stop
@@ -559,10 +559,10 @@ public enum OverlayEmergence {
         return out
     }
 
-    // MARK: - Rescue status line: text + cymatics dots (Michael 2026-08-22)
+    // MARK: - Rescue status line: text + cymatics dots (the maintainer 2026-08-22)
     //
     // While a whisper rescue runs, the transcribing card carries a centered status
-    // line ("Garbled audio. Trying Whisper…"). Michael asked for "little dots
+    // line ("Garbled audio. Trying Whisper…"). The maintainer asked for "little dots
     // emanating from the text, like sand cymatics driven by speech": a few grains
     // that appear on the text line, drift outward above or below it, and settle
     // away. Same vocabulary as the locked entry (lilac ink, easeOutQuint, a 30Hz
@@ -574,7 +574,7 @@ public enum OverlayEmergence {
     // is unit-testable and renders identically in the offscreen harness.
 
     /// Status text colour: off-white, brighter than the old white @ 0.9 but not pure
-    /// white (Michael 2026-08-22).
+    /// white (the maintainer 2026-08-22).
     public static let statusTextRGB: RGB = (0.97, 0.97, 0.98)
     public static let statusTextAlpha: CGFloat = 0.96
 

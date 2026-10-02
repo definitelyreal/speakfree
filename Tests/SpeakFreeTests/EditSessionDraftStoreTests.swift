@@ -17,6 +17,17 @@ final class EditSessionDraftStoreTests: XCTestCase {
     }
 
     override func tearDown() {
+        // Test-safety (2026-09-25 fix/test-real-config): `EditSessionModel.dispatch()` schedules
+        // a debounced background write (default 0.5s) on every `.open`-lifecycle action, and its
+        // `.committed` case clears the draft WITHOUT cancelling a still-pending scheduled write
+        // from an earlier action in the same test (e.g. testModelCommitClearsDraft's `.commit`
+        // after `.beginSegment`/`.provisional`). That stale write then fires on the background
+        // queue after this method resets `configDirOverride`, landing on the REAL
+        // ~/.config/speakfree/edit-session-draft.json — confirmed via LocalAPIServer.tmpAPIDir's
+        // sibling trap. Draining past the debounce window here, before releasing the override,
+        // closes the race without touching the production dispatch/cancel logic (out of scope
+        // for this test-safety ticket).
+        Thread.sleep(forTimeInterval: 0.6)
         Config.configDirOverride = nil
         try? FileManager.default.removeItem(at: scratchDir)
         super.tearDown()

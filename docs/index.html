@@ -589,7 +589,7 @@
       <div class="feature">
         <span class="feature-icon">🔒</span>
         <div class="feature-title">Completely private</div>
-        <div class="feature-body">Transcribed on-device using <a href="https://github.com/ggerganov/whisper.cpp">whisper.cpp</a>. Nothing leaves your Mac. Whisper is included in the app — no internet required after install.</div>
+        <div class="feature-body">Transcribed on-device by Parakeet (NVIDIA's speech model, on the Neural Engine) or <a href="https://github.com/ggerganov/whisper.cpp">whisper.cpp</a>. Your audio and text never leave your Mac. The app goes online only to download a model on first launch and for a periodic update check, which carries no audio or text.</div>
       </div>
 
       <div class="feature">
@@ -718,7 +718,7 @@
           <span class="arrow">▶</span> Does any audio leave my Mac?
         </button>
         <div class="changes-body">
-          <p style="font-size:14px;color:var(--dim);line-height:1.7;padding-top:4px">Never. Audio goes to a temporary file, gets transcribed locally by whisper.cpp, and is deleted. There are zero network requests during normal use — the only internet connection is the one-time model download on first launch.</p>
+          <p style="font-size:14px;color:var(--dim);line-height:1.7;padding-top:4px">Never. Audio goes to a temporary file, gets transcribed locally by Parakeet or whisper.cpp, and is deleted. No audio or text is ever sent anywhere. The only network requests are the one-time model download on first launch and a periodic check for updates. The update check fetches a small version list (Sparkle) and carries no audio, text, or usage data.</p>
         </div>
 
         <button class="changes-toggle" style="margin-top:8px" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">

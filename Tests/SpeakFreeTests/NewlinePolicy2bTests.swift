@@ -1,6 +1,6 @@
 // Claude · 2026-06-10 · Session: 5b06900b-1498-4764-a786-48f408c36626
 //
-// T1.3 — Newline policy 2b, Option B (Michael, 2026-06-10): a spoken "new line" produces a
+// T1.3 — Newline policy 2b, Option B (the maintainer, 2026-06-10): a spoken "new line" produces a
 // line break that NEVER sends. These tests pin the *routing* of a "\n" at the insertion seam:
 //   - keystroke route: a "\n" fires Shift+Return (keyCode 36 + .maskShift), NOT a bare Return.
 //   - clipboard route: a literal "\n" rides in the pasted string (paste never sends).

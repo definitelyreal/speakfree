@@ -49,6 +49,11 @@ final class CleanupServiceTests: XCTestCase {
             body = "printf 'a%.0s' {1..5000}"   // 5000 bytes, all builtin
         case "hanging":
             body = "/bin/sleep 5"
+        case "notloggedin":
+            // The real CLI prints its errors on stdout and exits 1 (observed 2026-09-24).
+            body = "printf '%s' 'Not logged in · Please run /login'\nexit 1"
+        case "limit":
+            body = "printf '%s' \"You've hit your weekly limit · resets Sep 30 at 2am\"\nexit 1"
         default:
             body = "printf '[]'"
         }
@@ -92,13 +97,19 @@ final class CleanupServiceTests: XCTestCase {
     // MARK: - Pure: environment
 
     func testSanitizedEnvironmentIsMinimal() {
+        // 2026-09-24: with only HOME/PATH/TERM the real CLI (2.1.281) answered "Not logged in";
+        // it reads the Keychain through /usr/bin/security keyed by the account name. These five
+        // variables are the whole environment and nothing else is inherited.
         let env = CleanupService.sanitizedEnvironment(
-            executablePath: "/Users/x/.local/bin/claude", home: "/Users/x")
+            executablePath: "/Users/x/.local/bin/claude", home: "/Users/x", user: "x")
         XCTAssertEqual(env["HOME"], "/Users/x")
-        XCTAssertEqual(env["PATH"], "/Users/x/.local/bin")
+        XCTAssertEqual(env["USER"], "x")
+        XCTAssertEqual(env["LOGNAME"], "x")
+        XCTAssertEqual(env["PATH"], "/Users/x/.local/bin:/usr/bin:/bin")
         XCTAssertEqual(env["TERM"], "dumb")
         XCTAssertNil(env["ANTHROPIC_API_KEY"], "no API key is ever set (estate rule + subscription auth)")
-        XCTAssertEqual(env.count, 3, "nothing else is inherited")
+        XCTAssertNil(env["CLAUDE_CONFIG_DIR"])
+        XCTAssertEqual(env.count, 5, "nothing else is inherited")
     }
 
     // MARK: - Pure: prompt hardening + model IDs
@@ -114,7 +125,8 @@ final class CleanupServiceTests: XCTestCase {
 
     func testModelIDs() {
         XCTAssertEqual(CleanupService.Model.sonnet.modelID, "claude-sonnet-5")
-        XCTAssertEqual(CleanupService.Model.opus.modelID, "claude-opus-5")
+        // Opus moved to the current ID; all three are in CLI 2.1.281's catalog (2026-09-24).
+        XCTAssertEqual(CleanupService.Model.opus.modelID, "claude-opus-5-5")
         XCTAssertEqual(CleanupService.Model.haiku.modelID, "claude-haiku-4-5-20251001")
     }
 
@@ -155,11 +167,13 @@ final class CleanupServiceTests: XCTestCase {
         else { XCTFail("expected success with no edits") }
     }
 
-    func testFencedOutputRejected() async {
+    func testWholeOutputFenceIsUnwrapped() async {
         let svc = CleanupService(configuredExecutablePath: writeFixture(mode: "fenced"),
                                  candidateLocations: [])
         let result = await svc.cleanup(raw: "r", pipelineText: "p", model: .sonnet)
-        if case .failure(.badOutput(.notJSONArray)) = result {} else { XCTFail("expected notJSONArray, got \(result)") }
+        if case .success(let edits) = result {
+            XCTAssertEqual(edits, [SpanEdit(find: "a", replace: "b", reason: "c")])
+        } else { XCTFail("expected the fenced array to parse, got \(result)") }
     }
 
     func testProseWrappedOutputRejected() async {
@@ -200,6 +214,73 @@ final class CleanupServiceTests: XCTestCase {
         if case .failure(.timedOut) = result {} else { XCTFail("expected timedOut, got \(result)") }
         // 1s attempt + 1s retry; must not hang for the fixture's full 5s sleep.
         XCTAssertLessThan(elapsed, 4.5, "cleanup must never block on a stalled CLI")
+    }
+
+    /// 2026-09-23: under a busy test run the fixture's instant `--version` "timed out" after 15 s.
+    /// The runner parked its exit-waiter and stdout reader on the shared global pool; when that
+    /// pool is saturated they never ran. Saturate it on purpose and require a prompt result.
+    func testCompletesPromptlyWhenTheGlobalPoolIsSaturated() async {
+        // Blockers hold the width-limited global pool until this test ends (released in defer,
+        // with a 3 s self-release as a backstop) so they cannot slow later tests on small CI runners.
+        let release = DispatchSemaphore(value: 0)
+        let blockerCount = 192
+        for qos in [DispatchQoS.QoSClass.userInitiated, .default, .utility] {
+            for _ in 0..<(blockerCount / 3) {
+                DispatchQueue.global(qos: qos).async { _ = release.wait(timeout: .now() + 3) }
+            }
+        }
+        defer { for _ in 0..<blockerCount { release.signal() } }
+        let svc = CleanupService(configuredExecutablePath: writeFixture(mode: "valid"),
+                                 candidateLocations: [], timeout: 4)
+        let start = Date()
+        let result = await svc.cleanup(raw: "teh cat", pipelineText: "teh cat", model: .sonnet)
+        let elapsed = Date().timeIntervalSince(start)
+        if case .success = result {} else { XCTFail("expected success under pool pressure, got \(result)") }
+        XCTAssertLessThan(elapsed, 1.5, "a finished subprocess must not wait on the shared thread pool")
+    }
+
+    func testNotLoggedInIsNamedNotMisreadAsBadOutput() async {
+        let svc = CleanupService(configuredExecutablePath: writeFixture(mode: "notloggedin"),
+                                 candidateLocations: [], timeout: 3)
+        let result = await svc.cleanup(raw: "r", pipelineText: "p", model: .sonnet)
+        if case .failure(.notLoggedIn) = result {} else { XCTFail("expected notLoggedIn, got \(result)") }
+    }
+
+    func testUsageLimitIsNamed() async {
+        let svc = CleanupService(configuredExecutablePath: writeFixture(mode: "limit"),
+                                 candidateLocations: [], timeout: 3)
+        let result = await svc.cleanup(raw: "r", pipelineText: "p", model: .sonnet)
+        if case .failure(.usageLimit(let m)) = result {
+            XCTAssertTrue(m.contains("weekly limit"))
+        } else { XCTFail("expected usageLimit, got \(result)") }
+    }
+
+    /// Cloud-off before the call: nothing is launched at all.
+    func testCancelledBeforeLaunchNeverRuns() async {
+        let marker = scratchDir.appendingPathComponent("ran")
+        let script = "#!/bin/bash\n: > \"\(marker.path)\"\nprintf '[]'\n"
+        let url = scratchDir.appendingPathComponent("claude-marker")
+        try? script.write(to: url, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        let svc = CleanupService(configuredExecutablePath: url.path, candidateLocations: [])
+        let cancel = CleanupCancellation()
+        cancel.cancel()
+        let result = await svc.cleanup(raw: "r", pipelineText: "p", model: .sonnet, cancellation: cancel)
+        if case .failure(.cancelled) = result {} else { XCTFail("expected cancelled, got \(result)") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "not even --version ran")
+    }
+
+    /// Cloud-off mid-call: the running process is stopped and there is no retry.
+    func testCancelMidCallStopsPromptlyWithoutRetry() async {
+        let svc = CleanupService(configuredExecutablePath: writeFixture(mode: "hanging"),
+                                 candidateLocations: [], timeout: 4)
+        let cancel = CleanupCancellation()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { cancel.cancel() }
+        let start = Date()
+        let result = await svc.cleanup(raw: "r", pipelineText: "p", model: .sonnet, cancellation: cancel)
+        let elapsed = Date().timeIntervalSince(start)
+        if case .failure(.cancelled) = result {} else { XCTFail("expected cancelled, got \(result)") }
+        XCTAssertLessThan(elapsed, 2.5, "no wait for the timeout, no second attempt")
     }
 
     func testPreflightFailureSurfacedBeforeCall() async {

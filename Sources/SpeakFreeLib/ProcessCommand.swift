@@ -34,16 +34,24 @@ public enum ProcessCommand {
 
     /// Run the full pipeline (transcribe → TextPipeline) on a wav file.
     /// Uses Config.load() for model size, language, and punctuation mode.
-    public static func run(wavURL: URL) throws -> ProcessResult {
+    /// `config` lets a caller supply an already-loaded config (the agent `transcribe`
+    /// command reads it without creating a file); nil keeps the historical `Config.load()`.
+    /// `useUserVocabulary` applies the user's vocabulary.txt and overrides.json the way live
+    /// dictation does (Whisper prompt hints + glossary correction). Off by default so
+    /// `speakfree process` and the golden tests keep their vocabulary-free behavior; the agent
+    /// `transcribe` command turns it on. Both files are only read.
+    public static func run(wavURL: URL, config suppliedConfig: Config? = nil,
+                           useUserVocabulary: Bool = false) throws -> ProcessResult {
         guard FileManager.default.fileExists(atPath: wavURL.path) else {
             throw Error.fileNotFound(wavURL.path)
         }
-        let config = Config.load()
+        let config = suppliedConfig ?? Config.load()
         let engine = EngineFactory.make(config: config)
         let modelID = engine.engineID == "parakeet"
             ? (config.parakeetModel ?? "parakeet-tdt-0.6b-v3")
             : config.modelSize
         let transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
+        transcriber.whisperFallbackEnabled = WhisperFallback.isEnabled(config)
 
         // Parakeet has no on-disk CLI fallback — it needs in-memory [Float]@16k samples.
         // Whisper keeps its file/CLI path here (samples=nil) so the headless `process` command
@@ -70,17 +78,23 @@ public enum ProcessCommand {
             samples = nil
         }
 
+        let (glossary, overrides) = vocabularyInputs(useUserVocabulary: useUserVocabulary)
+        let prompt = useUserVocabulary
+            ? TextPipeline.assemblePromptHints(input: TextPipeline.Input(
+                punctuationMode: config.effectivePunctuationMode, glossaryWords: glossary))
+            : nil
+
         let raw: String
         do {
             raw = try runBlocking {
                 try await transcriber.transcribe(
-                    audioURL: wavURL, samples: samples, prompt: nil,
+                    audioURL: wavURL, samples: samples, prompt: prompt,
                     punctuationMode: config.effectivePunctuationMode)
             }
         } catch {
             throw Error.transcriptionFailed(error)
         }
-        // Aligned to the app (Michael 2026-08-12): this was the last `?? .hybrid` outlier,
+        // Aligned to the app (the maintainer 2026-08-12): this was the last `?? .hybrid` outlier,
         // so `speakfree process` punctuated keyless legacy configs differently than
         // dictation did. Behavior change is confined to configs with no spokenPunctuation
         // key: they now run Automatic Only here too, matching the app and the UI label.
@@ -88,10 +102,28 @@ public enum ProcessCommand {
         // Pass the real duration when we decoded samples so the seam-dedup gate can tell
         // single-window recordings from chunkable ones (nil = dedup stays enabled).
         let duration = samples.map { Double($0.count) / 16000.0 }
+        return postProcess(raw: raw, punctuationMode: punctuationMode, glossary: glossary,
+                           overrides: overrides, prompt: prompt, duration: duration)
+    }
+
+    /// The text half of `run`: TextPipeline on an engine transcript. Split out so tests can
+    /// prove the user's vocabulary reaches it without loading a speech model.
+    static func postProcess(raw: String, punctuationMode: PunctuationMode, glossary: String?,
+                            overrides: [String: String], prompt: String?,
+                            duration: Double?) -> ProcessResult {
         let input = TextPipeline.Input(raw: raw, punctuationMode: punctuationMode,
+                                       glossaryWords: glossary, overrides: overrides,
                                        audioDurationSeconds: duration)
-        let result = TextPipeline.run(input)
+        // Reuse the prompt already built for the engine instead of assembling it twice.
+        let result = TextPipeline.run(input, precomputedPrompt: prompt.map { .some($0) } ?? .none)
         return ProcessResult(raw: raw, processed: result.processedText, styled: result.finalText)
+    }
+
+    /// The vocabulary inputs `run` uses: the user's vocabulary.txt and overrides.json when
+    /// `useUserVocabulary` is on (agent `transcribe`), nothing otherwise (`process`, tests).
+    static func vocabularyInputs(useUserVocabulary: Bool)
+        -> (glossary: String?, overrides: [String: String]) {
+        useUserVocabulary ? (Config.loadVocabulary(), Config.loadOverrides()) : (nil, [:])
     }
 
     /// Run an async throwing closure from a synchronous context, blocking until it returns.

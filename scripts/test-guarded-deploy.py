@@ -7,12 +7,17 @@ import subprocess
 import tempfile
 import unittest
 
+# The fleet script refuses to run without its remote hosts; the tests use fake stand-ins.
+os.environ.setdefault("SPEAKFREE_STUDIO_HOST", "deploy@studio.test")
+os.environ.setdefault("SPEAKFREE_RIG_HOST", "deploy@rig.test")
+
 SCRIPTS = pathlib.Path(__file__).resolve().parent
 
 INSTALL_HARNESS = r'''
 source "$SCRIPTS/guarded-install.sh"
 SF_INSTALLED_APP="$TEST_ROOT/installed.app"
 codesign() { echo "verify:$*" >> "$TRACE"; return "${VERIFY_STATUS:-0}"; }
+sf_installed_build_commit() { echo "${INSTALLED_COMMIT:-fixed-build}"; return "${COMMIT_STATUS:-0}"; }
 pgrep() {
     if [ "${QUERY_STATUS:-0}" != 0 ]; then return "$QUERY_STATUS"; fi
     if [ "${QUERY_INVALID:-0}" = 1 ]; then echo invalid; return 0; fi
@@ -85,6 +90,15 @@ sf_install_remote inert-host "$SF_NEW_REMOTE_STAGE"
 '''
 
 
+# The operator's channel closes while the guard waits (Ctrl-C on the deploying Mac with ssh
+# and no terminal): the receipt still arrives, but stdout is gone before any signal.
+CHANNEL_GONE_HARNESS = INSTALL_HARNESS.replace(
+    'sf_install_staged_app "$TEST_ROOT/staged.app" inert-test',
+    '''eval "$(declare -f sf_prepare_update | sed '1s/sf_prepare_update/sf_prepare_update_real/')"
+sf_prepare_update() { sf_prepare_update_real "$@" || return 1; exec 1>&-; }
+sf_install_staged_app "$TEST_ROOT/staged.app" inert-test''')
+
+
 class GuardedDeployTests(unittest.TestCase):
     def run_flow(self, harness=INSTALL_HARNESS, **overrides):
         with tempfile.TemporaryDirectory(prefix="speakfree-deploy-test-") as directory:
@@ -93,7 +107,21 @@ class GuardedDeployTests(unittest.TestCase):
             executable.parent.mkdir(parents=True)
             executable.write_text("""#!/bin/bash
 if [ "$1" = --help ]; then exit 0; fi
-[ "$1" = prepare-update ] && [ "$2" = --timeout ] && [ "$3" = 600 ] || exit 64
+if [ "$1" = quit-clipy ]; then
+    [ "$2" = --timeout ] && [ "$3" = 30 ] || exit 64
+    printf 'quit-clipy\\n' >> "$TRACE"
+    printf '%s\\n' "${CLIPY_OUTPUT-SPEAKFREE_CLIPY_STOPPED}"
+    exit "${CLIPY_STATUS:-0}"
+fi
+if [ "$1" = quit-legacy-installed ]; then
+    [ "$2" = --pid ] && [ "$3" = 4242 ] || exit 64
+    printf 'legacy-quit:%s\\n' "$3" >> "$TRACE"
+    if [ "${LEGACY_STATUS:-0}" = 0 ]; then touch "$TEST_ROOT/signaled"; fi
+    printf '%s\\n' "${LEGACY_OUTPUT-SPEAKFREE_LEGACY_QUIT_REQUESTED}"
+    exit "${LEGACY_STATUS:-0}"
+fi
+[ "$1" = prepare-update ] && [ "$2" = --timeout ] && [ "$3" = 600 ] \
+    && [ "$4" = --require-visible-warning ] && [ "$#" = 4 ] || exit 64
 printf 'guard\\n' >> "$TRACE"
 printf '%s\\n' "${GUARD_OUTPUT-SPEAKFREE_UPDATE_READY}"
 exit "${GUARD_STATUS:-0}"
@@ -125,11 +153,65 @@ exit "${GUARD_STATUS:-0}"
     def test_positive_receipt_precedes_only_graceful_signal_and_trash_before_copy(self):
         result, events, files = self.run_flow()
         self.assertEqual(result.returncode, 0, result.stderr)
-        expected = ["guard", "signal:-TERM 4242", "trash", "copy", "launch"]
+        expected = ["quit-clipy", "guard", "signal:-TERM 4242", "trash", "copy", "launch"]
         self.assertEqual([e for e in events if e in expected], expected)
         self.assertEqual([e for e in events if e.startswith("signal:")], ["signal:-TERM 4242"])
         self.assertTrue(files["original_in_fake_trash"])
         self.assertFalse(files["original_installed"])
+
+    def test_clipy_failure_prevents_guard_and_speakfree_stop(self):
+        for status in (1, 2, 3, 4, 64):
+            with self.subTest(status=status):
+                result, events, files = self.run_flow(CLIPY_STATUS=status)
+                self.assertIn("quit-clipy", events)
+                self.assertNotIn("guard", events)
+                self.assert_no_interruption(result, events, files)
+
+    def test_exact_legacy_build_uses_normal_quit_after_guard_without_signal(self):
+        result, events, files = self.run_flow(INSTALLED_COMMIT="9f4f749")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = ["quit-clipy", "guard", "legacy-quit:4242", "trash", "copy", "launch"]
+        self.assertEqual([e for e in events if e in expected], expected)
+        self.assertFalse(any(e.startswith("signal:") for e in events))
+        self.assertTrue(files["original_in_fake_trash"])
+
+    def test_legacy_quit_failure_never_falls_back_to_signal(self):
+        for status in (1, 2, 3, 4, 64):
+            with self.subTest(status=status):
+                result, events, files = self.run_flow(INSTALLED_COMMIT="9f4f749", LEGACY_STATUS=status)
+                self.assertIn("guard", events)
+                self.assertIn("legacy-quit:4242", events)
+                self.assert_no_interruption(result, events, files)
+
+    def test_legacy_quit_requires_exact_request_receipt(self):
+        for output in ("", "SPEAKFREE_LEGACY_QUIT_REQUESTED extra", "usage: unsupported command"):
+            with self.subTest(output=output):
+                self.assert_no_interruption(*self.run_flow(
+                    INSTALLED_COMMIT="9f4f749", LEGACY_OUTPUT=output))
+
+    def test_legacy_app_that_stays_open_is_never_signaled_or_replaced(self):
+        result, events, files = self.run_flow(INSTALLED_COMMIT="9f4f749", STUCK=1)
+        self.assertIn("legacy-quit:4242", events)
+        self.assertIn("180 seconds", result.stderr)
+        self.assert_no_interruption(result, events, files)
+
+    def test_unreadable_installed_build_cannot_authorize_any_stop(self):
+        result, events, files = self.run_flow(COMMIT_STATUS=1)
+        self.assertNotIn("legacy-quit:4242", events)
+        self.assert_no_interruption(result, events, files)
+
+    def test_clipy_requires_exact_success_receipt(self):
+        for output in ("", "usage: unsupported command", "SPEAKFREE_CLIPY_STOPPED extra",
+                       "noise\nSPEAKFREE_CLIPY_STOPPED"):
+            with self.subTest(output=output):
+                result, events, files = self.run_flow(CLIPY_OUTPUT=output)
+                self.assertNotIn("guard", events)
+                self.assert_no_interruption(result, events, files)
+
+    def test_operator_channel_gone_after_receipt_never_signals(self):
+        result, events, files = self.run_flow(harness=CHANNEL_GONE_HARNESS)
+        self.assertIn("guard", events)
+        self.assert_no_interruption(result, events, files)
 
     def test_cancel_timeout_unknown_and_usage_fail_closed_even_with_ready_text(self):
         for status in (1, 2, 3, 4, 64):
@@ -143,14 +225,20 @@ exit "${GUARD_STATUS:-0}"
                 self.assert_no_interruption(*self.run_flow(GUARD_OUTPUT=output))
 
     def test_custom_config_cannot_authorize_production_stop(self):
-        result, events, files = self.run_flow(SPEAKFREE_CONFIG_DIR="/tmp/inert-custom-config")
-        self.assert_no_interruption(result, events, files)
-        self.assertNotIn("guard", events)
+        for no_process in (0, 1):
+            with self.subTest(no_process=no_process):
+                result, events, files = self.run_flow(
+                    SPEAKFREE_CONFIG_DIR="/tmp/inert-custom-config", NO_PROCESS=no_process)
+                self.assert_no_interruption(result, events, files)
+                self.assertNotIn("guard", events)
+                self.assertNotIn("quit-clipy", events)
 
     def test_unknown_or_malformed_process_state_does_not_stop(self):
         for options in ({"QUERY_STATUS": 2}, {"QUERY_INVALID": 1}, {"QUERY_EMPTY": 1}):
             with self.subTest(options=options):
-                self.assert_no_interruption(*self.run_flow(**options))
+                result, events, files = self.run_flow(**options)
+                self.assert_no_interruption(result, events, files)
+                self.assertNotIn("quit-clipy", events)
 
     def test_stuck_app_is_never_forced_or_replaced(self):
         result, events, files = self.run_flow(STUCK=1)
@@ -188,28 +276,31 @@ exit "${GUARD_STATUS:-0}"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("guard", events)
         self.assertFalse(any(e.startswith("signal:") for e in events))
+        self.assertIn("quit-clipy", events)
         self.assertIn("copy", events)
 
     def test_process_appearing_in_no_warning_branch_aborts_without_signal(self):
         result, events, files = self.run_flow(NO_PROCESS=1, APPEARS_DURING_NO_GUARD=1)
         self.assert_no_interruption(result, events, files)
         self.assertNotIn("guard", events)
+        self.assertIn("quit-clipy", events)
         self.assertIn("app started after the initial check", result.stderr)
 
     def test_invalid_bundle_fails_before_guard(self):
         result, events, files = self.run_flow(VERIFY_STATUS=1)
         self.assert_no_interruption(result, events, files)
         self.assertNotIn("guard", events)
+        self.assertNotIn("quit-clipy", events)
 
     def test_default_fleet_stages_all_hosts_before_any_install(self):
         result, events, _ = self.run_flow(FLEET_HARNESS)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(events, ["initialize", "build", "stage:movie@STUDIO_TAILSCALE_HOST", "stage:ark",
-                                  "install:local", "install:movie@STUDIO_TAILSCALE_HOST", "install:ark", "cleanup"])
+        self.assertEqual(events, ["initialize", "build", "stage:deploy@studio.test", "stage:deploy@rig.test",
+                                  "install:local", "install:deploy@studio.test", "install:deploy@rig.test", "cleanup"])
 
     def test_build_or_remote_staging_failure_never_interrupts_any_host(self):
-        for options in ({"BUILD_STATUS": 1}, {"FAIL_STAGE": "movie@STUDIO_TAILSCALE_HOST"},
-                        {"FAIL_STAGE": "ark"}):
+        for options in ({"BUILD_STATUS": 1}, {"FAIL_STAGE": "deploy@studio.test"},
+                        {"FAIL_STAGE": "deploy@rig.test"}):
             with self.subTest(options=options):
                 result, events, _ = self.run_flow(FLEET_HARNESS, **options)
                 self.assertNotEqual(result.returncode, 0)
@@ -221,9 +312,9 @@ exit "${GUARD_STATUS:-0}"
         self.assertEqual([e for e in events if e.startswith("install:")], ["install:local"])
 
     def test_remote_abort_stops_fleet_sequence_and_does_not_claim_cleanup(self):
-        result, events, _ = self.run_flow(FLEET_HARNESS, FAIL_INSTALL="movie@STUDIO_TAILSCALE_HOST")
+        result, events, _ = self.run_flow(FLEET_HARNESS, FAIL_INSTALL="deploy@studio.test")
         self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("install:ark", events)
+        self.assertNotIn("install:deploy@rig.test", events)
         self.assertNotIn("cleanup", events)
 
     def test_all_stage_transfer_and_install_commands_bound_ssh_transport(self):

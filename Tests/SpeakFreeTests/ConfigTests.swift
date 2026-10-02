@@ -165,7 +165,7 @@ final class ConfigTests: XCTestCase {
     // MARK: - Default model
 
     func testDefaultEngineIsParakeetEnglish() {
-        // Product default (Michael, 2026-06-11): new users get Parakeet ENGLISH.
+        // Product default (2026-06-11): new users get Parakeet ENGLISH.
         // v2 = English-only; v3 = multilingual (selected when language != en).
         let config = Config.defaultConfig
         XCTAssertEqual(config.engine, "parakeet")
@@ -183,11 +183,11 @@ final class ConfigTests: XCTestCase {
     // MARK: - Vocabulary provenance-comment parsing
 
     func testStripInlineComment() {
-        XCTAssertEqual(Config.stripInlineComment("Gaubert # brain"), "Gaubert")
-        XCTAssertEqual(Config.stripInlineComment("Sari # auto"), "Sari")
-        XCTAssertEqual(Config.stripInlineComment("Maryna # contacts"), "Maryna")
-        XCTAssertEqual(Config.stripInlineComment("Rohrlich"), "Rohrlich")
-        XCTAssertEqual(Config.stripInlineComment("  Bexx  "), "Bexx")
+        XCTAssertEqual(Config.stripInlineComment("Lambrin # manual"), "Lambrin")
+        XCTAssertEqual(Config.stripInlineComment("Noor # auto"), "Noor")
+        XCTAssertEqual(Config.stripInlineComment("Maryna # import"), "Maryna")
+        XCTAssertEqual(Config.stripInlineComment("Vohrbach"), "Vohrbach")
+        XCTAssertEqual(Config.stripInlineComment("  Jaxx  "), "Jaxx")
         // Full-line comment returned as-is (caller drops it via hasPrefix("#")).
         XCTAssertEqual(Config.stripInlineComment("# a heading"), "# a heading")
         // Hashes inside a term are not comment markers (no leading space-hash).
@@ -203,15 +203,15 @@ final class ConfigTests: XCTestCase {
 
         try """
         # heading comment
-        Rohrlich
-        Gaubert # brain
-        Maryna # contacts
-        Sari # auto
+        Vohrbach
+        Lambrin # manual
+        Maryna # import
+        Noor # auto
 
         """.write(to: Config.vocabularyFile, atomically: true, encoding: .utf8)
 
         let vocab = Config.loadVocabulary()
-        XCTAssertEqual(vocab, "Rohrlich, Gaubert, Maryna, Sari")
+        XCTAssertEqual(vocab, "Vohrbach, Lambrin, Maryna, Noor")
     }
 }
 

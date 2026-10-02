@@ -1,5 +1,6 @@
 // ai-suggestion:unverified · session:unknown · 2026-08-24
 import Foundation
+import NaturalLanguage
 
 public struct TextPostProcessor {
     // Boundaries use whitespace OR punctuation (not \b which treats hyphens as boundaries).
@@ -8,7 +9,7 @@ public struct TextPostProcessor {
     private static let we = "(?=[\\s.,!?;:]|$)"
 
     // A negation/auxiliary directly before a command word is never a command: "didn't new
-    // line that" is a garble ("didn't realize that", 2026-07-03 recording FD2F92D7), and
+    // line that" is a garble ("didn't realize that", 2026-07-03 regression), and
     // converting it eats the garbled word AND inserts fake punctuation. Bounded-alternation
     // lookbehind (ICU requires bounded length).
     private static let notAfterNegation =
@@ -20,13 +21,32 @@ public struct TextPostProcessor {
     // are unaffected because the immediately preceding character is punctuation, not this set.
     private static let notAfterLiteralNounMarker =
         "(?<!\\b(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their|word|said)\\s)"
+    // 2026-09-24: extended with the "a big question mark" idiom adjectives and colors, which
+    // (like the originals) describe the glyph or the figurative noun, never a command's object.
     private static let notAfterLiteralNounModifier =
-        "(?<!\\b(?:red|large|small|literal|actual|visible|single|double|first|second|another)\\s)"
+        "(?<!\\b(?:red|large|small|literal|actual|visible|single|double|first|second|third|fourth|fifth|final|another|big|huge|giant|major|massive|little|tiny|real|open|lingering|serious|extra|bold|blue|green|yellow|orange|black|white|grey|gray|pink|purple)\\s)"
     private static let notAfterModifiedLiteralNounMarker =
         "(?<!\\b(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their)"
         + "\\s[A-Za-z][A-Za-z'’-]{0,29}\\s)"
     private static let questionPhraseNotUsedAsNoun =
         "(?!\\s+(?:as|is|means|symbol|character|noun|usage|use|uses|placement|rule|rules)\\b)"
+
+    // Clause-final "question mark" / "exclamation mark" commands are decided per clause in
+    // ClauseFinalCommand.swift (round 4). The table rules below cover only the mid-sentence
+    // positions: this lookahead keeps them off every position that decision already owns, so
+    // a phrase it left literal ("Click the circled question mark.") is not converted anyway.
+    private static let notAtClauseEnd =
+        "(?!\\s*[.?!]|\\s*$|\\s+(?:new line|newline|new paragraph)\\b"
+        + "|\\s*,\\s+(?:i|i'm|i’m|i'd|i’d|it|it's|it’s|we|you|they|he|she|probably|maybe|perhaps"
+        + "|please)\\b)"
+
+    /// Round 4 (2026-09-25): the engine often ends a spoken "new line" with its own period
+    /// ("…? New line. Thanks"). That period is consumed with the command; left behind, it
+    /// collapsed into the mark before the break and the line break was lost.
+    private static let consumeEngineMark = "(?:[.,](?=\\s|$))?"
+
+    /// "Press question mark to open help": a verb that takes the glyph as its object.
+    private static let notAfterGlyphVerb = "(?<!\\b(?:type|typed|insert|inserted|press|pressed|click|clicked|tap|tapped|hit|enter|entered)\\s)"
 
     // Unambiguous: these phrases are almost never used as regular words in speech.
     // Always safe to replace regardless of context (except right after a negation).
@@ -34,13 +54,13 @@ public struct TextPostProcessor {
         // SINGULAR ONLY. The trailing `s?` used to swallow the plural NOUN, and unlike every
         // other failure in this file that one DESTROYS CONTENT: "the people with question marks"
         // became "the people with?", deleting the rest of the sentence (speech audit finding 3,
-        // ~5 of 6,571 pairs; Michael approved the fix 2026-08-05). Spoken punctuation is dictated
+        // ~5 of 6,571 pairs; fix approved 2026-08-05). Spoken punctuation is dictated
         // in the singular, so the plural is essentially always the literal noun. If someone really
         // does dictate two question marks, the cost is a visible word to delete by hand — which is
         // the direction this file always errs, per the 2026-07-26 "prefer the loud useless one".
-        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)\(notAfterLiteralNounModifier)\(notAfterModifiedLiteralNounMarker)question mark\(questionPhraseNotUsedAsNoun)\(we)", "?"),
-        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)\(notAfterLiteralNounModifier)\(notAfterModifiedLiteralNounMarker)exclamation mark\(we)", "!"),
-        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)\(notAfterLiteralNounModifier)\(notAfterModifiedLiteralNounMarker)exclamation point\(we)", "!"),
+        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)\(notAfterLiteralNounModifier)\(notAfterModifiedLiteralNounMarker)\(notAfterGlyphVerb)question mark\(questionPhraseNotUsedAsNoun)\(notAtClauseEnd)\(we)", "?"),
+        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)\(notAfterLiteralNounModifier)\(notAfterModifiedLiteralNounMarker)exclamation mark\(notAtClauseEnd)\(we)", "!"),
+        ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)\(notAfterLiteralNounModifier)\(notAfterModifiedLiteralNounMarker)exclamation point\(notAtClauseEnd)\(we)", "!"),
         ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)semicolon\(we)", ";"),
         ("\(ws)\(notAfterNegation)\(notAfterLiteralNounMarker)semi colon\(we)", ";"),
         // Ellipsis removed — whisper generates "..." from pauses causing false positives
@@ -49,9 +69,9 @@ public struct TextPostProcessor {
         ("\(ws)\(notAfterNegation)close quote\(we)", "\""),
         ("\(ws)\(notAfterNegation)open paren\(we)", "("),
         ("\(ws)\(notAfterNegation)close paren\(we)", ")"),
-        ("\(ws)\(notAfterNegation)new line\(we)", "\n"),
-        ("\(ws)\(notAfterNegation)newline\(we)", "\n"),
-        ("\(ws)\(notAfterNegation)new paragraph\(we)", "\n\n"),
+        ("\(ws)\(notAfterNegation)new line\(consumeEngineMark)\(we)", "\n"),
+        ("\(ws)\(notAfterNegation)newline\(consumeEngineMark)\(we)", "\n"),
+        ("\(ws)\(notAfterNegation)new paragraph\(consumeEngineMark)\(we)", "\n\n"),
     ]}
 
     // Ambiguous: these words are commonly used as regular words ("comma separating",
@@ -67,7 +87,7 @@ public struct TextPostProcessor {
         // "hello, comma how" → replace ("," before "comma" = whisper saw a break)
         // "comma separating" → skip (no punctuation before = regular word)
         // Comma-homophone family: Parakeet mishears the spoken word "comma" as a small,
-        // bounded set of /kVmV/ non-words. Mined from Michael's corpus 2026-07-02:
+        // bounded set of /kVmV/ non-words. Mined from the maintainer's corpus 2026-07-02:
         // kama(29), kana(4), karma(3), kamala(1). All are handled here, gated on a
         // preceding punctuation break — that break is the garble signature (Parakeet
         // emits its own period/comma, then the mis-heard command). The gate is what keeps
@@ -92,16 +112,17 @@ public struct TextPostProcessor {
         // would just leave visible garbles ("…note. Kama usage varies" — round 3).
         ("[.;]\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("[.;]\\s*(?:komma|kamma|kana|kanna|kama|kaima|kalma|katma|comam|comlette|(?-i:gama|kanga))(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("[.;]\\s*(?:kamala|karma|(?-i:gama|kanga))[.,!?;:]", ","),
-        // comment/common joined the family 2026-07-29 (Michael: "bad commas"). Parakeet hears
+        ("[.;]\\s*(?:kamala|karma|(?-i:gama|kanga))\(notListItem)[.,!?;:]", ","),
+        // comment/common joined the family 2026-07-29 (reported as "bad commas"). Parakeet hears
         // spoken "comma" as these two often enough to show up 6 times in one day. They are REAL
         // words, so they take the kamala/karma treatment — punctuation required on BOTH sides —
         // never the loose non-word tail. Verified against the same day's corpus: ". Comment,"
-        // converts, while "the right comment bar", "in off-handed comments I", "bad comments and"
-        // and "should be common in" all correctly do NOT (no trailing punctuation, or plural).
+        // converts, while shapes like "the side comment box", "in quick comments I", "kind
+        // comments and" and "should be common in" correctly do NOT (no trailing punctuation, or
+        // plural).
         ("[.;]\\s*(?:comment|common|coma)[.,!?;:]", ","),
         // Same high-signal shape at utterance end: an existing punctuation mark immediately
-        // followed by a comma-homophone and nothing else. This catches "Turkey, comment" without
+        // followed by a comma-homophone and nothing else. This catches "Bread, comment" without
         // touching ordinary "leave a comment" prose (no punctuation directly before the noun).
         ("[,!?:]\\s*(?:comment|common|coma|karma|kamala)\\s*$", ","),
         // Short discourse markers followed by a punctuated comma-homophone are command-shaped:
@@ -113,28 +134,29 @@ public struct TextPostProcessor {
             + "[ ,]+(?:comment|common|coma)[.,!?;:](?=\\s|$)", "$1,"),
         ("(?<=[,!?:])\\s*comma\(commaSkipAhead)(?:[.,!?;:]|(?=\\s|$))", ","),
         ("(?<=[,!?:])\\s*(?:komma|kana|kanna|kama|kaima|kalma|katma|comam|comlette|ka\\s+ma|(?-i:gama|kanga))(?:[.,!?;:]|(?=\\s|$))", ","),
-        ("(?<=[,!?:])\\s*(?:kamala|karma|(?-i:gama|kanga))[.,!?;:]", ","),
+        ("(?<=[,!?:])\\s*(?:kamala|karma|(?-i:gama|kanga))\(notListItem)[.,!?;:]", ","),
         ("(?<=[,!?:])\\s*(?:comment|common|coma)[.,!?;:]", ","),
-        // Sentence-medial comment/common (2026-08-14, Michael: "yes" to looser conversion).
+        // Sentence-medial comment/common (2026-08-14, looser conversion approved).
         // Parakeet's dominant comma garble in running speech carries NO adjacent punctuation
-        // ("the subject matter comment, I would love" / "memory options common. Maybe"), so the
+        // ("the baking side comment, I would love" / "lunch options common. Maybe"), so the
         // both-sides-punctuation family above never fires. Three corpus-validated shapes convert;
         // the guard is the PRECEDING word: legitimate noun/adjective uses are (in 2 months of
         // corpus, Jul-Aug 2026: 27+2+19 command hits, 0 legit casualties) always preceded by a
         // determiner, possessive, comparative, copula, or verb marker ("a comment", "the right
         // comment bar", "more common", "to comment", "leave a comment or"), all blocklisted.
         // Plurals never match (the word is followed directly by punctuation or whitespace).
-        // Shape 1: bare word before, punctuation after — "matter comment, I" → "matter, I".
+        // Shape 1: bare word before, punctuation after — "side comment, I" → "side, I".
         ("(?<![.,!?;:])(?<!\\b\(commentPrecedingWordBlock))\(commentNounPhraseLookback)"
             + "\\s+(?:comment|common)[.,!?;:](?=\\s|$)", ","),
+        // "comet" is decided in `convertGarbledCometComma` (needs evidence on both sides).
         // Shape 2: no punctuation anywhere, followed by a clause-continuing conjunction —
-        // "gates other things comment and think" → "gates other things, and think".
+        // "holds other things comment and think" → "holds other things, and think".
         ("(?<![.,!?;:])(?<!\\b\(commentPrecedingWordBlock))\(commentNounPhraseLookback)"
             + "\\s+(?:comment|common)\\s+"
             + "(?=(?:and|but|so|or|since|because|which|instead|then)\\b)", ", "),
         // Shape 3: punctuation before (consumed — the spoken comma outranks the engine's
         // auto-period, same rationale as the kama family), clause-starter after —
-        // "tasks. Common to differentiate" → "tasks, to differentiate".
+        // "chores. Common to separate" → "chores, to separate".
         ("[.,;]\\s+(?:comment|common)\\s+"
             + "(?=(?:and|but|so|or|if|either|to|does|do|keep|let|need|should|can|could|would"
             + "|might|not|just|it|that|this|they|there|you|we|i)\\b)", ", "),
@@ -143,6 +165,10 @@ public struct TextPostProcessor {
         ("(?<=[.,!?;:])\\s*dash(?!\\s+(?:of|board|cam)\\b)(?:[.,!?;:]|(?=\\s|$))", " —"),
         ("(?<=[.,!?;:])\\s*hyphen(?:[.,!?;:]|(?=\\s|$))", "-"),
     ]}
+
+    /// Round 4 (2026-09-25): a real-word homophone followed by ", and" / ", or" is a list item
+    /// ("Sam, Karma, and Lee came"), never a spoken comma; converting it deleted the name.
+    private static let notListItem = "(?!,\\s+(?:and|or|&)(?=\\s|$))"
 
     /// Negative lookahead mirroring `comma`'s skipBefore list ("comma separated values",
     /// "Comma usage varies") for the punctuation-preceded rules above.
@@ -175,13 +201,132 @@ public struct TextPostProcessor {
     /// What every leak shared was a determiner/possessive/copula sitting exactly TWO tokens
     /// back — the reliable signature of a noun phrase whose head is "comment"/"common"-as-
     /// adjective. This second lookbehind blocks that signature. Cost, measured on the Jul-Aug
-    /// corpus: 3 of 29 real command garbles no longer convert ("is EQ comment." / "miss your
-    /// talk comment since" / "in the party comment,") because they are structurally identical
+    /// corpus: 3 of 29 real command garbles no longer convert (shapes like "is fine comment." /
+    /// "miss your walk comment since" / "in the yard comment,") because they are structurally identical
     /// to legitimate noun phrases — a missed comma is visible and cheap; a silently deleted
     /// noun is neither. Engine-level (acoustic) correction is the only clean fix for those.
     private static let commentNounPhraseLookback =
         "(?<!\\b(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their"
         + "|is|are|was|were|be|been|being)\\s\\w{1,24})"
+
+    /// Candidate shape for the "comet" comma garble: lowercase "comet" directly before the
+    /// engine's own comma, with the comment/common noun-phrase guards and three more: a
+    /// capitalized word before it names the comet ("Halley comet,", "ISON comet,"), a
+    /// capitalized "Comet" is the browser or a name ("open Comet,"), and "X or comet," /
+    /// "X and comet," is a noun list.
+    private static let cometCandidate: NSRegularExpression? = try? NSRegularExpression(
+        pattern: "(?<![.,!?;:])(?<!\\b\(commentPrecedingWordBlock))(?<!\\b(?:or|and|nor))"
+            + "\(commentNounPhraseLookback)"
+            + "(?<!(?-i:\\b[A-Z][A-Za-z'’]{0,24}))[^\\S\\n]+(?-i:comet),(?=\\s)",
+        options: [.caseInsensitive])
+
+    /// Words that open a new clause. After "comet," they are the garble evidence on the right.
+    private static let cometClauseOpeners: Set<String> = [
+        "i", "i'm", "i’m", "i'd", "i’d", "i'll", "i’ll", "i've", "i’ve", "it", "it's", "it’s",
+        "we", "we're", "we’re", "you", "you're", "you’re", "they", "they're", "they’re", "he",
+        "she", "that", "that's", "that’s", "this", "there", "there's", "there’s", "and", "but",
+        "so", "or", "not", "then", "because", "if", "when", "which", "maybe", "also", "just",
+        "like", "though", "although", "unless", "since", "while", "otherwise", "instead",
+        "probably", "please", "let's", "let’s", "do", "does", "don't", "don’t", "can", "could",
+        "would", "should", "is", "are", "was", "what", "how", "why", "where", "okay", "ok",
+        "yeah", "yes", "no",
+    ]
+
+    /// Determiners, possessives and numbers: inside the noun phrase before "comet" they mark
+    /// the real noun ("a really bright comet,", "one more comet,").
+    private static let cometDeterminers: Set<String> = [
+        "a", "an", "the", "this", "that", "these", "those", "my", "your", "his", "her", "its",
+        "our", "their", "any", "no", "each", "every", "one", "another", "some", "which", "what",
+        "whose", "such", "two", "three", "first", "second", "last", "next",
+    ]
+
+    /// "comet," is a spoken comma only with evidence on both sides (design ruling 2026-09-25):
+    /// - right: the word after the comma opens a clause or is capitalized
+    ///   ("between them comet, not always", "smaller comet, it fits");
+    /// - left: nothing marks a noun phrase. An adjective or noun right before it, or a
+    ///   determiner, possessive or number reached by walking back over modifiers and
+    ///   participles, means the real noun ("a really bright comet, and then", "an ice comet,
+    ///   it", "a newly discovered comet, it"). The one exception is a comparative after a
+    ///   degree phrase that opens the clause ("A little bit smaller comet, it fits"): a size
+    ///   answer with no noun, so "comet" has nothing to be a noun of.
+    /// Both 2026 archive uses of "comet" are garbles of this shape; no real noun appears.
+    static func convertGarbledCometComma(_ text: String) -> String {
+        guard let re = cometCandidate, text.range(of: "comet,", options: .caseInsensitive) != nil
+        else { return text }
+        let ns = text as NSString
+        var out = text as NSString
+        for m in re.matches(in: text, range: NSRange(location: 0, length: ns.length)).reversed() {
+            // Right-hand evidence: the next word.
+            let after = ns.substring(from: m.range.location + m.range.length)
+                .trimmingCharacters(in: .whitespaces)
+            let nextWord = after.split(whereSeparator: { $0 == " " || $0 == "\n" }).first
+                .map { String($0).trimmingCharacters(in: CharacterSet.punctuationCharacters
+                    .subtracting(CharacterSet(charactersIn: "'’"))) } ?? ""
+            guard let first = nextWord.first else { continue }
+            guard cometClauseOpeners.contains(nextWord.lowercased()) || first.isUppercase
+            else { continue }
+            // Left-hand evidence: the clause before "comet".
+            let before = ns.substring(to: m.range.location)
+            if cometHeadsNounPhrase(clauseBefore: before) { continue }
+            out = out.replacingCharacters(in: m.range, with: ",") as NSString
+        }
+        return out as String
+    }
+
+    /// True when the words before "comet" in its clause form a noun phrase for it.
+    private static func cometHeadsNounPhrase(clauseBefore before: String) -> Bool {
+        let clause = before.split(whereSeparator: { ".,;:!?\n".contains($0) }).last
+            .map(String.init) ?? before
+        // Tag the clause with "comet" in place so the tagger sees the head it modifies.
+        let tagged = clause + " comet"
+        let tagger = NLTagger(tagSchemes: [.lexicalClass])
+        tagger.string = tagged
+        var tokens: [(word: String, tag: NLTag?)] = []
+        tagger.enumerateTags(in: tagged.startIndex..<tagged.endIndex, unit: .word,
+                             scheme: .lexicalClass, options: [.omitWhitespace, .omitPunctuation]) {
+            tag, range in
+            tokens.append((String(tagged[range]).lowercased(), tag))
+            return true
+        }
+        guard tokens.last?.word == "comet" else { return false }
+        tokens.removeLast()
+        // A possessive ("Halley's comet,") names it; the tagger splits off the "'s".
+        guard let last = tokens.last else { return false }
+        if last.word == "'s" || last.word == "’s" || last.word.hasSuffix("'s")
+            || last.word.hasSuffix("’s") {
+            return true
+        }
+        // A comparative after a clause-opening degree phrase ("A little bit smaller comet, it
+        // fits") answers a question about size and has no noun: "comet" is the garble there.
+        // Only that opening shape is exempt; with anything before it ("It was a lot bigger
+        // comet,", "a much brighter comet,") the phrase is a real noun phrase.
+        let comparative = last.word.hasSuffix("er") || last.word == "more" || last.word == "less"
+        let degree = tokens.dropLast().map(\.word)
+        if comparative, degree.contains(where: { ["bit", "tad", "lot"].contains($0) }),
+           degree.allSatisfy({ ["a", "little", "bit", "tad", "lot"].contains($0) }) {
+            return false
+        }
+        if cometDeterminers.contains(last.word) || last.tag == .adjective || last.tag == .number
+            || last.tag == .noun {
+            // A noun right before it is a compound ("an ice comet,", "space rock comet,").
+            return true
+        }
+        // Walk back over modifiers, participles and compound nouns to a determiner ("a big
+        // ice comet,", "a newly discovered comet,").
+        for token in tokens.reversed().prefix(5) {
+            if cometDeterminers.contains(token.word) || token.tag == .number
+                || token.tag == .determiner {
+                return true
+            }
+            // Verbs are crossed too: the tagger reads participles as verbs, and irregular ones
+            // ("found", "seen") have no ending to recognize. Crossing only ever adds noun
+            // evidence, so the cost is a missed comma, never a deleted word.
+            guard let t = token.tag, [.adjective, .adverb, .noun, .verb].contains(t) else {
+                return false
+            }
+        }
+        return false
+    }
 
     // Ellipsis support removed — whisper generates "..." from pauses, causing false positives.
     // All multi-dot sequences are now stripped unconditionally.
@@ -214,7 +359,7 @@ public struct TextPostProcessor {
     public static func process(_ text: String, hybrid: Bool = false) -> String {
         var result = text
         // Spurious pause-split softener (2026-07-25, corpus 0.3% of raws): the
-        // engine sometimes splits at a spoken pause — "computer. as it goes" — and
+        // engine sometimes splits at a spoken pause — "kitchen. as it goes" — and
         // the LOWERCASE continuation is its own tell that it didn't believe the
         // sentence ended. Soften to a comma. Runs FIRST, on pure engine output —
         // later passes intentionally create lowercase-after-period intermediates
@@ -223,11 +368,11 @@ public struct TextPostProcessor {
         // period protects abbreviations (e.g., vs.).
         // LIVE as of 2026-08-02. This was written to a `var softened` that nothing read, so the
         // rule documented as "runs FIRST, on pure engine output" never actually ran. Wiring it in
-        // changes one corpus expectation — "…or at least. Every six months" becomes
-        // "…or at least, every six months" — which Michael approved ("Yes I want it on"), since
+        // changes one corpus expectation — "…or at least. Every six days" becomes
+        // "…or at least, every six days" — which was approved as a product decision, since
         // the engine's pause-split was never a real sentence boundary.
         result = text.replacingOccurrences(
-            of: "([A-Za-z]{3,})\\. (?!(?:period|comma|kama|kaima|gama|coma|kamala|karma|dot|question|exclamation|new|newline)\\b)([a-z])",
+            of: "([A-Za-z]{3,})(?<!\\b[Ee]tc)\\. (?!(?:period|comma|kama|kaima|gama|coma|kamala|karma|dot|question|exclamation|new|newline)\\b)([a-z])",
             with: "$1, $2",
             options: .regularExpression)
 
@@ -237,7 +382,7 @@ public struct TextPostProcessor {
         // quotes first; the existing rules then handle the now-unquoted command.
         result = stripQuotesAroundCommandWords(result)
 
-        // Parakeet article insertion (2026-08-22 labeled clip 29): the speaker said
+        // Parakeet article insertion (2026-08-22 labeled clip): the speaker said
         // "Like, comma, what else..." and the decoder produced "Like a comma, what else...".
         // Keep this narrower than a generic "a comma" rewrite: require the exact discourse
         // marker plus punctuation plus a closed clause-starter set. Utterance-final
@@ -261,13 +406,13 @@ public struct TextPostProcessor {
 
         // 1. (removed 2026-08-21) The old `commaBeforeCapitalToPeriod` rule converted
         // every engine ", Capital" → ". Capital" (a Whisper-era heuristic: Whisper spammed
-        // commas where it meant periods). On Parakeet — the default engine, 15,283 of 15,313
+        // commas where it meant periods). On Parakeet — the default engine, nearly all of the
         // labeled recordings — that premise is false: Parakeet's comma-before-a-capital is
         // almost always CORRECT (a name, a list, an appositive, a quoted clause). Corpus
-        // audit: the rule fired 312 times and was WRONG in 100% of them — it split
-        // "…meetings, Slack, and my email", "…for me, Jen, and Paul", "…make decisions,
-        // Fable should…" into fake sentences, and turned "Hello, Michael" into "Hello.
-        // Michael" (a documented false positive). The 30 Whisper recordings never triggered
+        // audit: the rule fired 312 times and was WRONG in 100% of them — it split shapes
+        // like "…meetings, Notion, and my email", "…for me, Sam, and Lee", "…make decisions,
+        // Jordan should…" into fake sentences, and turned "Hello, Taylor" into "Hello.
+        // Taylor" (a documented false positive). The Whisper recordings never triggered
         // it. Removing it stops corrupting good output. The legitimate residual case — an
         // engine stray-capital directly after a comma ("Great, So when") — is still handled,
         // correctly and proper-noun-safely, by `lowercaseStrandedCapitalAfterComma` (step 9).
@@ -278,6 +423,8 @@ public struct TextPostProcessor {
         result = result.replacingOccurrences(
             of: "(?i)^(.*\\b(?:is|was) that right)\\s+question mark[.!]?\\s*$",
             with: "$1?", options: .regularExpression)
+        result = convertClauseFinalCommands(result)
+        result = convertSplitQuestionCommand(result)
         for (pattern, replacement) in alwaysReplace {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
             result = regex.stringByReplacingMatches(
@@ -294,7 +441,7 @@ public struct TextPostProcessor {
         result = collapseHalfConvertedQuestionMark(result)
 
         // 2c. Command-word garbles that arrive as their own one-word sentence
-        // (2026-07-14 glowing-line dictation, MacBook mic — engine garbles, not audio).
+        // (2026-07-14, built-in mic — engine garbles, not audio).
         result = collapseCommandWordGarbles(result)
 
         // 2a. Trim spaces adjacent to spoken line-breaks (audit M2).
@@ -310,7 +457,14 @@ public struct TextPostProcessor {
         // 2. Replace ambiguous words — strategy depends on mode
         let ambiguous = hybrid ? contextReplace : spokenFallback
         for (pattern, replacement) in ambiguous {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+            // A spoken line break is not a pause between words: these rules read "punctuation,
+            // then whitespace, then the word" as a spoken mark, and crossing a break let them
+            // consume it ("First part. New line. Comma, second" lost the break). Their
+            // whitespace runs stop at a line break.
+            let sameLine = pattern
+                .replacingOccurrences(of: "\\s*", with: "[^\\S\\n]*")
+                .replacingOccurrences(of: "\\s+", with: "[^\\S\\n]+")
+            guard let regex = try? NSRegularExpression(pattern: sameLine, options: .caseInsensitive) else { continue }
             result = regex.stringByReplacingMatches(
                 in: result,
                 range: NSRange(result.startIndex..., in: result),
@@ -322,8 +476,14 @@ public struct TextPostProcessor {
         // The context regex requires preceding punctuation, but users often say
         // "word comma word" without whisper adding a comma first.
         if hybrid {
+            result = convertGarbledCometComma(result)
             result = convertStandaloneAmbiguous(result)
         }
+
+        // 2.6. A spoken mark right after a spoken line break ("new line comma"). The collapse
+        // and spacing passes below read the break as whitespace between two marks, or before
+        // one, and delete it, so every mark is settled against the break first.
+        result = placeMarksAfterLineBreak(result)
 
         // 3. Collapse exactly-two-dots (from substitution duplicates) to a single dot.
         // The lookbehind+lookahead together ensure we don't touch any pair that's part
@@ -338,7 +498,7 @@ public struct TextPostProcessor {
         // 4. Collapse space-separated same-type punctuation BEFORE fixSpacing.
         // Excludes "." so 3+ dot ellipses ("So...") survive — double-dots from
         // substitution duplicates are already handled by the dot-collapse above.
-        if let regex = try? NSRegularExpression(pattern: "([,!?;:])(?:\\s*\\1)+", options: []) {
+        if let regex = try? NSRegularExpression(pattern: "([,!?;:])(?:[^\\S\\n]*\\1)+", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
             )
@@ -365,15 +525,15 @@ public struct TextPostProcessor {
         result = ensureSpaceAfterPunctuation(result)
 
         // 8. Capitalize first letter after sentence-ending punctuation (. ! ?)
-        // Double-punctuation collapse (2026-07-25, live report): Parakeet often
-        // auto-punctuates the pause AND transcribes the spoken word — "declares it
-        // dead, comma things" — leaving the literal word after its own mark. When a
+        // Double-punctuation collapse (2026-07-25 regression): Parakeet often
+        // auto-punctuates the pause AND transcribes the spoken word — "calls it
+        // done, comma things" — leaving the literal word after its own mark. When a
         // spoken-punctuation word directly follows the SAME mark, drop the word.
         result = result.replacingOccurrences(
-            of: ",\\s+comma\\b\\s*", with: ", ",
+            of: ",[^\\S\\n]+comma\\b[^\\S\\n]*", with: ", ",
             options: [.regularExpression, .caseInsensitive])
         result = result.replacingOccurrences(
-            of: "\\.\\s+period\\b\\s*", with: ". ",
+            of: "\\.[^\\S\\n]+period\\b[^\\S\\n]*", with: ". ",
             options: [.regularExpression, .caseInsensitive])
         // Corpus H3/H9 (2026-07-25, 7 instances): Parakeet splits/mangles spoken
         // "exclamation mark" into "Exclamation. Mark." / "exclamation marker" /
@@ -388,12 +548,19 @@ public struct TextPostProcessor {
         let modifiedLiteralExclamationPrefix =
             "(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their)"
             + "\\s[A-Za-z][A-Za-z'’-]{0,29}"
-        let commandPrefix = "(?:^|[,.]\\s*|(?<!\\b\(literalExclamationPrefix))"
-            + "(?<!\\b\(modifiedLiteralExclamationPrefix))\\s+)"
+        let commandPrefix = "(?:^|[,.][^\\S\\n]*|(?<!\\b\(literalExclamationPrefix))"
+            + "(?<!\\b\(modifiedLiteralExclamationPrefix))[^\\S\\n]+)"
         if let re = try? NSRegularExpression(
             pattern: commandPrefix
-                + "\\bexclamation[ .]+(?:mark(?:er|et)?|park)\\b[.!]*"
-                + "|" + commandPrefix + "\\bexclamation\\.?\\s*$",
+                + "\\bexclamation(?:[ .]+|,[^\\S\\n]+(?=mark\\b(?:[.!]|\\s*$)))(?:mark(?:er|et)?|park)\\b[.!]*"
+                + "|" + commandPrefix + "\\bexclamation\\.?\\s*$"
+                // Clause-final split form: only the mention markers protect it there (see
+                // `atClauseEnd`) — "…on the new job exclamation park." is the command.
+                + "|(?<!\\b(?:word|said|red|large|small|literal|actual|visible|single|double|first|second|third|fourth|fifth|final|another|big|huge|giant|major|massive|little|tiny|real|open|lingering|serious|extra|bold|blue|green|yellow|orange|black|white|grey|gray|pink|purple|a|an|the|my|your|his|her|its|our|their|any|no))"
+                // Split/garbled forms only; plain "exclamation mark" is owned (with all its
+                // guards) by the alwaysReplace clause-end rule.
+                + "[^\\S\\n]+\\bexclamation(?: +(?:mark(?:er|et)|park)|\\.[ .]*(?:mark(?:er|et)?|park))"
+                + "\\b[.!]*(?=\\s*$)",
             options: [.caseInsensitive]) {
             let ns = NSMutableString(string: result)
             let matches = re.matches(in: result, range: NSRange(location: 0, length: ns.length))
@@ -404,82 +571,110 @@ public struct TextPostProcessor {
                                                          options: .regularExpression)
                 .trimmingCharacters(in: .whitespaces)
         }
-        // Wide-sweep garbles (2026-08-20, build/26-08-20-punctuation-phonemes/WIDE-SWEEP.md;
-        // every rule corpus-simulated at 0 false positives before shipping).
+        // Wide-sweep garbles (2026-08-20 punctuation-phoneme sweep; every rule
+        // corpus-simulated at 0 false positives before shipping).
         // "Quark" = FUSED "question mark" — the sweep's biggest find (29 occurrences, 27
         // directly after the engine's own "?" or ".", zero prose uses). The engine's
         // punctuation is consumed; the user's spoken question mark wins.
         result = result.replacingOccurrences(
-            of: "[?.]\\s*quark\\b[.,!?;:]*", with: "?",
+            of: "[?.][^\\S\\n]*quark\\b[.,!?;:]*", with: "?",
             options: [.regularExpression, .caseInsensitive])
         // "Colin" = "colon" when punctuated on BOTH sides ("two thoughts, Colin. One is…").
         // Greeting-position guard keeps a real Colin addressable: "Hi Colin," survives.
         result = result.replacingOccurrences(
-            of: "(?<!\\b(?:hi|hey|hello|dear|thanks|yo)[ ,])[.,;]\\s*colin[.,:]\\s*", with: ": ",
+            of: "(?<!\\b(?:hi|hey|hello|dear|thanks|yo)[ ,])[.,;][^\\S\\n]*colin[.,:][^\\S\\n]*", with: ": ",
             options: [.regularExpression, .caseInsensitive])
         // "questioner" / "question marked" / "question marker" / "kushma" — question-mark
         // garbles, gated to punctuation-adjacent or final position.
         result = result.replacingOccurrences(
-            of: "[?.,]\\s*(?:questioner|question\\s+mark(?:ed|er)|kushma)\\b[.,!?;:]*(?=\\s|$)", with: "?",
+            of: "[?.,][^\\S\\n]*(?:questioner|question[^\\S\\n]+mark(?:ed|er)|kushma(?:rk?)?)\\b[.,!?;:]*(?=\\s|$)", with: "?",
             options: [.regularExpression, .caseInsensitive])
         result = result.replacingOccurrences(
-            of: "\\s+(?:questioner|question\\s+mark(?:ed|er)|kushma)[.!?]*\\s*$", with: "?",
+            of: "[^\\S\\n]+(?:questioner|question[^\\S\\n]+mark(?:ed|er)|kushma(?:rk?)?)[.!?]*\\s*$", with: "?",
             options: [.regularExpression, .caseInsensitive])
         // "periods" directly after punctuation = spoken "period" (the plural NOUN is
         // protected by requiring the preceding punctuation break; "my periods" or "time
         // periods" carry no break).
         result = result.replacingOccurrences(
-            of: "[.,]\\s*periods\\b[.,!?;:]*(?=\\s|$)", with: ".",
+            of: "[.,][^\\S\\n]*periods\\b[.,!?;:]*(?=\\s|$)", with: ".",
             options: [.regularExpression, .caseInsensitive])
-        // Michael-approved 2026-08-21 (WIDE-SWEEP MICHAEL-DECIDES rows, "yes on them"):
+        // Approved 2026-08-21 (the wide sweep's owner-decision rows):
         // "quarter" directly after the engine's own "?" and final = spoken "question mark"
         // (real word, so the gate is the tightest observed shape: after-? + final).
         result = result.replacingOccurrences(
-            of: "\\?\\s*quarter[.!?]*\\s*$", with: "?",
+            of: "\\?[^\\S\\n]*quarter[.!?]*\\s*$", with: "?",
             options: [.regularExpression, .caseInsensitive])
         // "question marks" with punctuation before AND a trailing ? — the engine already
         // half-converted, so the plural here is the command, not the protected noun
         // (which appears mid-prose with a determiner: "the people with question marks" —
         // no punctuation break before, no trailing ?, so the 08-05 plural ruling holds).
         result = result.replacingOccurrences(
-            of: "[.,]\\s*question\\s+marks\\?+\\s*$", with: "?",
+            of: "[.,][^\\S\\n]*question[^\\S\\n]+marks\\?+\\s*$", with: "?",
             options: [.regularExpression, .caseInsensitive])
         // tama/fama/pama both-sides-punctuated = spoken comma (plausible nicknames, so
         // both-sides only — the vocative shape "Hey Tama," has no punctuation before).
         result = result.replacingOccurrences(
-            of: "[.;,]\\s*(?:tama|fama|pama)[.,;]\\s*", with: ", ",
+            of: "[.;,][^\\S\\n]*(?:tama|fama|pama)[.,;][^\\S\\n]*", with: ", ",
+            options: [.regularExpression, .caseInsensitive])
+        // "combo" punctuated on BOTH sides mid-sentence = spoken comma (2026-09-25). Every
+        // such hit in the maintainer's archive is a command (shapes like "a small risk. Combo,
+        // but at the same time", "planning, combo, okay", "…, combo, it's noisy"); no real
+        // "combo" in the archive has that shape. The word after must open a new clause, so a
+        // menu order keeps its word ("the burger, combo, and a drink", "three. Combo, please").
+        result = result.replacingOccurrences(
+            of: "[.;,][^\\S\\n]*combo[.,;][^\\S\\n]+(?=(?:but|so|okay|ok|it|it's|it’s|i|i'm|i’m|we|you|they"
+                + "|that|this|there|then|because|maybe|also)\\b)", with: ", ",
             options: [.regularExpression, .caseInsensitive])
         // "combo" / "pierre" both-sides-punctuated at utterance end = spoken comma/period.
         result = result.replacingOccurrences(
-            of: "[.,;]\\s*combo[.,;]?\\s*$", with: ",",
+            of: "[.,;][^\\S\\n]*combo[.,;]?\\s*$", with: ",",
             options: [.regularExpression, .caseInsensitive])
         result = result.replacingOccurrences(
-            of: "[.,;]\\s*pierre[.,;]?\\s*$", with: ".",
+            of: "[.,;][^\\S\\n]*pierre[.,;]?\\s*$", with: ".",
+            options: [.regularExpression, .caseInsensitive])
+        // 2026-09-24 punctuation pass: mid-sentence comma garble. Checked against every Jun-Sep
+        // corpus take (both hits were spoken commas; an independent listener heard "comma").
+        // "come a" is not grammatical before a clause opener, so no real word is lost.
+        // "come a" (comma + inserted article) after an engine comma and before a clause
+        // opener: "Okay, come a can you open the door" → "Okay, can you open the door".
+        result = result.replacingOccurrences(
+            of: ",[^\\S\\n]+come a[^\\S\\n]+(?=(?:i|we|you|they|do|does|did|can|could|would|should|it|so|and"
+                + "|but|is|are|if|what|how)\\b)", with: ", ",
             options: [.regularExpression, .caseInsensitive])
 
-        // Phoneme-mined final-position garbles (2026-08-20, build/26-08-20-punctuation-
-        // phonemes/FINDINGS.md). All FINAL-position only: each surface form is plausible
+        // Phoneme-mined final-position garbles (2026-08-20 punctuation-phoneme study).
+        // All FINAL-position only: each surface form is plausible
         // prose mid-sentence ("make the question work", "his explanation marks a shift"),
         // but as the dictation's last token after real content it is command-shaped.
         // R5: "explanation mark" — head garble of "exclamation mark" (3 corpus hits).
         result = result.replacingOccurrences(
-            of: "[ ,.]*\\bexplanation[ .]+mark\\b[.!]*\\s*$", with: "!",
+            of: "[ ,.]*\\bexplanation[ .]+mark(?:et)?\\b[.!]*\\s*$", with: "!",
             options: [.regularExpression, .caseInsensitive])
-        // R6: "exclaim" / "exclaim mark" — clipped command (3 corpus hits: "Come by
-        // tomorrow, exclaim.").
+        // R6: "exclaim" / "exclaim mark" — clipped command (3 corpus hits, shaped like
+        // "See you soon, exclaim.").
         result = result.replacingOccurrences(
             of: "[ ,.]*\\bexclaim(?:[ .]+mark)?\\b[.!]*\\s*$", with: "!",
             options: [.regularExpression, .caseInsensitive])
         // R7: "question work" — tail garble of "question mark" (punct-gated, final only).
+        // "question market" (2026-09-24) is the same tail garble; also final-only.
         result = result.replacingOccurrences(
-            of: "[ ,.]*\\bquestion\\s+work\\b[.!?]*\\s*$", with: "?",
+            of: "[ ,.]*\\bquestion[^\\S\\n]+(?:work|market)\\b[.!?]*\\s*$", with: "?",
             options: [.regularExpression, .caseInsensitive])
         // R8: ", appeared." — spoken "period" heard as "appeared" after an engine comma
         // (a comma directly before a bare verb is not grammatical prose, so the shape is
-        // safe to claim in final position).
+        // safe to claim in final position). 2026-09-24: also directly after "etc." ("…the
+        // apples, etc. Appeared."), where no sentence can be ending on its own.
+        // Round 4: the engine's closing period is required, so "Items etc. appeared" (no
+        // period, a real verb continuing the sentence) keeps its word.
         result = result.replacingOccurrences(
-            of: ",\\s+appeared[.]?\\s*$", with: ".",
+            of: ",[^\\S\\n]+appeared[.]?\\s*$", with: ".",
             options: [.regularExpression, .caseInsensitive])
+        result = result.replacingOccurrences(
+            of: "(?<=\\betc[.,])[^\\S\\n]+appeared\\.\\s*$", with: "",
+            options: [.regularExpression, .caseInsensitive])
+        // The final-position garble rules above can leave a new mark right after a break
+        // ("First part new line question market" -> "First part\n?"); settle it again.
+        result = placeMarksAfterLineBreak(result)
         result = capitalizeAfterSentenceEnd(result)
 
         // 9. Lowercase a stranded capital left after a spoken-comma conversion. The
@@ -490,16 +685,16 @@ public struct TextPostProcessor {
         // Since the step-1 comma→period rule was removed (2026-08-21), this pass ALSO sees
         // engine-native ", Capital" — which it handles correctly: only a CLOSED set of
         // discourse/function words (never proper nouns) is lowercased, so an engine comma
-        // before a name or a list ("him, Mark was there", "meetings, Slack, and email") is
+        // before a name or a list ("him, Sam was there", "meetings, Notion, and email") is
         // left exactly as the engine — correctly — punctuated it. Corpus Jul-Aug 2026: ~81
         // stranded capitals, 0 legit casualties in the closed set.
         result = lowercaseStrandedCapitalAfterComma(result)
 
         // 10. Lowercase a mid-CLAUSE spurious capital the engine emitted on a function word
-        // that can never begin a sentence (Parakeet, 2026-08-21: "block something from The
-        // large pool", "points of The clips", "I want To make it"). Distinct from step 9:
+        // that can never begin a sentence (Parakeet, 2026-08-21: "take something from The
+        // large pile", "edges of The tiles", "I want To make it"). Distinct from step 9:
         // this fires between two words (not after a comma), and only for never-openers — so
-        // it can't mistake a missing-period boundary ("…in response to that. Are you able…")
+        // it can't mistake a missing-period boundary ("…in reply to that. Are you able…")
         // for a stray capital, the way lowercasing And/But/So/Then/Are would.
         result = lowercaseSpuriousMidClauseCapital(result)
 
@@ -540,7 +735,7 @@ public struct TextPostProcessor {
     /// And/But/So/Then/Are/Would (which DO open sentences, so a mid-clause capital there is
     /// often a missing period, not a stray capital). Deliberately EXCLUDES single letters
     /// ("A"/"B" option labels), month/name homographs, and auxiliaries that open yes/no
-    /// questions. Corpus-simulated (15k Parakeet raws, 2026-08-21): 40 firings, 0 false
+    /// questions. Corpus-simulated (Parakeet raws, 2026-08-21): 40 firings, 0 false
     /// positives (the lone borderline case was already-malformed input).
     private static let neverSentenceOpeners: Set<String> = [
         "the", "of", "to", "for", "with", "by", "from", "into", "onto", "at", "in",
@@ -674,8 +869,8 @@ public struct TextPostProcessor {
         return .none
     }
 
-    /// Apply Michael's writing style to transcribed text.
-    /// Based on style profiles derived from 172 messages across platforms.
+    /// Apply the chat-message style to transcribed text: casual messages conventionally drop
+    /// the final period and start with a capital.
     /// Only modifies text for messaging apps — email and other apps keep normal punctuation.
     public static func applyStyle(_ text: String, mode: StyleMode,
                                   explicitTrailingPeriod: Bool = false) -> String {
@@ -686,10 +881,10 @@ public struct TextPostProcessor {
         guard !result.isEmpty else { return result }
 
         // Strip trailing period only — mid-sentence periods stay for multi-sentence dictations.
-        // Michael never ends messages with a period (0% across texting platforms).
-        // EXCEPT when he explicitly dictated it (Michael 2026-08-14: "honor dictated"): saying
-        // the word "period" is a deliberate override of his own texting style, and stripping
-        // it reads as "punctuation I said didn't get honored".
+        // Chat messages conventionally end without a period.
+        // EXCEPT when the user explicitly dictated it (product decision 2026-08-14: honor
+        // dictated punctuation): saying the word "period" is a deliberate override of the
+        // chat style, and stripping it reads as "punctuation I said didn't get honored".
         if !explicitTrailingPeriod, result.hasSuffix(".") && !result.hasSuffix("..") {
             let beforeDot = result.dropLast()
             if !beforeDot.isEmpty {
@@ -700,7 +895,7 @@ public struct TextPostProcessor {
             }
         }
 
-        // Capitalize first letter (90%+ across all platforms)
+        // Capitalize first letter
         if let first = result.first, first.isLowercase {
             result = first.uppercased() + result.dropFirst()
         }
@@ -714,14 +909,16 @@ public struct TextPostProcessor {
         // (?<!\.)  — skip the trailing dot of an ellipsis ("..."), so "could... do"
         //            stays lowercase instead of becoming "could... Do".
         // (?<![A-Z]) — skip when the dot follows a single uppercase letter, which is
-        //            typically an acronym end ("U.S.A. next" / "Subs.S.A. essay").
+        //            typically an acronym end ("U.S.A. next" / "Tour.U.K. guide").
         //            Capitalizing would turn the next common word into a fake sentence.
         // (?<![aApP]\.[mM]) — skip the trailing dot of a meridiem abbreviation ("5 p.m.
         //            today" must not become "5 p.m. Today"). In dictation "p.m."/"a.m." is
         //            almost always mid-sentence (a time), so the following word continues
         //            the sentence. Accepted tradeoff: a genuine sentence break right after
         //            "…p.m." is left lowercase — far rarer than the continuation.
-        guard let regex = try? NSRegularExpression(pattern: "(?<!\\.)(?<![A-Z])(?<![aApP]\\.[mM])([.!?])\\s+(\\w)", options: []) else { return text }
+        // (?<!\b[Ee]tc) — same for "etc." (round 4, 2026-09-25): "Items etc. appeared" is one
+        //            sentence; the engine's own capital after "etc." is left as it came.
+        guard let regex = try? NSRegularExpression(pattern: "(?<!\\.)(?<![A-Z])(?<![aApP]\\.[mM])(?<!\\b[Ee]tc)([.!?])\\s+(\\w)", options: []) else { return text }
         let mutable = NSMutableString(string: text)
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
         // Process in reverse so ranges stay valid
@@ -738,7 +935,7 @@ public struct TextPostProcessor {
     /// a pure article or possessive directly before it ("like a colon", "add the comma",
     /// "their period") means the user is talking *about* the thing. Deliberately excludes
     /// demonstratives ("I like that comma and then…" is a plausible genuine command).
-    /// Root cause of the 2026-07-03 login→colon incident: Parakeet garbled "login" into
+    /// Root cause of the 2026-07-03 colon incident: Parakeet garbled a real word into
     /// "colon" inside "like a colon where", and the unguarded standalone rule converted one
     /// recognition error into fake punctuation.
     private static let nounDeterminers: Set<String> = [
@@ -755,12 +952,15 @@ public struct TextPostProcessor {
     /// "What is the question?", "the person in question?".
     static func collapseHalfConvertedQuestionMark(_ text: String) -> String {
         guard let regex = try? NSRegularExpression(
-            pattern: "(?i)(?:^|\\s+)question\\?(?=\\s|$)", options: []) else { return text }
+            pattern: "(?i)(?:^|[^\\S\\n]+|(?<=\\n))question\\?(?=\\s|$)", options: []) else { return text }
         var result = text
         let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
         for match in matches.reversed() {
             guard let range = Range(match.range, in: result) else { continue }
-            let before = result[..<range.lowerBound]
+            // At a line start the words before the dictated break are still the context; the
+            // "?" lands after the break and `placeMarksAfterLineBreak` moves it before it.
+            let before = Substring(String(result[..<range.lowerBound].reversed()
+                .drop(while: { $0 == "\n" }).reversed()))
             // Scan accepts hyphens and BOTH apostrophe forms so "follow-up" and "student’s"
             // are single tokens (round 2: the curly ’ and the hyphen used to stop the scan,
             // defeating the guards below).
@@ -788,8 +988,8 @@ public struct TextPostProcessor {
         return result
     }
 
-    /// Command-word garbles observed 2026-07-14 (glowing-line dictation, MacBook mic —
-    /// recognition garbles, not Bluetooth audio):
+    /// Command-word garbles observed 2026-07-14 (built-in mic — recognition garbles, not
+    /// Bluetooth audio):
     /// - "…? Quark." — spoken "question mark" where the engine already emitted the "?"
     ///   and rendered the leftover as "Quark". Strip the stray word ("quark" as a real
     ///   word directly after a question mark is essentially nonexistent in dictation).
@@ -800,12 +1000,12 @@ public struct TextPostProcessor {
     static func collapseCommandWordGarbles(_ text: String) -> String {
         var result = text
         if let quark = try? NSRegularExpression(
-            pattern: "(?<=\\?)\\s+[Qq]uark(?:\\.|(?=\\s|$))", options: []) {
+            pattern: "(?<=\\?)[^\\S\\n]+[Qq]uark(?:\\.|(?=\\s|$))", options: []) {
             result = quark.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "")
         }
         if let comment = try? NSRegularExpression(
-            pattern: "\\.\\s+[Cc]omment\\.(?=\\s|$)", options: []) {
+            pattern: "\\.[^\\S\\n]+[Cc]omment\\.(?=\\s|$)", options: []) {
             result = comment.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: ",")
         }
@@ -817,7 +1017,7 @@ public struct TextPostProcessor {
     /// Skips conversion when the word is part of a compound like "comma separated", when a
     /// real-word command follows an article/possessive (noun usage), or when a real-word
     /// command opens a multi-word utterance (punctuation with nothing before it is the garble
-    /// signature — see the ": what about…" false conversion, recording 2026-07-03-010745).
+    /// signature — see the ": what about…" false conversion, 2026-07-03).
     private static func convertStandaloneAmbiguous(_ text: String) -> String {
         var result = text
         // `guarded` = the word is a real English word, so position guards apply. The comma
@@ -831,6 +1031,14 @@ public struct TextPostProcessor {
              ["oxford", "serial", "trailing", "inverted", "word", "said"], true),
             ("komma", ",", [], [], false),
             ("kamma", ",", [], [], false),
+            // 2026-09-25: "kama" converts in EVERY position, not only after punctuation
+            // (maintainer ruling: it is not a name in practice). Round 1 of the punctuation
+            // pass read "Hey Kama," and "<name> Kama." as a person's name; they are Parakeet
+            // hearing the spoken word "comma" with no pause before it (3 of 112 raw corpus
+            // hits, all three commands). "Kama Sutra" is the only real phrase and stays.
+            ("kama", ",", ["sutra"], ["the"], false),
+            // Same shape, same non-word family: "going to the market Kaima, so they are right".
+            ("kaima", ",", [], [], false),
             ("kana", ",", [], [], false),
             ("kanna", ",", [], [], false),
             ("kalma", ",", [], [], false),
@@ -876,6 +1084,15 @@ public struct TextPostProcessor {
                 let nextWord = String(afterMatch.prefix(while: { $0.isLetter })).lowercased()
                 if skipBefore.contains(nextWord) { continue }
 
+                // Non-word garbles convert in every position, but a listed preceding word still
+                // marks the real noun ("the Kama river", 2026-09-25 review).
+                if !guarded, !literalPreceders.isEmpty {
+                    let precedingWord = String(result[..<range.lowerBound]
+                        .reversed().drop(while: { $0.isWhitespace })
+                        .prefix(while: { $0.isLetter }).reversed()).lowercased()
+                    if literalPreceders.contains(precedingWord) { continue }
+                }
+
                 // Position guards for real-word commands. Utterance-final means nothing
                 // follows but one optional auto-punct char and whitespace — a digit or a
                 // following sentence does NOT count ("talk about your period. It hurts" is
@@ -893,9 +1110,11 @@ public struct TextPostProcessor {
                 if guarded {
                     let before = result[..<range.lowerBound]
                     let beforeTrimmed = before.reversed().drop(while: { $0.isWhitespace }).reversed()
-                    if beforeTrimmed.isEmpty && !isUtteranceFinal {
+                    // A line start after a dictated break is not the utterance start: the
+                    // break was spoken, so the command after it is too ("new line comma …").
+                    if beforeTrimmed.isEmpty && !isUtteranceFinal && !before.contains("\n") {
                         // Utterance-opening command with more words after it: garble signature
-                        // (": what about…", recording 2026-07-03-010745).
+                        // (": what about…", 2026-07-03).
                         continue
                     }
                     // Accept hyphens and both apostrophe forms so "cooling-off" is one
@@ -946,7 +1165,7 @@ public struct TextPostProcessor {
                         if menstrualVerbs.contains(priorWords.dropLast().last ?? "") { continue }
                     }
                     // Utterance-final articles stay convertible: the live capture
-                    // "…and end with a comma." (recording 2026-04-29-022224) is a spoken
+                    // "…and end with a comma." (2026-04-29 regression) is a spoken
                     // command demo, and "a/an <command>" at the very end reads as command
                     // far more often than noun. "the" and the possessive DETERMINERS that
                     // cannot double as object pronouns (my/your/our/their/its) read as noun
@@ -973,8 +1192,7 @@ public struct TextPostProcessor {
                     // common emphatic "take your time. Period." / "on your own time. Period." /
                     // "give it the time. Period." The rare formal noun "at the appropriate time
                     // period" is left to convert to "…time." (a visible typo, the accepted
-                    // cost — this is Michael's original corpus defect, 3 raws). See
-                    // build/26-08-12-noun-protection/TAXONOMY.ai.md.
+                    // cost — the original corpus defect, 3 raws).
                 }
 
                 // If the next non-space character is whisper auto-punct, consume it —
@@ -1011,7 +1229,28 @@ public struct TextPostProcessor {
                         }
                     }
                 }
-                if let firstNonWS = trailing.first(where: { !$0.isWhitespace }), punctSet.contains(firstNonWS) {
+                // A non-word garble opening the utterance ("Kama let's go") is dropped with the
+                // engine mark after it: a comma has nothing to follow there, and a leading ","
+                // is never what was meant (2026-09-25 review). The next word takes the capital.
+                // Applies to the whole non-word family (kama, komma, kana, …). A dictation that is
+                // ONLY the garble still becomes "," so it matches a correctly heard "Comma."
+                var end = range.upperBound
+                // The engine mark is consumed only on the same line: a dictated break between
+                // them is kept ("new line comma new line comma" kept one break, 2026-09-25).
+                let sameLineMark = trailing.first(where: { !$0.isWhitespace || $0 == "\n" })
+                if let firstNonWS = sameLineMark,
+                   punctSet.contains(firstNonWS) {
+                    end = result.index(after: trailing.firstIndex(of: firstNonWS)!)
+                }
+                let rest = result[end...].drop(while: { $0.isWhitespace })
+                if !guarded, !rest.isEmpty,
+                   result[..<range.lowerBound].allSatisfy({ $0.isWhitespace }) {
+                    let capital = result[range].first?.isUppercase ?? false
+                    result = (capital ? rest.prefix(1).uppercased() : String(rest.prefix(1)))
+                        + rest.dropFirst()
+                    continue
+                }
+                if let firstNonWS = sameLineMark, punctSet.contains(firstNonWS) {
                     let endIdx = trailing.firstIndex(of: firstNonWS)!
                     let extendedRange = replacementRange.lowerBound..<result.index(after: endIdx)
                     result.replaceSubrange(extendedRange, with: replacement)
@@ -1046,9 +1285,47 @@ public struct TextPostProcessor {
         return result
     }
 
+    /// A punctuation mark directly after a spoken line break has no text on its line to
+    /// attach to, and step 5 would delete the break as "space before punctuation" (2026-09-25
+    /// regression: "new line comma" lost the line break). The break was explicitly dictated,
+    /// so it always survives:
+    /// - a comma, semicolon or colon after a break is dropped ("first part new line comma
+    ///   second part" -> "first part\nsecond part"). Its only job is to separate text within
+    ///   a line, the break already separates more strongly, and a line that starts with a
+    ///   comma is never wanted. Moving it before the break would instead add a mark to the
+    ///   previous line that the break order says came after it.
+    /// - a period, question mark or exclamation point after a break moves before it ("new
+    ///   line period" -> "first part.\nSecond part"). It also ends the sentence and sets the
+    ///   capital on the next line, which dropping it would lose.
+    /// With no text before the break (the dictation opens with "new line"), any mark is
+    /// dropped.
+    static func placeMarksAfterLineBreak(_ text: String) -> String {
+        guard text.contains("\n") else { return text }
+        let rules: [(NSRegularExpression?, String)] = [
+            (try? NSRegularExpression(pattern: "(\\n+)[ \\t]*[,;:]+(?!\\d)[ \\t]*"), "$1"),
+            (try? NSRegularExpression(
+                pattern: "(?<=\\S)[ \\t]*(\\n+)[ \\t]*([.?!]+)(?!\\d)[ \\t]*"), "$2$1"),
+            (try? NSRegularExpression(pattern: "(\\n+)[ \\t]*[.?!,;:]+(?!\\d)[ \\t]*"), "$1"),
+        ]
+        // A run such as ",?" after a break: the comma goes, then the question mark moves.
+        var result = text
+        for _ in 0..<4 {
+            let before = result
+            for (re, template) in rules {
+                guard let re else { continue }
+                result = re.stringByReplacingMatches(
+                    in: result, range: NSRange(result.startIndex..., in: result),
+                    withTemplate: template)
+            }
+            if result == before { break }
+        }
+        return result
+    }
+
     private static func fixSpacingAroundPunctuation(_ text: String) -> String {
         var result = text
-        guard let regex = try? NSRegularExpression(pattern: "\\s+([.,?!:;...])", options: []) else { return result }
+        // Never across a line break: every break reaching here was dictated.
+        guard let regex = try? NSRegularExpression(pattern: "[^\\S\\n]+([.,?!:;...])", options: []) else { return result }
         result = regex.stringByReplacingMatches(
             in: result,
             range: NSRange(result.startIndex..., in: result),
@@ -1062,7 +1339,7 @@ public struct TextPostProcessor {
         var result = text
 
         // Remove comma/semicolon/colon before a sentence-ending mark: ",!" → "!", ";." → "."
-        if let regex = try? NSRegularExpression(pattern: "[,;:]\\s*([.!?...])", options: []) {
+        if let regex = try? NSRegularExpression(pattern: "[,;:][^\\S\\n]*([.!?...])", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
             )
@@ -1071,28 +1348,28 @@ public struct TextPostProcessor {
         // Remove period before ! or ?: ".!" → "!". Excludes "." in the character
         // class so 3+ dot ellipses ("So...") survive — sentence-end punct trumps
         // period, but a period inside an ellipsis isn't a "weaker" sentence-ender.
-        if let regex = try? NSRegularExpression(pattern: "\\.\\s*([!?])", options: []) {
+        if let regex = try? NSRegularExpression(pattern: "\\.[^\\S\\n]*([!?])", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
             )
         }
 
         // Remove trailing period after ! or ?: "!." → "!", "?." → "?"
-        if let regex = try? NSRegularExpression(pattern: "([!?])\\s*\\.", options: []) {
+        if let regex = try? NSRegularExpression(pattern: "([!?])[^\\S\\n]*\\.", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
             )
         }
 
         // Remove comma after ! or ?: "!," → "!", "?," → "?"
-        if let regex = try? NSRegularExpression(pattern: "([!?])\\s*,", options: []) {
+        if let regex = try? NSRegularExpression(pattern: "([!?])[^\\S\\n]*,", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1"
             )
         }
 
         // Remove comma after period: ".," → "." (period is stronger than comma)
-        if let regex = try? NSRegularExpression(pattern: "\\.\\s*,", options: []) {
+        if let regex = try? NSRegularExpression(pattern: "\\.[^\\S\\n]*,", options: []) {
             result = regex.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "."
             )
@@ -1103,20 +1380,56 @@ public struct TextPostProcessor {
 
     private static func ensureSpaceAfterPunctuation(_ text: String) -> String {
         var result = text
-        // (?<!\d) skips a period/comma between digits ("4.30", "30,000") so decimals
-        // and thousands separators aren't split into "4. 30".
+        // Comma, ?, !, : and ; (unchanged): (?<!\d) skips a mark between digits ("30,000").
         // (?![A-Za-z]\.) skips when the next char is a letter that's itself followed by
         // another dot — a single-letter abbreviation chain. Case-insensitive so it covers
-        // BOTH uppercase acronyms ("U.S.A.", "Subs.S.A.I") and lowercase abbreviations
+        // BOTH uppercase acronyms ("U.S.A.", "Tour.U.K.I") and lowercase abbreviations
         // ("p.m.", "a.m.", "e.g.", "i.e."). Before this it was `[A-Z]` only, so "5 p.m."
         // was shattered into "5 p. m." and then capitalized to "p. M." (corpus Jul-Aug 2026:
         // 17 of 20 meridiem times corrupted). Keeps abbreviations compact.
-        guard let regex = try? NSRegularExpression(pattern: "(?<!\\d)([.,?!:;])(?![A-Za-z]\\.)(\\w)", options: []) else { return result }
-        result = regex.stringByReplacingMatches(
-            in: result,
-            range: NSRange(result.startIndex..., in: result),
-            withTemplate: "$1 $2"
-        )
+        //
+        // The period (2026-09-25): the old shared rule split every dotted token the engine
+        // wrote correctly ("H.264" → "H. 264", "Frame.io" → "Frame. Io", "config.json").
+        // A period after a letter is now spaced only for sentence glue, "word.Next": a capital
+        // continuation, or the one-letter words "a"/"i". Any other digit or lowercase
+        // continuation after a letter is not spaced, and a period after a digit never is
+        // ("4.30", "H.264", "Frame.io", "Amazon.com"). In the September research replay, most
+        // lowercase continuations were dotted names; the rest were engine garbles or stray
+        // periods before an ordinary word, which a space rarely repaired. No dotted name had
+        // a one-letter lowercase continuation. Rules below are applied in order.
+        let rules = [
+            "(?<![\\d\\n])([,?!:;])(?![A-Za-z]\\.)(\\w)",
+            // After a non-capital letter: any capital that is not followed by a digit or dot
+            // ("file.V2", "Tour.U.K." stay whole), except the dotted-name suffixes the engine
+            // writes in capitals ("Frame.IO", "Node.JS", "Socket.IO"). "end.OK" is spaced.
+            // (?<!\.\p{L}) leaves letters inside a dotted chain to the chain rule.
+            "(?<=\\p{L})(?<!\\p{Lu})(?<!\\.\\p{L})(\\.)(?!(?:IO|JS|NET)\\b)(\\p{Lu})(?![\\d.])",
+            // After a capital: only a capital that starts an ordinary word, so all-caps
+            // tokens stay whole ("ASP.NET", "CLAUDE.MD") while "USA.I think" is spaced.
+            "(?<=\\p{Lu})(?<!\\.\\p{L})(\\.)(\\p{Lu})(?![\\p{Lu}\\d.])",
+            // Inside a dotted chain ("U.S.", "p.m.", "J.R.R."): only a capitalized word
+            // ("U.S.Then" → "U.S. Then"), the pronoun "I" ("p.m.I think") and, after a
+            // lowercase chain, the article "A" ("a.m.A new day"). "U.S.A next", "A.I. is" and
+            // "Frame.i.O" stay whole; an all-caps word after a chain ("U.S.NASA") stays glued.
+            "(?<=\\.\\p{L})(\\.)(\\p{Lu})(?=\\p{Ll})",
+            "(?<=\\.\\p{L})(\\.)(I)(?=[\\s'’]|$)",
+            "(?<=\\.\\p{Ll})(\\.)(A)(?=\\s)",
+            // The lowercase one-letter words, as a whole word: "ended.a new one" is glue.
+            // Trade-off, as before this change: a one-letter extension ending a token
+            // ("libfoo.a", "file.i") is spaced.
+            "(?<=\\p{L})(?<!\\.\\p{L})(\\.)([ai])(?=[\\s'’]|$)",
+            // After anything that is not a word character (an ellipsis dot, a closing quote
+            // or paren): the original rule. Keep it last: its [A-Za-z] is ASCII-only.
+            "(?<![\\w\\n])(\\.)(?![A-Za-z]\\.)(\\w)",
+        ]
+        for pattern in rules {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            result = regex.stringByReplacingMatches(
+                in: result,
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: "$1 $2"
+            )
+        }
         return result
     }
 }

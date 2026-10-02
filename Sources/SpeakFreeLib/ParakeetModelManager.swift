@@ -12,6 +12,7 @@
 //     nvidia/parakeet-tdt-0.6b-* models are CC-BY-4.0 — attribution required. Credit line, e.g.:
 //     "Speech recognition powered by NVIDIA Parakeet (CC-BY-4.0) via FluidAudio (Apache-2.0)."
 
+import CoreML
 import Foundation
 import FluidAudio
 
@@ -87,11 +88,42 @@ public final class ParakeetModelManager {
     /// prior, which under overlapping windows can restore a transient `false` and
     /// permanently unlatch the offline pin (verifier finding, 2026-07-22). The CTC
     /// keyword-spotter fetch (VocabularyBoost setup) routes through here.
-    func withSanctionedDownload<T>(_ op: () async throws -> T) async rethrows -> T {
+    func withSanctionedDownload<T>(_ op: () async throws -> T) async throws -> T {
         try await downloadGate.run {
+            // Offline-only process (agent `transcribe`): run the op with FluidAudio still
+            // pinned offline, so a cached model loads and a missing one fails instead of
+            // downloading. The caller's catch already treats that failure as optional.
+            if Self.networkForbidden { return try await op() }
             DownloadUtils.enforceOffline = false
             defer { DownloadUtils.enforceOffline = true }
-            return try await op()
+            let result = try await op()
+            // Any successful sanctioned fetch means the network works again: let a Silero fetch
+            // that failed earlier this session try once more on the next model load.
+            ParakeetEngine.sileroFetchFailed.value = false
+            return result
+        }
+    }
+
+    // MARK: - Offline-only mode (agent command line)
+
+    /// Set by the agent-facing `speakfree transcribe` command so that no code path in this
+    /// process can open a model download window, even an optional one (the CTC vocabulary
+    /// model). Every place that flips `enforceOffline` off checks this first. Process-wide
+    /// and one-way on purpose: nothing clears it once set.
+    nonisolated(unsafe) public private(set) static var networkForbidden = false
+    public static func forbidNetwork() {
+        networkForbidden = true
+        DownloadUtils.enforceOffline = true
+    }
+
+    /// Test seam only: lets one test exercise the gate without leaving the whole test
+    /// process offline. Production code never calls this.
+    static func allowNetworkForTesting() { networkForbidden = false }
+
+    static func assertNetworkAllowed() throws {
+        if networkForbidden {
+            throw TranscriptionEngineError.modelLoadFailed(
+                "downloads are disabled in offline mode (speakfree transcribe never uses the network)")
         }
     }
 
@@ -294,6 +326,7 @@ public final class ParakeetModelManager {
         progress: @escaping (_ downloaded: Int64, _ total: Int64) -> Void
     ) async throws {
         guard isKnownModelID(modelName) else { return }
+        try Self.assertNetworkAllowed()
         let cacheDir = cacheDirectory(for: modelName)
         do {
             try await ParakeetDirectDownloader.prefetch(
@@ -372,6 +405,7 @@ public final class ParakeetModelManager {
             // of the deliberate download and restore it via `defer`. The gate guarantees we are the
             // sole owner of this window, so no other FluidAudio path (e.g. a `loadFromCache`
             // recovery) can observe `enforceOffline == false` and silently hit the network.
+            try Self.assertNetworkAllowed()
             DownloadUtils.enforceOffline = false
             defer { DownloadUtils.enforceOffline = true }
 
@@ -424,6 +458,7 @@ public final class ParakeetModelManager {
             let start = Date()
             let normalizer = ProgressNormalizer()
             let handler: DownloadUtils.ProgressHandler = { p in progress(normalizer.map(p)) }
+            try Self.assertNetworkAllowed()
             DownloadUtils.enforceOffline = false
             defer { DownloadUtils.enforceOffline = true }
             _ = try await AsrModels.download(version: v, progressHandler: handler)
@@ -460,7 +495,11 @@ public final class ParakeetModelManager {
     /// Hand the returned value to `AsrManager(config:)` + `loadModels(_:)` in the engine (Unit 4).
     /// `AsrModels` is a `Sendable` struct in FluidAudio 0.15.1, so it crosses the actor boundary
     /// cleanly.
-    public func loadDownloadedModels(_ modelName: String) async throws -> AsrModels {
+    ///
+    /// `cpuOnly` loads the same files for the CPU (the first-start stand-in, 2026-09-24). The
+    /// default Neural Engine load passes no configuration at all, exactly as before, so its
+    /// compiled-model cache entry is the one the compile helper and every earlier build used.
+    public func loadDownloadedModels(_ modelName: String, cpuOnly: Bool = false) async throws -> AsrModels {
         // Reject unknown/typo'd/tampered ids up front (see `isKnownModelID`): otherwise a v3 cache
         // load would be attempted for an id the catalog never advertised.
         guard isKnownModelID(modelName) else {
@@ -482,14 +521,20 @@ public final class ParakeetModelManager {
             throw TranscriptionEngineError.modelAssetsMissing(modelName)
         }
 
-        DiagnosticLogger.shared.log("ParakeetModelManager: loading \(modelName) from cache")
+        DiagnosticLogger.shared.log(
+            "ParakeetModelManager: loading \(modelName) from cache\(cpuOnly ? " (CPU only)" : "")")
         do {
             // Route through the single global gate so this load can never run while
             // `ensureDownloaded` has `enforceOffline` flipped false. `enforceOffline` is true here
             // (the gate guarantees no concurrent download owns the false window), so `loadFromCache`
             // cannot silently re-download on a load/compile failure — it surfaces the error instead.
             return try await downloadGate.run {
-                try await AsrModels.loadFromCache(version: v)
+                if cpuOnly {
+                    let config = AsrModels.defaultConfiguration()
+                    config.computeUnits = .cpuOnly
+                    return try await AsrModels.loadFromCache(configuration: config, version: v)
+                }
+                return try await AsrModels.loadFromCache(version: v)
             }
         } catch {
             DiagnosticLogger.shared.log(

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Pure fn-tap reducer for Edit mode (Michael, 2026-08-28). Edit mode is TAP-driven like Toggle:
+/// Pure fn-tap reducer for Edit mode (the maintainer, 2026-08-28). Edit mode is TAP-driven like Toggle:
 /// key-up is ignored (AppDelegate.handleKeyUp), and each fn-tap advances the session through
 /// these states. Extracted as a pure function so the tap semantics are unit-testable without a
 /// window, a recorder, or an AppDelegate — the same reason `TextPipeline.run` was pulled out of

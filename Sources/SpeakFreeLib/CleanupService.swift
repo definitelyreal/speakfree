@@ -22,12 +22,31 @@ public final class CleanupService {
         case haiku
 
         /// Full model IDs (DESIGN.md decision 3 / PLAN item 4).
+        ///
+        /// Checked 2026-09-24 against CLI 2.1.281: all three IDs are in its model catalog (an
+        /// unknown ID makes the CLI print "isn't described by this version's model catalog";
+        /// these do not). Opus moved from `claude-opus-5` to the current `claude-opus-5-5`.
         public var modelID: String {
             switch self {
             case .sonnet: return "claude-sonnet-5"
-            case .opus:   return "claude-opus-5"
+            case .opus:   return "claude-opus-5-5"
             case .haiku:  return "claude-haiku-4-5-20251001"
             }
+        }
+
+        /// The name shown in the window and Settings.
+        public var displayName: String {
+            switch self {
+            case .sonnet: return "Sonnet"
+            case .opus:   return "Opus"
+            case .haiku:  return "Haiku"
+            }
+        }
+
+        /// Lenient parse of a stored value; unknown or nil falls back to Sonnet, the default.
+        public static func resolve(_ raw: String?) -> Model {
+            guard let raw = raw?.lowercased(), let m = Model(rawValue: raw) else { return .sonnet }
+            return m
         }
     }
 
@@ -38,6 +57,54 @@ public final class CleanupService {
         case timedOut                 // both the call and its one retry exceeded the timeout
         case outputTooLarge           // stdout exceeded the byte cap (runaway / non-conforming output)
         case badOutput(SpanEditParseError)  // stdout was not the contracted JSON array
+        case notLoggedIn              // the CLI answered "Not logged in"
+        case usageLimit(String)       // the account hit a usage limit (message carries the reset time)
+        case cliError(String)         // the CLI exited non-zero with some other message
+        case cancelled                // cleanup was turned off (or the session ended) mid-call
+
+        /// True when every further call in this session would fail the same way, so the session
+        /// stops sending instead of repeating a doomed call per paragraph.
+        public var isSessionWide: Bool {
+            switch self {
+            case .executableNotFound, .preflightFailed, .notLoggedIn, .usageLimit: return true
+            default: return false
+            }
+        }
+
+        /// Plain-English cause for the window (failures are visible and specific, never silent).
+        public var userMessage: String {
+            switch self {
+            case .executableNotFound:
+                return "Claude command line tool not found"
+            case .preflightFailed(let why):
+                return "Claude command line tool did not start (\(why))"
+            case .launchFailed:
+                return "Claude could not be started"
+            case .timedOut:
+                return "Claude timed out"
+            case .outputTooLarge, .badOutput:
+                return "Claude returned something that was not a list of fixes"
+            case .notLoggedIn:
+                return "not logged in to Claude"
+            case .usageLimit(let message):
+                return message.isEmpty ? "Claude usage limit reached" : message
+            case .cliError(let message):
+                return message.isEmpty ? "Claude reported an error" : "Claude: \(message)"
+            case .cancelled:
+                return "cleanup was turned off"
+            }
+        }
+
+        /// Classify a non-zero CLI exit from its stdout (the CLI prints errors on stdout, exit 1;
+        /// observed 2026-09-24 on CLI 2.1.281).
+        static func classifyFailure(stdout: String) -> CleanupError {
+            let line = stdout.split(whereSeparator: \.isNewline).first.map(String.init)?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            let lower = line.lowercased()
+            if lower.contains("not logged in") || lower.contains("/login") { return .notLoggedIn }
+            if lower.contains("limit") { return .usageLimit(String(line.prefix(120))) }
+            return .cliError(String(line.prefix(120)))
+        }
     }
 
     // MARK: - Confinement flags (RECORDED per PLAN item 4)
@@ -67,7 +134,7 @@ public final class CleanupService {
     //
     // Deliberately NOT used:
     //   --bare  — would be the strongest confinement, but it forces auth to ANTHROPIC_API_KEY /
-    //             apiKeyHelper ONLY ("OAuth and keychain are never read"), which breaks Michael's
+    //             apiKeyHelper ONLY ("OAuth and keychain are never read"), which breaks the maintainer's
     //             subscription auth AND would violate the estate no-API-key rule. --safe-mode gives
     //             the same customization kill without touching auth, so it is the right tool here.
     static let baseFlags = ["--print", "--safe-mode", "--no-session-persistence",
@@ -130,19 +197,19 @@ public final class CleanupService {
     /// directory (no inherited PATH), TERM=dumb (non-interactive). Nothing else is inherited — no
     /// ANTHROPIC_API_KEY, no shell rc exports, no XDG overrides.
     ///
-    /// OPEN — Phase 2 live-preflight (M9/M25): a probe on 2026-08-28 showed the real CLI reporting
-    /// "Not logged in" when launched under exactly this stripped env, while it authed under a full
-    /// env. That probe ran INSIDE a Claude Code session, so the full-env success was likely
-    /// piggybacking on the parent session's auth relay (CLAUDE_CODE_MESSAGING_SOCKET), which the
-    /// standalone speakfree process will NOT have — so the result is inconclusive, not proof either
-    /// way. The Phase-1 preflight here only runs `--version`, which does NOT exercise auth. Phase 2's
-    /// app-level preflight MUST make a trivial REAL call from the actual (non-Claude-Code) process
-    /// and, if it 401s, widen this env to whatever the credential read needs. Do not assume this env
-    /// authenticates until that check passes from the app.
-    static func sanitizedEnvironment(executablePath: String, home: String) -> [String: String] {
+    /// RESOLVED 2026-09-24 (CLI 2.1.281, run with `env -i` so nothing leaked from a parent
+    /// session): with only HOME/PATH/TERM the CLI answers "Not logged in". It reads the
+    /// subscription credential from the login Keychain through `/usr/bin/security`, keyed by the
+    /// account name, so it also needs USER and LOGNAME and `/usr/bin:/bin` on PATH. With those five
+    /// variables it gave an authenticated answer. Still nothing else is inherited: no API key, no shell rc exports, no
+    /// CLAUDE_CONFIG_DIR, no proxy settings.
+    static func sanitizedEnvironment(executablePath: String, home: String,
+                                     user: String = NSUserName()) -> [String: String] {
         [
             "HOME": home,
-            "PATH": (executablePath as NSString).deletingLastPathComponent,
+            "USER": user,
+            "LOGNAME": user,
+            "PATH": (executablePath as NSString).deletingLastPathComponent + ":/usr/bin:/bin",
             "TERM": "dumb",
         ]
     }
@@ -173,6 +240,14 @@ public final class CleanupService {
         through as Kama / Gamma / comment should become "," ; a spoken "period" that came through as \
         "paired" should become "." ; a spoken "colon" that came through as "column" should become ":" \
         — only when the context makes the punctuation intent clear.
+        - SELF-CORRECTIONS ARE THE ONE EXCEPTION to "repair only": when the speaker obviously \
+        corrected themselves, delete the false start and the correction marker ("no wait", \
+        "I mean", "sorry", "actually") and keep only the correction. Example: PIPELINE "Meet \
+        Tuesday no wait Wednesday." gives [{"find": "Tuesday no wait Wednesday", "replace": \
+        "Wednesday", "reason": "self-correction"}]. Adding commas around the marker is wrong; it \
+        keeps the false start.
+        - NEVER change the meaning: never add or remove a negation (not, never, no, don't) except \
+        the "no" inside an obvious self-correction.
         - "find" MUST be an exact, unique substring of the PIPELINE text. If a correction cannot be \
         anchored uniquely, omit it.
         - "replace" MUST NOT contain newlines.
@@ -190,9 +265,13 @@ public final class CleanupService {
     /// Clean up one segment. Never throws — returns a Result so the caller (the reducer) can settle
     /// a segment to `.failed` and offer retry without unwinding. Runs the confined subprocess with a
     /// bounded timeout and exactly one retry; on success parses stdout into span edits.
-    public func cleanup(raw: String, pipelineText: String, model: Model) async
+    public func cleanup(raw: String, pipelineText: String, model: Model,
+                        cancellation: CleanupCancellation = CleanupCancellation()) async
         -> Result<[SpanEdit], CleanupError>
     {
+        // Cloud-off is immediate: a cancelled request never launches anything,
+        // not even the local `--version` preflight.
+        if cancellation.isCancelled { return .failure(.cancelled) }
         guard let exe = resolvedExecutable() else {
             return .failure(.executableNotFound)
         }
@@ -201,10 +280,11 @@ public final class CleanupService {
 
         // Preflight `--version` once per instance, from the SAME sanitized environment the real
         // call uses — an env too minimal to launch the CLI fails here, loudly, instead of silently
-        // failing every segment (M7/C6).
+        // failing every segment (M7/C6). It is local: `--version` makes no network call.
         if let error = await preflightIfNeeded(exe: exe, env: env) {
             return .failure(error)
         }
+        if cancellation.isCancelled { return .failure(.cancelled) }
 
         let prompt = Self.buildPrompt(raw: raw, pipelineText: pipelineText)
         let args = Self.baseFlags + ["--model", model.modelID]
@@ -216,9 +296,15 @@ public final class CleanupService {
 
         // Attempt + one retry on timeout only (a bad-output or launch error will not fix itself).
         for attempt in 0..<2 {
+            // No retry after cloud-off: the check sits before every launch.
+            if cancellation.isCancelled { return .failure(.cancelled) }
             let outcome = await runOnce(exe: exe, args: args, env: env, cwd: cwd,
-                                        stdin: prompt, timeout: timeout)
+                                        stdin: prompt, timeout: timeout, cancellation: cancellation)
+            if cancellation.isCancelled { return .failure(.cancelled) }
             switch outcome {
+            case .failedExit(let data):
+                // swiftlint:disable:next optional_data_string_conversion
+                return .failure(CleanupError.classifyFailure(stdout: String(decoding: data, as: UTF8.self)))
             case .completed(let data):
                 // Preserve replacement characters for malformed subprocess UTF-8 before parsing.
                 // swiftlint:disable:next optional_data_string_conversion
@@ -244,15 +330,20 @@ public final class CleanupService {
         preflightLock.lock()
         let cached = preflightPassed
         preflightLock.unlock()
-        if let cached = cached { return cached ? nil : .preflightFailed("cached failure") }
+        // Only success is cached: a CLI installed or repaired after a failure is picked up on the
+        // next call instead of staying "failed" for the rest of the launch.
+        if cached == true { return nil }
 
         let cwd = Self.makeScratchDir()
         defer { try? FileManager.default.removeItem(at: cwd) }
         let outcome = await runOnce(exe: exe, args: ["--version"], env: env, cwd: cwd,
-                                    stdin: nil, timeout: min(timeout, 15))
+                                    stdin: nil, timeout: min(timeout, 15),
+                                    cancellation: CleanupCancellation())
         let ok: Bool
         var error: CleanupError?
         switch outcome {
+        case .failedExit:
+            ok = false; error = .preflightFailed("--version failed")
         case .completed(let data):
             // A working CLI prints a version line and exits 0; treat any non-empty stdout as pass.
             ok = !data.isEmpty
@@ -274,6 +365,7 @@ public final class CleanupService {
 
     private enum RunOutcome {
         case completed(Data)
+        case failedExit(Data)   // non-zero exit; stdout carries the CLI's message
         case timedOut
         case launchFailed(String)
         case outputTooLarge
@@ -288,11 +380,16 @@ public final class CleanupService {
     }
 
     private func runOnce(exe: String, args: [String], env: [String: String], cwd: URL,
-                         stdin: String?, timeout: TimeInterval) async -> RunOutcome {
+                         stdin: String?, timeout: TimeInterval,
+                         cancellation: CleanupCancellation) async -> RunOutcome {
+        // A dedicated thread, not the global pool (2026-09-23): runBlocking parks for the whole
+        // call, and a saturated width-limited pool delayed it past the timeout (the flaky
+        // "--version timed out" under load).
         await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
+            Self.runOnDedicatedThread {
                 continuation.resume(returning: self.runBlocking(
-                    exe: exe, args: args, env: env, cwd: cwd, stdin: stdin, timeout: timeout))
+                    exe: exe, args: args, env: env, cwd: cwd, stdin: stdin, timeout: timeout,
+                    cancellation: cancellation))
             }
         }
     }
@@ -320,9 +417,20 @@ public final class CleanupService {
         }
     }
 
+    private static func runOnDedicatedThread(_ work: @escaping () -> Void) {
+        let thread = Thread(block: work)
+        thread.qualityOfService = .userInitiated
+        thread.start()
+    }
+
     private func runBlocking(exe: String, args: [String], env: [String: String], cwd: URL,
-                             stdin: String?, timeout: TimeInterval) -> RunOutcome {
+                             stdin: String?, timeout: TimeInterval,
+                             cancellation: CleanupCancellation) -> RunOutcome {
         let process = Process()
+        // Exit arrives via Foundation's own process monitor, never a pool thread parked in
+        // waitUntilExit. Set before run() so an instant exit cannot be missed.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         process.executableURL = URL(fileURLWithPath: exe)
         process.arguments = args
         process.currentDirectoryURL = cwd
@@ -338,6 +446,17 @@ public final class CleanupService {
         } catch {
             return .launchFailed(error.localizedDescription)
         }
+        // Cloud-off mid-call: SIGTERM now, SIGKILL if it is still running half a second later.
+        // `isRunning` (not a second wait on `exited`) decides the KILL, so a pid that already
+        // exited and was reused is never signalled.
+        cancellation.onCancel {
+            guard process.isRunning else { return }
+            process.terminate()
+            Self.runOnDedicatedThread {
+                Thread.sleep(forTimeInterval: 0.5)
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+        }
 
         // Feed the prompt then close stdin so the CLI sees EOF and produces output.
         if let stdin = stdin {
@@ -349,7 +468,7 @@ public final class CleanupService {
         // never deadlock the pipe while we wait on exit.
         let collector = OutputCollector(cap: maxOutputBytes)
         let readDone = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .userInitiated).async {
+        Self.runOnDedicatedThread {
             let handle = outPipe.fileHandleForReading
             while true {
                 let chunk = handle.availableData
@@ -358,22 +477,17 @@ public final class CleanupService {
             }
             readDone.signal()
         }
-        DispatchQueue.global(qos: .utility).async {
+        Self.runOnDedicatedThread {
             _ = errPipe.fileHandleForReading.readDataToEndOfFile()
         }
 
         // Wait for exit with a wall-clock cap. On timeout: SIGTERM, brief grace, then SIGKILL — a
         // stalled CLI (observed 70s tails) must never hold the caller.
-        let exited = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .userInitiated).async {
-            process.waitUntilExit()
-            exited.signal()
-        }
         if exited.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
             let pid = process.processIdentifier
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-                if process.isRunning { kill(pid, SIGKILL) }
+            Self.runOnDedicatedThread {
+                if exited.wait(timeout: .now() + 0.5) == .timedOut { kill(pid, SIGKILL) }
             }
             _ = readDone.wait(timeout: .now() + 1)
             return .timedOut
@@ -382,6 +496,44 @@ public final class CleanupService {
 
         let (data, overflowed) = collector.snapshot
         if overflowed { return .outputTooLarge }
+        if process.terminationStatus != 0 { return .failedExit(data) }
         return .completed(data)
+    }
+}
+
+/// Cancels one cleanup request: a request cancelled before launch never launches; one cancelled
+/// mid-call has its process terminated and is never retried (cloud-off takes
+/// effect immediately). Thread-safe; handlers registered after cancellation run at once.
+public final class CleanupCancellation {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var handlers: [() -> Void] = []
+
+    public init() {}
+
+    public var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+
+    public func cancel() {
+        lock.lock()
+        guard !cancelled else { lock.unlock(); return }
+        cancelled = true
+        let toRun = handlers
+        handlers = []
+        lock.unlock()
+        toRun.forEach { $0() }
+    }
+
+    func onCancel(_ handler: @escaping () -> Void) {
+        lock.lock()
+        if cancelled {
+            lock.unlock()
+            handler()
+            return
+        }
+        handlers.append(handler)
+        lock.unlock()
     }
 }

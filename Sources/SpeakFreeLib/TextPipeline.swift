@@ -180,8 +180,8 @@ public enum TextPipeline {
         let processed = (input.punctuationMode == .off)
             ? stripped
             : TextPostProcessor.process(stripped, hybrid: guarded)
-        // An explicitly dictated final "period" survives the texting-style strip (Michael
-        // 2026-08-14: "honor dictated"). Detected on the pre-substitution text — afterwards a
+        // An explicitly dictated final "period" survives the texting-style strip (product
+        // decision 2026-08-14: honor dictated punctuation). Detected on the pre-substitution text — afterwards a
         // dictated "." is indistinguishable from the engine's auto-punctuation.
         let dictatedPeriod = input.punctuationMode != .off
             && TextPostProcessor.endsWithSpokenPeriodCommand(stripped)
@@ -203,16 +203,16 @@ public enum TextPipeline {
                                                 screenText: input.screenContextText,
                                                 isRealWord: isRealWord)
         if corrected != preScreen {
-            // Every screen-driven rewrite is LOGGED (Michael 2026-07-25: "are we
-            // propagating slop based on what's on the screen?") — changed token
+            // Every screen-driven rewrite is LOGGED (2026-07-25 design review: screen text
+            // must never silently propagate errors into the transcript) — changed token
             // pairs only, never full transcript content.
             let a = preScreen.split(separator: " "), b = corrected.split(separator: " ")
             let changes = zip(a, b).filter { $0 != $1 }
                 .map { "\($0)→\($1)" }.joined(separator: ", ")
             DiagnosticLogger.shared.log("ScreenNameCorrector: rewrote [\(changes)]")
         }
-        // Mid-sentence insertion must not start with a capital (Michael 2026-06-11:
-        // "I really want it to be lowercase if I'm in the middle of the sentence").
+        // Mid-sentence insertion must not start with a capital (product decision 2026-06-11:
+        // text inserted in the middle of a sentence continues in lowercase).
         // Whisper sentence-cases every utterance; when the cursor context shows we're
         // continuing a sentence, undo that leading capital — glossary names, "I",
         // all-caps, and internal-caps words keep their case.
@@ -398,7 +398,7 @@ public enum TextPipeline {
     }
 
     /// Strip Whisper's pause ellipses. Whisper renders hesitation pauses as "..." (or "…")
-    /// attached to the preceding word — "make it, and... If you think" — and capitalizes the
+    /// attached to the preceding word — "join us, and... If you think" — and capitalizes the
     /// word that follows. The old standalone-only rule (`(?:^|\s)\.\.\.(?:\s|$)`) required
     /// whitespace BEFORE the dots, so it never fired on real output.
     ///

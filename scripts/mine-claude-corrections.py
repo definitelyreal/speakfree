@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # Claude · 2026-08-21 · Session: 2ac29c26-0aed-4f1e-839a-ee90d216d795
-"""Mine correction pairs from Michael's Claude Code inputs.
+"""Mine correction pairs from your own Claude Code inputs.
 
 Both sides of every correction already exist on disk, captured by systems that
 were built for other reasons:
 
   INSERTED  ~/.config/speakfree/recordings/recording-*.txt      what speakfree typed
             (+ .meta.json: targetApp bundle id, UTC date, duration)
-  SENT      ~/.claude/projects/*/<session>.jsonl                what he actually sent
+  SENT      ~/.claude/projects/*/<session>.jsonl                what was actually sent
             (user-role messages, UTC timestamps)
 
 For recordings whose targetApp is a Claude surface, this script finds the sent
@@ -15,15 +15,15 @@ user message that near-matches the inserted text (timestamp window + token
 overlap), word-diffs inserted-vs-sent, and emits correction pairs
 (original span -> corrected span) with full provenance.
 
-Ground rules (Michael's ruling 2026-08-21):
+Ground rules:
   * A LACK of correction is NEVER approval — identical matches emit nothing.
   * An explicit correction is ALWAYS a signpost — every divergence is emitted.
   * NOTHING here auto-applies. Output is a reviewable JSONL; pairs go through
-    the review-gate philosophy (the June CorrectionMonitor auto-apply produced
-    the "I Will" bug). This script reads two archives and writes one file.
+    the review-gate philosophy (an earlier auto-apply corrector produced a
+    capitalization bug). This script reads two archives and writes one file.
 
-Output lands in build/corrections/ (gitignored — the repo is public and the
-pairs quote Michael's messages; they must never be committed).
+Output lands in build/corrections/ (gitignored: the repo is public and the
+pairs quote your own messages; they must never be committed).
 
 Known limitation: only Claude Code CLI sessions leave local transcripts.
 Dictations sent to the Claude desktop/web app have no local SENT side and will
@@ -32,46 +32,46 @@ report "no matching message" — that is a surface gap, not a matcher failure.
 Usage:
   python3 scripts/mine-claude-corrections.py                     # last 30 days
   python3 scripts/mine-claude-corrections.py --days 90
-  python3 scripts/mine-claude-corrections.py --validate 2026-08-21-123806-D943539E
+  python3 scripts/mine-claude-corrections.py --validate 2026-01-15-093000-0A1B2C3D
   python3 scripts/mine-claude-corrections.py --self-test         # no disk reads
 
-Designed to generalize (2026-08-21 personalization direction): all paths are
-parameterized, the JSONL schema is documented below, and nothing assumes
-Michael-specific vocabulary. Schema per output line:
+Designed to generalize: all paths are parameterized, the JSONL schema is
+documented below, and nothing assumes user-specific vocabulary. Schema per
+output line (values are invented examples):
 
   {
-    "recording_id":  "2026-08-21-123806-D943539E",
+    "recording_id":  "2026-01-15-093000-0A1B2C3D",
     "recording_wav": "/abs/path/recording-....wav",
     "target_app":    "com.googlecode.iterm2",
-    "recording_utc": "2026-08-21T19:38:06Z",
+    "recording_utc": "2026-01-15T17:30:00Z",
     "duration_s":    12.4,
-    "session":       "98484c82-....jsonl session id",
-    "project_dir":   "-Users-...-speakfree",
-    "message_uuid":  "d086058a-...",
-    "message_utc":   "2026-08-21T19:39:06.425Z",
+    "session":       "<session id from the .jsonl file name>",
+    "project_dir":   "-Users-example-project",
+    "message_uuid":  "00000000-0000-0000-0000-000000000000",
+    "message_utc":   "2026-01-15T17:31:00.000Z",
     "match_coverage": 0.83,          # fraction of inserted tokens aligned
     "utterance_aligned": true,       # coverage >= HIGH_COVERAGE and no long insert/delete
     "confidence": "high" | "low",    # record has >= 1 high-confidence pair
     "corrections": [
       { "kind": "word-sub" | "case-only" | "punct-only" | "punct-command"
                 | "insert" | "delete",
-        "original": "Airtable",             # inserted span ("" for insert)
-        "corrected": "Fable",               # sent span ("" for delete)
-        "plausibility": 0.615,              # word-sub only: could the sent span be a
+        "original": "doctor",               # inserted span ("" for insert)
+        "corrected": "Docker",              # sent span ("" for delete)
+        "plausibility": 0.857,              # word-sub only: could the sent span be a
                                             # transcription of the same sound? (0..1)
         "confidence": "high" | "low",
-        "before": "want to start a",        # up to CONTEXT_TOKENS of context
-        "after": "builder in the dev" }
+        "before": "need to start a",        # up to CONTEXT_TOKENS of context
+        "after": "container in the test" }
     ]
   }
 
-Confidence (Michael's constraint, 2026-08-21): a pair is a TRANSCRIPTION label only
-when the sent text could plausibly be a transcription of what he said. Casing-only
+Confidence: a pair is a TRANSCRIPTION label only when the sent text could
+plausibly be a transcription of what was said. Casing-only
 and punctuation-only edits inside otherwise identical text qualify; so does a
 spoken-punctuation command realized as its glyph ("question mark" -> "?"); a word
 substitution qualifies only when it is phonetically close to what was typed
-(Airtable -> Fable yes; fleet -> "the three Macs" no, that is a content edit).
-Added or reordered sentences mean he was editing, not correcting, so the whole
+(doctor -> Docker yes; cluster -> "the build servers" no, that is a content edit).
+Added or reordered sentences mean the user was editing, not correcting, so the whole
 utterance must align (HIGH_COVERAGE, no insert/delete longer than MAX_EDIT_TOKENS)
 before any of its pairs can be high-confidence. Low-confidence pairs are still
 emitted (an explicit correction is always a signpost) but tagged, and
@@ -116,7 +116,7 @@ CLAUDE_SURFACE_SUBSTRINGS = ("claude", "anthropic", "cursor", "windsurf")
 MIN_INSERTED_TOKENS = 4       # too short to match reliably below this
 MIN_COVERAGE = 0.5            # fraction of inserted tokens that must align
 WINDOW_BEFORE_S = 60          # message may predate the recording slightly (clock skew)
-WINDOW_AFTER_S = 180          # ±3 min per spec: he edits, then sends
+WINDOW_AFTER_S = 180          # ±3 min per spec: the user edits, then sends
 CONTEXT_TOKENS = 5
 
 # High-confidence gate (see module docstring)
@@ -158,7 +158,7 @@ def parse_iso_utc(s):
 
 
 def parse_filename_ts_local(ts):
-    """'2026-08-21-123806' (local wall clock) -> aware UTC datetime."""
+    """'2026-01-15-093000' (local wall clock) -> aware UTC datetime."""
     try:
         naive = dt.datetime.strptime(ts, "%Y-%m-%d-%H%M%S")
     except ValueError:
@@ -361,8 +361,8 @@ def classify(orig_raw, corr_raw):
 
 
 def phonetic_key(letters):
-    """Cheap grapheme->sound folding, no external deps: enough to rank 'airtable'
-    next to 'fable' and far from 'threemacs'. Not a real G2P; the raw-letter
+    """Cheap grapheme->sound folding, no external deps: enough to rank 'doctor'
+    next to 'docker' and far from 'thebuildservers'. Not a real G2P; the raw-letter
     ratio is taken alongside it so neither view alone decides."""
     s = letters
     for a, b in (("ph", "f"), ("ck", "k"), ("qu", "kw"), ("wh", "w"), ("wr", "r"),
@@ -423,7 +423,7 @@ def grade(pairs, coverage):
 
 def diff_pairs(ins_raw, ins_norm, sent_raw, sent_norm, sm):
     """Walk opcodes inside the aligned region; every divergence becomes a pair.
-    The sent message's unmatched prefix/suffix (text he typed around the
+    The sent message's unmatched prefix/suffix (text the user typed around the
     dictation) is NOT a correction and is excluded."""
     blocks = [b for b in sm.get_matching_blocks() if b.size > 0]
     if not blocks:
@@ -438,9 +438,9 @@ def diff_pairs(ins_raw, ins_norm, sent_raw, sent_norm, sm):
         # keep only edits inside the aligned span (with the inserted side's
         # own head/tail included — dropped leading/trailing words are real)
         if a1 == a2 and a2 <= lo_a and b2 <= lo_b:
-            continue      # pure insert before alignment = his surrounding prose
+            continue      # pure insert before alignment = surrounding typed prose
         if a1 == a2 and a1 >= hi_a and b1 >= hi_b:
-            continue      # pure insert after alignment = his surrounding prose
+            continue      # pure insert after alignment = surrounding typed prose
         orig = ins_raw[a1:a2]
         corr = sent_raw[b1:b2]
         pair = {
@@ -490,15 +490,15 @@ def self_test():
         if not cond:
             failures.append(name)
 
-    now = dt.datetime(2026, 8, 21, 19, 38, 6, tzinfo=dt.timezone.utc)
+    now = dt.datetime(2026, 1, 15, 17, 30, 0, tzinfo=dt.timezone.utc)
     rec = {"id": "test", "utc": now, "duration": 10.0,
-           "text": "Doesn't it mean that I want to start a Airtable builder "
-                   "in the dev account and be talking to a question mark?"}
-    sent_pos = {"text": "Doesn't it mean that I want to start a Fable builder "
-                        "in the dev account and be talking to a ?",
+           "text": "Does this mean that I need to start a doctor container "
+                   "in the test account and then wait for a question mark?"}
+    sent_pos = {"text": "Does this mean that I need to start a Docker container "
+                        "in the test account and then wait for a ?",
                 "utc": now + dt.timedelta(seconds=45),
                 "session": "s", "project": "p", "uuid": "u"}
-    sent_neg = {"text": "Completely unrelated message about the fleet deploy "
+    sent_neg = {"text": "Completely unrelated message about the staging deploy "
                         "scripts and the release checklist for tomorrow",
                 "utc": now + dt.timedelta(seconds=50),
                 "session": "s", "project": "p", "uuid": "u2"}
@@ -506,14 +506,14 @@ def self_test():
     sent_exact = dict(sent_pos, text=rec["text"])
 
     print("self-test:")
-    # positive control: the known Airtable->Fable shape is recovered
+    # positive control: the doctor->Docker shape is recovered
     m = best_match(rec, [sent_neg, sent_pos])
     check("matches the corrected message", m is not None and m["msg"] is sent_pos)
     if m:
         pairs = diff_pairs(m["ins"][0], m["ins"][1], m["sent"][0], m["sent"][1], m["sm"])
         subs = [p for p in pairs if p["kind"] == "word-sub"]
-        check("recovers Airtable->Fable pair",
-              any("Airtable" in p["original"] and "Fable" in p["corrected"] for p in subs))
+        check("recovers doctor->Docker pair",
+              any("doctor" in p["original"] and "Docker" in p["corrected"] for p in subs))
     # negative control: unrelated text must not match
     check("rejects unrelated message", best_match(rec, [sent_neg]) is None)
     # window control: same text outside +-window must not match
@@ -531,7 +531,7 @@ def self_test():
           classify(["question", "mark?"], ["?"]) == "punct-command")
     check("classify exclamation park -> !",
           classify(["exclamation", "park"], ["!"]) == "punct-command")
-    # surrounding prose: text he typed before/after the dictation is not a
+    # surrounding prose: text the user typed before/after the dictation is not a
     # correction (the prefix case was a real bug: a2 < lo_a never held at lo_a=0)
     sent_wrapped = dict(sent_pos, text="Quick note first. " + rec["text"]
                         + " Also please run the suite.")
@@ -540,10 +540,10 @@ def self_test():
           m is not None and not diff_pairs(m["ins"][0], m["ins"][1],
                                            m["sent"][0], m["sent"][1], m["sm"]))
     # confidence gate
-    check("Airtable->Fable is phonetically plausible",
-          plausibility("Airtable", "Fable") >= MIN_PLAUSIBILITY)
+    check("doctor->Docker is phonetically plausible",
+          plausibility("doctor", "Docker") >= MIN_PLAUSIBILITY)
     check("content edit is NOT plausible",
-          plausibility("fleet", "the three Macs") < MIN_PLAUSIBILITY)
+          plausibility("cluster", "the build servers") < MIN_PLAUSIBILITY)
     check("coming on -> comma I'm is plausible",
           plausibility("coming on", "comma I'm") >= MIN_PLAUSIBILITY)
     m = best_match(rec, [sent_pos])
@@ -558,9 +558,9 @@ def self_test():
         check("every positive-control pair is high",
               all(p["confidence"] == "high" for p in pairs))
     # a long insertion = editing: the whole record drops to low even though the
-    # Airtable->Fable pair is still present and plausible
+    # doctor->Docker pair is still present and plausible
     sent_edited = dict(sent_pos, text=sent_pos["text"].replace(
-        "in the dev account", "in the dev account because the old one is gone now"))
+        "in the test account", "in the test account because the old one is gone now"))
     m = best_match(rec, [sent_edited])
     check("edited-utterance fixture matched", m is not None)
     if m:
@@ -573,20 +573,20 @@ def self_test():
     # phonetic one beside it stays high (own fixture: 34 tokens, 2 unmatched, so
     # the record clears HIGH_COVERAGE with both edits present)
     rec_mixed = {"id": "test2", "utc": now, "duration": 10.0,
-                 "text": "Okay so for the next step I want you to open the Airtable "
-                         "project and check whether the fleet deploy script still "
-                         "restarts all three machines after the build finishes comma "
+                 "text": "Okay so for the next step I want you to open the doctor "
+                         "project and check whether the staging deploy script still "
+                         "restarts all four workers after the build finishes comma "
                          "then report back"}
     sent_mixed = dict(sent_pos, text=rec_mixed["text"]
-                      .replace("Airtable", "Fable").replace("restarts", "relaunches"))
+                      .replace("doctor", "Docker").replace("restarts", "relaunches"))
     m = best_match(rec_mixed, [sent_mixed])
     check("mixed-record fixture matched", m is not None)
     if m:
         pairs = diff_pairs(m["ins"][0], m["ins"][1], m["sent"][0], m["sent"][1], m["sm"])
         aligned, _ = grade(pairs, m["coverage"])
         by_orig = {p["original"]: p["confidence"] for p in pairs}
-        check("mixed record: Airtable high, content sub low",
-              aligned and by_orig.get("Airtable") == "high"
+        check("mixed record: doctor high, content sub low",
+              aligned and by_orig.get("doctor") == "high"
               and by_orig.get("restarts") == "low")
     if failures:
         sys.exit("self-test FAILED: %s" % ", ".join(failures))

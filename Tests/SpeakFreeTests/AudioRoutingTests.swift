@@ -135,7 +135,7 @@ final class AudioRoutingTests: XCTestCase {
     // MARK: - Effective capture device (default-pin rule, 2026-08-12)
 
     /// THE rule speakfree captures by: an explicit pin wins; otherwise the built-in mic.
-    /// Michael's ruling 2026-08-12 — "we need a way to steer people away from AirPods.
+    /// The maintainer's ruling 2026-08-12 — "we need a way to steer people away from AirPods.
     /// I guess we could just have the default be pinned to the Mac recording."
     func testExplicitPinAlwaysWinsOverTheBuiltInDefault() {
         XCTAssertEqual(

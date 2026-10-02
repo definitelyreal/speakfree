@@ -19,8 +19,8 @@ final class RecordingsUIRenderTests: XCTestCase {
 
     private enum SnapshotFailure: Error { case invalidSize, bitmapUnavailable, pngUnavailable }
 
-    private let recordingCount = 18_710
-    private let artifactCount = 76_144
+    private let recordingCount = 12_000
+    private let artifactCount = 48_000
     private let sampleFolderPath = "/Users/preview/Library/Application Support/SpeakFree UI Test/recordings"
 
     func testNoticeCentersFolderButtonByDefault() {
@@ -116,7 +116,7 @@ final class RecordingsUIRenderTests: XCTestCase {
         try withIsolatedOutput { output, _ in
             let phases: [RecordingRemoval.Progress] = [
                 .init(phase: .preparing, completed: 0, total: 0, elapsedSeconds: 0),
-                .init(phase: .moving, completed: 38_072, total: artifactCount, elapsedSeconds: 2),
+                .init(phase: .moving, completed: 24_000, total: artifactCount, elapsedSeconds: 2),
                 .init(phase: .finishing, completed: artifactCount, total: artifactCount, elapsedSeconds: 4)
             ]
             for profile in TextProfile.allCases {
@@ -151,7 +151,7 @@ final class RecordingsUIRenderTests: XCTestCase {
                 failedFiles: 4, retainedRecordings: 1, enumerationFailed: false,
                 recoveryDirectory: recovery, trashDirectory: nil, elapsedSeconds: 4)
             let progress = RecordingRemoval.Progress(
-                phase: .moving, completed: 38_072, total: artifactCount - 4, elapsedSeconds: 2)
+                phase: .moving, completed: 24_000, total: artifactCount - 4, elapsedSeconds: 2)
             let states: [(String, RecordingsTrashConfirmView.ReviewState)] = [
                 ("success-retained", .completed(success, nil, nil, false)),
                 ("restoring", .completed(success, nil, progress, true)),

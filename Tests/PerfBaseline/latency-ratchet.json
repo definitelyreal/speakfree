@@ -1,0 +1,68 @@
+{
+  "about": "Key-release-to-text ceilings that may only go down. Check: perf-harness ratchet check. Lower: perf-harness ratchet lower. See Tests/PerfBaseline/README.md.",
+  "machines": [
+    {
+      "engines": [
+        {
+          "engine": "parakeet",
+          "fixtures": {
+            "fixture-1-clean.wav": {
+              "endToEndMedianMs": 1300,
+              "inferenceMedianMs": 97
+            },
+            "fixture-2-spoken-comma.wav": {
+              "endToEndMedianMs": 1305,
+              "inferenceMedianMs": 101
+            },
+            "fixture-3-spoken-period-end.wav": {
+              "endToEndMedianMs": 329,
+              "inferenceMedianMs": 105
+            },
+            "fixture-4-trailing-silence-period.wav": {
+              "endToEndMedianMs": 197,
+              "inferenceMedianMs": 104
+            }
+          },
+          "model": "parakeet-tdt-0.6b-v2"
+        },
+        {
+          "engine": "whisper",
+          "fixtures": {
+            "fixture-1-clean.wav": {
+              "endToEndMedianMs": 1854,
+              "inferenceMedianMs": 647
+            },
+            "fixture-2-spoken-comma.wav": {
+              "endToEndMedianMs": 1850,
+              "inferenceMedianMs": 643
+            },
+            "fixture-3-spoken-period-end.wav": {
+              "endToEndMedianMs": 873,
+              "inferenceMedianMs": 643
+            },
+            "fixture-4-trailing-silence-period.wav": {
+              "endToEndMedianMs": 741,
+              "inferenceMedianMs": 642
+            }
+          },
+          "model": "tiny.en"
+        }
+      ],
+      "fingerprint": {
+        "arch": "arm64",
+        "cores": 16,
+        "cpu": "Apple M3 Max",
+        "os": "macOS Version 26.6.2 (Build 25G83)"
+      },
+      "updatedAt": "2026-09-25T03:50:50Z"
+    }
+  ],
+  "postBufferCeilingsMs": {
+    "fixture-1-clean.wav": 1200,
+    "fixture-2-spoken-comma.wav": 1200,
+    "fixture-3-spoken-period-end.wav": 220,
+    "fixture-4-trailing-silence-period.wav": 90
+  },
+  "schemaVersion": 1,
+  "timedTolerancePct": 15
+}

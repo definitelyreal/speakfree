@@ -15,6 +15,13 @@ class AudioRecorder {
     private var recording = false // capture.queue
     private var preroll: [Float] = [] // capture.queue
     private var prelistenActive = true // capture.queue
+    /// Key press seen, take not started yet (capture.queue). While armed, pre-roll keeps every
+    /// sample instead of only the last 500 ms, so file-system stalls between key press and
+    /// `startRecording` (logged up to 2.4 s, 2026-09-22) no longer drop the first words.
+    private var armed = false
+    /// Runaway bound for an armed pre-roll whose take never starts.
+    static let armedPrerollCapSamples = 16_000 * 60
+    static let prerollSamples = 8_000
     private var lastSource = "Microphone connecting"
     private var recordingSources: [String] = []
     private var outputURL: URL?
@@ -24,6 +31,8 @@ class AudioRecorder {
     private var monitorsStarted = false // main
     private var observers: [NSObjectProtocol] = []
     private(set) var pinnedInputDeviceUID: String?
+    /// The headset "Stay on" routes to (nil when off or paused). See StayOnController.
+    private(set) var stayOnDeviceUID: String?
     var onCaptureStatus: ((String) -> Void)?
 
     init(factory: @escaping () -> DeviceCapturing = { DeviceAudioSession() }) {
@@ -31,7 +40,29 @@ class AudioRecorder {
             self?.receive(samples, source: source)
         }, status: { [weak self] message in
             DispatchQueue.main.async { [weak self] in self?.onCaptureStatus?(message) }
+        }, replace: { [weak self] index, samples, source in
+            self?.replaceTail(from: index, with: samples, source: source)
         })
+    }
+
+    /// capture.queue. The coordinator found the headset stretch of this take was static and
+    /// hands over what the Mac's own microphone heard instead, from `index` on.
+    private func replaceTail(from index: Int, with samples: [Float], source: String) {
+        guard recording else { return }
+        if !recordingSources.contains(source) { recordingSources.append(source) }
+        writeQueue.async {
+            let keep = min(max(0, index), self.pcmSamples.count)
+            self.pcmSamples.removeSubrange(keep...)
+            self.pcmSamples += samples
+            // Append even if the truncate step failed, so later audio never lands before it.
+            var failure: Error?
+            do { try self.audioFile?.truncate(toSamples: keep) } catch { failure = error }
+            do { try self.audioFile?.append(samples) } catch { failure = failure ?? error }
+            if let failure, !self.writeFailed {
+                self.writeFailed = true
+                DiagnosticLogger.shared.log("Capture: WAV write failed: \(failure.localizedDescription); in-memory audio retained")
+            }
+        }
     }
 
     var preBufferEnabled = true {
@@ -75,12 +106,18 @@ class AudioRecorder {
     private func updateRouting() {
         capture.configure(devices: AudioDeviceCatalog.cachedInputDevices,
             systemDefault: AudioDeviceCatalog.cachedDefaultInput,
-            pin: pinnedInputDeviceUID, prelisten: preBufferEnabled)
+            pin: pinnedInputDeviceUID, prelisten: preBufferEnabled, stayOn: stayOnDeviceUID)
     }
 
     func setPinnedInputDevice(uid: String?) {
         guard uid != pinnedInputDeviceUID else { return }
         pinnedInputDeviceUID = uid
+        updateRouting()
+    }
+
+    func setStayOnDevice(uid: String?) {
+        guard uid != stayOnDeviceUID else { return }
+        stayOnDeviceUID = uid
         updateRouting()
     }
 
@@ -117,9 +154,10 @@ class AudioRecorder {
         if recording {
             if !recordingSources.contains(source) { recordingSources.append(source) }
             append(samples)
-        } else if prelistenActive {
+        } else if prelistenActive || armed {
             preroll += samples
-            if preroll.count > 8000 { preroll.removeFirst(preroll.count - 8000) }
+            let cap = armed ? Self.armedPrerollCapSamples : Self.prerollSamples
+            if preroll.count > cap { preroll.removeFirst(preroll.count - cap) }
         }
     }
 
@@ -136,18 +174,41 @@ class AudioRecorder {
         }
     }
 
+    /// Call at key press, before any file-system work: from here until `startRecording` (or
+    /// its failure) the pre-roll keeps everything captured. Async so key press never waits on
+    /// the capture queue; `startRecording` runs on the same serial queue, so it sees the flag.
+    func armTake() {
+        capture.queue.async {
+            if !self.recording { self.armed = true }
+        }
+    }
+
+    /// Undo `armTake` when record start fails before `startRecording` runs (the caller's catch
+    /// path), so pre-roll trims back to 500 ms instead of carrying unrelated audio into the next take.
+    func disarmTake() {
+        capture.queue.async { self.armed = false }
+    }
+
     func startRecording(to url: URL) throws {
         try capture.queue.sync {
             guard !recording else { return }
+            // Disarm on every exit, including a WavWriter failure, so pre-roll trims again.
+            defer { armed = false }
             let file = try WavWriter(url: url)
             outputURL = url
             writeQueue.sync { audioFile = file; pcmSamples = []; writeFailed = false }
             recordingSources = preroll.isEmpty ? [] : [lastSource]
             append(preroll)
             DiagnosticLogger.shared.log("AudioRecorder: recording started, pre-roll \(preroll.count) samples, input device: \(lastSource)")
+            if preroll.count > Self.prerollSamples {
+                DiagnosticLogger.shared.log(String(
+                    format: "AudioRecorder: kept %.2fs captured while recording start was delayed",
+                    Double(preroll.count - Self.prerollSamples) / 16_000))
+            }
+            let prerollCount = preroll.count
             preroll = []
             recording = true
-            capture.setRecording(true)
+            capture.setRecording(true, prerollSamples: prerollCount)
         }
     }
 

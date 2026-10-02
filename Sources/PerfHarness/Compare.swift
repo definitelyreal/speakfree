@@ -17,7 +17,7 @@
 //     for BOTH inferenceMs and endToEndMs. Any metric exceeding +`thresholdPct`% is a regression.
 //     One or more regressions → FAIL (exit 1) after printing every offending row.
 //
-// Locked threshold: +15% median (Michael, 2026-06-10).
+// Locked threshold: +15% median (the maintainer, 2026-06-10).
 
 import Foundation
 

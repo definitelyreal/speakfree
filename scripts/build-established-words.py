@@ -34,8 +34,8 @@ try:
 except OSError:
     dictionary = set()
 # Never establish a known MISHEAR: curated aliases are by definition wrong surface
-# forms (Codex review 2026-08-21 — establishing "rorlik" would permanently block the
-# rorlik->Rohrlich rescue it exists to enable).
+# forms (Codex review 2026-08-21 — establishing "vorbak" would permanently block the
+# vorbak->Vohrbach rescue it exists to enable).
 aliases = set()
 import json
 cv = os.path.expanduser("~/.config/speakfree/custom-vocabulary.json")

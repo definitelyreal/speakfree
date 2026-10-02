@@ -1,67 +1,8 @@
 #!/bin/bash
-# install-dev.sh — build + install for local testing WITHOUT full DMG/notarize cycle.
-#
-# Builds a fresh dev bundle via scripts/bundle-app.sh (which Developer-ID-signs it
-# when available, so TCC grants survive rebuilds) and installs it per CLAUDE.md's
-# mandatory trash-then-copy policy: NEVER mutate the installed bundle in place —
-# that leaves stale files and corrupts TCC (Microphone/Accessibility) state.
-#
-# Dev bundles resolve libwhisper from Homebrew's absolute path (no rpath rewrite,
-# no bundled dylib) — see scripts/bundle-app.sh. Do not re-point it to @rpath here;
-# the dev bundle never ships a Frameworks/libwhisper*.dylib for @rpath to resolve,
-# so doing so previously broke dyld at launch.
-set -e
+# ai-processed:unverified · session:unknown/agent:alpha-product-fixes · 2026-10-01
+# Compatibility entrypoint: use the same staged, guarded deployment on all three Macs.
+# M3_ONLY=1 remains the explicit local-only override supported by the fleet script.
+set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP="/Applications/speakfree.app"
-TMP_DIR="$(mktemp -d)"
-TMP_APP="$TMP_DIR/speakfree.app"
-
-cleanup() { rm -rf "$TMP_DIR"; }
-trap cleanup EXIT
-
-cd "$REPO_DIR"
-
-echo "Building (debug)..."
-xcrun swift build
-
-BINARY=".build/debug/speakfree"
-
-echo "Bundling app (dev)..."
-bash scripts/bundle-app.sh "$BINARY" "$TMP_APP" dev
-
-echo "Stopping existing speakfree..."
-pkill -x speakfree 2>/dev/null || true
-
-# The app defers termination while a dictation is in flight, so a fixed sleep
-# isn't enough — poll until the process actually exits (up to ~20s, 0.5s
-# interval) before trashing/copying the bundle underneath it.
-tries=0
-max_tries=40  # 40 * 0.5s = 20s
-while pgrep -x speakfree >/dev/null 2>&1 && [ "$tries" -lt "$max_tries" ]; do
-    sleep 0.5
-    tries=$((tries + 1))
-done
-if pgrep -x speakfree >/dev/null 2>&1; then
-    echo "Warning: speakfree still running after ~20s wait; force-killing..."
-    pkill -9 -x speakfree 2>/dev/null || true
-    sleep 1
-fi
-
-echo "Removing old install (trash, not in-place mutation — see CLAUDE.md)..."
-if [ -d "$APP" ]; then
-    if command -v /usr/bin/trash &>/dev/null; then
-        /usr/bin/trash "$APP"
-    else
-        # No `trash` utility available — fall back to rm -rf (loses Trash recoverability).
-        rm -rf "$APP"
-    fi
-fi
-
-echo "Installing to $APP..."
-cp -R "$TMP_APP" "$APP"
-
-echo "Launching..."
-open "$APP"
-
-echo "Done. Tail logs: tail -f ~/.config/speakfree/logs/\$(ls -t ~/.config/speakfree/logs/ | head -1)"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec bash "$REPO_DIR/scripts/dev-deploy-fleet.sh" "$@"

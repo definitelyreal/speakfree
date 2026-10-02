@@ -2,7 +2,7 @@
 // Retuned 2026-07-21: storm signature, not a slow trickle (pocket-cycle false positive).
 import Foundation
 
-/// Detects the multi-device AirPods fight (Michael, 2026-07-14: two extra Macs running
+/// Detects the multi-device AirPods fight (the maintainer, 2026-07-14: two extra Macs running
 /// speakfree + an iPhone all contend for the AirPods mic, and the link degrades in
 /// bursts). The app can't see the other devices, but it can see the symptoms: route
 /// changes, engine rebuilds, and buffer stalls while the input is Bluetooth. The real

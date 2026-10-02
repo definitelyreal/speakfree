@@ -343,7 +343,7 @@ final class PipelineIntegrationTests: XCTestCase {
         XCTAssertNil(context, "a click into a new field must invalidate the prior insertion tail")
 
         let final = TextPipeline.run(TextPipeline.Input(
-            raw: "Timing is different than the Premiere version, but doesn't matter, there's no dialogue.",
+            raw: "Spacing is different than the draft version, but doesn't matter, there's no footer.",
             punctuationMode: .off,
             cursorContextText: context,
             audioDurationSeconds: 8.5
@@ -352,7 +352,7 @@ final class PipelineIntegrationTests: XCTestCase {
             FinalizePipeline.composeInsertText(
                 final,
                 prependSpace: TextInserter.shouldPrependSpace(contextBefore: context)),
-            "Timing is different than the Premiere version, but doesn't matter, there's no dialogue.")
+            "Spacing is different than the draft version, but doesn't matter, there's no footer.")
     }
 
     func test_fallbackContext_sameElementWithoutInteraction_stillContinues() {

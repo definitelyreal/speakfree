@@ -13,7 +13,7 @@ private final class PostBufferCapture: DeviceCapturing {
 /// Exercise production key/timer/recorder paths without starting inference or desktop UI.
 private final class PostBufferTestApp: AppDelegate {
     var finalize: (() -> Void)?
-    override func finalizeRecording(keyReleaseTime: Double) { finalize?() }
+    override func finalizeRecording(keyReleaseTime: Double, postBuffer: PostBufferOutcome?) { finalize?() }
     override func resetRecordingUIAfterAbort() {}
 }
 

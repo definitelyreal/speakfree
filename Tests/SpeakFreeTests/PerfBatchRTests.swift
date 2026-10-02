@@ -1,6 +1,6 @@
 // Claude · 2026-07-19 · Session: ed573fa2-e6e0-4a72-b0e5-8eab0a7411b1
 //
-// Batch R (perf adjudication build/26-07-15-adversarial-review/perf/ADJUDICATION-PERF.md)
+// Batch R (internal perf adjudication)
 // unit tests. Seams only — NO real audio, NO real AX, NO display dependency for the
 // synthetic-buffer / capture-box cases.
 //

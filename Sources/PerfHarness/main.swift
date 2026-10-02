@@ -7,6 +7,7 @@
 //   compare    Gate a candidate JSON against a baseline JSON (exit 1 on >+15% median regression
 //              vs a MATCHING-fingerprint baseline; exit 0 + note otherwise).
 //   bench-and-gate   Benchmark, write JSON, then gate against a baseline in one shot (CI helper).
+//   postbuffer-replay  Replay the post-release wait over archived takes (--manifest, --asr, --ratios).
 //
 // Flags (for run / bench-and-gate):
 //   --iterations N    timed iterations (default 5, minimum 5)
@@ -52,8 +53,9 @@ func resolveEngineSpecs(_ list: String) -> [Benchmark.EngineSpec] {
         switch id {
         case "whisper":
             specs.append(.init(engineID: "whisper", model: "tiny.en", language: "en"))
-        case "parakeet":
-            let model = "parakeet-tdt-0.6b-v3"
+        case "parakeet", "parakeet-v3":
+            // "parakeet" = the default new-user engine (English v2); "parakeet-v3" = multilingual.
+            let model = id == "parakeet" ? "parakeet-tdt-0.6b-v2" : "parakeet-tdt-0.6b-v3"
             if parakeetModelPresent(model) {
                 specs.append(.init(engineID: "parakeet", model: model, language: "en"))
             } else {
@@ -61,7 +63,7 @@ func resolveEngineSpecs(_ list: String) -> [Benchmark.EngineSpec] {
                     "perf-harness: parakeet model '\(model)' not on disk — skipping (no download)\n".utf8))
             }
         default:
-            fail("unknown engine '\(id)' (want whisper,parakeet)")
+            fail("unknown engine '\(id)' (want whisper,parakeet,parakeet-v3)")
         }
     }
     if specs.isEmpty { fail("no runnable engines (whisper model missing? parakeet not on disk?)") }
@@ -122,6 +124,18 @@ func writeReport(_ report: PerfReport, to path: String) {
 // MARK: - dispatch
 
 switch command {
+
+case "transcribe-batch":
+    // Perf round 2: paired engine evaluation (FluidAudio versions, input transforms). Private output.
+    exit(TranscribeBatch.run(args: Array(args.dropFirst())))
+
+case "ratchet":
+    // Perf round 2 (2026-09-24): latency ratchet, ceilings that may only go down.
+    exit(Ratchet.run(args: Array(args.dropFirst())))
+
+case "postbuffer-replay":
+    // Speed loop W1 (2026-09-22): replay the post-release wait over archived takes.
+    exit(PostBufferReplay.run(args: Array(args.dropFirst())))
 
 case "run":
     let iters = max(5, Int(value(for: "--iterations", in: args) ?? "5") ?? 5)
@@ -461,6 +475,85 @@ case "reuse":
         exit(1)
     }
 
+case "ane-hog":
+    guard args.count > 1 else { fail("ane-hog: give a WAV path") }
+    let hogWav = URL(fileURLWithPath: args[1])
+    Task.detached {
+        do { try await ColdStartBench.runANEHog(wav: hogWav) } catch { fail("ane-hog: \(error)") }
+    }
+    dispatchMain()
+
+case "load-once":
+    guard let dir = value(for: "--work-dir", in: args) else { fail("load-once: --work-dir DIR is required") }
+    let unitsName = value(for: "--units", in: args) ?? "ane"
+    let sem1 = DispatchSemaphore(value: 0)
+    var loadFailure: Error?
+    Task.detached(priority: .userInitiated) {
+        do {
+            try await ColdStartBench.runLoadOnce(
+                workDir: URL(fileURLWithPath: dir),
+                units: unitsName == "cpu" ? .cpuOnly : .cpuAndNeuralEngine, label: unitsName,
+                modelDir: value(for: "--model-dir", in: args).map { URL(fileURLWithPath: $0) })
+        } catch { loadFailure = error }
+        sem1.signal()
+    }
+    sem1.wait()
+    if let loadFailure { fail("load-once failed: \(loadFailure)") }
+    exit(0)
+
+case "coldstart", "coldstart-concurrent", "coldstart-cpu-first", "coldstart-infer-during", "qos-ab":
+    // Positional WAV paths after the flags; flags: --work-dir DIR (coldstart), --reps N, --load N (qos-ab).
+    let flagArgs: Set<String> = ["--work-dir", "--reps", "--load", "--cpu-delay", "--ane-delay", "--infer-delay", "--load-qos", "--ane-load"]
+    var wavPaths: [String] = []
+    var i = 1
+    while i < args.count {
+        if flagArgs.contains(args[i]) { i += 2; continue }
+        wavPaths.append(args[i]); i += 1
+    }
+    guard !wavPaths.isEmpty else { fail("\(command): give one or more WAV paths") }
+    let wavs = wavPaths.map { URL(fileURLWithPath: $0) }
+    let reps = Int(value(for: "--reps", in: args) ?? "3") ?? 3
+    let sem = DispatchSemaphore(value: 0)
+    var failure: Error?
+    Task.detached(priority: .userInitiated) {
+        do {
+            if command.hasPrefix("coldstart") {
+                guard let dir = value(for: "--work-dir", in: args) else {
+                    fail("\(command): --work-dir DIR is required (the model clone goes there)")
+                }
+                if command == "coldstart" {
+                    try await ColdStartBench.runColdStart(
+                        wavs: wavs, workDir: URL(fileURLWithPath: dir), reps: reps)
+                } else if command == "coldstart-infer-during" {
+                    try await ColdStartBench.runInferDuringCompile(
+                        wavs: wavs, workDir: URL(fileURLWithPath: dir),
+                        inferDelay: Double(value(for: "--infer-delay", in: args) ?? "3") ?? 3)
+                } else if command == "coldstart-cpu-first" {
+                    try await ColdStartBench.runCPUFirst(
+                        wavs: wavs, workDir: URL(fileURLWithPath: dir),
+                        aneDelay: Double(value(for: "--ane-delay", in: args) ?? "0.2") ?? 0.2)
+                } else {
+                    try await ColdStartBench.runConcurrent(
+                        wavs: wavs, workDir: URL(fileURLWithPath: dir),
+                        cpuDelay: Double(value(for: "--cpu-delay", in: args) ?? "1.5") ?? 1.5)
+                }
+            } else {
+                let load = Int(value(for: "--load", in: args) ?? "")
+                    ?? (ProcessInfo.processInfo.activeProcessorCount + 1)
+                try await ColdStartBench.runQosAB(
+                    wavs: wavs, reps: reps, loadCount: load,
+                    loadQoSName: value(for: "--load-qos", in: args) ?? "default",
+                    aneLoad: Int(value(for: "--ane-load", in: args) ?? "0") ?? 0)
+            }
+        } catch {
+            failure = error
+        }
+        sem.signal()
+    }
+    sem.wait()
+    if let failure { fail("\(command) failed: \(failure)") }
+    exit(0)
+
 case "-h", "--help", "help":
     print("""
     perf-harness — speakfree performance-regression harness (T2.0)
@@ -471,9 +564,23 @@ case "-h", "--help", "help":
       perf-harness bench-and-gate [--iterations N] [--engines …] [--policy flat|adaptive] [--out PATH] --baseline PATH [--threshold PCT] [--require-baseline]
       perf-harness divergence [--out PATH] [--fixtures-dir DIR] [--work-dir DIR]
       perf-harness reuse [--iterations N] [--out PATH] [--fixtures-dir DIR] [--work-dir DIR]
+      perf-harness ratchet check [--ratchet PATH] [--deterministic-only] [--require-timed] [--engines …] [--iterations N]
+      perf-harness ratchet lower [--ratchet PATH] [--deterministic-only] [--engines …] [--iterations N]
+      perf-harness ratchet monotonic <old.json> <new.json>
+      perf-harness transcribe-batch --manifest M.json --out PRIVATE.json [--model ID] [--transform drop-ms:N,rms:X,peak:X] [--wait-vocab]
+      perf-harness coldstart --work-dir DIR [--reps N] WAV...   (Parakeet v2 ANE vs CPU-only load + infer)
+      perf-harness coldstart-concurrent --work-dir DIR [--cpu-delay S] WAV...  (CPU-only load while ANE compiles)
+      perf-harness qos-ab [--reps N] [--load N] [--load-qos Q] [--ane-load N] WAV...
+          (infer by task priority, idle vs under load; --load 0 --ane-load 2: two background
+           processes looping Parakeet inference on the ANE)
+
+    --engines: whisper (tiny.en), parakeet (English v2, the default engine), parakeet-v3.
+
+    ratchet: key-release-to-text ceilings in Tests/PerfBaseline/latency-ratchet.json that may only
+              go down. See Tests/PerfBaseline/README.md.
 
     --policy: flat = legacy 300ms tax on every dictation (default, = pre-T2.1 baseline);
-              adaptive = T2.1 — stop on ~150ms trailing silence, hard cap 300ms.
+              adaptive = the live policy: stop on 90ms trailing silence, cap 220ms, 1200ms when the tail is speech.
 
     --require-baseline: a fingerprint-MISMATCHED (or missing) baseline FAILS (exit 1) instead of
               silently passing. CI passes this so the +threshold gate can never be a no-op
@@ -489,5 +596,5 @@ case "-h", "--help", "help":
     exit(0)
 
 default:
-    fail("unknown command '\(command)' (run | compare | bench-and-gate | divergence | reuse | help)")
+    fail("unknown command '\(command)' (run | compare | bench-and-gate | ratchet | transcribe-batch | postbuffer-replay | divergence | reuse | help)")
 }

@@ -1,5 +1,7 @@
+// ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 import AppKit
 import AVFoundation
+import UniformTypeIdentifiers
 
 /// NSWindowController for "Transcribe audio file…".
 /// Presents a single NSPanel that cycles through Config → Progress → Completion / Error states.
@@ -89,6 +91,13 @@ public class FileTranscriptionController: NSWindowController {
         panel.delegate = self
         panel.minSize = NSSize(width: W, height: H)
         panel.maxSize = NSSize(width: W, height: H)
+        let dropView = FileTranscriptionDropView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        dropView.canAcceptFile = { [weak self] in
+            guard let self else { return false }
+            return self.transcriptionTask == nil
+        }
+        dropView.selectFile = { [weak self] url in self?.handleDroppedURLs([url]) ?? false }
+        panel.contentView = dropView
         self.window = panel
         buildUI()
     }
@@ -279,7 +288,12 @@ public class FileTranscriptionController: NSWindowController {
 
     // MARK: - Config actions
 
-    public func setSourceFile(_ url: URL) {
+    @discardableResult
+    public func setSourceFile(_ url: URL) -> Bool {
+        // A cancelled task may still be unwinding or writing its output. Keep its source
+        // stable until the completion cleanup runs, including Finder/Open With requests.
+        guard transcriptionTask == nil, let url = FileTranscriptionDropPolicy.singleMediaFile([url]) else { return false }
+        if !isWindowLoaded { loadWindow() }
         sourceURL = url
         fileLabel.stringValue = url.lastPathComponent
         fileLabel.textColor = .labelColor
@@ -289,19 +303,16 @@ public class FileTranscriptionController: NSWindowController {
         // Parakeet always has a model id, so it stays enabled as before.
         let hasModel = settings.engine == "parakeet" || !downloadedWhisperModels().isEmpty
         transcribeButton.isEnabled = hasModel
+        showState(.config)
+        return true
     }
 
     @objc private func chooseFileTapped() {
+        guard transcriptionTask == nil else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose Audio File"
         panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.audio, .movie,
-            .init(filenameExtension: "m4a")!, .init(filenameExtension: "mp3")!,
-            .init(filenameExtension: "wav")!, .init(filenameExtension: "flac")!,
-            .init(filenameExtension: "aiff")!, .init(filenameExtension: "caf")!,
-            .init(filenameExtension: "aac")!, .init(filenameExtension: "mp4")!,
-            .init(filenameExtension: "mov")!
-        ]
+        panel.allowedContentTypes = FileTranscriptionDropPolicy.allowedContentTypes
         if panel.runModal() == .OK, let url = panel.url { setSourceFile(url) }
     }
 
@@ -404,7 +415,7 @@ public class FileTranscriptionController: NSWindowController {
     // MARK: - Transcription
 
     @objc private func transcribeTapped() {
-        guard let sourceURL = sourceURL else { return }
+        guard transcriptionTask == nil, let sourceURL = sourceURL else { return }
         guard let saveDir = settings.saveDirectoryURL else {
             showError("No save folder selected."); return
         }
@@ -433,6 +444,7 @@ public class FileTranscriptionController: NSWindowController {
         let transcriber = Transcriber(engine: engine,
                                       modelID: settings.engine == "parakeet" ? settings.parakeetModel : settings.modelSize,
                                       language: cfg.language)
+        transcriber.whisperFallbackEnabled = WhisperFallback.isEnabled(cfg)
 
         // Switch to progress state
         progressFileLabel.stringValue = "Transcribing \(sourceURL.lastPathComponent)…"
@@ -446,7 +458,15 @@ public class FileTranscriptionController: NSWindowController {
         outputURL = outputPath
 
         transcriptionTask = Task { [activityLease] in
-            defer { activityLease.release() }
+            defer {
+                activityLease.release()
+                Task { @MainActor in
+                    self.transcriptionTask = nil
+                    self.chooseFileButton.isEnabled = true
+                    self.transcribeButton.isEnabled = self.sourceURL != nil
+                        && (self.settings.engine == "parakeet" || !self.downloadedWhisperModels().isEmpty)
+                }
+            }
             do {
                 var modelLoaded = false
                 let text = try await transcriber.transcribeFile(
@@ -524,7 +544,9 @@ public class FileTranscriptionController: NSWindowController {
     @objc private func cancelTapped() {
         isCancelled = true
         transcriptionTask?.cancel()
-        transcriptionTask = nil
+        // Cancellation is cooperative. Do not admit a replacement until the job exits.
+        chooseFileButton.isEnabled = false
+        transcribeButton.isEnabled = false
         progressBar.stopAnimation(nil)
         showState(.config)
     }
@@ -568,9 +590,75 @@ extension FileTranscriptionController: NSWindowDelegate {
 // MARK: - Drag and drop
 
 extension FileTranscriptionController {
-    public func handleDroppedURLs(_ urls: [URL]) {
-        guard let first = urls.first else { return }
-        setSourceFile(first)
+    @discardableResult
+    public func handleDroppedURLs(_ urls: [URL]) -> Bool {
+        guard transcriptionTask == nil,
+              let url = FileTranscriptionDropPolicy.singleMediaFile(urls) else { return false }
+        // Selection only: the person still chooses Transcribe and the output options.
+        return setSourceFile(url)
+    }
+}
+
+/// Drag payload validation shared with the normal file chooser. File contents are not
+/// opened here; a media type is eligibility, not a claim that a decoder can read the bytes.
+enum FileTranscriptionDropPolicy {
+    static let allowedContentTypes: [UTType] = [.audio, .movie]
+
+    static func singleMediaFile(_ urls: [URL]) -> URL? {
+        guard urls.count == 1, let url = urls.first, url.isFileURL,
+              url.host == nil || url.host == "" || url.host == "localhost",
+              url.query == nil, url.fragment == nil,
+              let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentTypeKey]),
+              values.isRegularFile == true,
+              let type = values.contentType ?? UTType(filenameExtension: url.pathExtension),
+              allowedContentTypes.contains(where: { type.conforms(to: $0) }) else { return nil }
+        return url
+    }
+
+    static func singleMediaFile(on pasteboard: NSPasteboard) -> URL? {
+        // Reading only filtered URLs would hide an extra unsupported/non-file item and
+        // silently select one member of a multiple-item drag.
+        guard let items = pasteboard.pasteboardItems, items.count == 1,
+              let raw = items[0].string(forType: .fileURL), let url = URL(string: raw) else { return nil }
+        return singleMediaFile([url])
+    }
+}
+
+/// The content view remains the drag destination above every configuration/progress state.
+/// Admission is checked again at commit, so a job started after drag-enter cannot be replaced.
+final class FileTranscriptionDropView: NSView {
+    var canAcceptFile: () -> Bool = { false }
+    var selectFile: (URL) -> Bool = { _ in false }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func operation(for pasteboard: NSPasteboard, sourceMask: NSDragOperation) -> NSDragOperation {
+        guard canAcceptFile(), sourceMask.contains(.copy),
+              FileTranscriptionDropPolicy.singleMediaFile(on: pasteboard) != nil else { return [] }
+        return .copy
+    }
+
+    func receive(_ pasteboard: NSPasteboard, sourceMask: NSDragOperation) -> Bool {
+        guard canAcceptFile(), sourceMask.contains(.copy),
+              let url = FileTranscriptionDropPolicy.singleMediaFile(on: pasteboard) else { return false }
+        return selectFile(url)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        operation(for: sender.draggingPasteboard, sourceMask: sender.draggingSourceOperationMask)
+    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        operation(for: sender.draggingPasteboard, sourceMask: sender.draggingSourceOperationMask)
+    }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        operation(for: sender.draggingPasteboard, sourceMask: sender.draggingSourceOperationMask) == .copy
+    }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        receive(sender.draggingPasteboard, sourceMask: sender.draggingSourceOperationMask)
     }
 }
 

@@ -2,7 +2,7 @@
 import XCTest
 @testable import SpeakFreeLib
 
-/// Policy tests for the Secure-Input retry dialog (Michael 2026-08-12: "a little box …
+/// Policy tests for the Secure-Input retry dialog (the maintainer 2026-08-12: "a little box …
 /// keeps retrying, and if it gets it, it shuts down the box"). The loop itself is a
 /// 0.5s timer in AppDelegate; every decision it takes routes through the pure
 /// `TextInserter.secureInputRetryAction`, pinned here.

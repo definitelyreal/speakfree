@@ -1,8 +1,8 @@
-// ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-17
+// ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 import Foundation
 
 public enum SpeakFree {
-    public static let version = "1.7.2"
+    public static let version = "1.8.0-alpha.1"
 
     /// Menu-bar title reflecting the build variant and mode, so an experimental/test build is
     /// never mistaken for the dogfood release. (2026-07-02: two builds ran at once, fought the
@@ -22,7 +22,8 @@ public enum SpeakFree {
     /// forced-dev instance is never mistaken for stock behavior.
     public static func menuTitle(bundleID: String, buildChannel: String?, devMode: Bool = false) -> String {
         let base: String
-        if bundleID.hasSuffix(".streaming") { base = "SpeakFree Streaming \(version) Testing" }
+        if buildChannel == "alpha" { base = "speakfree Alpha \(version) Testing" }
+        else if bundleID.hasSuffix(".streaming") { base = "SpeakFree Streaming \(version) Testing" }
         else if bundleID.hasSuffix(".beta") { base = "SpeakFree Beta \(version) Testing" }
         else { base = buildChannel == "release" ? "speakfree \(version)" : "speakfree \(version) Testing" }
         return devMode ? base + " Dev" : base

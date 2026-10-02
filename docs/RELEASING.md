@@ -185,7 +185,7 @@ are setting up a new machine.
 ### 5a. Developer ID certificate
 
 1. Open **Xcode → Settings → Accounts** and add the Apple ID
-   `michael@definitelyreal.com` (or the account associated with team
+   `<apple-id>` (or the account associated with team
    `AZ53Y7V4UZ`).
 2. Under Manage Certificates, click **+** → **Developer ID Application**.
    Xcode creates a new private key and requests a certificate from Apple.
@@ -223,7 +223,7 @@ passwords) because they don't expire.
 Alternatively, with an app-specific password:
 ```
 xcrun notarytool store-credentials "speakfree-notary" \
-  --apple-id "michael@definitelyreal.com" \
+  --apple-id "<apple-id>" \
   --team-id AZ53Y7V4UZ \
   --password "xxxx-xxxx-xxxx-xxxx"
 ```

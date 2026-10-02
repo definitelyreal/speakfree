@@ -119,7 +119,7 @@ final class PerfBatchFTests: XCTestCase {
 
     // MARK: - F2: GlossaryCorrector reorder
 
-    private let glossary = ["Rohrlich", "Bexx", "Maryna", "Viktor"]
+    private let glossary = ["Vohrbach", "Jaxx", "Maryna", "Viktor"]
 
     // The reordered fast path must skip the (expensive) real-word check entirely for tokens
     // with no glossary candidate, and produce identical output.
@@ -144,7 +144,7 @@ final class PerfBatchFTests: XCTestCase {
         func c(_ s: String) -> String {
             GlossaryCorrector.correct(s, glossary: glossary, isRealWord: isReal)
         }
-        XCTAssertEqual(c("Rorlick"), "Rohrlich")                 // near-miss corrected
+        XCTAssertEqual(c("Vorback"), "Vohrbach")                 // near-miss corrected
         XCTAssertEqual(c("the marina was calm"), "the marina was calm")  // real word protected
         XCTAssertEqual(c("he was the victor"), "he was the victor")      // real word protected
     }

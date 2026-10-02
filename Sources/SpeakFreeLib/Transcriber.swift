@@ -62,7 +62,7 @@ public enum HallucinationFilterTuning {
 public class Transcriber {
     private static let shadowSlot = DispatchSemaphore(value: 1)
     enum SecondOpinionStatus: Equatable {
-        /// What the audio contained, as far as the evidence can tell. Michael's copy
+        /// What the audio contained, as far as the evidence can tell. The maintainer's copy
         /// rule (2026-08-22): the status line is two sentences, the first describing
         /// the audio, the second the action or outcome. This is the first sentence.
         enum AudioDescriptor: Equatable {
@@ -81,8 +81,13 @@ public class Transcriber {
 
         case rechecking(AudioDescriptor)
         case failed(AudioDescriptor)
+        /// Parakeet returned nothing on real speech and no Whisper backup ran (not installed or
+        /// turned off). The app may offer the backup download.
+        case missed
+        /// The take was static (a broken microphone stream), so no Whisper rescue ran.
+        case staticNoise
 
-        /// Full status line. No em-dashes in UI copy (Michael's standing rule).
+        /// Full status line. No em-dashes in UI copy (the maintainer's standing rule).
         var message: String {
             switch self {
             case .rechecking(let audio):
@@ -91,6 +96,10 @@ public class Transcriber {
                 return "Garbled audio. Whisper found nothing."
             case .failed(.silence):
                 return "Silence. Nothing to transcribe."
+            case .missed:
+                return "Didn't catch that. Try again."
+            case .staticNoise:
+                return "Didn't catch that. The mic sounded like static."
             }
         }
     }
@@ -111,6 +120,8 @@ public class Transcriber {
         /// True when at least one energetic window carries a voiced-speech pitch (harmonic structure
         /// in the 85–255 Hz band), i.e. the energy is a human word rather than a tap/click/noise burst.
         let hasVoicedSpeech: Bool
+        /// Per-window RMS (`audioEvidenceWindowSize` samples each), for noise-relative measures.
+        var windowRMS: [Float] = []
 
         var hasAnySpeechEnergy: Bool { speechWindowCount > 0 }
         var hasSustainedSpeechEnergy: Bool {
@@ -131,6 +142,9 @@ public class Transcriber {
     let modelID: String
     let language: String
     public var suppressAutoPunctuation: Bool = false
+    /// "Load Whisper as fallback for errors" (WhisperFallback.isEnabled). Off = no Whisper
+    /// rescue, sparse rescue or shadow check ever runs for a Parakeet take.
+    public var whisperFallbackEnabled: Bool = true
     var onSecondOpinionStatus: ((SecondOpinionStatus) -> Void)?
 
     // MARK: - Engine lifecycle passthroughs (used by AppDelegate)
@@ -162,6 +176,90 @@ public class Transcriber {
     public func warmUp() async {
         if isLoaded { return }
         try? await engine.loadModel(modelID: modelID)
+    }
+
+    /// Launch-time model preparation. Parakeet compiles for the Neural Engine in a helper
+    /// process while a CPU-only stand-in serves dictations (ParakeetFirstStart.swift); other
+    /// engines just warm up. `onPhase` drives the menu line.
+    public func prepare(onPhase: @escaping @Sendable (ModelPreparationPhase) -> Void) async {
+        if let parakeet = engine as? ParakeetEngine {
+            await parakeet.prepareModel(modelID: modelID, onPhase: onPhase)
+        } else {
+            await warmUp()
+            onPhase(isLoaded ? .ready : .failed)
+        }
+    }
+
+    private let preparationLock = NSLock()
+    private var preparationsPending = 0
+
+    /// True from `startPreparation` until that preparation returns. Set synchronously by the
+    /// caller, so it already reads true before the preparation task has registered with the
+    /// engine; key-press preload uses it to leave the load to the preparation.
+    public var isPreparationPending: Bool {
+        preparationLock.lock(); defer { preparationLock.unlock() }
+        return preparationsPending > 0
+    }
+
+    /// Runs `prepare` in a detached task at the key-release path's priority, marking the
+    /// preparation pending before returning.
+    @discardableResult
+    public func startPreparation(
+        onPhase: @escaping @Sendable (ModelPreparationPhase) -> Void) -> Task<Void, Never> {
+        adjustPendingPreparations(by: 1)
+        return Task.detached(priority: .userInitiated) { [self] in
+            await prepare(onPhase: onPhase)
+            adjustPendingPreparations(by: -1)
+        }
+    }
+
+    private func adjustPendingPreparations(by delta: Int) {
+        preparationLock.lock(); preparationsPending += delta; preparationLock.unlock()
+    }
+
+    /// True when a dictation could be transcribed without waiting for a model load, counting
+    /// Parakeet's CPU stand-in.
+    public var isReadyToTranscribe: Bool {
+        (engine as? ParakeetEngine)?.canTranscribeNow ?? engine.isLoaded
+    }
+
+    /// True when loading this engine's model could mean a Neural Engine compile (Parakeet,
+    /// 16 to 73 s at first start). Background work (launch crash recovery) never loads such a
+    /// model itself; see `LaunchRecoveryGate`.
+    public var modelLoadMayCompile: Bool { engine.engineID == "parakeet" }
+
+    /// Background file transcription pauses before each chunk while this returns true.
+    static let liveTakePollNanoseconds: UInt64 = 100_000_000
+    /// A background file transcription that has paused this long for live takes gives up
+    /// (`BackgroundTranscriptionError.gaveWayToLiveTakes`) so it does not hold the recording's
+    /// reading lease indefinitely; its caller retries later.
+    static let liveTakeMaxYieldSeconds: Double = 60
+
+    /// Waits while `isLiveTakeActive` reports a dictation recording or finalizing, so a
+    /// background chunk never starts ahead of a live take. Throws on cancellation, and
+    /// `gaveWayToLiveTakes` after `maxYieldSeconds` of waiting.
+    static func yieldToLiveTakes(isLiveTakeActive: @Sendable () async -> Bool,
+                                 isCancelled: () -> Bool,
+                                 pollNanoseconds: UInt64 = liveTakePollNanoseconds,
+                                 maxYieldSeconds: Double = liveTakeMaxYieldSeconds) async throws {
+        let start = CFAbsoluteTimeGetCurrent()
+        while await isLiveTakeActive() {
+            if isCancelled() { throw TranscriptionEngineError.transcriptionFailed }
+            if CFAbsoluteTimeGetCurrent() - start >= maxYieldSeconds {
+                throw BackgroundTranscriptionError.gaveWayToLiveTakes
+            }
+            try? await Task.sleep(nanoseconds: pollNanoseconds)
+        }
+    }
+
+    /// Seconds a take waited for a model load and spent in engine inference, summed over the
+    /// empty-result retries. Reported on the "Transcription latency:" line, and for live
+    /// dictations also on the per-take "Latency:" line (via TakeRecorder).
+    struct EngineTiming {
+        var modelWait: Double = 0
+        var infer: Double = 0
+        /// Model instance that produced the returned text (Parakeet: "ane" or "cpu-standin").
+        var path: String?
     }
 
     // Known whisper hallucinations on silence/noise.
@@ -228,7 +326,8 @@ public class Transcriber {
             peakWindowRMS: peakWindowRMS,
             speechWindowCount: speechWindowCount,
             noiseFloorRMS: noiseFloorRMS(from: windowRMSValues),
-            hasVoicedSpeech: hasVoicedSpeech)
+            hasVoicedSpeech: hasVoicedSpeech,
+            windowRMS: windowRMSValues)
     }
 
     /// Robust room-noise-floor estimate: the `noiseFloorPercentile` window RMS across the take.
@@ -395,19 +494,48 @@ public class Transcriber {
     /// Transcribe using the in-process engine (fast, model stays loaded).
     /// Falls back to CLI (whisper only) if the engine fails or samples are not provided.
     public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil,
-                           punctuationMode: PunctuationMode = .off) async throws -> String {
+                           punctuationMode: PunctuationMode = .off,
+                           inputDevice: String? = nil) async throws -> String {
         let activityLease = try RecordingActivity.shared.acquireReading(audioURL)
         defer { activityLease.release() }
         let result: String
         // Set when a rescue fires; carries the descriptor so the failure line can keep
         // the same first sentence the "trying" line opened with.
         var secondOpinionAudio: SecondOpinionStatus.AudioDescriptor?
+        // Per-take provenance for the dictation trace and the meta sidecar (see TakeRecorder).
+        let recorder = TakeRecorder.current
+        recorder?.engineDiagnostics = nil
+        recorder?.engineTextKept = false
+        recorder?.engine = nil
+        recorder?.model = nil
+        recorder?.inferencePath = nil
+        recorder?.modelWaitSeconds = nil
+        func markReplacedByWhisperCLI(model: String? = nil) {
+            if let model { recorder?.model = model }
+            recorder?.engine = "whisper"
+            recorder?.engineTextKept = false
+        }
 
         // Try engine first if we have samples
         if let samples = samples, !samples.isEmpty {
             do {
+                var timing = EngineTiming()
                 result = try await transcribeWithEngineRecoveringEmpty(
-                    samples: samples, prompt: prompt, punctuationMode: punctuationMode)
+                    samples: samples, prompt: prompt, punctuationMode: punctuationMode,
+                    timing: &timing)
+                recorder?.engine = engine.engineID
+                recorder?.engineTextKept = true
+                // A live dictation also folds these into its per-take "Latency:" line.
+                recorder?.inferencePath = timing.path ?? engine.engineID
+                recorder?.modelWaitSeconds = timing.modelWait
+                // One line per engine pass, for every caller and every outcome (the "Latency:"
+                // line is only written after a successful insertion): which model instance ran
+                // it (Neural Engine, or the CPU stand-in during a first-start compile), how long
+                // it waited for a model, the inference time, and the priority it ran at. No text.
+                DiagnosticLogger.shared.log(String(format: "Transcription latency: path=%@ wait=%.3f infer=%.3f audio=%.1f qos=%@",
+                    timing.path ?? engine.engineID,
+                    timing.modelWait, timing.infer, Double(samples.count) / 16_000.0,
+                    currentQoSName()))
             } catch {
                 // CLI fallback is whisper-only; other engines rethrow.
                 if engine.engineID == "whisper" {
@@ -416,6 +544,7 @@ public class Transcriber {
                     // degrading every dictation must be visible in the log health checks read.
                     DiagnosticLogger.shared.log("Transcriber: in-process engine failed (\(error.localizedDescription)) — falling back to whisper CLI")
                     result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
+                    markReplacedByWhisperCLI()
                 } else {
                     throw error
                 }
@@ -423,6 +552,7 @@ public class Transcriber {
         } else if engine.engineID == "whisper" {
             // Fallback to CLI (whisper only)
             result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
+            markReplacedByWhisperCLI()
         } else {
             // Non-whisper engines have no CLI fallback and need samples.
             throw TranscriptionEngineError.transcriptionFailed
@@ -432,7 +562,19 @@ public class Transcriber {
         var cleaned = result.replacingOccurrences(of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
 
         let evidence = Self.audioEvidence(in: samples ?? [])
-        if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        // A broken microphone stream (2026-09-25 AirPods static) has no words to recover:
+        // no Whisper second opinion of any kind runs on it.
+        let takeWindows = CaptureStaticJudge.windows(of: samples ?? [])
+        let takeIsStatic = CaptureStaticJudge.isStatic(takeWindows, minimumWindows: CaptureStaticJudge.wholeTakeMinimumWindows)
+        let wordCount = cleaned.split(whereSeparator: { $0.isWhitespace }).count
+        if engine.engineID != "whisper", takeIsStatic, wordCount <= 2,
+           wordCount > 0 || !evidence.hasSustainedSpeechEnergy {
+            // A stray word or two read out of static is not what was said.
+            DiagnosticLogger.shared.log(
+                "Transcriber: take sounded like static (\(CaptureStaticJudge.describe(takeWindows))); dropped \(wordCount) words")
+            cleaned = ""
+            onSecondOpinionStatus?(.staticNoise)
+        } else if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            evidence.hasSustainedSpeechEnergy {
             DiagnosticLogger.shared.log(String(
                 format: "Transcriber: speech-energy-present but model-empty "
@@ -442,9 +584,18 @@ public class Transcriber {
             // nothing on audio with sustained speech — the take is otherwise LOST, so a
             // slower second opinion is strictly better than silence. Corpus evidence:
             // whisper-large-v3-turbo recovered coherent text from takes Parakeet zeroed
-            // (2026-08-19 airplane forensics; 56 empty-sentinel takes in the corpus).
+            // (field-recording forensics; dozens of empty-sentinel takes in the corpus).
             // Guarded on the whisper model actually being on disk; failure keeps empty.
-            if engine.engineID != "whisper", Self.modelExists(modelSize: "large-v3-turbo") {
+            if engine.engineID != "whisper", takeIsStatic {
+                // 2026-09-25: Whisper "rescued" static from a broken headset stream into
+                // invented sentences that were typed into Signal and Claude. Static has no
+                // words to recover; say so instead (and offer no backup download for it).
+                DiagnosticLogger.shared.log(
+                    "Transcriber: take sounded like static (\(CaptureStaticJudge.describe(takeWindows))); no Whisper rescue")
+                onSecondOpinionStatus?(.staticNoise)
+            } else if engine.engineID != "whisper", !whisperFallbackEnabled || !Self.modelExists(modelSize: "large-v3-turbo") {
+                onSecondOpinionStatus?(.missed)
+            } else if engine.engineID != "whisper" {
                 let audio = Self.audioDescriptor(for: evidence)
                 secondOpinionAudio = audio
                 onSecondOpinionStatus?(.rechecking(audio))
@@ -456,6 +607,7 @@ public class Transcriber {
                             "Transcriber: whisper rescue recovered \(rescued.count) chars from an empty take")
                         cleaned = rescued.replacingOccurrences(
                             of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
+                        markReplacedByWhisperCLI(model: "large-v3-turbo")
                     }
                 } catch {
                     // A failed rescue must say so — a silent catch hid the modelID bug above.
@@ -463,13 +615,19 @@ public class Transcriber {
                         "Transcriber: whisper rescue failed (\(error.localizedDescription))")
                 }
             }
-        } else if engine.engineID != "whisper",
+        } else if engine.engineID != "whisper", whisperFallbackEnabled, !takeIsStatic,
                   Self.sparseRescueEligible(
                       parakeetWordCount: cleaned.split(separator: " ").count,
                       durationSeconds: Double((samples ?? []).count) / 16_000.0,
                       speechDurationSeconds: Double(evidence.speechWindowCount)
                           * Double(Self.audioEvidenceWindowSize) / Self.audioEvidenceSampleRate),
-                  Self.modelExists(modelSize: "large-v3-turbo") {
+                  Self.modelExists(modelSize: "large-v3-turbo"),
+                  // Over the confabulation cap the rescue can never replace the text, so the
+                  // synchronous 3 s run could only write a sidecar (2026-09-22: the 20.3 s take).
+                  evidence.durationSeconds <= Self.swapMaxDurationSeconds,
+                  sparseGateAllowsRescue(
+                      parakeetText: cleaned, evidence: evidence, audioURL: audioURL,
+                      prompt: prompt, inputDevice: inputDevice) {
             // SPARSE rescue (revised 2026-08-21): the confidence-triggered active swap
             // was WITHDRAWN same-day — the 23-take active-band adjudication measured it
             // helping 30% and harming 43%, and no veto set separated the two. What the
@@ -487,6 +645,13 @@ public class Transcriber {
                 let duration = Double((samples ?? []).count) / 16_000.0
                 let pWords = cleaned.split(separator: " ").count
                 let wWords = swap.split(separator: " ").count
+                // Zero-word takes always rescue regardless of the ratio (mostly silent holds), so
+                // they must not train it.
+                if pWords > 0 {
+                    SparseRescueGate.shared.recordRescue(
+                        device: inputDevice,
+                        gained: Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords))
+                }
                 if duration <= Self.swapMaxDurationSeconds,
                    Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords),
                    Self.activeSwapVeto(parakeet: cleaned, whisper: swap,
@@ -497,6 +662,7 @@ public class Transcriber {
                         conf, wWords, pWords, duration))
                     cleaned = swap.replacingOccurrences(
                         of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
+                    markReplacedByWhisperCLI(model: "large-v3-turbo")
                 } else {
                     DiagnosticLogger.shared.log(String(
                         format: "Transcriber: sparse rescue declined (%.2f, %d vs %d words) — whisper to sidecar",
@@ -507,7 +673,8 @@ public class Transcriber {
                 DiagnosticLogger.shared.log(
                     "Transcriber: sparse-rescue whisper failed (\(error.localizedDescription)) — keeping Parakeet")
             }
-        } else if engine.engineID != "whisper",
+        } else if engine.engineID != "whisper", !takeIsStatic,
+                  whisperFallbackEnabled,
                   Self.secondOpinionTier(aggregateConfidence: engine.lastDiagnostics?.aggregateConfidence) == .shadow,
                   Self.modelExists(modelSize: "large-v3-turbo"),
                   Self.shadowSlot.wait(timeout: .now()) == .success {
@@ -570,9 +737,9 @@ public class Transcriber {
     /// Retry budget when the in-process engine returns EMPTY text on audio that carries genuine
     /// voiced speech. FluidAudio's Parakeet ANE decode intermittently yields an empty result on
     /// real dictation: the recordings corpus (2026-08) holds 250+ empty-drops, and re-running the
-    /// exact same audio recovers coherent multi-second sentences. Proven on rec-2026-07-14-115522,
-    /// an 11.7 s take dropped at record time that transcribes in full on replay ("Another thing
-    /// that can happen is sometimes we will push a meeting..."), with whisper corroborating real
+    /// exact same audio recovers coherent multi-second sentences. Proven on an 11.7 s
+    /// production take dropped at record time that transcribes in full on replay (a complete
+    /// multi-clause sentence), with whisper corroborating real
     /// speech in that and other dropped takes. An empty return is otherwise silently discarded, so
     /// a bounded, voiced-speech-gated retry only ever recovers loss: worst case it re-returns empty
     /// and the take is dropped exactly as before. Each retry gets a fresh decoder state (the engine
@@ -587,7 +754,7 @@ public class Transcriber {
     static let whisperShadowConfidenceThreshold: Float = 0.92
 
     /// Below this bound the take is presumed garbled and whisper's transcript REPLACES
-    /// Parakeet's (Michael approved the active swap 2026-08-20). The band is deliberately
+    /// Parakeet's (the maintainer approved the active swap 2026-08-20). The band is deliberately
     /// well under the shadow bound: every known word-salad take scored 0.73–0.83, while
     /// 0.85–0.92 is a mixed band that stays observe-only until the sidecar corpus proves
     /// it. Cost: one synchronous whisper-CLI call (~1.1–1.6 s) on ~2–3% of takes.
@@ -613,7 +780,7 @@ public class Transcriber {
     /// carries (< 0.5 words per second of ACTUAL speech — the dropped-sentence failure shape).
     /// Density is measured against speech-seconds, not wall-clock: a short phrase inside a long,
     /// mostly-silent recording is not sparse and must not pull a whisper recheck. Concretely,
-    /// 2026-08-21 rec-172840 was 6 words over 2.5 s of speech in a 19 s take (0.98 conf) — a
+    /// one production take was 6 words over 2.5 s of speech in a 19 s take (0.98 conf) — a
     /// clean short utterance the old wall-clock ratio (6/19 = 0.32) wrongly flagged; against
     /// speech (6/2.5 = 2.4) it is obviously not sparse. The wall-clock `>= 5` floor STAYS so a
     /// near-empty take (0 Parakeet words) is still eligible for recovery regardless of how little
@@ -627,6 +794,51 @@ public class Transcriber {
         durationSeconds >= 5
             && Double(parakeetWordCount) / max(speechDurationSeconds, 0.1) < 0.5
     }
+    /// Noise-relative gate on the sparse rescue (see `SparseRescueGate`). Returns false when the
+    /// take is only "sparse" because room noise counted as speech; such takes skip the 3 s
+    /// synchronous rescue and are occasionally re-checked with Whisper in the background.
+    private func sparseGateAllowsRescue(
+        parakeetText: String, evidence: AudioEvidence, audioURL: URL, prompt: String?,
+        inputDevice: String?
+    ) -> Bool {
+        let pWords = parakeetText.split(separator: " ").count
+        let windowSeconds = Double(Self.audioEvidenceWindowSize) / Self.audioEvidenceSampleRate
+        let (decision, speech, ratio) = SparseRescueGate.shared.decide(
+            device: inputDevice, parakeetWords: pWords, durationSeconds: evidence.durationSeconds,
+            windowRMS: evidence.windowRMS, windowSeconds: windowSeconds,
+            noiseFloor: evidence.noiseFloorRMS)
+        guard case .skip(let backgroundCheck) = decision else { return true }
+        let fixedSpeech = Double(evidence.speechWindowCount) * windowSeconds
+        DiagnosticLogger.shared.log(String(
+            format: "Transcriber: sparse rescue skipped: %d words over %.1fs speech at %.1fx noise floor %.4f "
+                + "(fixed bar counted %.1fs of %.1fs)%@",
+            pWords, speech, ratio, evidence.noiseFloorRMS, fixedSpeech, evidence.durationSeconds,
+            backgroundCheck ? "; checking in background" : ""))
+        guard backgroundCheck, Self.shadowSlot.wait(timeout: .now()) == .success else { return false }
+        // Acquire before dispatch: the parent can finish before this worker starts.
+        let lease = try? RecordingActivity.shared.acquireReading(audioURL)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            defer { lease?.release(); Self.shadowSlot.signal() }
+            guard let self, lease != nil else { return }
+            do {
+                let check = try self.transcribeWithCLI(audioURL: audioURL, prompt: prompt,
+                                                       modelOverride: "large-v3-turbo", background: true)
+                let wWords = check.split(separator: " ").count
+                let gained = Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords)
+                RecordingStore.saveAuxiliaryTranscription(text: check, kind: .whisper, for: audioURL)
+                SparseRescueGate.shared.recordSkipCheck(device: inputDevice, wouldHaveGained: gained)
+                DiagnosticLogger.shared.log(String(
+                    format: "Transcriber: sparse-skip check %@ (%d vs %d words); gate ratio now %.2f",
+                    gained ? "MISSED WORDS" : "confirmed skip", wWords, pWords,
+                    SparseRescueGate.shared.ratio(for: inputDevice)))
+            } catch {
+                DiagnosticLogger.shared.log(
+                    "Transcriber: sparse-skip check failed (\(error.localizedDescription))")
+            }
+        }
+        return false
+    }
+
     static func sparseRescueAccepts(parakeetWordCount: Int, whisperWordCount: Int) -> Bool {
         whisperWordCount >= 2 * max(parakeetWordCount, 1)
     }
@@ -640,8 +852,8 @@ public class Transcriber {
 
     /// Names whisper drifted on in the adjudication (clod/Koda/favorable/codecs). A swap
     /// candidate that LOSES one of these while Parakeet had it is rejected.
-    /// "Karma" was removed 2026-08-21: there is no such person (the vocab term was mined
-    /// from mishears of a real name), so protecting Parakeet's "Karma" outputs only
+    /// "Karma" was removed 2026-08-21: it is a mishear alias rather than an intended word,
+    /// so protecting Parakeet's "Karma" outputs only
     /// blocked whisper from fixing them.
     /// User terms from vocabulary.txt are not yet included automatically.
     static let swapProtectedTerms = [
@@ -683,17 +895,18 @@ public class Transcriber {
     /// accidental silent key-tap (no harmonic pitch structure) still fast-paths to empty with no
     /// added latency. Non-empty results and true-silence returns are untouched.
     private func transcribeWithEngineRecoveringEmpty(
-        samples: [Float], prompt: String?, punctuationMode: PunctuationMode
+        samples: [Float], prompt: String?, punctuationMode: PunctuationMode,
+        timing: inout EngineTiming
     ) async throws -> String {
         var text = try await transcribeWithEngine(
-            samples: samples, prompt: prompt, punctuationMode: punctuationMode)
+            samples: samples, prompt: prompt, punctuationMode: punctuationMode, timing: &timing)
         guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               Self.audioEvidence(in: samples).hasVoicedSpeech else { return text }
         for attempt in 1...Self.maxEmptyRetriesOnVoicedSpeech {
             DiagnosticLogger.shared.log(
                 "Transcriber: engine returned empty on voiced speech, retry \(attempt)/\(Self.maxEmptyRetriesOnVoicedSpeech)")
             text = try await transcribeWithEngine(
-                samples: samples, prompt: prompt, punctuationMode: punctuationMode)
+                samples: samples, prompt: prompt, punctuationMode: punctuationMode, timing: &timing)
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 DiagnosticLogger.shared.log(
                     "Transcriber: empty-result retry \(attempt) recovered \(text.count) chars")
@@ -704,20 +917,28 @@ public class Transcriber {
     }
 
     private func transcribeWithEngine(samples: [Float], prompt: String?,
-                                      punctuationMode: PunctuationMode) async throws -> String {
-        // Ensure model is loaded (engine resolves its own on-disk/cache location)
+                                      punctuationMode: PunctuationMode,
+                                      timing: inout EngineTiming) async throws -> String {
+        // Ensure model is loaded (engine resolves its own on-disk/cache location). During a
+        // Parakeet first start this returns as soon as the CPU stand-in can serve the take.
+        let waitStart = CFAbsoluteTimeGetCurrent()
         if !engine.isLoaded {
             try await engine.loadModel(modelID: modelID)
         }
+        let inferStart = CFAbsoluteTimeGetCurrent()
+        timing.modelWait += inferStart - waitStart
+        defer { timing.infer += CFAbsoluteTimeGetCurrent() - inferStart }
 
         let suppressRegex = suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
 
         let raw: String
         if let confidenceCorrectingEngine = engine as? ConfidencePunctuationCorrectingEngine {
-            raw = try await confidenceCorrectingEngine.transcribe(
+            let result = try await confidenceCorrectingEngine.transcribeReportingPath(
                 samples: samples, language: language, prompt: prompt,
                 suppressRegex: suppressRegex,
                 enablePunctuationCommandCorrection: punctuationMode != .off)
+            raw = result.text
+            timing.path = result.inferencePath
         } else {
             raw = try await engine.transcribe(
                 samples: samples, language: language, prompt: prompt,
@@ -752,7 +973,7 @@ public class Transcriber {
     /// `modelOverride` exists for the rescue/shadow paths: under the Parakeet engine,
     /// `modelID` is a Parakeet id ("parakeet-tdt-0.6b-v2") and resolving it as a ggml
     /// file can only throw — which is exactly how the 2026-08-20 shadow pass silently
-    /// never fired (take 135106 "Caramore Kaima", conf 0.911, no sidecar, no log).
+    /// never fired (a garbled two-word take, conf 0.911, no sidecar, no log).
     private func transcribeWithCLI(audioURL: URL, prompt: String? = nil,
                                    modelOverride: String? = nil, background: Bool = false) throws -> String {
         guard let whisperPath = Transcriber.findWhisperBinary() else {
@@ -788,9 +1009,13 @@ public class Transcriber {
         let duration = (try? AVAudioFile(forReading: audioURL)).map {
             Double($0.length) / max(1, $0.processingFormat.sampleRate)
         } ?? 60
+        // The background shadow pass must never compete with a dictation (utility); a rescue
+        // the user is waiting on runs at the key-release path's priority. Both used to run at
+        // the Process default.
         let outputResult = try BoundedProcess.run(
             executable: URL(fileURLWithPath: whisperPath), arguments: args,
-            timeout: Self.cliTimeout(audioDuration: duration, background: background))
+            timeout: Self.cliTimeout(audioDuration: duration, background: background),
+            qualityOfService: Self.cliQualityOfService(background: background))
         let data = outputResult.stdout
         let stderrData = outputResult.stderr
 
@@ -811,6 +1036,10 @@ public class Transcriber {
         }
 
         return output
+    }
+
+    static func cliQualityOfService(background: Bool) -> QualityOfService {
+        background ? .utility : .userInitiated
     }
 
     static func cliTimeout(audioDuration: Double, background: Bool) -> TimeInterval {
@@ -899,15 +1128,26 @@ public class Transcriber {
     /// `isCancelled` is polled between chunks and inside whisper_full.
     /// On cancellation throws `TranscriptionEngineError.transcriptionFailed`.
     /// On success returns the full transcript string.
+    ///
+    /// Background callers (launch crash recovery) pass `loadModelIfNeeded: false`: the call then
+    /// never loads a model (which for Parakeet could be a Neural Engine compile a dictation
+    /// would wait behind) and throws `TranscriptionEngineError.modelNotLoaded` unless the
+    /// engine's own model is loaded, checked before every chunk. (Parakeet's CPU stand-in does
+    /// not count: a background chunk on it would compete with live takes on the CPU.) They also
+    /// pass `isLiveTakeActive`, checked before every chunk: while a dictation is recording or
+    /// finalizing, the next chunk waits, so the live take goes first.
     public func transcribeFile(
         url: URL,
         progressHandler: @escaping (_ chunk: Int, _ totalChunks: Int, _ whisperPct: Int) -> Void,
-        isCancelled: @escaping () -> Bool
+        isCancelled: @escaping () -> Bool,
+        loadModelIfNeeded: Bool = true,
+        isLiveTakeActive: (@Sendable () async -> Bool)? = nil
     ) async throws -> String {
         let activityLease = try RecordingActivity.shared.acquireReading(url)
         defer { activityLease.release() }
         // Ensure model loaded
         if !engine.isLoaded {
+            guard loadModelIfNeeded else { throw TranscriptionEngineError.modelNotLoaded }
             try await engine.loadModel(modelID: modelID)
         }
 
@@ -943,6 +1183,14 @@ public class Transcriber {
             if samples.isEmpty { continue }
 
             let suppressRegex = suppressAutoPunctuation ? "[,\\.\\?!;:\\-—]" : nil
+
+            // A live dictation always goes first: never start a chunk while one is recording
+            // or finalizing (only a chunk already in flight can delay it).
+            if let isLiveTakeActive {
+                try await Self.yieldToLiveTakes(isLiveTakeActive: isLiveTakeActive, isCancelled: isCancelled)
+            }
+            // Background callers never load, and never fall back to the CPU stand-in.
+            if !loadModelIfNeeded, !engine.isLoaded { throw TranscriptionEngineError.modelNotLoaded }
 
             let raw: String
             if engine.engineID == "whisper", let whisperEngine = engine as? WhisperEngine {

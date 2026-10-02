@@ -26,7 +26,7 @@ final class VocabularyBoostTests: XCTestCase {
 
     func testPunctuationCommandSpanIsVetoed() {
         // "colon" garbled and matched toward a name must never be rescored.
-        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["colon"], term: term("Rohrlich")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["colon"], term: term("Vohrbach")))
         XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["new", "line"], term: term("Maryna")))
         // …even when a curated alias claims the words (punctuation veto outranks aliases).
         XCTAssertNotNil(VocabularyBoost.vetoReason(
@@ -34,7 +34,7 @@ final class VocabularyBoostTests: XCTestCase {
     }
 
     func testRealWordSpanIsVetoed() {
-        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["makes"], term: term("Mareesa")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["makes"], term: term("Melora")))
         XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["render."], term: term("Zander")))
         // Modern compound missing from web2 — caught by NSSpellChecker (iteration-2 fix).
         XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["timeline"], term: term("Trimble")))
@@ -46,7 +46,7 @@ final class VocabularyBoostTests: XCTestCase {
     }
 
     func testGarbleIsEligible() {
-        XCTAssertNil(VocabularyBoost.vetoReason(originalSpan: ["rorlik"], term: term("Rohrlich")))
+        XCTAssertNil(VocabularyBoost.vetoReason(originalSpan: ["vorbak"], term: term("Vohrbach")))
         XCTAssertNil(VocabularyBoost.vetoReason(originalSpan: ["pebblebet"], term: term("Pebblebed")))
         // Possessives and trailing punctuation still eligible.
         XCTAssertNil(VocabularyBoost.vetoReason(originalSpan: ["Xeander's"], term: term("Zander's")))
@@ -54,8 +54,8 @@ final class VocabularyBoostTests: XCTestCase {
 
     func testAcronymSpanIsVetoed() {
         // it2 false positive: TDT emitted the acronym 'AAF' (audio format), rescorer
-        // proposed the name 'Naam'. ALL-CAPS spans are recognized acronyms — keep them.
-        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["AAF"], term: term("Naam")))
+        // proposed the name 'Navo'. ALL-CAPS spans are recognized acronyms — keep them.
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["AAF"], term: term("Navo")))
         // …but a term that IS that acronym may still claim it (EC2 case-fix path).
         XCTAssertNil(VocabularyBoost.vetoReason(originalSpan: ["EC-2"], term: term("EC2")))
     }
@@ -74,13 +74,13 @@ final class VocabularyBoostTests: XCTestCase {
     }
 
     func testSpliceAppliesAcceptedAndPreservesPunctuation() {
-        let terms = ["rohrlich": term("Rohrlich")]
+        let terms = ["vohrbach": term("Vohrbach")]
         let (text, decisions) = VocabularyBoost.spliceAcceptedReplacements(
-            batchText: "Talk to rorlik, tomorrow.",
-            rescoredText: "Talk to Rohrlich, tomorrow.",
-            replacements: [rescoring("rorlik,", "Rohrlich")],
+            batchText: "Talk to vorbak, tomorrow.",
+            rescoredText: "Talk to Vohrbach, tomorrow.",
+            replacements: [rescoring("vorbak,", "Vohrbach")],
             termByText: terms)
-        XCTAssertEqual(text, "Talk to Rohrlich, tomorrow.")
+        XCTAssertEqual(text, "Talk to Vohrbach, tomorrow.")
         XCTAssertEqual(decisions.count, 1)
         XCTAssertTrue(decisions[0].accepted)
     }
@@ -100,11 +100,11 @@ final class VocabularyBoostTests: XCTestCase {
     func testSpliceIgnoresUnclaimedDiffRegions() {
         // Rescored text differs somewhere the rescorer did NOT claim → batch text wins.
         let (text, decisions) = VocabularyBoost.spliceAcceptedReplacements(
-            batchText: "it still is paralleling physics",
-            rescoredText: "it still is parallel. ing physics",
+            batchText: "it still is paralleling the road",
+            rescoredText: "it still is parallel. ing the road",
             replacements: [],
             termByText: [:])
-        XCTAssertEqual(text, "it still is paralleling physics")
+        XCTAssertEqual(text, "it still is paralleling the road")
         XCTAssertEqual(decisions.count, 1)
         XCTAssertFalse(decisions[0].accepted)
         XCTAssertEqual(decisions[0].reason, "unmatched-diff-region")
@@ -117,15 +117,15 @@ final class VocabularyBoostTests: XCTestCase {
     }
 
     func testPrefilterSkipsAllRealWordText() {
-        let ctx = context([term("Rohrlich"), term("Zander")])
+        let ctx = context([term("Vohrbach"), term("Zander")])
         XCTAssertFalse(VocabularyBoost.hasEligibleToken(
-            batchText: "See what you think makes the most sense to render.", vocabulary: ctx))
+            batchText: "Tell me what you think makes the most sense to render.", vocabulary: ctx))
     }
 
     func testPrefilterCatchesGarbleToken() {
-        let ctx = context([term("Rohrlich")])
+        let ctx = context([term("Vohrbach")])
         XCTAssertTrue(VocabularyBoost.hasEligibleToken(
-            batchText: "Please ping rorlik about the screener.", vocabulary: ctx))
+            batchText: "Please ping vorbak about the order.", vocabulary: ctx))
     }
 
     func testPrefilterCatchesAliasPhraseOfRealWords() {
@@ -149,38 +149,38 @@ final class VocabularyBoostTests: XCTestCase {
     }
 
     func testWhitespaceOutsideAcceptedSpanIsPreserved() {
-        let batch = "Talk  to rorlik,\ntomorrow."
+        let batch = "Talk  to vorbak,\ntomorrow."
         let (text, decisions) = VocabularyBoost.spliceAcceptedReplacements(
             batchText: batch,
-            rescoredText: "Talk to Rohrlich, tomorrow.",
-            replacements: [rescoring("rorlik,", "Rohrlich")],
-            termByText: ["rohrlich": term("Rohrlich")])
-        XCTAssertEqual(text, "Talk  to Rohrlich,\ntomorrow.")
+            rescoredText: "Talk to Vohrbach, tomorrow.",
+            replacements: [rescoring("vorbak,", "Vohrbach")],
+            termByText: ["vohrbach": term("Vohrbach")])
+        XCTAssertEqual(text, "Talk  to Vohrbach,\ntomorrow.")
         XCTAssertTrue(decisions[0].accepted)
     }
 
     func testDigitSpanIsVetoed() {
         // [CX19] numbers/versions/model ids are never garbled names.
-        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["v2"], term: term("Naam")))
-        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["2026"], term: term("Bexx")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["v2"], term: term("Navo")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["2026"], term: term("Jaxx")))
     }
 
     func testMixedCaseAcronymIsVetoed() {
         // [CX21] LLMs / eBPF / iOS style tokens are decoder-recognized acronyms.
-        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["LLMs"], term: term("Naam")))
-        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["eBPF"], term: term("Bexx")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["LLMs"], term: term("Navo")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["eBPF"], term: term("Jaxx")))
     }
 
     func testContractionIsRealWord() {
         // [CX18] "don't" must be protected even though stripping the apostrophe
         // yields the non-word "dont".
-        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["don't"], term: term("Doxbox")))
-        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["day-to-day"], term: term("Doxbox")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["don't"], term: term("Zipbox")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["day-to-day"], term: term("Zipbox")))
     }
 
     func testMixedSpanWithRealWordIsVetoed() {
         // [CX14] a span containing ANY real word must not be swallowed by a term.
-        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["to", "rorlik"], term: term("Rohrlich")))
+        XCTAssertNotNil(VocabularyBoost.vetoReason(originalSpan: ["to", "vorbak"], term: term("Vohrbach")))
     }
 
     func testLengthGainIsVetoed() {
@@ -190,14 +190,14 @@ final class VocabularyBoostTests: XCTestCase {
 
     func testDuplicateTermKeysDoNotTrap() {
         // [CX13] duplicate textLowercased values must not crash the splice.
-        let t1 = term("Bexx")
-        let terms = ["bexx": t1]
+        let t1 = term("Jaxx")
+        let terms = ["jaxx": t1]
         let (text, _) = VocabularyBoost.spliceAcceptedReplacements(
-            batchText: "ping becks now",
-            rescoredText: "ping Bexx now",
-            replacements: [rescoring("becks", "Bexx")],
+            batchText: "ping jacks now",
+            rescoredText: "ping Jaxx now",
+            replacements: [rescoring("jacks", "Jaxx")],
             termByText: terms)
-        XCTAssertEqual(text, "ping becks now")  // "becks" is a real word → vetoed
+        XCTAssertEqual(text, "ping jacks now")  // "jacks" is a real word → vetoed
     }
 
     func testMultiWordTermWithPunctuationWordIsNotLoaded() {
@@ -207,9 +207,9 @@ final class VocabularyBoostTests: XCTestCase {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let f = dir.appendingPathComponent("vocabulary.txt")
-        try? "New Line Cinema\nRohrlich\n".write(to: f, atomically: true, encoding: .utf8)
+        try? "New Line Cinema\nVohrbach\n".write(to: f, atomically: true, encoding: .utf8)
         XCTAssertEqual(VocabularyBoost.loadTermSpecs(vocabularyFile: f).map { $0.text },
-                       ["Rohrlich"])
+                       ["Vohrbach"])
     }
 
     func testTokenizePreservingGapsRoundTrips() {
@@ -224,7 +224,7 @@ final class VocabularyBoostTests: XCTestCase {
 
     func testPrefilterProtectsAcronymAndDigitTokens() {
         // [CX37]/[CX39] tokens the guard would veto do not trigger the CTC pass.
-        let ctx = context([term("Naam"), term("Bexx")])
+        let ctx = context([term("Navo"), term("Jaxx")])
         XCTAssertFalse(VocabularyBoost.hasEligibleToken(
             batchText: "The AAF spec and v2 build ship in 2026.", vocabulary: ctx))
     }
@@ -254,14 +254,14 @@ final class VocabularyBoostTests: XCTestCase {
         let f = dir.appendingPathComponent("vocabulary.txt")
         try? """
         # comment
-        Rohrlich
+        Vohrbach
         comma
-        Gaubert # brain
+        Lambrin # manual
         CLAUDE.md
         EC2 # manual
         """.write(to: f, atomically: true, encoding: .utf8)
         let specs = VocabularyBoost.loadTermSpecs(vocabularyFile: f)
-        XCTAssertEqual(specs.map { $0.text }, ["Rohrlich", "Gaubert", "EC2"])
+        XCTAssertEqual(specs.map { $0.text }, ["Vohrbach", "Lambrin", "EC2"])
     }
 }
 
@@ -303,7 +303,7 @@ final class ProperNounGuardTests: XCTestCase {
 
     func testProperNounShapePredicate() {
         XCTAssertTrue(VocabularyBoost.isProperNounShaped("Cloudflare"))
-        XCTAssertTrue(VocabularyBoost.isProperNounShaped("Kodish,"))
+        XCTAssertTrue(VocabularyBoost.isProperNounShaped("Pelton,"))
         XCTAssertFalse(VocabularyBoost.isProperNounShaped("cloudflare"))
         XCTAssertFalse(VocabularyBoost.isProperNounShaped("eBPF"), "acronym guard's territory")
         XCTAssertFalse(VocabularyBoost.isProperNounShaped("LLMs"))

@@ -1,11 +1,11 @@
 // Claude · 2026-07-29 · Session: 6277a78f-7ff9-4d99-b9d1-f9ee9afe952a
 //
-// Michael, 2026-07-29: "additional spaces should be tracked so that you are able to see them."
+// The maintainer, 2026-07-29: "additional spaces should be tracked so that you are able to see them."
 //
 // Spacing damage is the one dictation defect NOTHING could observe. The recordings corpus stores
 // the dictation alone (.txt), so a spurious leading space or a missing one lives only in the
 // target app — 2026-07-29's corpus showed 0 leading spaces, 0 doubles, 0 space-before-punct while
-// Michael was actively looking at extra spaces on screen. `spacingDiagnosis` classifies the seam
+// The maintainer was actively looking at extra spaces on screen. `spacingDiagnosis` classifies the seam
 // so the diagnostic log can count what only he could see.
 
 import XCTest
@@ -17,7 +17,7 @@ final class SpacingDiagnosisTests: XCTestCase {
         TextInserter.spacingDiagnosis(contextBefore: context, insertText: insert)
     }
 
-    // MARK: - The defect Michael reported
+    // MARK: - The defect the maintainer reported
 
     /// Field already ends in a space AND the pipeline prepended one → "word  next".
     func test_extraSpace_whenFieldEndsInSpaceAndSpaceIsPrepended() {

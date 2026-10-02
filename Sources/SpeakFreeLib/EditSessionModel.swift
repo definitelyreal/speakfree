@@ -1,6 +1,6 @@
 import Foundation
 
-// Edit Mode session state (Michael, 2026-08-28). This file is the model half of Edit Mode: an
+// Edit Mode session state (the maintainer, 2026-08-28). This file is the model half of Edit Mode: an
 // immutable-revision segment history (C3/M24), a single token-guarded reducer that drops stale
 // async work (C4), and consent-bound draft persistence (C5). It is deliberately AppKit-free and
 // pure so the whole race surface is unit-testable without a window — the finalize/insertion side
@@ -65,10 +65,17 @@ public struct EditSegment: Codable, Equatable, Identifiable {
 
     public let id: UUID
     public var state: State
-    /// The raw pre-pipeline transcript (Michael: "feed the raw phonemes"). Immutable once set.
+    /// The raw pre-pipeline transcript (the maintainer: "feed the raw phonemes"). Immutable once set.
     public var raw: String
     public private(set) var revisions: [SegmentRevision]
     public var inFlight: InFlightAttempt?
+    /// Segments merged INTO this one by a Backspace at a paragraph boundary, in order, with their
+    /// full revision history kept (merged-paragraph history stays inspectable).
+    /// Optional so drafts written before the field existed still decode.
+    public var absorbed: [EditSegment]?
+    /// The archived recording stem(s) behind this paragraph (nil when recordings are off or the
+    /// paragraph was typed). Used to list the paragraph as a component in Recent Dictations.
+    public var componentStems: [String]?
 
     /// Bounded history (M24): keep the original asr revision (index 0, needed for Restore) plus the
     /// most recent revisions. A runaway A/B or retry loop can never grow this without bound.
@@ -86,8 +93,46 @@ public struct EditSegment: Codable, Equatable, Identifiable {
     /// The current text = the newest revision's text (empty while still recording).
     public var currentText: String { revisions.last?.text ?? "" }
 
-    /// The original provisional (asr) text, for Restore.
-    public var originalText: String? { revisions.first(where: { $0.origin == .asr })?.text }
+    /// The original provisional (asr) text, for Restore. For a merged paragraph this is the
+    /// originals of every merged take joined by one space (the merge removed the paragraph break).
+    public var originalText: String? {
+        let own = revisions.first(where: { $0.origin == .asr })?.text
+        let merged = (absorbed ?? []).compactMap { $0.originalText }
+        if merged.isEmpty { return own }
+        return ([own].compactMap { $0 } + merged).joined(separator: " ")
+    }
+
+    /// The version shown just before the current one: the newest earlier revision whose text
+    /// differs from the current text: the "previous" version the window offers beside the
+    /// original. nil when nothing earlier differs.
+    public var previousRevision: SegmentRevision? {
+        let current = currentText
+        return revisions.dropLast().last(where: { $0.text != current })
+    }
+
+    /// The newest model revision if it is still the current revision (its applied edits are the
+    /// change marks shown in the window), else nil.
+    public var currentModelRevision: SegmentRevision? {
+        guard let last = revisions.last, last.origin == .model else { return nil }
+        return last
+    }
+
+    /// Every cleanup change still visible in the current text: the applied edits of every model
+    /// revision, newest first, whose replacement still occurs EXACTLY ONCE in the current text
+    /// (undo anchors on it; a bare "," among several commas cannot be undone, so it is not
+    /// offered, review 2026-09-29). Original and Previous restore still cover those.
+    public var undoableChanges: [SpanEdit] {
+        var out: [SpanEdit] = []
+        let current = currentText
+        for rev in revisions.reversed() where rev.origin == .model {
+            for edit in rev.appliedEdits where !edit.replace.isEmpty
+                && SpanEditApplier.allRanges(of: edit.replace, in: current).count == 1
+                && !out.contains(edit) {
+                out.append(edit)
+            }
+        }
+        return out
+    }
 
     /// Append a revision, maintaining the parent chain and the bound. Keeps index 0 (the asr
     /// original) and drops the oldest non-original when over the cap.
@@ -164,10 +209,36 @@ public enum EditSessionAction {
     case beginSegment(segmentID: UUID)
     case provisional(segmentID: UUID, raw: String, pipelineText: String)
     case startCleaning(segmentID: UUID, attemptID: UUID, arm: String)
+    /// An explicit "Clean up again" from the user. Unlike `startCleaning` it may start from
+    /// `.edited`: the user asked for it.
+    case retryCleaning(segmentID: UUID, attemptID: UUID, arm: String)
     case cleanupResult(CleanupCompletion)
     case cleanupFailed(segmentID: UUID, attemptID: UUID)
+    /// The in-flight cleanup was stopped on purpose (cloud turned off, hand edit, restore, commit):
+    /// back to the posture it had before the call, with no failure mark.
+    case cancelCleaning(segmentID: UUID)
     case userEdit(segmentID: UUID, newText: String)
     case restoreOriginal(segmentID: UUID)
+    /// Make an earlier revision current again (Original / Previous restore). Appends, never
+    /// rewrites history, so restoring is itself reversible.
+    case restoreRevision(segmentID: UUID, revisionID: UUID)
+    /// Undo ONE cleanup change without discarding later hand edits: the inverse
+    /// span edit (replace -> find) is applied to the CURRENT text, anchored uniquely, so edits made
+    /// elsewhere in the paragraph survive.
+    case revertChange(segmentID: UUID, edit: SpanEdit)
+    /// Apply a chosen compare candidate. Guarded by the revision the candidates were computed from:
+    /// any edit since then invalidates the comparison.
+    case applyCandidate(segmentID: UUID, sourceRevision: UUID, arm: String, edits: [SpanEdit])
+    /// A Backspace across a paragraph boundary merged `absorbedIDs` into `ownerID`; `text` is the
+    /// merged paragraph as it now reads.
+    case mergeSegments(ownerID: UUID, absorbedIDs: [UUID], text: String)
+    /// A take that produced no text (too short, silent, failed transcription) or a paragraph the
+    /// user deleted entirely.
+    case removeSegment(segmentID: UUID)
+    /// A paragraph typed by hand with no dictation behind it.
+    case addTypedSegment(segmentID: UUID, text: String)
+    /// Record the archived recording stem behind a paragraph (Recents components).
+    case setComponentStem(segmentID: UUID, stem: String)
     case commit
     case cancel
     case terminate
@@ -225,14 +296,18 @@ public enum EditSessionReducer {
             next.segments[i].state = .provisional
             return applied(&next, now)
 
-        case .startCleaning(let segmentID, let attemptID, let arm):
+        case .startCleaning(let segmentID, let attemptID, let arm),
+             .retryCleaning(let segmentID, let attemptID, let arm):
             guard let i = next.indexOfSegment(segmentID) else {
                 return Result(state: state, outcome: .dropped(.segmentMissing))
             }
             let s = next.segments[i]
-            // Cleanup can start from any settled-ish state (provisional/settled/failed) but never on
-            // a segment the user has taken over (.edited) or one still recording.
-            guard s.state == .provisional || s.state == .settled || s.state == .failed,
+            var allowed: [EditSegment.State] = [.provisional, .settled, .failed]
+            if case .retryCleaning = action { allowed.append(.edited) }
+            // Automatic cleanup can start from any settled-ish state (provisional/settled/failed)
+            // but never on a segment the user has taken over (.edited) or one still recording.
+            // An explicit retry may also start from .edited.
+            guard allowed.contains(s.state), !s.currentText.isEmpty,
                   let source = s.revisions.last?.id else {
                 return Result(state: state, outcome: .dropped(.invalidState))
             }
@@ -288,6 +363,21 @@ public enum EditSessionReducer {
             next.segments[i].inFlight = nil
             return applied(&next, now)
 
+        case .cancelCleaning(let segmentID):
+            guard let i = next.indexOfSegment(segmentID) else {
+                return Result(state: state, outcome: .dropped(.segmentMissing))
+            }
+            guard next.segments[i].state == .cleaning else {
+                return Result(state: state, outcome: .dropped(.notCleaning))
+            }
+            switch next.segments[i].revisions.last?.origin {
+            case .asr?: next.segments[i].state = .provisional
+            case .model?: next.segments[i].state = .settled
+            default: next.segments[i].state = .edited
+            }
+            next.segments[i].inFlight = nil
+            return applied(&next, now)
+
         case .userEdit(let segmentID, let newText):
             guard let i = next.indexOfSegment(segmentID) else {
                 return Result(state: state, outcome: .dropped(.segmentMissing))
@@ -306,8 +396,108 @@ public enum EditSessionReducer {
                 return Result(state: state, outcome: .dropped(.invalidState))
             }
             next.segments[i].appendRevision(text: original, origin: .restore, timestamp: now)
-            next.segments[i].state = .settled
+            // A restore is the user taking control: no automatic cleanup may land on it afterward.
+            next.segments[i].state = .edited
             next.segments[i].inFlight = nil
+            return applied(&next, now)
+
+        case .restoreRevision(let segmentID, let revisionID):
+            guard let i = next.indexOfSegment(segmentID) else {
+                return Result(state: state, outcome: .dropped(.segmentMissing))
+            }
+            guard let rev = next.segments[i].revisions.first(where: { $0.id == revisionID }) else {
+                return Result(state: state, outcome: .dropped(.invalidState))
+            }
+            next.segments[i].appendRevision(text: rev.text, origin: .restore, timestamp: now)
+            next.segments[i].state = .edited
+            next.segments[i].inFlight = nil
+            return applied(&next, now)
+
+        case .revertChange(let segmentID, let edit):
+            guard let i = next.indexOfSegment(segmentID) else {
+                return Result(state: state, outcome: .dropped(.segmentMissing))
+            }
+            // A pure deletion leaves nothing to anchor on, so it cannot be undone individually;
+            // Original/Previous restore still covers it.
+            guard !edit.replace.isEmpty else {
+                return Result(state: state, outcome: .dropped(.invalidState))
+            }
+            let inverse = SpanEdit(find: edit.replace, replace: edit.find,
+                                   reason: "undid: \(edit.reason)")
+            // Undo never widens: it must put back exactly what the fix took out.
+            let application = SpanEditApplier.apply([inverse], to: next.segments[i].currentText,
+                                                    absorbSpace: false)
+            guard application.applied.count == 1 else {
+                return Result(state: state, outcome: .dropped(.invalidState))
+            }
+            next.segments[i].appendRevision(text: application.text, origin: .restore,
+                                            timestamp: now, appliedEdits: application.applied)
+            next.segments[i].state = .edited
+            next.segments[i].inFlight = nil
+            return applied(&next, now)
+
+        case .applyCandidate(let segmentID, let sourceRevision, let arm, let edits):
+            guard let i = next.indexOfSegment(segmentID) else {
+                return Result(state: state, outcome: .dropped(.segmentMissing))
+            }
+            let s = next.segments[i]
+            guard s.state != .recording, s.state != .cleaning else {
+                return Result(state: state, outcome: .dropped(.invalidState))
+            }
+            guard s.revisions.last?.id == sourceRevision else {
+                return Result(state: state, outcome: .dropped(.staleRevision))
+            }
+            let application = SpanEditApplier.apply(edits, to: s.currentText)
+            next.segments[i].appendRevision(text: application.text, origin: .model, arm: arm,
+                                            timestamp: now, appliedEdits: application.applied)
+            if s.state != .edited { next.segments[i].state = .settled }
+            return applied(&next, now)
+
+        case .mergeSegments(let ownerID, let absorbedIDs, let text):
+            guard next.indexOfSegment(ownerID) != nil else {
+                return Result(state: state, outcome: .dropped(.segmentMissing))
+            }
+            var gathered: [EditSegment] = []
+            for id in absorbedIDs where id != ownerID {
+                guard let j = next.indexOfSegment(id) else { continue }
+                var gone = next.segments[j]
+                gone.inFlight = nil   // its cleanup result is now dropped as segmentMissing
+                gathered.append(gone)
+                next.segments.remove(at: j)
+            }
+            guard let k = next.indexOfSegment(ownerID) else {
+                return Result(state: state, outcome: .dropped(.segmentMissing))
+            }
+            let absorbed = (next.segments[k].absorbed ?? []) + gathered
+            let stems = (next.segments[k].componentStems ?? [])
+                + gathered.flatMap { $0.componentStems ?? [] }
+            next.segments[k].absorbed = absorbed.isEmpty ? nil : absorbed
+            next.segments[k].componentStems = stems.isEmpty ? nil : stems
+            next.segments[k].appendRevision(text: text, origin: .user, timestamp: now)
+            next.segments[k].state = .edited
+            next.segments[k].inFlight = nil
+            return applied(&next, now)
+
+        case .removeSegment(let segmentID):
+            guard let i = next.indexOfSegment(segmentID) else {
+                return Result(state: state, outcome: .dropped(.segmentMissing))
+            }
+            next.segments.remove(at: i)
+            return applied(&next, now)
+
+        case .addTypedSegment(let segmentID, let text):
+            var seg = EditSegment(id: segmentID, state: .edited)
+            seg.appendRevision(text: text, origin: .user, timestamp: now)
+            next.segments.append(seg)
+            return applied(&next, now)
+
+        case .setComponentStem(let segmentID, let stem):
+            guard let i = next.indexOfSegment(segmentID) else {
+                return Result(state: state, outcome: .dropped(.segmentMissing))
+            }
+            var stems = next.segments[i].componentStems ?? []
+            if !stems.contains(stem) { stems.append(stem) }
+            next.segments[i].componentStems = stems
             return applied(&next, now)
 
         case .commit:
@@ -387,8 +577,22 @@ public final class EditSessionDraftStore {
 
     /// Computed fresh (never stored) so a `Config.configDirOverride` switch in tests is honored —
     /// same discipline as RecordingStore.recordingsDir.
+    ///
+    /// Permanent regression guard (2026-09-25 fix/test-real-config): `write()`/`clear()` route
+    /// through here, and `write()` can fire from a debounced background queue seconds after a
+    /// test method returns — a real straggler was found racing past `tearDown()`'s
+    /// `Config.configDirOverride = nil` and landing on the real edit-session-draft.json. Fail
+    /// loudly instead of touching real data.
     public static var draftURL: URL {
-        Config.configDir.appendingPathComponent("edit-session-draft.json")
+        if Config.isResolvingRealDirUnderTest {
+            fatalError(
+                "EditSessionDraftStore.draftURL resolved to the REAL " +
+                "~/.config/speakfree/edit-session-draft.json under XCTest. A debounced write can " +
+                "fire after your test method returns — drain pending work (or wait past the " +
+                "debounce interval) in tearDown() BEFORE resetting Config.configDirOverride to nil."
+            )
+        }
+        return Config.configDir.appendingPathComponent("edit-session-draft.json")
     }
 
     public func schedule(_ state: EditSessionState) {

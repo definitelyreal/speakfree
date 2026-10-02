@@ -4,9 +4,11 @@ import XCTest
 /// Regression corpus for `TextPostProcessor`. Each case is a JSON object in
 /// `Corpus/cases.json` with `{name, mode, input, expected, note?}`.
 ///
-/// To add a case: copy a real failing dictation from `~/.config/speakfree/recordings/`
-/// (`<id>.raw.txt` is the whisper output, `<id>.txt` is what speakfree typed) into
-/// a new entry, set `expected` to what *should* have come out, and re-run.
+/// To add a case: write a SYNTHETIC reproduction of the failure. Never paste a real
+/// dictation (yours or anyone's) into this public file. Invent a neutral sentence that
+/// keeps the exact structural trigger (the same punctuation tokens, garble word and its
+/// position, preceding article or negation, ellipsis shape, number or acronym form), set
+/// `expected` to what *should* come out, confirm the old code fails it, and re-run.
 ///
 /// Modes: "hybrid" (whisper auto-punct + spoken words), "spoken" (spoken words only),
 /// "off" (no post-processing).

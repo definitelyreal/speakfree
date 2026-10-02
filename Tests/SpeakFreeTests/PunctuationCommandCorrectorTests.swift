@@ -68,7 +68,7 @@ final class PunctuationCommandCorrectorTests: XCTestCase {
         TextPostProcessor.process(text, hybrid: true)
     }
 
-    // MARK: ARM B -- real corpus-positive shapes
+    // MARK: ARM B -- corpus-positive shapes (synthetic wording)
 
     func testLowOutlierPairedAfterPauseBecomesPeriod() {
         let result = correct("But we could paired. Yeah", [
@@ -80,7 +80,7 @@ final class PunctuationCommandCorrectorTests: XCTestCase {
     }
 
     func testStudyGammaOutlierAfterPauseBecomesComma() {
-        // Michael label 3: confidence 0.539, 0.24 s gap, take median approximately 1.0.
+        // Ear-labeled case 3: confidence 0.539, 0.24 s gap, take median approximately 1.0.
         let result = correct("cover in this gamma, whether it works", [
             WordSpec("cover"), WordSpec("in"), WordSpec("this"),
             WordSpec("gamma,", 0.539, gap: 0.24), WordSpec("whether"),
@@ -90,7 +90,7 @@ final class PunctuationCommandCorrectorTests: XCTestCase {
     }
 
     func testStudyComeUsesTwoStrongCommandSignals() {
-        // Michael label 24: "Sure, come, I'd...", confidence 0.349. Boundary plus the
+        // Ear-labeled case 24: "Sure, come, I'd...", confidence 0.349. Boundary plus the
         // candidate's own punctuation clears the stricter collision guard for "come".
         let result = correct("Sure, come, I'd be happy to", [
             WordSpec("Sure,"), WordSpec("come,", 0.349), WordSpec("I'd"),
@@ -100,11 +100,11 @@ final class PunctuationCommandCorrectorTests: XCTestCase {
     }
 
     func testStudyCountAfterClauseBoundaryBecomesComma() {
-        let result = correct("Ethan staying longer. Count my potentially", [
-            WordSpec("Ethan"), WordSpec("staying"), WordSpec("longer."),
+        let result = correct("Nadia staying longer. Count my potentially", [
+            WordSpec("Nadia"), WordSpec("staying"), WordSpec("longer."),
             WordSpec("Count", 0.484), WordSpec("my"), WordSpec("potentially"),
         ])
-        XCTAssertEqual(finish(result.text), "Ethan staying longer, my potentially")
+        XCTAssertEqual(finish(result.text), "Nadia staying longer, my potentially")
     }
 
     func testQuestionerAndColumnLexiconEntriesUseTheSameGate() {
@@ -251,7 +251,7 @@ final class PunctuationCommandCorrectorTests: XCTestCase {
     }
 
     func testConfirmedHighConfidenceColumnRemainsVisibleByDesign() {
-        // Michael label 36 is a true colon command, but its 0.898 token confidence violates
+        // Ear-labeled case 36 is a true colon command, but its 0.898 token confidence violates
         // the mandated loose <0.6 ceiling. Preserve the visible word rather than inventing a
         // false-positive exception; the labeled-set report records this one known false negative.
         let result = correct("Yeah, column my replacement", [
@@ -275,16 +275,16 @@ final class PunctuationCommandCorrectorTests: XCTestCase {
     }
 
     func testVocabularyBoostChangeBeforeCandidateDoesNotBreakTimingAlignment() {
-        // Timing text has the pre-boost "Kriss" while the text reaching this pass has "Kris".
+        // Timing text has the pre-boost "Errik" while the text reaching this pass has "Erik".
         // The later gamma must still align and correct; a greedy aligner lost every word after
         // the first mismatch.
         let result = ParakeetEngine.correctingPunctuationCommandHomophones(
-            text: "Kris said okay. Gamma, next",
+            text: "Erik said okay. Gamma, next",
             timings: timings([
-                WordSpec("Kriss"), WordSpec("said"), WordSpec("okay."),
+                WordSpec("Errik"), WordSpec("said"), WordSpec("okay."),
                 WordSpec("Gamma,", 0.42), WordSpec("next"),
             ]))
-        XCTAssertEqual(finish(result.text), "Kris said okay, next")
+        XCTAssertEqual(finish(result.text), "Erik said okay, next")
     }
 
     func testClauseBoundaryInsideClosingQuoteIsConsumed() {
@@ -368,119 +368,5 @@ final class PunctuationCommandCorrectorTests: XCTestCase {
                        "Pooh paused. Kanga, however, continued")
         XCTAssertEqual(finish("We studied explorers. Gama, however, continued"),
                        "We studied explorers. Gama, however, continued")
-    }
-
-    // MARK: Michael's 50 ear-labels (private artifacts remain outside the repository)
-
-    func testMichaelLabeledSetPrecisionRecall() throws {
-        struct Label: Decodable {
-            let id: Int
-            let base: String
-            let label: String
-        }
-        struct Selected: Decodable {
-            let id: Int
-            let wl: String
-            let s: Double
-            let ctx: String
-        }
-        struct DumpToken: Decodable {
-            let t: String
-            let s: Double
-            let e: Double
-            let c: Float
-        }
-        struct DumpLine: Decodable {
-            let wav: String
-            let tokens: [DumpToken]
-            let tdt: String
-        }
-
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/speakfree/analysis/26-08-22-punct-uncertainty")
-        let labelsURL = dir.appendingPathComponent("michael-labels.json")
-        let selectedURL = dir.appendingPathComponent("selected.json")
-        let tokensURL = dir.appendingPathComponent("tokens.jsonl")
-        guard FileManager.default.fileExists(atPath: labelsURL.path),
-              FileManager.default.fileExists(atPath: selectedURL.path),
-              FileManager.default.fileExists(atPath: tokensURL.path) else {
-            throw XCTSkip("private 2026-08-22 punctuation study artifacts are not installed")
-        }
-
-        let decoder = JSONDecoder()
-        let labels = try decoder.decode([Label].self, from: Data(contentsOf: labelsURL))
-        let selected = try decoder.decode([Selected].self, from: Data(contentsOf: selectedURL))
-        let selectedByID = Dictionary(uniqueKeysWithValues: selected.map { ($0.id, $0) })
-        let wantedBases = Set(labels.map(\.base))
-        let lines = try String(contentsOf: tokensURL, encoding: .utf8)
-            .split(separator: "\n")
-        var dumps: [String: DumpLine] = [:]
-        for line in lines {
-            guard let data = String(line).data(using: .utf8),
-                  let dump = try? decoder.decode(DumpLine.self, from: data) else { continue }
-            let base = URL(fileURLWithPath: dump.wav).deletingPathExtension().lastPathComponent
-            if wantedBases.contains(base) { dumps[base] = dump }
-        }
-        XCTAssertEqual(dumps.count, wantedBases.count,
-                       "labeled eval must not silently omit a recording's token dump")
-
-        func normalized(_ value: String) -> String {
-            String(value.lowercased().unicodeScalars.filter {
-                CharacterSet.alphanumerics.contains($0)
-            })
-        }
-        func count(_ key: String, in text: String) -> Int {
-            text.split(whereSeparator: { $0.isWhitespace })
-                .map { normalized(String($0)) }.filter { $0 == key }.count
-        }
-
-        var armATP = 0, armAFP = 0
-        var combinedTP = 0, combinedFP = 0
-        var commandCount = 0, wordCount = 0
-        var misses: [Int] = []
-        for label in labels where label.label != "unclear" {
-            guard let row = selectedByID[label.id] else {
-                return XCTFail("missing selected row for label \(label.id)")
-            }
-            let key = normalized(row.wl)
-            let local = row.ctx.replacingOccurrences(of: "⟪", with: "")
-                .replacingOccurrences(of: "⟫", with: "")
-                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let armAFired = count(key, in: finish(local)) < count(key, in: local)
-
-            var armBFired = false
-            if let dump = dumps[label.base] {
-                let result = ParakeetEngine.correctingPunctuationCommandHomophones(
-                    text: dump.tdt,
-                    timings: dump.tokens.map {
-                        TokenTiming(token: $0.t, tokenId: 0, startTime: $0.s,
-                                    endTime: $0.e, confidence: $0.c)
-                    })
-                armBFired = result.corrections.contains {
-                    abs($0.startTime - row.s) < 0.12 && normalized($0.original) == key
-                }
-            }
-            let combined = armAFired || armBFired
-            if label.label == "command" {
-                commandCount += 1
-                if armAFired { armATP += 1 }
-                if combined { combinedTP += 1 } else { misses.append(label.id) }
-            } else if label.label == "word" {
-                wordCount += 1
-                if armAFired { armAFP += 1 }
-                if combined { combinedFP += 1 }
-            }
-        }
-
-        print("PUNCTUATION_LABEL_EVAL currentArmA=TP:\(armATP) FP:\(armAFP) "
-            + "combined=TP:\(combinedTP) FP:\(combinedFP) "
-            + "commands:\(commandCount) words:\(wordCount) misses:\(misses)")
-        XCTAssertEqual(commandCount, 40)
-        XCTAssertEqual(wordCount, 9)
-        XCTAssertEqual(combinedFP, 0, "a Michael-labeled real word was converted")
-        XCTAssertGreaterThan(combinedTP, armATP, "ARM B must improve labeled-set recall")
-        XCTAssertEqual(misses, [30, 32, 36],
-                       "only the explicit literal-noun guards and high-confidence column may miss")
     }
 }

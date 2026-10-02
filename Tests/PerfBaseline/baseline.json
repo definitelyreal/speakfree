@@ -1,91 +1,179 @@
 {
   "engines" : [
     {
+      "engine" : "parakeet",
+      "fixtures" : [
+        {
+          "audioSeconds" : 11.1,
+          "endToEndMs" : {
+            "iterations" : 7,
+            "max" : 1319.4540410000002,
+            "mean" : 1298.7326545714288,
+            "median" : 1294.555208,
+            "min" : 1291.618416
+          },
+          "fixture" : "fixture-1-clean.wav",
+          "inferenceMs" : {
+            "iterations" : 7,
+            "max" : 117.094125,
+            "mean" : 96.27025,
+            "median" : 91.822833,
+            "min" : 88.694708
+          },
+          "postBufferMs" : 1200,
+          "transcript" : ""
+        },
+        {
+          "audioSeconds" : 9.4,
+          "endToEndMs" : {
+            "iterations" : 7,
+            "max" : 1338.502625,
+            "mean" : 1310.3122681428572,
+            "median" : 1307.265625,
+            "min" : 1298.306584
+          },
+          "fixture" : "fixture-2-spoken-comma.wav",
+          "inferenceMs" : {
+            "iterations" : 7,
+            "max" : 134.091417,
+            "mean" : 105.72116685714286,
+            "median" : 102.7755,
+            "min" : 93.66475
+          },
+          "postBufferMs" : 1200,
+          "transcript" : ""
+        },
+        {
+          "audioSeconds" : 11,
+          "endToEndMs" : {
+            "iterations" : 7,
+            "max" : 322.664416,
+            "mean" : 319.93219042857146,
+            "median" : 319.471084,
+            "min" : 318.522833
+          },
+          "fixture" : "fixture-3-spoken-period-end.wav",
+          "inferenceMs" : {
+            "iterations" : 7,
+            "max" : 99.158708,
+            "mean" : 96.43788685714286,
+            "median" : 96.017,
+            "min" : 95.283792
+          },
+          "postBufferMs" : 220,
+          "transcript" : ""
+        },
+        {
+          "audioSeconds" : 11.4,
+          "endToEndMs" : {
+            "iterations" : 7,
+            "max" : 192.422124,
+            "mean" : 189.76123199999998,
+            "median" : 190.066291,
+            "min" : 186.864125
+          },
+          "fixture" : "fixture-4-trailing-silence-period.wav",
+          "inferenceMs" : {
+            "iterations" : 7,
+            "max" : 98.818208,
+            "mean" : 96.36406528571429,
+            "median" : 96.775542,
+            "min" : 93.626083
+          },
+          "postBufferMs" : 90,
+          "transcript" : ""
+        }
+      ],
+      "model" : "parakeet-tdt-0.6b-v2",
+      "postBufferMs" : 220,
+      "postBufferPolicy" : "adaptive"
+    },
+    {
       "engine" : "whisper",
       "fixtures" : [
         {
           "audioSeconds" : 11.1,
           "endToEndMs" : {
             "iterations" : 7,
-            "max" : 979.115332,
-            "mean" : 933.6524818571428,
-            "median" : 910.029,
-            "min" : 895.269041
+            "max" : 1871.872875,
+            "mean" : 1857.5297144285717,
+            "median" : 1856.754833,
+            "min" : 1848.872625
           },
           "fixture" : "fixture-1-clean.wav",
           "inferenceMs" : {
             "iterations" : 7,
-            "max" : 677.367041,
-            "mean" : 632.5448867142857,
-            "median" : 609.129917,
-            "min" : 593.860666
+            "max" : 667.34275,
+            "mean" : 649.8621785714286,
+            "median" : 645.023875,
+            "min" : 644.10875
           },
-          "postBufferMs" : 300,
-          "transcript" : "I do think you're right and we shouldn't come"
+          "postBufferMs" : 1200,
+          "transcript" : ""
         },
         {
           "audioSeconds" : 9.4,
           "endToEndMs" : {
             "iterations" : 7,
-            "max" : 988.779417,
-            "mean" : 946.6937918571429,
-            "median" : 962.92,
-            "min" : 905.4456670000001
+            "max" : 1860.676166,
+            "mean" : 1852.4461190000002,
+            "median" : 1854.3848329999998,
+            "min" : 1839.4176250000003
           },
           "fixture" : "fixture-2-spoken-comma.wav",
           "inferenceMs" : {
             "iterations" : 7,
-            "max" : 687.885375,
-            "mean" : 645.7530954285714,
-            "median" : 662.042375,
-            "min" : 604.3445
+            "max" : 649.658125,
+            "mean" : 643.8598391428571,
+            "median" : 643.909208,
+            "min" : 635.041
           },
-          "postBufferMs" : 300,
-          "transcript" : "Especially that we aren't using the CLI, talking about the changes we made in architecture to speed things up are really important."
+          "postBufferMs" : 1200,
+          "transcript" : ""
         },
         {
           "audioSeconds" : 11,
           "endToEndMs" : {
             "iterations" : 7,
-            "max" : 971.717084,
-            "mean" : 919.1686372857142,
-            "median" : 900.445416,
-            "min" : 893.8506669999999
+            "max" : 888.049625,
+            "mean" : 872.5397082857144,
+            "median" : 870.037375,
+            "min" : 855.196792
           },
           "fixture" : "fixture-3-spoken-period-end.wav",
           "inferenceMs" : {
             "iterations" : 7,
-            "max" : 670.877167,
-            "mean" : 618.1093692857145,
-            "median" : 599.312709,
-            "min" : 592.895375
+            "max" : 658.970458,
+            "mean" : 645.8350058571428,
+            "median" : 646.19675,
+            "min" : 631.4475
           },
-          "postBufferMs" : 300,
-          "transcript" : "What's a more felt way to present the RSVP button question mark for the big chunky button feels too promotional period."
+          "postBufferMs" : 220,
+          "transcript" : ""
         },
         {
           "audioSeconds" : 11.4,
           "endToEndMs" : {
             "iterations" : 7,
-            "max" : 829.6648329999999,
-            "mean" : 793.9735117142857,
-            "median" : 821.280875,
-            "min" : 750.8093739999999
+            "max" : 746.193959,
+            "mean" : 740.3704347142857,
+            "median" : 742.143,
+            "min" : 730.3157500000001
           },
           "fixture" : "fixture-4-trailing-silence-period.wav",
           "inferenceMs" : {
             "iterations" : 7,
-            "max" : 678.610792,
-            "mean" : 643.0444344285714,
-            "median" : 670.455041,
-            "min" : 599.786208
+            "max" : 645.784959,
+            "mean" : 641.077905,
+            "median" : 642.97825,
+            "min" : 630.732375
           },
-          "postBufferMs" : 150,
-          "transcript" : "What's a more felt way to present the RSVP button question mark for the big chunky button feels too promotional period."
+          "postBufferMs" : 90,
+          "transcript" : ""
         }
       ],
       "model" : "tiny.en",
-      "postBufferMs" : 300,
+      "postBufferMs" : 220,
       "postBufferPolicy" : "adaptive"
     }
   ],
@@ -93,9 +181,9 @@
     "arch" : "arm64",
     "cores" : 16,
     "cpu" : "Apple M3 Max",
-    "os" : "macOS Version 26.0 (Build 25A354)"
+    "os" : "macOS Version 26.6.2 (Build 25G83)"
   },
-  "generatedAt" : "2026-06-11T05:55:46Z",
+  "generatedAt" : "2026-09-25T03:53:09Z",
   "iterations" : 7,
   "schemaVersion" : 1
 }

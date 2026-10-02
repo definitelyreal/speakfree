@@ -1,7 +1,7 @@
 // ai-suggestion:unverified · session:9bb7d552-ac60-4aeb-b987-841018c752be · 2026-08-12
 //
 // Timeline tests for the locked record-icon entry (2026-08-12): Ring Pulses ×
-// Purple bloom, build/26-08-12-record-icon-animation/LOCKED-SETTINGS.json.
+// Purple bloom, from the locked animation settings.
 //
 // The drawing itself is visual and reviewed through HUD_RENDER_DIR stills; what
 // is asserted here is the part that can silently drift: the geometry landing on
@@ -96,7 +96,7 @@ final class OverlayEmergenceTests: XCTestCase {
 
     // MARK: - Armed state: a bare red dot, nothing else
 
-    /// Michael's spec for the opening frame is "bare red record dot with a thin
+    /// The maintainer's spec for the opening frame is "bare red record dot with a thin
     /// white pulsing ring — NO card". The bloom exists at p = 0 but is a disc
     /// exactly the size of the mark, so the mark covers it completely.
     func test_atProgressZeroTheCardIsHiddenBehindTheMark() {
@@ -356,7 +356,7 @@ final class OverlayEmergenceTests: XCTestCase {
     // MARK: - Which style gets it
 
     /// An unset `overlayStyle` resolves to 5 (`AppDelegate`: `min(5, max(1, ?? 5))`),
-    /// so 5 is the variant Michael actually sees and the one that carries the entry.
+    /// so 5 is the variant the maintainer actually sees and the one that carries the entry.
     func test_onlyStyle5UsesTheEmergenceEntry() {
         for style in 1...4 {
             XCTAssertFalse(OverlayContentView.usesEmergenceEntry(style: style))
@@ -551,7 +551,7 @@ final class OverlayEmergenceTests: XCTestCase {
         XCTAssertEqual(mean!, 0.5, accuracy: 1e-9)
     }
 
-    // MARK: - Transcribing HOLD (Michael's ruling 2026-08-12)
+    // MARK: - Transcribing HOLD (the maintainer's ruling 2026-08-12)
 
     /// The emergence card holds centered through transcription — the rule both
     /// `update()` (skip the bottom-pill reposition) and `draw()` (paint the working
@@ -601,7 +601,7 @@ final class OverlayEmergenceTests: XCTestCase {
         XCTAssertLessThan(E.transcribingFloor + E.transcribingCrest, 0.7, "stays calm vs live speech")
     }
 
-    // MARK: - Lighter waveform (Michael 2026-08-12: "a little bit lighter")
+    // MARK: - Lighter waveform (the maintainer 2026-08-12: "a little bit lighter")
 
     /// The live waveform is dialed lighter than the locked barAlpha / full width,
     /// but stays visible — a mutation to 0/1 (back to full weight) fails here.
@@ -705,7 +705,7 @@ final class AdaptiveSpeechGateTests: XCTestCase {
     }
 }
 
-// MARK: - Rescue status line: cymatics grains + text brightness (Michael 2026-08-22)
+// MARK: - Rescue status line: cymatics grains + text brightness (the maintainer 2026-08-22)
 
 final class RescueStatusCymaticsTests: XCTestCase {
     typealias E = OverlayEmergence

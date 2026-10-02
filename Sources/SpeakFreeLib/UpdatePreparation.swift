@@ -5,6 +5,16 @@ import Darwin
 
 /// External legacy-app guard: observations are not an atomic capture-admission lease.
 /// The caller must act immediately, request graceful exit, and never escalate to SIGKILL.
+/// In compatibility mode, an explicit Install now click skips the quiet wait but still
+/// requires no active dictation. Strict guarded installs disable this shortcut.
+enum UpdateInstallNow {
+    /// Deliberately ignores `changed` and staleness (an explicit choice); the app's own SIGTERM
+    /// handler still waits for an in-flight dictation to finish before it exits.
+    static func shouldProceed(requested: Bool, dictationActive: Bool) -> Bool {
+        requested && !dictationActive
+    }
+}
+
 struct UpdateQuietPolicy {
     enum Decision: Equatable {
         case waiting(Int), warning(Int, playTone: Bool), ready, timedOut
@@ -51,11 +61,41 @@ enum UpdateLogEvent {
             "AudioRecorder: recording ", "Recording ", "Finalize:", "Transcription ",
             "Streaming:", "WATCHDOG:", "Gate override:", "Insertion boundary:",
             "SecureInputRetry:", "HotkeyManager:", "SIGTERM:", "Recovery:",
-            "Capture: WAV write failed:", "Parakeet model not downloaded", "Transcriber configured:"
+            "Capture: WAV write failed:", "Parakeet model not downloaded", "Transcriber configured:",
+            // Added 2026-09-24 after a real install was blocked by "Capture route: ... dictation:"
+            // and "Reprocess: ... recent dictation" lines. The prefixes here are activity (they
+            // restart the quiet wait); "Capture route:" is classified unrelated below. Capture
+            // boundaries still come only from the recorder lines and the in-progress sentinel.
+            // UpdateLogCoverageTests keeps this list complete.
+            "Reprocess:", "WhisperEngine:", "RecordingStore:", "Recordings removal:",
+            "Terminate:", "Capture: restarting streams",
+            // The retired AirPods "Dictation Mode" menu toggle (replaced by Stay on, 2026-09-24)
+            // can still appear in startup history. A user action, so it counts as activity
+            // (restarts the quiet wait); never a capture boundary.
+            "Dictation Mode:",
+            // Multi-line log calls the coverage test missed until 2026-09-24: the streaming-
+            // reuse finalize note and the recording overlay's backdrop fallback. Both happen
+            // around a take, so they are activity.
+            "T2.3:", "Overlay:",
+            // dogfood's armed pre-roll note (right after "recording started") and the per-take
+            // "Latency:" record written at insertion: both belong to a take.
+            "AudioRecorder: kept ", "Latency: ",
+            // Stay on static switch (2026-09-25): capture left the headset for the Mac's mic,
+            // mid-take or at its start. It belongs to a take, so it restarts the quiet wait.
+            "Capture switch:"
         ]
         if activityPrefixes.contains(where: message.hasPrefix) { return .activity }
         // Periodic health checks describe subsystem health, not a dictation boundary.
         if message.hasPrefix("Health check:") { return .unrelated }
+        // Route and notice status lines describe configuration, not a dictation boundary.
+        if message.hasPrefix("Capture route:") || message.hasPrefix("RecordingsNotice:") || message.hasPrefix("Stay on notice:")
+            || message.hasPrefix("Report a Problem:") || message.hasPrefix("DictationTrace:") { return .unrelated }
+        // The user's own Cmd+V put the clipboard back (or was left alone): clipboard
+        // bookkeeping after an insertion, not a capture boundary (2026-09-24).
+        if message.hasPrefix("Clipboard restore: trigger=user-paste ") { return .unrelated }
+        // The clipboard canary and trust checks run only while nothing is being captured
+        // (screen locked or idle, never during a take): never a capture boundary (2026-09-25).
+        if message.hasPrefix("Clipboard trust: ") { return .unrelated }
         // Legacy 3143a81 StatusBarController emits these menu/cache timing records.
         // They describe a read-only UI refresh, not capture or a recovery attempt.
         // Match the complete known numeric formats; unfamiliar history events stay unknown.
@@ -262,8 +302,14 @@ final class LegacyUpdateActivityObserver {
         let directoryBefore = try stamp(recordingDir, directory: true)
         _ = try stamp(logDir, directory: true)
         if listingStamp != directoryBefore {
-            recordingNames = Array(try FileManager.default.contentsOfDirectory(atPath: recordingDir.path)
-                .filter { $0.hasPrefix("recording-") }.sorted(by: >).prefix(Self.recentFileLimit))
+            // Names only (POSIX readdir). FileManager.contentsOfDirectory does per-entry metadata
+            // work that took tens of seconds on an 83,000-file folder and re-ran after every
+            // dictation, so the update prompt appeared stuck (2026-09-24).
+            guard let names = RecordingStore.directoryEntryNames(atPath: recordingDir.path) else {
+                throw Failure.unavailable
+            }
+            recordingNames = Array(names.filter { $0.hasPrefix("recording-") }.sorted(by: >)
+                .prefix(Self.recentFileLimit))
             listingStamp = directoryBefore
             recordingListingCount += 1
         }
@@ -328,32 +374,104 @@ final class LegacyUpdateActivityObserver {
     }
 }
 
-/// Runs only for the explicit prepare-update command; does not construct AppDelegate,
-/// open a microphone, change routes, signal another process, or alter recording files.
-public enum UpdatePreparation {
-    public static func run(arguments: [String]) -> Int32 {
-        var timeout: TimeInterval = 600
-        if !arguments.isEmpty {
-            guard arguments.count == 2, arguments[0] == "--timeout",
-                  let value = Double(arguments[1]), value.isFinite, (60...3600).contains(value) else {
-                fputs("Usage: speakfree prepare-update [--timeout 60...3600]\n", stderr)
-                return 64
-            }
-            timeout = value
-        }
-        guard Thread.isMainThread else { return 4 }
-        let app = NSApplication.shared
-        let controller = UpdatePreparationController(directory: Config.configDir, timeout: timeout)
-        app.setActivationPolicy(.accessory)
-        app.delegate = controller
-        controller.start()
-        if controller.result == nil { app.run() }
-        return controller.result ?? 4
+/// How the update prompt presents itself, decided once at start.
+/// Guarded agent installs additionally require a visible warning and successful tone. The
+/// compatibility behavior below applies only when --require-visible-warning is absent.
+///
+/// - `.panel`: someone can see the screen. Show the panel (Cancel, Install now ») and play the
+///   tone, exactly as before. If the screen locks or sleeps mid-wait, the wait simply goes on.
+/// - `.quiet`: no GUI session is reachable from this process (a locked screen, no console user,
+///   or an ssh session, which has no window-server connection: fleet installs on the other Macs
+///   are always quiet, even with someone at them). A display that is merely asleep but unlocked
+///   still counts as `.panel` (the tone may play to nobody, which is harmless). No panel, no
+///   tone, and no AppKit event loop at all: proceed
+///   on the quiet rule alone (no active dictation, then 30 s with none, then the 5 s warning
+///   interval; new activity restarts both). Uncertain activity, timeout, or a failed stop still
+///   abort; nothing ever escalates to SIGKILL.
+enum UpdateWarningMode: Equatable {
+    case panel, quiet
+    static func atStart(consoleAvailable: Bool) -> UpdateWarningMode { consoleAvailable ? .panel : .quiet }
+}
+
+enum UpdateConsole {
+    /// Strict agent installs must also have an awake display; an unlocked sleeping session
+    /// cannot supply the required visible warning. Uncertainty is a refusal, never a bypass.
+    static func visible() -> Bool {
+        let display = CGMainDisplayID()
+        return available() && display != kCGNullDirectDisplay
+            && CGDisplayIsActive(display) != 0 && CGDisplayIsAsleep(display) == 0
+    }
+
+    /// True when this user's session is on the console, logged in, and the screen is unlocked.
+    static func available() -> Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+              (session[kCGSessionOnConsoleKey as String] as? NSNumber)?.boolValue == true,
+              (session[kCGSessionLoginDoneKey as String] as? NSNumber)?.boolValue == true,
+              (session[kCGSessionUserIDKey as String] as? NSNumber)?.uint32Value == geteuid(),
+              (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue != true else { return false }
+        return true
     }
 }
 
-private final class UpdatePreparationController: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    private let observer: LegacyUpdateActivityObserver
+/// Runs only for the explicit prepare-update command; does not construct AppDelegate,
+/// open a microphone, change routes, signal another process, or alter recording files.
+public enum UpdatePreparation {
+    struct Options: Equatable {
+        var timeout: TimeInterval = 600
+        var requireVisibleWarning = false
+
+        static func parse(_ arguments: [String]) -> Options? {
+            var options = Options()
+            var sawTimeout = false
+            var index = 0
+            while index < arguments.count {
+                switch arguments[index] {
+                case "--require-visible-warning" where !options.requireVisibleWarning:
+                    options.requireVisibleWarning = true
+                case "--timeout" where !sawTimeout:
+                    index += 1
+                    guard index < arguments.count, let value = Double(arguments[index]),
+                          value.isFinite, (60...3600).contains(value) else { return nil }
+                    options.timeout = value
+                    sawTimeout = true
+                default:
+                    return nil
+                }
+                index += 1
+            }
+            return options
+        }
+    }
+
+    public static func run(arguments: [String]) -> Int32 {
+        guard let options = Options.parse(arguments) else {
+            fputs("Usage: speakfree prepare-update [--timeout 60...3600] [--require-visible-warning]\n", stderr)
+            return 64
+        }
+        guard Thread.isMainThread else { return 4 }
+        let consoleAvailable = options.requireVisibleWarning ? UpdateConsole.visible : UpdateConsole.available
+        let observer = LegacyUpdateActivityObserver(directory: Config.configDir)
+        let controller = UpdatePreparationController(
+            timeout: options.timeout,
+            mode: .atStart(consoleAvailable: consoleAvailable()),
+            requireVisibleWarning: options.requireVisibleWarning,
+            observe: { try observer.snapshot() },
+            consoleAvailable: consoleAvailable)
+        return controller.runToCompletion()
+    }
+}
+
+final class UpdatePreparationController: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    let mode: UpdateWarningMode
+    private let requireVisibleWarning: Bool
+    private let warningVisible: (() -> Bool)?
+    private let playWarningTone: (() -> Bool)?
+    private var running = false
+    private let observe: () throws -> UpdateActivitySnapshot
+    private let consoleAvailable: () -> Bool
+    private let clock: () -> TimeInterval
+    private let tickInterval: TimeInterval
+    private let report: (Int32, String) -> Void
     private let worker = DispatchQueue(label: "com.speakfree.prepare-update", qos: .utility)
     private var policy: UpdateQuietPolicy
     private var timer: Timer?
@@ -362,24 +480,70 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
     private var panel: NSPanel?
     private var label: NSTextField?
     private var sound: NSSound?
+    private var installNowRequested = false
+    private var warningToneStarted = false
     private(set) var result: Int32?
 
-    init(directory: URL, timeout: TimeInterval) {
-        observer = LegacyUpdateActivityObserver(directory: directory)
-        policy = UpdateQuietPolicy(startedAt: ProcessInfo.processInfo.systemUptime, timeout: timeout)
+    /// Tests run the quiet loop, or drive apply directly with fake visibility and tone
+    /// providers. Neither path shows a window or plays a real sound.
+    init(timeout: TimeInterval, mode: UpdateWarningMode,
+         requireVisibleWarning: Bool = false,
+         observe: @escaping () throws -> UpdateActivitySnapshot,
+         consoleAvailable: @escaping () -> Bool = UpdateConsole.available,
+         warningVisible: (() -> Bool)? = nil,
+         playWarningTone: (() -> Bool)? = nil,
+         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         tickInterval: TimeInterval = 0.25,
+         report: @escaping (Int32, String) -> Void = { code, message in
+             if code == 0 { print(message) } else { fputs(message + "\n", stderr) }
+         }) {
+        self.mode = mode
+        self.requireVisibleWarning = requireVisibleWarning
+        self.warningVisible = warningVisible
+        self.playWarningTone = playWarningTone
+        self.observe = observe
+        self.consoleAvailable = consoleAvailable
+        self.clock = clock
+        self.tickInterval = tickInterval
+        self.report = report
+        policy = UpdateQuietPolicy(startedAt: clock(), timeout: timeout)
     }
 
-    private func consoleAvailable() -> Bool {
-        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
-              (session[kCGSessionOnConsoleKey as String] as? NSNumber)?.boolValue == true,
-              (session[kCGSessionLoginDoneKey as String] as? NSNumber)?.boolValue == true,
-              (session[kCGSessionUserIDKey as String] as? NSNumber)?.uint32Value == geteuid(),
-              (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue != true else { return false }
-        return true
+    /// Main thread. Runs until a result and returns the exit code.
+    func runToCompletion() -> Int32 {
+        if requireVisibleWarning && (mode != .panel || !consoleAvailable()) {
+            finish(4, message: "Update blocked: a visible console session is required; app left running.")
+            return result ?? 4
+        }
+        running = true
+        defer { running = false }
+        switch mode {
+        case .panel:
+            let app = NSApplication.shared
+            app.setActivationPolicy(.accessory)
+            app.delegate = self
+            start()
+            if result == nil { app.run() }
+        case .quiet:
+            fputs("No screen session is reachable from here (locked screen, no console user, or ssh). "
+                  + "Waiting for no dictation and 30 seconds of quiet, without a visible warning.\n", stderr)
+            start()
+            if result == nil { CFRunLoopRun() }
+        }
+        return result ?? 4
     }
 
-    func start() {
-        guard consoleAvailable() else { finish(4, message: "Update blocked: visible console session unavailable."); return }
+    private func start() {
+        if mode == .panel { showPanel() }
+        let timer = Timer(timeInterval: tickInterval, repeats: true) { [weak self] _ in self?.tick() }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        // Let AppKit publish the ordered panel's occlusion state before the strict visibility
+        // check. No quiet time accrues until the first timer observation confirms visibility.
+        if !requireVisibleWarning { tick() }
+    }
+
+    private func showPanel() {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 430, height: 160),
                             styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "SpeakFree update"
@@ -387,35 +551,38 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
         panel.delegate = self
-        let label = NSTextField(wrappingLabelWithString: "Waiting for dictation to finish, then 30 seconds of quiet. You can keep dictating or cancel this update.")
+        let label = NSTextField(wrappingLabelWithString: requireVisibleWarning
+            ? "Waiting for dictation to finish, then 30 seconds of quiet. Keep dictating or cancel this update."
+            : "Waiting for dictation to finish, then 30 seconds of quiet. Install now, keep dictating, or cancel this update.")
         label.frame = NSRect(x: 24, y: 63, width: 382, height: 76)
         panel.contentView?.addSubview(label)
+        // Cancel on the left, "Install now »" on the right with clear space between them
         let cancel = NSButton(title: "Cancel update", target: self, action: #selector(cancelUpdate))
-        cancel.frame = NSRect(x: 265, y: 19, width: 141, height: 32)
+        cancel.frame = NSRect(x: 24, y: 19, width: 141, height: 32)
         cancel.keyEquivalent = "\u{1b}"
         panel.contentView?.addSubview(cancel)
+        let installNow = NSButton(title: "Install now \u{00BB}", target: self, action: #selector(installNow))
+        installNow.frame = NSRect(x: 265, y: 19, width: 141, height: 32)
+        installNow.keyEquivalent = "\r"
+        if !requireVisibleWarning { panel.contentView?.addSubview(installNow) }
         self.panel = panel
         self.label = label
         panel.center()
         panel.orderFrontRegardless()
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
-        self.timer = timer
-        RunLoop.main.add(timer, forMode: .common)
-        tick()
     }
 
     private func tick() {
         guard result == nil else { return }
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = clock()
         guard now - policy.startedAt < policy.timeout else { finish(3, message: "Update canceled: quiet-period timeout."); return }
-        guard consoleAvailable(), panel?.isVisible == true else { finish(4, message: "Update blocked: warning is not visible."); return }
+        guard checkRequiredVisibility() else { return }
         guard !scanning, now - lastScanAt >= 1 else { return }
         scanning = true
         lastScanAt = now
         worker.async { [weak self] in
             guard let self else { return }
-            let observation = Result { try self.observer.snapshot() }
-            let completedAt = ProcessInfo.processInfo.systemUptime
+            let observation = Result { try self.observe() }
+            let completedAt = self.clock()
             DispatchQueue.main.async {
                 self.scanning = false
                 guard self.result == nil else { return }
@@ -429,25 +596,44 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
         }
     }
 
-    private func apply(_ snapshot: UpdateActivitySnapshot, observedAt: TimeInterval) {
-        guard consoleAvailable(), panel?.isVisible == true else { finish(4, message: "Update blocked: warning is not visible."); return }
-        switch policy.observe(now: ProcessInfo.processInfo.systemUptime, active: snapshot.active,
+    // Internal so tests can drive observations with an injected clock/visibility/tone without
+    // starting AppKit, showing a window, playing sound, or reading actual capture state.
+    func apply(_ snapshot: UpdateActivitySnapshot, observedAt: TimeInterval) {
+        guard result == nil, checkRequiredVisibility() else { return }
+        if UpdateInstallNow.shouldProceed(requested: installNowRequested, dictationActive: snapshot.active) {
+            finish(0, message: "SPEAKFREE_UPDATE_READY")
+            return
+        }
+        if installNowRequested {
+            label?.stringValue = "Dictation is active. The update will install as soon as it ends."
+            return
+        }
+        switch policy.observe(now: clock(), active: snapshot.active,
                               changed: snapshot.changed, observedAt: observedAt) {
         case .waiting(let seconds):
+            warningToneStarted = false
             sound?.stop()
             label?.stringValue = snapshot.active
                 ? "Dictation is active. The update will wait. You can keep dictating or cancel."
                 : "Waiting for \(seconds) more seconds of quiet before the update warning. You can keep dictating or cancel."
         case .warning(let seconds, let playTone):
             label?.stringValue = "SpeakFree will pause for an update in \(seconds) seconds. Start dictating to postpone, or cancel below."
-            if playTone {
-                guard let sound = NSSound(named: NSSound.Name("Glass")), sound.play() else {
-                    finish(4, message: "Update blocked: warning tone could not start."); return
+            if playTone, mode == .panel, requireVisibleWarning || consoleAvailable() {
+                warningToneStarted = startWarningTone()
+                if !warningToneStarted {
+                    if requireVisibleWarning {
+                        finish(4, message: "Update blocked: the required warning tone could not start; app left running.")
+                        return
+                    }
+                    fputs("Update warning tone could not start; continuing on the quiet rule.\n", stderr)
                 }
-                self.sound = sound
                 panel?.orderFrontRegardless()
             }
         case .ready:
+            guard !requireVisibleWarning || warningToneStarted else {
+                finish(4, message: "Update blocked: the required warning tone was not played; app left running.")
+                return
+            }
             // This receipt is only an external observation, not a lock on the old app.
             finish(0, message: "SPEAKFREE_UPDATE_READY")
         case .timedOut:
@@ -455,7 +641,31 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
         }
     }
 
-    @objc private func cancelUpdate() { finish(2, message: "Update canceled by user.") }
+    private func checkRequiredVisibility() -> Bool {
+        guard requireVisibleWarning else { return true }
+        let visible = warningVisible?() ?? (panel?.isVisible == true && panel?.occlusionState.contains(.visible) == true)
+        guard mode == .panel, consoleAvailable(), visible else {
+            finish(4, message: "Update blocked: the required warning is no longer visible; app left running.")
+            return false
+        }
+        return true
+    }
+
+    private func startWarningTone() -> Bool {
+        if let playWarningTone { return playWarningTone() }
+        guard let sound = NSSound(named: NSSound.Name("Glass")), sound.play() else { return false }
+        self.sound = sound
+        return true
+    }
+
+    @objc func cancelUpdate() { finish(2, message: "Update canceled by user.") }
+    @objc func installNow() {
+        guard result == nil, !requireVisibleWarning else { return }
+        installNowRequested = true
+        label?.stringValue = "Installing now, as soon as no dictation is in progress."
+        lastScanAt = -.infinity  // observe right away instead of on the next 1 s scan
+        tick()
+    }
     func windowShouldClose(_ sender: NSWindow) -> Bool { cancelUpdate(); return true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         cancelUpdate()
@@ -468,11 +678,17 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
         timer = nil
         sound?.stop()
         panel?.orderOut(nil)
-        if code == 0 { print(message) } else { fputs(message + "\n", stderr) }
-        NSApp.stop(nil)
-        // stop() takes effect after the current event; wake a quiet run loop as well.
-        if let event = NSEvent.otherEvent(with: .applicationDefined, location: .zero,
-            modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
-            subtype: 0, data1: 0, data2: 0) { NSApp.postEvent(event, atStart: false) }
+        report(code, message)
+        guard running else { return }
+        switch mode {
+        case .panel:
+            NSApp.stop(nil)
+            // stop() takes effect after the current event; wake a quiet run loop as well.
+            if let event = NSEvent.otherEvent(with: .applicationDefined, location: .zero,
+                modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                subtype: 0, data1: 0, data2: 0) { NSApp.postEvent(event, atStart: false) }
+        case .quiet:
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
     }
 }

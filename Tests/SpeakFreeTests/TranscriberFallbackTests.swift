@@ -1,7 +1,28 @@
 import XCTest
 @testable import SpeakFreeLib
 
+/// Test-safety (2026-09-25 fix/test-real-config): `Transcriber.findModel` / `.modelExists`
+/// probe `Config.configDir` on disk (Transcriber.swift:874) — without an override that reaches
+/// the REAL ~/.config/speakfree/models, so results depend on whatever models happen to be
+/// installed there. Every test here redirects to an empty scratch dir (2026-06-11 rule).
 final class TranscriberFallbackTests: XCTestCase {
+
+    private var scratchDir: URL!
+
+    override func setUp() {
+        super.setUp()
+        scratchDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("speakfree-transcriber-fallback-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        Config.configDirOverride = scratchDir
+    }
+
+    override func tearDown() {
+        Config.configDirOverride = nil
+        try? FileManager.default.removeItem(at: scratchDir)
+        scratchDir = nil
+        super.tearDown()
+    }
 
     // MARK: - findModel
 

@@ -1,10 +1,38 @@
 #!/bin/bash
-# ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-17
+# ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 set -euo pipefail
+
+CHANNEL=release
+if [ "$#" -eq 1 ] && [ "$1" = "--alpha" ]; then
+    CHANNEL=alpha
+elif [ "$#" -ne 0 ]; then
+    echo "Usage: build.sh [--alpha]" >&2
+    exit 1
+fi
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 VERSION=$(grep 'let version' Sources/SpeakFreeLib/Version.swift | sed 's/.*"\(.*\)".*/\1/')
+MARKETING_VERSION="$VERSION"
+BUNDLE_VERSION="$VERSION"
+if [ "$CHANNEL" = alpha ]; then
+    if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-alpha\.([1-9][0-9]*)$ ]]; then
+        echo "FATAL: --alpha requires a source version such as 1.8.0-alpha.1." >&2
+        exit 1
+    fi
+    ALPHA_NUMBER="${BASH_REMATCH[4]}"
+    # CFBundleVersion permits a development suffix (a1...a255); the marketing
+    # version remains numeric. The full display version lives in the app/source.
+    if [ "${#ALPHA_NUMBER}" -gt 3 ] || [ "$ALPHA_NUMBER" -gt 255 ]; then
+        echo "FATAL: the alpha sequence must be between 1 and 255." >&2
+        exit 1
+    fi
+    MARKETING_VERSION="${VERSION%-alpha.*}"
+    BUNDLE_VERSION="${MARKETING_VERSION}a${ALPHA_NUMBER}"
+elif [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "FATAL: stable packaging requires X.Y.Z; use --alpha for an alpha source version." >&2
+    exit 1
+fi
 DMG="speakfree-${VERSION}.dmg"
 SIGN_ID="Developer ID Application: Michael Morgenstern (AZ53Y7V4UZ)"
 ENTITLEMENTS="$(dirname "$0")/speakfree.entitlements"
@@ -32,6 +60,7 @@ fi
 # experimenting. On a release branch the version in its name must match
 # Version.swift so a mis-bumped branch can never ship under the wrong number.
 CURRENT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)
+if [ "$CHANNEL" = release ]; then
 case "$CURRENT_BRANCH" in
     main) ;;
     release/*|codex/release/*)
@@ -44,6 +73,7 @@ case "$CURRENT_BRANCH" in
         echo "FATAL: build.sh requires main, release/X.Y.Z or codex/release/X.Y.Z (currently '$CURRENT_BRANCH')." >&2
         exit 1 ;;
 esac
+fi
 
 # Vendored whisper.cpp + ggml binaries. Pinning to a known-good version
 # (libwhisper 1.8.3 + ggml 0.9.5) avoids depending on transient brew state —
@@ -60,7 +90,7 @@ VENDOR_DIR="$(dirname "$0")/vendor/dylibs"
 # step, enforced by check-version.sh (newest <h3> must equal VERSION).
 INDEX="docs/index.html"
 MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1-2)
-if [ -f "$INDEX" ]; then
+if [ "$CHANNEL" = release ] && [ -f "$INDEX" ]; then
     echo "Stamping Pages site version surfaces to v${VERSION}..."
     # Download button URL
     sed -i '' -E "s#releases/(latest/download|download/v[0-9.]+)/speakfree-[0-9.]+\.dmg#releases/download/v${VERSION}/speakfree-${VERSION}.dmg#g" "$INDEX"
@@ -75,11 +105,16 @@ if [ -f "$INDEX" ]; then
     grep -q "What's new in v${MAJOR_MINOR}" "$INDEX"   || { echo "FATAL: changelog heading not updated to v${MAJOR_MINOR} in $INDEX." >&2; exit 1; }
 fi
 
-echo "Checking version consistency..."
-bash "$REPO_DIR/scripts/check-version.sh" --source-only
+if [ "$CHANNEL" = release ]; then
+    echo "Checking version consistency..."
+    bash "$REPO_DIR/scripts/check-version.sh" --source-only
+else
+    bash "$REPO_DIR/scripts/check-version.sh" --alpha
+fi
 
 echo "Building speakfree v${VERSION}..."
-xcrun swift build -c release
+# Keep packaging responsive on a Mac that is also being used for dictation.
+xcrun swift build -c release -j "${SPEAKFREE_BUILD_JOBS:-2}"
 check_source_inputs
 
 # A fresh, retained staging bundle cannot inherit stale files from a prior app.
@@ -95,14 +130,19 @@ cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # metadata are never silently dropped from a build.
 echo "Copying canonical Info.plist and setting version to ${VERSION}..."
 cp "Resources/Info.plist" "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${MARKETING_VERSION}" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUNDLE_VERSION}" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :SFBuildCommit string $BUILD_COMMIT" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :SFBuildDate string $(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APP/Contents/Info.plist"
-# Mark this as the RELEASE channel so the menu-bar title is clean ("speakfree X.Y.Z").
-# Any build without this key defaults to "Testing" (dev/experimental) — see SpeakFree.menuTitle.
-/usr/libexec/PlistBuddy -c "Set :SFBuildChannel release" "$APP/Contents/Info.plist" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c "Add :SFBuildChannel string release" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :SFBuildDisplayVersion string $VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :SFBuildChannel $CHANNEL" "$APP/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :SFBuildChannel string $CHANNEL" "$APP/Contents/Info.plist"
+if [ "$CHANNEL" = alpha ]; then
+    # A public GitHub prerelease label does not isolate Sparkle. This initial alpha
+    # has manual downloads only, so it must not enroll in the stable update feed.
+    /usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$APP/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$APP/Contents/Info.plist"
+fi
 
 echo "Copying main binary..."
 cp .build/release/speakfree "$APP/Contents/MacOS/speakfree"
@@ -123,13 +163,7 @@ SPARKLE_FW=".build/arm64-apple-macosx/release/Sparkle.framework"
 if [ ! -d "$SPARKLE_FW" ]; then
     SPARKLE_FW=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 fi
-rm -rf "$APP/Contents/Frameworks/Sparkle.framework"
 cp -a "$SPARKLE_FW" "$APP/Contents/Frameworks/Sparkle.framework"
-
-# Wipe stale dylibs (and any Dropbox conflicted-copy cruft) before bundling
-# the pinned set, so we never accidentally ship an old/incompatible version.
-find "$APP/Contents/Frameworks" -maxdepth 1 -type f -name '*.dylib' -delete
-find "$APP/Contents/Frameworks" -maxdepth 1 -type l -name '*.dylib' -delete
 
 # Bundle the pinned whisper.cpp + ggml dylibs from vendor.
 for dylib in "$VENDOR_DIR"/*.dylib; do
@@ -139,7 +173,9 @@ done
 # Create versioned symlinks so whisper-cli + libwhisper can find their deps by soname
 for real_dylib in "$APP/Contents/Frameworks"/*.dylib; do
     basename=$(basename "$real_dylib")
-    soname=$(echo "$basename" | sed 's/\([^0-9]*[0-9]*\)\.[0-9]*\.[0-9]*\.dylib$/\1.dylib/')
+    # Regex captures preserve the library name and ABI component on macOS Bash 3.
+    # shellcheck disable=SC2001
+    soname=$(sed 's/\([^0-9]*[0-9]*\)\.[0-9]*\.[0-9]*\.dylib$/\1.dylib/' <<< "$basename")
     if [ "$soname" != "$basename" ]; then
         ln -sf "$basename" "$APP/Contents/Frameworks/$soname"
     fi
@@ -209,11 +245,32 @@ xcrun stapler staple "$DMG"
 xcrun stapler validate "$DMG"
 spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 
+if [ "$CHANNEL" = alpha ]; then
+    check_source_inputs
+    shasum -a 256 "$DMG" > "$PACKAGE_DIR/$DMG.sha256"
+    cat > "$PACKAGE_DIR/build-receipt.json" << RECEIPT_EOF
+{
+  "provenance": "ai-processed:unverified",
+  "version": "$VERSION",
+  "channel": "alpha",
+  "sourceCommit": "$BUILD_COMMIT",
+  "bundleVersion": "$BUNDLE_VERSION",
+  "manualUpdatesOnly": true,
+  "artifact": "$DMG"
+}
+RECEIPT_EOF
+    echo "Alpha package ready: $REPO_DIR/$DMG"
+    echo "Staged app and build receipt: $PACKAGE_DIR"
+    echo "Signed, notarized and stapled. Manual downloads only; no update feed."
+    echo "Stable website/feed, running app and GitHub are unchanged."
+    exit 0
+fi
+
 echo "Updating Sparkle appcast..."
 # Discover the installed Sparkle cask version dynamically so the path does not
 # need to be bumped every time the cask is updated.
 SPARKLE_CASKROOM="/opt/homebrew/Caskroom/sparkle"
-SPARKLE_VERSION=$(ls "$SPARKLE_CASKROOM" 2>/dev/null | sort -V | tail -1)
+SPARKLE_VERSION=$(find "$SPARKLE_CASKROOM" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -V | tail -1)
 if [ -z "$SPARKLE_VERSION" ]; then
     echo "FATAL: Sparkle cask not installed. Run: brew install --cask sparkle" >&2
     exit 1

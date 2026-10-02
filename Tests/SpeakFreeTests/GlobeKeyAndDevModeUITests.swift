@@ -1,6 +1,6 @@
 // Claude · 2026-07-26 · Session: ec24b5ef-be6a-4c4b-be38-a3b84ca63074
 //
-// Two UI-honesty rules, both from Michael's 2026-07-26 decisions:
+// Two UI-honesty rules, both from the maintainer's 2026-07-26 decisions:
 //
 //   1. The Globe-key notice appears exactly when the fn hotkey in toggle mode costs the user
 //      the macOS emoji drawer, and its one-click fix moves the hotkey somewhere with no
@@ -21,7 +21,7 @@ final class GlobeKeyAndDevModeUITests: XCTestCase {
             keyCode: KeyCodes.fnKeyCode, toggleMode: true))
 
         // fn in hold mode: suppression is real but the user never taps the key, so warning
-        // them would be noise (Michael's call).
+        // them would be noise (the maintainer's call).
         XCTAssertFalse(HotkeyAdvice.suppressesGlobeKeyAction(
             keyCode: KeyCodes.fnKeyCode, toggleMode: false))
 

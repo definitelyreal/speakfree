@@ -1,3 +1,4 @@
+<!-- ai-processed:unverified | session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b | date:2026-10-01 -->
 <p align="center">
   <img src="logo.png" width="100" alt="speakfree logo">
 </p>
@@ -6,7 +7,8 @@
 
 <p align="center">
   Hold a key, speak, release — your words appear at the cursor.<br>
-  100% local. No internet. No account. Free forever.
+  Local dictation. No account required for speech recognition. Free forever.<br>
+  <sub>Speech recognition runs on your Mac. Optional Claude cleanup sends text to Claude; model downloads and update checks also use the network.</sub>
 </p>
 
 <p align="center">
@@ -31,6 +33,15 @@
 
 The speakfree icon appears in your menu bar when it's running.
 
+### Alpha builds
+
+The public repository is open to everyone; you do not need a collaborator invitation to test.
+Use a release explicitly marked **Pre-release** with an attached signed, notarized DMG.
+A branch or GitHub's automatic source ZIP is source code, not an installable app.
+See [alpha testing and distribution](docs/alpha-testing.md) for installation, feedback,
+and manual alpha updates. Until an alpha asset is published, the latest
+stable release above remains the public download.
+
 > **Requires macOS 14 or later on Apple Silicon (M1 or newer).** Intel Macs are not supported — the default Parakeet engine runs on the Neural Engine, and the build links Apple-Silicon Homebrew paths. Older releases ran on macOS 13, but this version moves the minimum up to 14. If you're on macOS 13, the last release that supports you is the previous one — you won't receive updates past it.
 
 ## Usage
@@ -53,21 +64,23 @@ Click the menu bar icon → **Settings** to change everything in-app:
 
 Click **Help** in the menu for plain-English explanations of every setting.
 
-## Microphones — and the AirPods problem
+## Microphones and the AirPods tradeoff
 
-The built-in Mac microphone is the default because it transcribes most reliably. You can pin any mic in **Settings → Microphone**; a pinned mic stays pinned even when you join a call or plug in headphones.
+speakfree records from your Mac's own microphone by default (on a Mac without one, the wired mic you have). You can pin any mic in **Settings → Microphone**, or pick one under **Change to** in the menu; a pinned mic stays pinned when you join a call or plug in headphones.
 
-AirPods deserve an honest note, because no dictation app handles them perfectly and we would rather explain the tradeoff than pretend it away:
+AirPods and other Bluetooth headsets deserve an honest note, because no Mac dictation app can make them free:
 
-- **Bluetooth makes you choose.** The moment any app records from an AirPods mic, the headset switches from its high-quality listening profile to its lower-quality call profile. Dictating through AirPods means everything you hear drops to call quality until you stop.
-- **Accuracy is situational.** In a quiet room, the Mac's built-in mic transcribes better than AirPods. In a noisy place (a plane, a café, a street), the AirPods mic — built to isolate your voice — is often the best microphone you own.
-- **Auto-switching guesses wrong.** We tried automatic behaviors, and they produced surprising results more often than good ones.
+- **Bluetooth makes you choose.** A Bluetooth headset only carries its microphone in its call mode. The moment any app records from it, music and video on the headset drop to phone-call quality, and they stay that way until the mic is released. AirPods may also switch over from your iPhone to the Mac. Apple offers a fix for this on iPhone, but not to Mac apps.
+- **Accuracy is situational.** In a quiet room the Mac's own mic does at least as well. In a noisy place (a plane, a café, a street) the headset mic, which sits by your mouth, can be the best microphone you have.
+- **Connecting is not choosing.** macOS makes every headset the default input the moment it connects, often while you only meant to listen to something.
 
-The compromise we chose: **you decide, with the cost stated up front.** The built-in mic is the default, and AirPods are never silently substituted. While AirPods are connected, a **Dictation Mode** toggle appears in the menu bar — turn it on to pin the AirPods mic for noisy environments (the toggle itself tells you audio output will drop to call quality while it's on), turn it off and your previous mic comes back.
+So speakfree never uses a headset just because it connected. When you want it, choose **Stay on AirPods Pro** (or whatever your headset is called) in the menu. One click keeps dictation on that headset for 2 hours; **Other durations** has 1, 6 or 24 hours, until you turn it off, until the Mac sleeps for 20 minutes, or until restart. While it is on, the menu says so and shows when it ends, the menu-bar icon carries a small headset badge, and music on the headset sounds like a phone call. If the headset disconnects, Stay on waits for it to come back instead of ending, and it ends on its own when its time is up. Picking another mic or **End Stay on** ends it early.
+
+One automatic behavior, and it is narrow: if a dictation of 8 seconds or more in a noisy room comes back nearly empty and a headset with a mic is connected, speakfree switches to it for 2 hours and tells you, with **Undo**. It asks instead of switching when music or video is playing on the headset, when you have pinned a different mic, or for a day after you pressed Undo. The lost dictation stays in Recent Dictations if you save recordings.
 
 ## Transcription engines
 
-speakfree can transcribe with one of two local engines. Both run entirely on your Mac — no audio or text ever leaves your computer.
+speakfree can transcribe with one of two local engines. Both perform speech recognition on your Mac, without uploading audio to a transcription service.
 
 | Engine | Parakeet (default) | Whisper |
 |---|---|---|
@@ -99,13 +112,58 @@ These are the **Whisper** model sizes, for when you switch off the default Parak
 
 Switching models downloads automatically if needed.
 
+## Use speakfree from AI assistants
+
+speakfree includes a skill for **Claude Code** and **Codex**, so your assistant can use the
+app you already have. Once it's installed you can ask things like "transcribe
+~/Desktop/memo.m4a", "what did I dictate into Mail just now?", or "add Priya Raman to my
+speakfree vocabulary".
+
+What the skill can do:
+
+- **Transcribe an audio file** on your Mac. No network, no model downloads.
+- **Read your recent dictations**, optionally only those typed into one app. Your
+  dictation history is private, so this works **only if you've turned on saving** in
+  Settings (Keep Recordings & Transcripts). With saving off, it reads nothing and says so.
+- **List, add, or remove words** in your custom vocabulary (the same file Settings opens).
+
+Nothing is installed until you run the installer yourself. From a clone of this repo:
+
+```bash
+bash scripts/install-agent-skills.sh install          # Claude Code and Codex
+bash scripts/install-agent-skills.sh install claude   # or just one
+bash scripts/install-agent-skills.sh remove           # take it back out
+```
+
+This copies one file, `SKILL.md`, to `~/.claude/skills/speakfree/` (Claude Code) and
+`~/.agents/skills/speakfree/` (Codex). Without a clone, download
+[integrations/claude-code/speakfree/SKILL.md](integrations/claude-code/speakfree/SKILL.md)
+and put it in one of those folders. Start a new assistant session afterward.
+
+Scripts and other tools can call the same commands directly
+(`/Applications/speakfree.app/Contents/MacOS/speakfree transcribe <file>`, `history`,
+`vocab`); each prints one JSON object. The full contract, including exit codes, is in
+[docs/AGENT-CLI.md](docs/AGENT-CLI.md).
+
+### Let the AI see what the engine heard (experimental, off by default)
+
+When a dictated prompt comes out wrong ("Kama" for "comma"), the assistant only sees the
+wrong word. speakfree can pass along what the speech engine actually heard: an optional
+**dictation trace** (one dot after each dictation in AI and coding apps, carrying the raw
+engine text invisibly), a **Claude Code / Codex hook** that adds it as context for every
+dictated prompt, and `speakfree match`, which finds the dictations a piece of text came
+from. The trace puts your raw spoken words into the app you dictate into, so it is off by
+default and never used in chat or mail apps. Details, privacy notes, and a two-minute test
+of which apps keep the invisible characters: [docs/DICTATION-TRACE.md](docs/DICTATION-TRACE.md).
+
 ## Privacy
 
-speakfree runs entirely on your Mac.
+speakfree's speech recognition runs on your Mac.
 
-- No audio or text ever leaves your computer
-- No servers, no accounts, no subscriptions
-- Internet is only needed once — to download a model on first launch (Parakeet by default, or a Whisper model if you switch engines)
+- Local speech recognition does not upload your recordings to a transcription service.
+- Optional Claude cleanup sends raw and processed dictation text with repair instructions through your signed-in Claude command line tool. It requires Claude access and is separate from local speech recognition.
+- Model downloads and update checks use the network. Update checks do not send dictation audio or text.
+- Dictating or pasting into another app gives that app the resulting text; its own storage and network behavior apply.
 - Audio is transcribed locally. Recordings are kept on your Mac (`~/.config/speakfree/recordings`) so you can review past dictations — cap or delete them anytime in Settings
 
 ## Build from source
