@@ -89,7 +89,7 @@ final class SettingsSidebarTests: XCTestCase {
     }
 
     private func makeWindow<V: View>(_ host: NSHostingView<V>, size: NSSize,
-                                    appearance: NSAppearance.Name) -> NSWindow {
+                                     appearance: NSAppearance.Name) -> NSWindow {
         host.frame = NSRect(origin: .zero, size: size)
         host.appearance = NSAppearance(named: appearance)
         let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)

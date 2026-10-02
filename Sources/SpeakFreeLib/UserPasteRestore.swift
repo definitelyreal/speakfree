@@ -65,7 +65,7 @@ enum PasteKeystroke {
                          ownPID: Int64 = Int64(getpid())) -> Kind {
         guard type == .keyDown else { return .other }
         guard keyCode == ansiVKeyCode || (layoutVKeyCode.map { keyCode == $0 } ?? false) else { return .other }
-        guard flags.contains(.maskCommand), flags.intersection(disqualifyingFlags).isEmpty else { return .other }
+        guard flags.contains(.maskCommand), flags.isDisjoint(with: disqualifyingFlags) else { return .other }
         if userData == SyntheticEventMarker.userData || sourcePID == ownPID { return .ownSynthetic }
         guard !isAutorepeat else { return .other }
         return .userPaste

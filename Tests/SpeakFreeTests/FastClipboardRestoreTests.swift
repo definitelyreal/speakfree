@@ -482,6 +482,8 @@ final class FastClipboardRestoreTests: XCTestCase {
         addTeardownBlock { if process.isRunning { process.terminate() } }
         process.terminationHandler = { _ in
             let data = out.fileHandleForReading.readDataToEndOfFile()
+            // Preserve replacement decoding for diagnostic output and bounded UTF-8 buffers.
+            // swiftlint:disable:next optional_data_string_conversion
             let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             DispatchQueue.main.async { done(text) }
         }

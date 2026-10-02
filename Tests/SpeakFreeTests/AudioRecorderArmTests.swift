@@ -81,7 +81,7 @@ final class AudioRecorderArmTests: XCTestCase {
         let result = try XCTUnwrap(recorder.stopRecording())
         let expected = Array(beforePress.suffix(AudioRecorder.prerollSamples)) + whileBlocked + during
         XCTAssertEqual(result.samples.count, expected.count)
-        let firstDiff = zip(result.samples, expected).enumerated().first { $0.element.0 != $0.element.1 }?.offset
+        let firstDiff = zip(result.samples, expected).enumerated().first { $0.element.0 != expected[$0.offset] }?.offset
         XCTAssertNil(firstDiff, "first difference at sample \(firstDiff ?? -1)")
         let wav = try ProcessCommand.loadSamples(from: url)
         XCTAssertEqual(wav.count, expected.count)

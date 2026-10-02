@@ -275,6 +275,24 @@ jobs:
         if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
         run: xcrun swift build -c release --product perf-harness
 
+      - name: Compile Homebrew Whisper GPU kernels before timed benchmarks
+        if: github.event_name == 'push' || steps.filter.outputs.swift == 'true'
+        # Match unit-test setup: first-run Metal compilation is not inference time.
+        # Keep the real transcription timeout and performance thresholds unchanged.
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import shutil
+          import subprocess
+          binary = shutil.which("whisper-cli") or shutil.which("whisper-cpp")
+          if not binary:
+              raise SystemExit("Homebrew Whisper CLI missing")
+          model = pathlib.Path.home() / ".config/speakfree/models/ggml-tiny.en.bin"
+          subprocess.run([binary, "-m", str(model), "-f",
+                          "Tests/SpeakFreeTests/AudioFixtures/fixture-1-clean.wav", "-nt"],
+                         check=True, timeout=180)
+          PY
+
       - name: Self-seed CI baseline on first run (push only)
         # Bootstrap: the gate can ONLY compare against a baseline measured on THIS runner's
         # fingerprint — timings can't be fabricated off-runner without re-introducing the

@@ -47,6 +47,8 @@ final class DictationTraceTests: XCTestCase {
         let inv = T.invisible(payload("caf\u{E9} \u{1F44D}"), encoding: .tags)
         XCTAssertTrue(inv.unicodeScalars.allSatisfy { (0xE0020...0xE007E).contains($0.value) })
         // Mapping the tags back to ASCII yields plain JSON a model can read directly.
+        // Preserve replacement decoding for diagnostic output and bounded UTF-8 buffers.
+        // swiftlint:disable:next optional_data_string_conversion
         let ascii = String(decoding: inv.unicodeScalars.map { UInt8($0.value - 0xE0000) }, as: UTF8.self)
         XCTAssertTrue(ascii.hasPrefix("{\"speakfree_trace\":1,\"engine\":\"whisper\",\"heard\":\"caf\\u00e9 \\ud83d\\udc4d\""), ascii)
         XCTAssertTrue(ascii.contains("\"unsure\":[\"draft 0.41\""))

@@ -163,6 +163,8 @@ struct HistoryEntry: Codable, Equatable, Identifiable {
             if data.count > budget { truncated = true }
             guard budget > 0 else { return }
             let prefix = data.prefix(budget)
+            // Preserve replacement decoding for diagnostic output and bounded UTF-8 buffers.
+            // swiftlint:disable:next optional_data_string_conversion
             searchable += String(decoding: prefix, as: UTF8.self)
             budget -= prefix.count
             if budget > 0 { searchable += "\n"; budget -= 1 }
@@ -177,6 +179,8 @@ struct HistoryEntry: Codable, Equatable, Identifiable {
             }
             if let text = item.data(forType: .string) {
                 if text.count > budget { truncated = true }
+                // Preserve replacement decoding for diagnostic output and bounded UTF-8 buffers.
+                // swiftlint:disable:next optional_data_string_conversion
                 let value = String(decoding: text.prefix(budget), as: UTF8.self)
                 if textTitle == nil, !value.isEmpty { textTitle = value }
                 appendSearch(value)
@@ -190,6 +194,8 @@ struct HistoryEntry: Codable, Equatable, Identifiable {
             }
             if let data = item.data(forType: .fileURL) {
                 if data.count > budget { truncated = true }
+                // Preserve replacement decoding for diagnostic output and bounded UTF-8 buffers.
+                // swiftlint:disable:next optional_data_string_conversion
                 let value = String(decoding: data.prefix(budget), as: UTF8.self)
                 if let url = URL(string: value), url.isFileURL {
                     filenames.append(url.lastPathComponent)
@@ -217,6 +223,8 @@ struct HistoryEntry: Codable, Equatable, Identifiable {
         else if rich { title = "Rich text" }
         else { title = "Clipboard item" }
         appendSearch(title)
+        // Preserve replacement decoding for diagnostic output and bounded UTF-8 buffers.
+        // swiftlint:disable:next optional_data_string_conversion
         if let sourceAppBundleID { appendSearch(String(decoding: sourceAppBundleID.utf8.prefix(512), as: UTF8.self)) }
         var unformattedItems: [HistoryPasteboardItem]?
         if !files, items.contains(where: \.containsRichText) {

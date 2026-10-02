@@ -40,12 +40,14 @@ final class VocabularyBoostProbabilityParityTests: XCTestCase {
         for repeats in [1, 70] {
             let audio = Array(repeating: speech, count: repeats).flatMap { $0 }
             let transcript = Array(repeating: words.joined(separator: " "), count: repeats).joined(separator: " ")
-            let timings = (0..<repeats).flatMap { repeatIndex in
-                words.enumerated().map { index, word in
-                    TokenTiming(token: "▁" + word, tokenId: index,
-                        startTime: Double(repeatIndex) * duration + Double(index) * duration / 7,
-                        endTime: Double(repeatIndex) * duration + Double(index + 1) * duration / 7,
-                        confidence: 0.1)
+            var timings: [TokenTiming] = []
+            for repeatIndex in 0..<repeats {
+                let offset = Double(repeatIndex) * duration
+                for (index, word) in words.enumerated() {
+                    let start = offset + Double(index) * duration / 7
+                    let end = offset + Double(index + 1) * duration / 7
+                    timings.append(TokenTiming(token: "▁" + word, tokenId: index,
+                        startTime: start, endTime: end, confidence: 0.1))
                 }
             }
             // Reverse order for the second pair to expose simple warm-cache ordering effects.
@@ -90,13 +92,19 @@ final class VocabularyBoostProbabilityParityTests: XCTestCase {
                 XCTAssertEqual(try encoder.encode(baseline.decisions), try encoder.encode(cachedCandidate.decisions))
                 // Native pairs must preserve the actual replacements/acceptance decisions;
                 // floating-point score wording may vary with the independent inference.
-                XCTAssertEqual(baseline.decisions.map { [$0.original, $0.replacement, String($0.accepted)] },
-                               candidate.decisions.map { [$0.original, $0.replacement, String($0.accepted)] })
-                acceptedCorrections += candidate.decisions.filter(\.accepted).count
+                let baselineDecisions: [[String]] = baseline.decisions.map {
+                    [$0.original, $0.replacement, String($0.accepted)]
+                }
+                let candidateDecisions: [[String]] = candidate.decisions.map {
+                    [$0.original, $0.replacement, String($0.accepted)]
+                }
+                XCTAssertEqual(baselineDecisions, candidateDecisions)
+                let accepted = candidate.decisions.filter { $0.accepted }.count
+                acceptedCorrections += accepted
                 print(String(format: "CTC_PARITY compute=native seconds=%.2f terms=%d frames=%d old_spotting=%.4f probabilities_only=%.4f old_detections=%d accepted=%d probability_max_delta=%.6f baseline_first=%@",
                     Double(audio.count) / 16000, vocabulary.terms.count, minimal.totalFrames,
                     baselineSeconds, candidateSeconds, full.detections.count,
-                    candidate.decisions.filter(\.accepted).count, probabilityDelta, baselineFirst.description))
+                    accepted, probabilityDelta, baselineFirst.description))
             }
         }
         XCTAssertGreaterThan(acceptedCorrections, 0, "Parity must exercise real guarded replacements, not only unchanged output")
@@ -119,8 +127,8 @@ final class VocabularyBoostProbabilityParityTests: XCTestCase {
     /// This reference uses a shared cached CTC result so native repeat variability cannot
     /// hide a vocabulary loss, score change or replacement change in the refactored seam.
     private func legacyCompletion(batchText: String, tokenTimings: [TokenTiming],
-        spot: CtcKeywordSpotter.SpotKeywordsResult, rescorer: VocabularyRescorer,
-        vocabulary: CustomVocabularyContext) -> VocabularyBoost.Output {
+                                  spot: CtcKeywordSpotter.SpotKeywordsResult, rescorer: VocabularyRescorer,
+                                  vocabulary: CustomVocabularyContext) -> VocabularyBoost.Output {
         guard !spot.logProbs.isEmpty else {
             return .init(text: batchText, decisions: [], rescoredRaw: batchText)
         }

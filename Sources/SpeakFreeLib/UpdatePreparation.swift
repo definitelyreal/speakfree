@@ -6,7 +6,8 @@ import Darwin
 /// External legacy-app guard: observations are not an atomic capture-admission lease.
 /// The caller must act immediately, request graceful exit, and never escalate to SIGKILL.
 /// In compatibility mode, an explicit Install now click skips the quiet wait but still
-/// requires no active dictation. Strict guarded installs disable this shortcut.
+/// requires no active dictation. Strict guarded installs additionally keep fresh
+/// observations, a visible warning, a successful tone, and the warning countdown.
 enum UpdateInstallNow {
     /// Deliberately ignores `changed` and staleness (an explicit choice); the app's own SIGTERM
     /// handler still waits for an in-flight dictation to finish before it exits.
@@ -25,7 +26,7 @@ struct UpdateQuietPolicy {
     private(set) var warningSince: TimeInterval?
 
     mutating func observe(now: TimeInterval, active: Bool, changed: Bool,
-                          observedAt: TimeInterval? = nil) -> Decision {
+                          observedAt: TimeInterval? = nil, skipQuietWait: Bool = false) -> Decision {
         guard now - startedAt < timeout else { return .timedOut }
         let stale = observedAt.map { !$0.isFinite || $0 > now || now - $0 > 2 } ?? false
         if active || changed || stale {
@@ -34,7 +35,7 @@ struct UpdateQuietPolicy {
             return .waiting(30)
         }
         if quietSince == nil { quietSince = now }
-        let quietRemaining = 30 - (now - quietSince!)
+        let quietRemaining = skipQuietWait ? 0 : 30 - (now - quietSince!)
         if quietRemaining > 0 { return .waiting(Int(ceil(quietRemaining))) }
         if warningSince == nil {
             warningSince = now
@@ -551,9 +552,8 @@ final class UpdatePreparationController: NSObject, NSApplicationDelegate, NSWind
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
         panel.delegate = self
-        let label = NSTextField(wrappingLabelWithString: requireVisibleWarning
-            ? "Waiting for dictation to finish, then 30 seconds of quiet. Keep dictating or cancel this update."
-            : "Waiting for dictation to finish, then 30 seconds of quiet. Install now, keep dictating, or cancel this update.")
+        let label = NSTextField(wrappingLabelWithString:
+            "Waiting for dictation to finish, then 30 seconds of quiet. Install now, keep dictating, or cancel this update.")
         label.frame = NSRect(x: 24, y: 63, width: 382, height: 76)
         panel.contentView?.addSubview(label)
         // Cancel on the left, "Install now »" on the right with clear space between them
@@ -564,7 +564,7 @@ final class UpdatePreparationController: NSObject, NSApplicationDelegate, NSWind
         let installNow = NSButton(title: "Install now \u{00BB}", target: self, action: #selector(installNow))
         installNow.frame = NSRect(x: 265, y: 19, width: 141, height: 32)
         installNow.keyEquivalent = "\r"
-        if !requireVisibleWarning { panel.contentView?.addSubview(installNow) }
+        panel.contentView?.addSubview(installNow)
         self.panel = panel
         self.label = label
         panel.center()
@@ -600,22 +600,26 @@ final class UpdatePreparationController: NSObject, NSApplicationDelegate, NSWind
     // starting AppKit, showing a window, playing sound, or reading actual capture state.
     func apply(_ snapshot: UpdateActivitySnapshot, observedAt: TimeInterval) {
         guard result == nil, checkRequiredVisibility() else { return }
-        if UpdateInstallNow.shouldProceed(requested: installNowRequested, dictationActive: snapshot.active) {
+        if !requireVisibleWarning,
+           UpdateInstallNow.shouldProceed(requested: installNowRequested, dictationActive: snapshot.active) {
             finish(0, message: "SPEAKFREE_UPDATE_READY")
             return
         }
-        if installNowRequested {
+        if installNowRequested && !requireVisibleWarning {
             label?.stringValue = "Dictation is active. The update will install as soon as it ends."
             return
         }
         switch policy.observe(now: clock(), active: snapshot.active,
-                              changed: snapshot.changed, observedAt: observedAt) {
+                              changed: snapshot.changed, observedAt: observedAt,
+                              skipQuietWait: installNowRequested) {
         case .waiting(let seconds):
             warningToneStarted = false
             sound?.stop()
             label?.stringValue = snapshot.active
                 ? "Dictation is active. The update will wait. You can keep dictating or cancel."
-                : "Waiting for \(seconds) more seconds of quiet before the update warning. You can keep dictating or cancel."
+                : installNowRequested
+                    ? "Checking that dictation has finished before the update warning. You can cancel below."
+                    : "Waiting for \(seconds) more seconds of quiet before the update warning. You can keep dictating or cancel."
         case .warning(let seconds, let playTone):
             label?.stringValue = "SpeakFree will pause for an update in \(seconds) seconds. Start dictating to postpone, or cancel below."
             if playTone, mode == .panel, requireVisibleWarning || consoleAvailable() {
@@ -660,11 +664,13 @@ final class UpdatePreparationController: NSObject, NSApplicationDelegate, NSWind
 
     @objc func cancelUpdate() { finish(2, message: "Update canceled by user.") }
     @objc func installNow() {
-        guard result == nil, !requireVisibleWarning else { return }
+        guard result == nil else { return }
         installNowRequested = true
-        label?.stringValue = "Installing now, as soon as no dictation is in progress."
+        label?.stringValue = requireVisibleWarning
+            ? "Starting the update warning as soon as no dictation is in progress."
+            : "Installing now, as soon as no dictation is in progress."
         lastScanAt = -.infinity  // observe right away instead of on the next 1 s scan
-        tick()
+        if running { tick() }
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool { cancelUpdate(); return true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

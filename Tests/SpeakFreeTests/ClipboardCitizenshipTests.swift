@@ -172,9 +172,9 @@ final class ClipboardCitizenshipTests: XCTestCase {
     }
 
     private func verifyBlockedReplacementKeepsBorrow(bundle: String = "com.microsoft.VSCode",
-                                                    trustReason: String? = nil,
-                                                    consume: Bool = false,
-                                                    file: StaticString = #filePath, line: UInt = #line) {
+                                                     trustReason: String? = nil,
+                                                     consume: Bool = false,
+                                                     file: StaticString = #filePath, line: UInt = #line) {
         let pb = board()
         write("original", to: pb)
         let subject = inserter(pb)

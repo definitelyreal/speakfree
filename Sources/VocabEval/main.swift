@@ -198,6 +198,8 @@ if args.first == "text-replay" {
         let processed = TextPipeline.run(input, isRealWord: { _ in true }).processedText
         let row = try JSONSerialization.data(withJSONObject: ["id": id, "processed": processed],
                                              options: [.sortedKeys])
+        // Preserve replacement decoding for diagnostic output and bounded UTF-8 buffers.
+        // swiftlint:disable:next optional_data_string_conversion
         out += String(decoding: row, as: UTF8.self) + "\n"
     }
     try out.write(toFile: outPath, atomically: true, encoding: .utf8)

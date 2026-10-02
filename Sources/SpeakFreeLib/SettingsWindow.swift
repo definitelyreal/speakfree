@@ -237,7 +237,7 @@ struct SettingsKeyRecorderState {
         }
         guard type == .keyDown else { return .ignore }
         loneModifier = nil
-        modifierChordInProgress = !flags.intersection(Self.relevantFlags).isEmpty
+        modifierChordInProgress = !flags.isDisjoint(with: Self.relevantFlags)
         if keyCode == 53 { return .cancel }
         var modifiers: [String] = []
         if flags.contains(.command) { modifiers.append("cmd") }
@@ -262,9 +262,10 @@ final class KeyMonitorHolder: ObservableObject {
     private var lifecycleObservers: [NSObjectProtocol] = []
 
     init(recordingGate: ShortcutRecordingGate = .shared, notificationCenter: NotificationCenter = .default,
-         installMonitor: @escaping (@escaping EventHandler) -> Any? = { handler in
-             NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged], handler: handler)
-         }, removeMonitor: @escaping (Any) -> Void = NSEvent.removeMonitor) {
+         installMonitor: @escaping (@escaping EventHandler) -> Any? = {
+             NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged], handler: $0)
+         },
+         removeMonitor: @escaping (Any) -> Void = NSEvent.removeMonitor) {
         self.recordingGate = recordingGate
         self.notificationCenter = notificationCenter
         self.installMonitor = installMonitor

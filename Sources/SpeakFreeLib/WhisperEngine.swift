@@ -632,6 +632,8 @@ class WhisperEngine: TranscriptionEngine {
         }
         return words.compactMap { w in
             guard w.p < unsureWordProbabilityCeiling else { return nil }
+            // Preserve replacement decoding for diagnostic output and bounded UTF-8 buffers.
+            // swiftlint:disable:next optional_data_string_conversion
             let word = String(decoding: w.bytes, as: UTF8.self)
                 .trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
             return word.isEmpty ? nil : DictationTrace.WordScore(word: word, score: w.p)

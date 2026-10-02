@@ -232,6 +232,8 @@ final class EditModeRealClaudeTests: XCTestCase {
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
         let enc = JSONEncoder()
         enc.outputFormatting = [.sortedKeys]
+        // Preserve replacement decoding for diagnostic output and bounded UTF-8 buffers.
+        // swiftlint:disable:next optional_data_string_conversion
         let lines = try rows.map { String(decoding: try enc.encode($0), as: UTF8.self) }
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         try (lines.joined(separator: "\n") + "\n")

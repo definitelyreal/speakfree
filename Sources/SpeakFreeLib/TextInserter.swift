@@ -1028,8 +1028,8 @@ class TextInserter {
     /// Pure interaction seam: failed publication keeps the selectable text available,
     /// and an owner that expired before presentation never opens a stale recovery dialog.
     @discardableResult static func runManualRecovery(shouldPresent: () -> Bool,
-                                  present: (_ copyFailed: Bool) -> Bool,
-                                  copy: () -> Bool) -> Bool {
+                                                     present: (_ copyFailed: Bool) -> Bool,
+                                                     copy: () -> Bool) -> Bool {
         var copyFailed = false
         while shouldPresent() {
             guard present(copyFailed) else { return true }

@@ -28,7 +28,7 @@ final class EditTextView: NSTextView {
                 insertText(String(EditDocumentReconciler.lineBreak), replacementRange: selectedRange())
                 return
             }
-            if event.modifierFlags.intersection([.command, .option, .control]).isEmpty {
+            if event.modifierFlags.isDisjoint(with: [.command, .option, .control]) {
                 onReturn?()
                 return
             }

@@ -351,7 +351,7 @@ struct HistoryPickerView: View {
     }
 
     private func chip<Content: View>(_ filter: HistoryPickerModel.Filter, label: String, shortcut: String,
-                                    @ViewBuilder content: () -> Content) -> some View {
+                                     @ViewBuilder content: () -> Content) -> some View {
         let unavailable = filter == .clipboard && !model.clipboardEnabled
         return Button {
             model.filter = filter

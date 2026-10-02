@@ -53,6 +53,8 @@ final class PerfRatchetCLITests: XCTestCase {
         try p.run()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        // Preserve replacement decoding for diagnostic output and bounded UTF-8 buffers.
+        // swiftlint:disable:next optional_data_string_conversion
         return (p.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 

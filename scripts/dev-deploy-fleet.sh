@@ -12,6 +12,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Remote Mac addresses live outside the repo: scripts/fleet.local.env (untracked) or the environment.
 FLEET_LOCAL_ENV="$REPO_DIR/scripts/fleet.local.env"
 if { [ -z "${SPEAKFREE_STUDIO_HOST:-}" ] || [ -z "${SPEAKFREE_RIG_HOST:-}" ]; } && [ -f "$FLEET_LOCAL_ENV" ]; then
+    # This optional machine-local file is intentionally outside the repository.
+    # shellcheck source=/dev/null
     . "$FLEET_LOCAL_ENV"
 fi
 if [ "${M3_ONLY:-0}" != 1 ]; then

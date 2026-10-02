@@ -317,7 +317,7 @@ final class StayOnModeTests: XCTestCase {
         if case .active(_, let detail) = m.status(now: t0.addingTimeInterval(3 * 86400), calendar: utc, locale: en) {
             XCTAssertTrue(detail.hasPrefix("on since "))
             XCTAssertTrue(detail.contains("day "), "an old start names the day: \(detail)")
-        } else { XCTFail() }
+        } else { XCTFail("An until-turned-off session must remain active after three days") }
     }
 
     func testUnexpectedEndIsShownOnlyForAWhile() {

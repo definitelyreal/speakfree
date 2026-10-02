@@ -132,18 +132,49 @@ final class UpdateVisibleWarningTests: XCTestCase {
         }
     }
 
-    func testStrictInstallNowCannotBypassQuietOrTone() {
+    func testExplicitInstallNowSkipsQuietButKeepsToneAndFullWarning() {
         let h = Harness()
         h.controller.installNow()
         h.apply(at: 0)
         XCTAssertNil(h.controller.result)
-        h.apply(at: 30)
+        XCTAssertEqual(h.toneAttempts, 1)
+        h.apply(at: 4)
         h.controller.installNow()
-        h.apply(at: 31)
         XCTAssertNil(h.controller.result)
-        h.apply(at: 35)
+        h.apply(at: 5)
         XCTAssertEqual(h.controller.result, 0)
         XCTAssertEqual(h.toneAttempts, 1)
+    }
+
+    func testExplicitInstallNowStillRejectsActiveChangedOrStaleObservations() {
+        for interruption in 0..<3 {
+            let h = Harness()
+            h.controller.installNow()
+            h.apply(at: 0)
+            h.apply(at: 4, active: interruption == 0, changed: interruption == 1,
+                    observedAt: interruption == 2 ? 0 : 4)
+            h.apply(at: 5)
+            XCTAssertNil(h.controller.result)
+            XCTAssertEqual(h.toneAttempts, 2, "New activity requires a fresh warning")
+            h.apply(at: 9)
+            XCTAssertNil(h.controller.result)
+            h.apply(at: 10)
+            XCTAssertEqual(h.controller.result, 0)
+        }
+    }
+
+    func testExplicitInstallNowCannotBypassToneFailureVisibilityOrCancellation() {
+        for failure in 0..<3 {
+            let h = Harness()
+            h.controller.installNow()
+            if failure == 0 { h.toneSucceeds = false }
+            h.apply(at: 0)
+            if failure == 1 { h.panelVisible = false }
+            if failure == 2 { h.controller.cancelUpdate() }
+            h.apply(at: 5)
+            XCTAssertEqual(h.controller.result, failure == 2 ? 2 : 4)
+            XCTAssertFalse(h.reports.contains { $0.0 == 0 })
+        }
     }
 
     func testCancellationNeverProducesReady() {
