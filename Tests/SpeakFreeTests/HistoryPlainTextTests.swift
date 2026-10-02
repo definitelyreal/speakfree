@@ -56,10 +56,11 @@ final class HistoryPlainTextTests: XCTestCase {
         let original = rich
         model.entries = [original]
         model.resetForPresentation()
-        model.handle(.move(0))
-        XCTAssertEqual(HistoryPickerKeyAction.action(keyCode: 124, modifiers: [],
-            rowNavigationFocused: model.rowNavigationFocused), .focusPlainText)
-        model.handle(.focusPlainText)
+        XCTAssertEqual(model.keyboardFocus, .search)
+        let right = model.keyAction(keyCode: 124, modifiers: [])
+        XCTAssertEqual(right, .focusPlainText)
+        if let right { model.handle(right) }
+        XCTAssertEqual(model.keyboardFocus, .plainText)
         var choices: [HistoryEntry] = []
         model.choose = { value, copy in XCTAssertFalse(copy); choices.append(value) }
         model.handle(.activate(copyOnly: false))
@@ -73,12 +74,48 @@ final class HistoryPlainTextTests: XCTestCase {
         let model = HistoryPickerModel()
         model.entries = [entry([.init(type: "public.utf8-plain-text", data: Data("Plain".utf8))])]
         model.resetForPresentation()
-        XCTAssertNil(HistoryPickerKeyAction.action(keyCode: 124, modifiers: [],
-            rowNavigationFocused: model.rowNavigationFocused))
+        model.handle(model.keyAction(keyCode: 124, modifiers: [])!)
+        XCTAssertEqual(model.keyboardFocus, .search, "A plain-only first item has no action to focus")
         model.handle(.move(0)); model.handle(.focusPlainText)
         XCTAssertEqual(model.keyboardFocus, .row)
         model.choose = { _, _ in XCTFail("Disabled action must not choose") }
         model.activate(id: model.entries[0].id, plainText: true)
+    }
+    func testSearchCaretFilterNavigationAndReopenRouteArrowsCorrectly() {
+        let model = HistoryPickerModel()
+        model.entries = [rich]
+        model.resetForPresentation()
+        model.query = "Bold"
+        model.searchChanged()
+        XCTAssertNil(model.keyAction(keyCode: 124, modifiers: []))
+        XCTAssertNil(model.keyAction(keyCode: 123, modifiers: []))
+        model.keyboardFocus = .filter(.all)
+        XCTAssertEqual(model.keyAction(keyCode: 124, modifiers: []), .cycleFilter(1))
+        model.resetForPresentation()
+        XCTAssertEqual(model.keyAction(keyCode: 124, modifiers: []), .focusPlainText)
+        XCTAssertNil(model.keyAction(keyCode: 124, modifiers: .shift))
+        model.handle(.focusPlainText)
+        XCTAssertEqual(model.keyAction(keyCode: 123, modifiers: []), .focusRow)
+    }
+    func testRepeatedActivationIsBlockedWhilePastingAndCopiesAfterFailureUntilReopened() {
+        let model = HistoryPickerModel()
+        model.entries = [rich]
+        model.resetForPresentation()
+        var copyChoices: [Bool] = []
+        model.choose = { _, copy in
+            copyChoices.append(copy)
+            model.pasteBehavior = .pasting
+        }
+        model.activate()
+        model.activate()
+        model.activate(id: model.entries[0].id, plainText: true)
+        XCTAssertEqual(copyChoices, [false], "A double-click must not start overlapping attempts")
+        model.pasteBehavior = .copyOnly
+        model.activate()
+        XCTAssertEqual(copyChoices, [false, true], "A failed destination must not be retried by the next click")
+        model.resetForPresentation()
+        model.activate()
+        XCTAssertEqual(copyChoices, [false, true, false], "Explicitly reopening captures a new destination")
     }
     func testPointerMovementReselectsRowAfterKeyboardWithinTheSameTrackingArea() {
         let model = HistoryPickerModel()

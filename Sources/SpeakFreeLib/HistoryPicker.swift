@@ -35,7 +35,8 @@ enum HistoryPickerKeyAction: Equatable {
     case filter(HistoryPickerModel.Filter)
 
     static func action(keyCode: UInt16, modifiers: NSEvent.ModifierFlags,
-                       filterNavigationFocused: Bool = false, rowNavigationFocused: Bool = false) -> Self? {
+                       filterNavigationFocused: Bool = false, rowNavigationFocused: Bool = false,
+                       emptySearchFocused: Bool = false) -> Self? {
         let modifiers = modifiers.intersection([.command, .shift, .option, .control])
         switch (keyCode, modifiers) {
         case (53, []): return .close
@@ -43,7 +44,7 @@ enum HistoryPickerKeyAction: Equatable {
         case (48, .shift): return .cycleFilter(-1)
         case (123, []) where filterNavigationFocused: return .cycleFilter(-1)
         case (124, []) where filterNavigationFocused: return .cycleFilter(1)
-        case (124, []) where rowNavigationFocused: return .focusPlainText
+        case (124, []) where rowNavigationFocused || emptySearchFocused: return .focusPlainText
         case (123, []) where rowNavigationFocused: return .focusRow
         case (3, .command): return .focusSearch
         case (125, []): return .move(1)
@@ -64,10 +65,16 @@ enum HistoryPickerKeyAction: Equatable {
 final class HistoryPickerModel: ObservableObject {
     enum Filter: String, CaseIterable { case all, dictation, clipboard }
     enum KeyboardFocus: Hashable { case search, filter(Filter), row, plainText }
+    enum PasteBehavior { case ready, pasting, copyOnly }
+    @Published var pasteBehavior: PasteBehavior = .ready
     @Published var keyboardFocus: KeyboardFocus? = .search
     @Published var entries: [HistoryEntry] = []
     @Published var query = ""
-    @Published var filter: Filter = .all
+    @Published var filter: Filter = .all {
+        didSet {
+            if oldValue != filter { preferences?.set(filter.rawValue, forKey: Self.filterPreferenceKey) }
+        }
+    }
     @Published var selectedID: UUID?
     @Published var status: String?
     @Published var clipboardEnabled = false
@@ -83,8 +90,17 @@ final class HistoryPickerModel: ObservableObject {
     var openSavedDictations: (() -> Void)?
     var openPreferences: (() -> Void)?
     var resize: (() -> Void)?
+    var focusSearchEditor: (() -> Void)?
+    private let preferences: UserDefaults?
+    static let filterPreferenceKey = "HistoryPickerSelectedFilter"
+
+    init(preferences: UserDefaults? = nil) {
+        self.preferences = preferences
+        filter = preferences?.string(forKey: Self.filterPreferenceKey).flatMap(Filter.init(rawValue:)) ?? .all
+    }
 
     var showsClipboardDisabled: Bool { filter == .clipboard && !clipboardEnabled }
+    var actionVerb: String { pasteBehavior == .copyOnly ? "Copy" : "Paste" }
     var filterNavigationFocused: Bool {
         if case .filter = keyboardFocus { return true }
         return false
@@ -92,6 +108,11 @@ final class HistoryPickerModel: ObservableObject {
     var rowNavigationFocused: Bool { keyboardFocus == .row || keyboardFocus == .plainText }
     /// Row/action focus is logical: leave the text editor ready for type-to-search.
     var editorFocus: KeyboardFocus? { rowNavigationFocused ? .search : keyboardFocus }
+    func keyAction(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> HistoryPickerKeyAction? {
+        HistoryPickerKeyAction.action(keyCode: keyCode, modifiers: modifiers,
+            filterNavigationFocused: filterNavigationFocused, rowNavigationFocused: rowNavigationFocused,
+            emptySearchFocused: keyboardFocus == .search && query.isEmpty)
+    }
     func searchChanged() {
         keyboardFocus = .search
         reconcileSelection()
@@ -128,11 +149,11 @@ final class HistoryPickerModel: ObservableObject {
         if maximumPanelHeight != height { maximumPanelHeight = height }
     }
     func resetForPresentation() {
+        pasteBehavior = .ready
         lastPointerLocation = pointerLocation()
         selectionScrollAnchor = nil
         query = ""
         keyboardFocus = .search
-        filter = .all
         selectedID = visible.first?.id
         selectionScrollRevision &+= 1
     }
@@ -181,13 +202,14 @@ final class HistoryPickerModel: ObservableObject {
         activate(id: entry.id, copyOnly: copyOnly, plainText: keyboardFocus == .plainText)
     }
     func activate(id: UUID, copyOnly: Bool = false, plainText: Bool = false) {
+        guard pasteBehavior != .pasting else { return }
         // A row can disappear between mouse-down and mouse-up when history refreshes.
         guard let entry = visible.first(where: { $0.id == id }) else { return }
         select(id)
         if plainText {
             guard let variant = entry.plainTextVariant() else { return }
-            choose?(variant, copyOnly)
-        } else { choose?(entry, copyOnly) }
+            choose?(variant, copyOnly || pasteBehavior == .copyOnly)
+        } else { choose?(entry, copyOnly || pasteBehavior == .copyOnly) }
     }
     func handle(_ action: HistoryPickerKeyAction) {
         switch action {
@@ -196,7 +218,10 @@ final class HistoryPickerModel: ObservableObject {
         case .page(let direction): page(direction)
         case .activate(let copyOnly): activate(copyOnly: copyOnly)
         case .preferences: openPreferences?()
-        case .focusSearch: keyboardFocus = .search
+        case .focusSearch:
+            keyboardFocus = .search
+            // Reassert native focus even if logical focus was already search.
+            focusSearchEditor?()
         case .focusRow: keyboardFocus = .row
         case .focusPlainText:
             if visible.first(where: { $0.id == selectedID })?.canPastePlainText == true {
@@ -287,7 +312,9 @@ struct HistoryPickerView: View {
             }
             VStack(spacing: 5) {
                 HStack {
-                    Text("↩ Paste   → Plain text   ⇥ Filters   ⎋ Close").lineLimit(1)
+                    Text(model.pasteBehavior == .copyOnly
+                         ? "↩ Copy   → Plain text   ⇥ Filters   ⎋ Close"
+                         : "↩ Paste   → Plain text   ⇥ Filters   ⎋ Close").lineLimit(1)
                     Spacer()
                     Text("⌘↑↓ Page").fixedSize()
                 }
@@ -309,9 +336,8 @@ struct HistoryPickerView: View {
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.primary.opacity(0.12)))
         .onAppear { focusedControl = model.editorFocus; model.reconcileSelection() }
         .onChange(of: model.keyboardFocus) { _ in focusedControl = model.editorFocus }
-        .onChange(of: focusedControl) { value in
-            if let value, !model.rowNavigationFocused { model.keyboardFocus = value }
-        }
+        // AppKit may temporarily focus a chip while a nonactivating panel opens.
+        // Only deliberate clicks/keys change logical navigation, never that fallback.
         .onChange(of: model.query) { _ in model.searchChanged() }
         .onChange(of: model.filter) { _ in model.reconcileSelection() }
         .onChange(of: model.clipboardEnabled) { _ in model.reconcileSelection() }
@@ -327,7 +353,10 @@ struct HistoryPickerView: View {
     private func chip<Content: View>(_ filter: HistoryPickerModel.Filter, label: String, shortcut: String,
                                     @ViewBuilder content: () -> Content) -> some View {
         let unavailable = filter == .clipboard && !model.clipboardEnabled
-        return Button { model.filter = filter } label: {
+        return Button {
+            model.filter = filter
+            model.keyboardFocus = .filter(filter)
+        } label: {
             HStack(spacing: 4) { content() }.frame(minWidth: 24)
                 .padding(.horizontal, 7).frame(height: 23)
                 .foregroundStyle(unavailable ? Color.secondary : Color.primary)
@@ -382,8 +411,8 @@ struct HistoryPickerView: View {
                         model.selectedID == entry.id && model.keyboardFocus == .plainText ? Color.accentColor : .clear,
                         lineWidth: 2))
             }.buttonStyle(.plain).disabled(!entry.canPastePlainText)
-                .accessibilityLabel("Paste as Plain Text")
-                .help(entry.canPastePlainText ? "Paste as Plain Text (→ then ↩)" : "No convertible rich text in this item")
+                .accessibilityLabel("\(model.actionVerb) as Plain Text")
+                .help(entry.canPastePlainText ? "\(model.actionVerb) as Plain Text (→ then ↩)" : "No convertible rich text in this item")
                 .padding(.trailing, 8)
           }
         }
@@ -399,15 +428,17 @@ struct HistoryPickerView: View {
                entry.searchWasTruncated ? "Search covers the first 64 KB; full content is kept." : nil]
             .compactMap { $0 }.joined(separator: "\n"))
         .contextMenu {
-            Button("Paste") { model.activate(id: entry.id) }
-            Button("Paste as Plain Text") { model.activate(id: entry.id, plainText: true) }
+            Button(model.actionVerb) { model.activate(id: entry.id) }
+            Button("\(model.actionVerb) as Plain Text") { model.activate(id: entry.id, plainText: true) }
                 .disabled(!entry.canPastePlainText)
-            Button("Copy") { model.activate(id: entry.id, copyOnly: true) }
+            if model.pasteBehavior != .copyOnly {
+                Button("Copy") { model.activate(id: entry.id, copyOnly: true) }
+            }
             Divider()
             Button("Remove from History") { model.remove?(entry.id) }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityHint("Paste this item")
+        .accessibilityHint("\(model.actionVerb) this item")
         .accessibilityAddTraits(model.selectedID == entry.id ? .isSelected : [])
     }
 }
@@ -424,6 +455,16 @@ final class HistoryPanel: NSPanel {
     var handleKey: ((NSEvent) -> Bool)?
     var onResignKey: (() -> Void)?
     var onClose: (() -> Void)?
+    @discardableResult
+    func focusSearchEditor() -> Bool {
+        contentView?.layoutSubtreeIfNeeded()
+        func searchField(in view: NSView) -> NSTextField? {
+            if let field = view as? NSTextField, field.isEditable { return field }
+            return view.subviews.lazy.compactMap { searchField(in: $0) }.first
+        }
+        guard let contentView, let field = searchField(in: contentView) else { return false }
+        return makeFirstResponder(field)
+    }
     override func resignKey() { super.resignKey(); onResignKey?() }
     override func close() { onClose?(); super.close() }
     override func keyDown(with event: NSEvent) {

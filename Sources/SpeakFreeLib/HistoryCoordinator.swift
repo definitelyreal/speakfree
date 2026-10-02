@@ -8,7 +8,7 @@ import SwiftUI
 /// standalone dictation service and accepts generic pasteboard items only.
 final class HistoryCoordinator {
     let store: HistoryStore
-    let model = HistoryPickerModel()
+    let model = HistoryPickerModel(preferences: .standard)
     var showSavedDictations: (() -> Void)?
     var showPreferences: (() -> Void)?
     private var presentationAnchor: NSPoint?
@@ -25,7 +25,7 @@ final class HistoryCoordinator {
     private var captureReady = false
     static let shortcutStatusChanged = Notification.Name("SpeakFreeHistoryShortcutStatusChanged")
     private(set) var shortcutError: String?
-    private var isReplaying = false
+    private var isReplaying: Bool { model.pasteBehavior == .pasting }
     private var isClosing = false
     private var isPreparingForTermination = false
     private var pauseReasons = Set<String>()
@@ -61,6 +61,7 @@ final class HistoryCoordinator {
         }
         model.close = { [weak self] in self?.close() }
         model.resize = { [weak self] in self?.positionPanel() }
+        model.focusSearchEditor = { [weak self] in self?.panel?.focusSearchEditor() }
         model.openPreferences = { [weak self] in
             guard let self, !self.isBusy(), self.inserter()?.hasDeferredInsertion != true else { return }
             self.close()
@@ -221,6 +222,7 @@ final class HistoryCoordinator {
         if panel == nil { makePanel() }
         positionPanel()
         panel?.makeKeyAndOrderFront(nil)
+        model.handle(.focusSearch)
         installKeys()
     }
 
@@ -228,7 +230,7 @@ final class HistoryCoordinator {
         guard !isClosing else { return }
         isClosing = true
         defer { isClosing = false }
-        isReplaying = false
+        model.pasteBehavior = .ready
         operation &+= 1
         panel?.orderOut(nil)
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil }
@@ -278,16 +280,14 @@ final class HistoryCoordinator {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window === self.panel else { return event }
-            guard let action = HistoryPickerKeyAction.action(keyCode: event.keyCode, modifiers: event.modifierFlags,
-                                                             filterNavigationFocused: self.model.filterNavigationFocused,
-                                                             rowNavigationFocused: self.model.rowNavigationFocused) else { return event }
+            guard let action = self.model.keyAction(keyCode: event.keyCode, modifiers: event.modifierFlags) else { return event }
             self.model.handle(action)
             return nil
         }
     }
 
     private func choose(_ entry: HistoryEntry, copyOnly: Bool) {
-        guard !isBusy(), let inserter = inserter() else { return }
+        guard panel?.isVisible == true, !isReplaying, !isBusy(), let inserter = inserter() else { return }
         guard copyOnly || captureReady else { model.status = "Finding the previous window…"; return }
         // This is an explicit clipboard selection, not a temporary dictation borrow.
         guard inserter.replaceClipboardForUser(with: entry.makePasteboardItems(includeHistoryMarker: true)) else {
@@ -300,15 +300,17 @@ final class HistoryCoordinator {
         guard !copyOnly else { close(); return }
         guard let destination = target, !destination.app.isTerminated,
               destination.window != nil, destination.field != nil else {
+            model.pasteBehavior = .copyOnly
             model.status = "Copied. Press ⌘V in the app where you want it."
             return
         }
         if EditDestination.terminalBundleIDs.contains(destination.app.bundleIdentifier ?? "")
             || TextInserter.isRemoteDesktop(bundleID: destination.app.bundleIdentifier) {
+            model.pasteBehavior = .copyOnly
             model.status = "Copied. Paste in the terminal or remote app when you are ready."
             return
         }
-        isReplaying = true
+        model.pasteBehavior = .pasting
         panel?.orderOut(nil)
         let generation = operation
         destination.app.activate(options: [])
@@ -328,7 +330,10 @@ final class HistoryCoordinator {
     }
 
     private func retainCopy(_ message: String) {
-        isReplaying = false
+        // A failed destination check is final for this presentation. Repeated
+        // clicks must copy, not hide/reopen while retrying the same stale field.
+        model.pasteBehavior = .copyOnly
+        target = nil
         model.status = message
         panel?.makeKeyAndOrderFront(nil)
     }

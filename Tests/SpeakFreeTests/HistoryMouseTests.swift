@@ -39,10 +39,14 @@ final class HistoryMouseTests: XCTestCase {
             return view.subviews.lazy.compactMap { textField(in: $0) }.first
         }
         let search = try XCTUnwrap(textField(in: host))
-        XCTAssertTrue(panel.makeFirstResponder(search))
-        model.move(0)
-        model.handle(.focusPlainText)
+        model.focusSearchEditor = { [weak panel] in XCTAssertTrue(panel?.focusSearchEditor() == true) }
+        XCTAssertEqual(model.keyboardFocus, .search)
+        XCTAssertTrue(panel.makeFirstResponder(nil))
+        model.handle(.focusSearch)
+        XCTAssertNotNil(search.currentEditor(), "⌘F must reassert native focus when logical focus is already search")
+        model.handle(try XCTUnwrap(model.keyAction(keyCode: 124, modifiers: [])))
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(model.keyboardFocus, .plainText, "Right Arrow must work on the initially selected row")
         let editor = try XCTUnwrap(search.currentEditor() as? NSTextView)
         editor.insertText("Rich", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))

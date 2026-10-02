@@ -89,7 +89,7 @@ class AlphaPackagingTests(unittest.TestCase):
             tool.write_text(MOCK_TOOL)
             tool.chmod(0o755)
         self.env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
-        self.git("init", "-q", "-b", "codex/alpha/1.8.0-alpha.1")
+        self.git("init", "-q", "-b", "alpha/clipboard-history")
         self.git("config", "user.name", "Packaging Test")
         self.git("config", "user.email", "packaging-test@example.invalid")
         self.git("config", "commit.gpgsign", "false")

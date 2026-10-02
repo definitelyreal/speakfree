@@ -14,20 +14,38 @@ final class HistoryInterfaceTests: XCTestCase {
         return model
     }
 
-    func testPresentationResetsToNewestAcrossSources() {
+    func testPresentationClearsSearchButPreservesSourceFilter() {
         let newest = entry("new dictation")
         let older = entry("old copy", source: .clipboard)
         let model = pickerModel()
+        model.clipboardEnabled = true
         model.entries = [newest, older]
         model.filter = .clipboard
         model.query = "old"
         model.keyboardFocus = .filter(.clipboard)
         model.selectedID = older.id
         model.resetForPresentation()
-        XCTAssertEqual(model.filter, .all)
+        XCTAssertEqual(model.filter, .clipboard)
         XCTAssertEqual(model.keyboardFocus, .search)
         XCTAssertEqual(model.query, "")
-        XCTAssertEqual(model.selectedID, newest.id)
+        XCTAssertEqual(model.selectedID, older.id)
+    }
+
+    func testFilterPreferenceSurvivesNewModelAndInvalidValueDefaultsToAll() throws {
+        let suite = "HistoryInterfaceTests-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let first = HistoryPickerModel(preferences: preferences)
+        XCTAssertEqual(first.filter, .all)
+        first.handle(.filter(.dictation))
+        XCTAssertEqual(HistoryPickerModel(preferences: preferences).filter, .dictation)
+        first.filter = .clipboard
+        let reopened = HistoryPickerModel(preferences: preferences)
+        reopened.resetForPresentation()
+        XCTAssertEqual(reopened.filter, .clipboard)
+        XCTAssertTrue(reopened.showsClipboardDisabled)
+        preferences.set("future-filter", forKey: HistoryPickerModel.filterPreferenceKey)
+        XCTAssertEqual(HistoryPickerModel(preferences: preferences).filter, .all)
     }
 
     func testShortcutDefaultsToCommandShiftVAndCannotCaptureShiftTyping() throws {
@@ -255,10 +273,10 @@ final class HistoryInterfaceTests: XCTestCase {
 
     func testFilterArrowKeysNeverStealSearchCaretOrModifiedEditingKeys() {
         let model = pickerModel()
+        model.query = "editable search"
         XCTAssertFalse(model.filterNavigationFocused)
         for key: UInt16 in [123, 124] {
-            XCTAssertNil(HistoryPickerKeyAction.action(keyCode: key, modifiers: [],
-                                                       filterNavigationFocused: model.filterNavigationFocused))
+            XCTAssertNil(model.keyAction(keyCode: key, modifiers: []))
         }
         model.handle(.cycleFilter(1))
         XCTAssertTrue(model.filterNavigationFocused)

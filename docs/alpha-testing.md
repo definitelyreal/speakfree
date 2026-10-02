@@ -52,6 +52,11 @@ This alpha has **manual updates only**. It has no Sparkle update feed; installin
 it does not enroll you in automatic alpha releases. Download a newer alpha or a
 stable version explicitly from Releases.
 
+The development branch is [alpha/clipboard-history](https://github.com/definitelyreal/speakfree/tree/alpha/clipboard-history).
+Pushing that branch updates source code, not an installed app or an existing
+release download. Bookmark [Releases](https://github.com/definitelyreal/speakfree/releases)
+for future alpha installers; each published version gets its own release link.
+
 To return to stable, finish dictation/editing, quit speakfree, move the alpha app
 to Trash, and install the saved stable DMG. The stable app does not provide the new
 History or Edit features. Reinstalling an app does not restore earlier data or
