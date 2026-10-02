@@ -610,6 +610,18 @@ class TextInserter {
             let sameElement = currentElement.map { CFEqual($0, element) } ?? false
 
             if !sameElement {
+                // The focus query itself may have blocked while the user moved apps
+                // or enabled Secure Input. Validate before changing AX focus too.
+                guard refocusDestinationIsCurrent(element) else {
+                    let secure = isSecureInputActive()
+                    let copied = secureInputClipboardFallback(text)
+                    recordOutcome(copied ? (secure ? .secureInput : .copiedFocusLost) : .deliveryFailed, text: text)
+                    if copied {
+                        if secure { notifySecureInputFallback(text, reason: .secureInput) }
+                        onFocusLost?()
+                    }
+                    return false
+                }
                 let refocused = refocusElement(element)
                 if refocused {
                     // Use non-blocking delay for focus to settle, then insert.
@@ -1148,11 +1160,22 @@ class TextInserter {
     var axVerifySettleDelay: TimeInterval = 0.05
 
     private func axDestinationIsCurrent(_ element: AXUIElement) -> Bool {
+        // Compare identities directly: two successive focus reads can observe A
+        // then B, which must never authorize writing B for captured field A.
+        if let captured = activeInsertionAttempt?.field, !CFEqual(captured, element) { return false }
         guard insertionDestinationIsCurrent(),
               let expectedPID = activeInsertionAttempt?.expectedForegroundPID ?? frontmostPIDProvider(),
               elementPIDProvider(element) == expectedPID,
               let current = currentFocusedElement(), CFEqual(current, element) else { return false }
         // AX queries may have waited for another process. Recheck after them.
+        return frontmostPIDProvider() == expectedPID && !isSecureInputActive()
+    }
+
+    private func refocusDestinationIsCurrent(_ element: AXUIElement) -> Bool {
+        guard let attempt = activeInsertionAttempt,
+              let expectedPID = attempt.expectedForegroundPID,
+              attempt.fieldOwnerPID == expectedPID,
+              elementPIDProvider(element) == expectedPID else { return false }
         return frontmostPIDProvider() == expectedPID && !isSecureInputActive()
     }
 

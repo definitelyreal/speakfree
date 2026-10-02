@@ -1,3 +1,4 @@
+// ai-processed:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-02
 // Claude · 2026-06-10 · Session: 5b06900b-1498-4764-a786-48f408c36626
 //
 // T1.4 — Secure Input on all insertion paths
@@ -112,6 +113,8 @@ final class SecureInputTests: XCTestCase {
     func test_secureInput_asyncRefocusPathRechecksBeforeInserting() {
         let exp = expectation(description: "async re-check fires onFocusLost from the closure")
         let inserter = TextInserter()
+        inserter.frontmostPIDProvider = { 4242 }
+        inserter.elementPIDProvider = { _ in 4242 }
         inserter.pasteboard = makeTestPasteboard()
         inserter.focusedElementProvider = { nil }
 
@@ -141,7 +144,8 @@ final class SecureInputTests: XCTestCase {
         XCTAssertTrue(scheduled, "insert must return true when the refocus path is scheduled")
         XCTAssertTrue(refocusCalled, "the refocus seam must be consulted")
         XCTAssertFalse(callbackFired, "onFocusLost must NOT have fired synchronously")
-        XCTAssertEqual(secureInputChecks, 1, "exactly one secure-input check (entry guard) before the closure runs")
+        let checksBeforeSettle = secureInputChecks
+        XCTAssertGreaterThanOrEqual(checksBeforeSettle, 2, "Entry and refocus both check Secure Input")
 
         // Secure input becomes active during the 150ms focus-settle window.
         secureInputIsOn = true
@@ -149,7 +153,7 @@ final class SecureInputTests: XCTestCase {
         // The closure's re-check must consult the seam again and fall back to copy-only.
         wait(for: [exp], timeout: 2.0)
         XCTAssertTrue(callbackFired, "the async re-check must fire onFocusLost when secure input became active mid-settle")
-        XCTAssertEqual(secureInputChecks, 2, "the async closure must re-check secure input (second seam consultation)")
+        XCTAssertGreaterThan(secureInputChecks, checksBeforeSettle, "The async closure must recheck Secure Input")
     }
 
     // MARK: - AR-1: Secure-Input clipboard fallback is concealed + auto-cleared

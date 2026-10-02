@@ -36,6 +36,8 @@ final class AdversarialR1InsertionTests: XCTestCase {
     func test_axC_focusMovedDuringSettle_concealsInsteadOfBlindPaste() {
         let exp = expectation(description: "async fallback fires onFocusLost")
         let inserter = TextInserter()
+        inserter.frontmostPIDProvider = { 4242 }
+        inserter.elementPIDProvider = { _ in 4242 }
         inserter.pasteboard = makeTestPasteboard()
         inserter.pasteboard.clearContents()
         inserter.secureInputClipboardClearDelay = 60  // don't auto-clear during assertions
@@ -117,6 +119,8 @@ final class AdversarialR1InsertionTests: XCTestCase {
         inserter.pasteboard.clearContents()
         inserter.isSecureInputActive = { false }
         inserter.focusedElementProvider = { nil }    // sync sameElement == false
+        inserter.frontmostPIDProvider = { 4242 }
+        inserter.elementPIDProvider = { _ in 4242 }
         inserter.refocusElement = { _ in false }     // refocus fails → copyToClipboard path (synchronous)
 
         var focusLostFired = false

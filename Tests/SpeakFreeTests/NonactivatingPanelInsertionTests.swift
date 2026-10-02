@@ -99,6 +99,41 @@ final class NonactivatingPanelInsertionTests: XCTestCase {
         XCTAssertTrue(attempted)
     }
 
+    func testNativeAXCannotApproveDifferentSameOwnerFieldAcrossAlternatingFocusReads() {
+        let (s, original) = subject()
+        let other = AXUIElementCreateApplication(999_993)
+        // Both synthetic elements deliberately have the SAME mocked owner.
+        XCTAssertEqual(s.elementPIDProvider(original), s.elementPIDProvider(other))
+        s.setSelectedText = { _, _ in XCTFail("Never write a field other than the captured one"); return .success }
+        var attempted = false
+        s.performLocalInsertion = { text in
+            attempted = true
+            var reads = 0
+            s.focusedElementProvider = { reads += 1; return reads == 1 ? original : other }
+            XCTAssertNil(s.writeSelectedText(text, to: other))
+        }
+        _ = s.insert(text: "Synthetic native text", refocusing: original)
+        XCTAssertTrue(attempted)
+    }
+
+    func testAppSwitchOrSecureInputDuringFocusQueryCannotMutateAXFocus() {
+        for secure in [false, true] {
+            let (s, original) = subject()
+            var first = true
+            s.focusedElementProvider = {
+                if first {
+                    first = false
+                    if secure { s.isSecureInputActive = { true } }
+                    else { s.frontmostPIDProvider = { 999_994 } }
+                }
+                return nil
+            }
+            s.refocusElement = { _ in XCTFail("No focus mutation after app/security change"); return true }
+            XCTAssertFalse(s.insert(text: "Synthetic text", refocusing: original))
+            XCTAssertEqual(s.pasteboard.string(forType: .string), "Synthetic text")
+        }
+    }
+
     func testNativeAXFinalGateChecksSecureInputAndWritesOnlyTheCapturedField() {
         let (s, original) = subject()
         s.frontmostPIDProvider = { 999_991 }
@@ -270,18 +305,19 @@ final class NonactivatingPanelInsertionTests: XCTestCase {
     private func checkRefocus(activateOwner: Bool, expected: InsertionOutcome) {
         let (s, field) = subject()
         s.focusedElementProvider = { nil }
-        s.frontmostPIDProvider = { 999_992 }
-        s.refocusElement = { _ in true }
+        s.frontmostPIDProvider = { activateOwner ? 999_991 : 999_992 }
+        var refocusCalls = 0
+        s.refocusElement = { _ in refocusCalls += 1; return true }
         var shortcuts = 0
         s.postPasteShortcut = { shortcuts += 1 }
         let done = expectation(description: "Refocus settles")
-        XCTAssertTrue(s.insert(text: "Synthetic panel text", refocusing: field, completion: {
+        XCTAssertEqual(s.insert(text: "Synthetic panel text", refocusing: field, completion: {
             XCTAssertEqual($0, expected)
             done.fulfill()
-        }))
+        }), activateOwner, "Only the original foreground app may be refocused")
         s.focusedElementProvider = { field }
-        if activateOwner { s.frontmostPIDProvider = { 999_991 } }
         wait(for: [done], timeout: 2)
+        XCTAssertEqual(refocusCalls, activateOwner ? 1 : 0)
         XCTAssertEqual(shortcuts, expected == .pasted ? 1 : 0)
     }
 }
