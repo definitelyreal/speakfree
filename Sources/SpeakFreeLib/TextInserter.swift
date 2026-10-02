@@ -39,6 +39,9 @@ class TextInserter {
     }
     var performRemoteInsertion: ((String) -> Void)?
     var performLocalInsertion: ((String) -> Void)?
+    var setSelectedText: (AXUIElement, String) -> AXError = { element, text in
+        AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
+    }
     var frontmostPIDProvider: () -> pid_t? = {
         NSWorkspace.shared.frontmostApplication?.processIdentifier
     }
@@ -654,6 +657,10 @@ class TextInserter {
                         if route != .accessibilityChain {
                             axInserted = false
                         } else if let directAXInsert = self.directAXInsert {
+                            guard self.axDestinationIsCurrent(element) else {
+                                self.remoteInsertionFailed(text, message: "The original text field changed.")
+                                return
+                            }
                             axInserted = directAXInsert(element, text)
                         } else {
                             var settable: DarwinBoolean = false
@@ -664,7 +671,10 @@ class TextInserter {
                                 // Keep the process-wide 0.5s cap and react three-way to the result: a
                                 // `.cannotComplete` under that cap may have COMMITTED, so conceal-copy
                                 // + notify rather than fall through and duplicate via paste/keystrokes.
-                                let setResult = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
+                                guard let setResult = self.writeSelectedText(text, to: element) else {
+                                    self.remoteInsertionFailed(text, message: "The original text field changed.")
+                                    return
+                                }
                                 switch Self.axSetOutcome(setResult) {
                                 case .inserted:
                                     axInserted = true
@@ -674,7 +684,7 @@ class TextInserter {
                                     self.recordOutcome(copied ? .axTimeoutCopied : .deliveryFailed, text: text)
                                     if copied { onFocusLost?() }
                                     return
-                                case .fallbackToKeystrokes, .retryViaPaste:
+                                case .fallbackToKeystrokes, .retryViaPaste, .destinationChanged:
                                     // `axSetOutcome` never yields `.retryViaPaste` (that comes only
                                     // from the read-back verifier in `insertViaAccessibility`), but
                                     // the switch must stay exhaustive; both mean "not inserted",
@@ -844,6 +854,9 @@ class TextInserter {
 
         // Try direct AX text insertion first — no clipboard involvement
         switch insertViaAccessibility(text) {
+        case .destinationChanged:
+            remoteInsertionFailed(text, message: "The original text field or Secure Input changed.")
+            return
         case .inserted:
             DiagnosticLogger.shared.log("TextInserter: used AX insertion")
             recordOutcome(lastAXVerification == .landed ? .axVerified : .axUnverifiable,
@@ -962,15 +975,15 @@ class TextInserter {
         presentManualRecovery(text: text, message: message, title: title)
     }
 
-    /// The owner of an asynchronous insertion can suppress only a stale presentation,
-    /// while retaining that take's text through its normal history/persistence path.
+    /// A revoked presentation returns false so its owner can retain the text for later.
     func presentManualRecovery(text: String, message: String,
                                title: String = "Check your dictation",
-                               shouldPresent: @escaping () -> Bool = { true }) {
+                               shouldPresent: @escaping () -> Bool = { true },
+                               completion: @escaping (Bool) -> Void = { _ in }) {
         // A modal started from a main-dispatch block starves other main-queue
         // work, including clipboard restoration. Enter through the run loop.
         CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) { [weak self] in
-            guard let self, shouldPresent() else { return }
+            guard let self, shouldPresent() else { completion(false); return }
             let text = Self.withoutTrace(text)
             let alert = NSAlert()
             alert.messageText = title
@@ -989,28 +1002,30 @@ class TextInserter {
             scroll.documentView = view
             alert.accessoryView = scroll
             let instructions = alert.informativeText
-            Self.runManualRecovery(shouldPresent: shouldPresent, present: { copyFailed in
+            let handled = Self.runManualRecovery(shouldPresent: shouldPresent, present: { copyFailed in
                 alert.informativeText = copyFailed
                     ? "The clipboard could not accept your text. It is still below; try Copy again or close.\n\n" + instructions
                     : instructions
                 return alert.runModal() == .alertSecondButtonReturn
             }, copy: { self.copyForManualRecovery(text) })
+            completion(handled)
         }
         CFRunLoopWakeUp(CFRunLoopGetMain())
     }
 
     /// Pure interaction seam: failed publication keeps the selectable text available,
     /// and an owner that expired before presentation never opens a stale recovery dialog.
-    static func runManualRecovery(shouldPresent: () -> Bool,
+    @discardableResult static func runManualRecovery(shouldPresent: () -> Bool,
                                   present: (_ copyFailed: Bool) -> Bool,
-                                  copy: () -> Bool) {
+                                  copy: () -> Bool) -> Bool {
         var copyFailed = false
         while shouldPresent() {
-            guard present(copyFailed) else { return }
-            guard shouldPresent() else { return }
-            if copy() { return }
+            guard present(copyFailed) else { return true }
+            guard shouldPresent() else { return false }
+            if copy() { return true }
             copyFailed = true
         }
+        return false
     }
 
     /// -1743 = the app has no Automation (Apple Events → System Events) grant. Both remote-
@@ -1045,7 +1060,7 @@ class TextInserter {
     /// Collapsing the two is exactly the Chrome silent-drop bug (2026-08-12): a web contenteditable
     /// accepts the AX set, reports success, applies nothing, and the old code concealed to the
     /// clipboard WITHOUT pasting — so the text never appeared on the page.
-    enum AXSetOutcome: Equatable { case inserted, fallbackToKeystrokes, concealClipboard, retryViaPaste }
+    enum AXSetOutcome: Equatable { case inserted, fallbackToKeystrokes, concealClipboard, retryViaPaste, destinationChanged }
 
     static func axSetOutcome(_ error: AXError) -> AXSetOutcome {
         switch error {
@@ -1132,6 +1147,21 @@ class TextInserter {
     /// still show the old count. Seam so tests don't sleep.
     var axVerifySettleDelay: TimeInterval = 0.05
 
+    private func axDestinationIsCurrent(_ element: AXUIElement) -> Bool {
+        guard insertionDestinationIsCurrent(),
+              let expectedPID = activeInsertionAttempt?.expectedForegroundPID ?? frontmostPIDProvider(),
+              elementPIDProvider(element) == expectedPID,
+              let current = currentFocusedElement(), CFEqual(current, element) else { return false }
+        // AX queries may have waited for another process. Recheck after them.
+        return frontmostPIDProvider() == expectedPID && !isSecureInputActive()
+    }
+
+    /// All native AX writes use the same final target check, including refocus.
+    func writeSelectedText(_ text: String, to element: AXUIElement) -> AXError? {
+        guard axDestinationIsCurrent(element) else { return nil }
+        return setSelectedText(element, text)
+    }
+
     /// Insert text directly via the Accessibility API. Returns the three-way `AXSetOutcome` so the
     /// caller can distinguish a clean rejection (safe to retype) from a timeout that may have
     /// committed (must NOT retype — conceal instead). See `axSetOutcome`.
@@ -1156,7 +1186,7 @@ class TextInserter {
         // per-element messaging timeout (L4): keep the process-wide 0.5s cap so a stuck target
         // can't hang the main thread; a `.cannotComplete` under that cap routes to conceal, not
         // a duplicating retype.
-        let result = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
+        guard let result = writeSelectedText(text, to: element) else { return .destinationChanged }
         let outcome = Self.axSetOutcome(result)
         guard outcome == .inserted else { return outcome }
 

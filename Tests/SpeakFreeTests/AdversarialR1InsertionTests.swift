@@ -1,3 +1,4 @@
+// ai-processed:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-02
 // Claude · 2026-07-15 · Session: ed573fa2-e6e0-4a72-b0e5-8eab0a7411b1
 //
 // Round-1 adversarial-review fixes for the insertion / AX / UI surface (Agent-1):
@@ -79,6 +80,10 @@ final class AdversarialR1InsertionTests: XCTestCase {
         inserter.isSecureInputActive = { false }
         inserter.refocusElement = { _ in true }
         inserter.directAXInsert = { _, _ in false }
+        // A synthetic AX element has no real app owner. Model both halves of the
+        // destination contract so this success case does not consult live focus.
+        inserter.frontmostPIDProvider = { 4242 }
+        inserter.elementPIDProvider = { _ in 4242 }
 
         let target = AXUIElementCreateSystemWide()
         // Sync check returns nil (so sameElement is false → schedule the closure); the closure's

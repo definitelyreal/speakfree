@@ -70,6 +70,7 @@ final class AppProblemModel: ObservableObject {
         case .inserted: retryMessage = nil
         case .skippedBusy: retryMessage = "Retry skipped: a dictation was in progress."
         case .appNotInFront: retryMessage = "Retry skipped: \(appName) did not come to the front."
+        case .notDelivered: retryMessage = "Delivery was not confirmed. Check the dictation recovery prompt or clipboard."
         }
         refreshCanRetry()
     }

@@ -84,6 +84,36 @@ final class NonactivatingPanelInsertionTests: XCTestCase {
         assertPublication(startForeground: foreground, expected: .deliveryFailed)
     }
 
+    func testNativeAXCannotWriteAReacquiredFieldEvenAfterInitialDestinationPassed() {
+        let (s, original) = subject()
+        let other = AXUIElementCreateApplication(999_993)
+        s.frontmostPIDProvider = { 999_991 }
+        s.setSelectedText = { _, _ in XCTFail("Must not reach AX write"); return .success }
+        var attempted = false
+        s.performLocalInsertion = { text in
+            attempted = true
+            s.focusedElementProvider = { other }
+            XCTAssertNil(s.writeSelectedText(text, to: other))
+        }
+        _ = s.insert(text: "Synthetic native text", refocusing: original)
+        XCTAssertTrue(attempted)
+    }
+
+    func testNativeAXFinalGateChecksSecureInputAndWritesOnlyTheCapturedField() {
+        let (s, original) = subject()
+        s.frontmostPIDProvider = { 999_991 }
+        var writes = 0
+        s.setSelectedText = { field, _ in XCTAssertTrue(CFEqual(field, original)); writes += 1; return .success }
+        s.performLocalInsertion = { text in
+            s.isSecureInputActive = { true }
+            XCTAssertNil(s.writeSelectedText(text, to: original))
+            s.isSecureInputActive = { false }
+            XCTAssertEqual(s.writeSelectedText(text, to: original), .success)
+        }
+        _ = s.insert(text: "Synthetic native text", refocusing: original)
+        XCTAssertEqual(writes, 1)
+    }
+
     func testRecordedPIDPreventsNilAXCaptureFromAdoptingAnotherApp() {
         let (s, _) = subject()
         s.focusedElementProvider = { nil }

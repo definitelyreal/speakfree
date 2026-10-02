@@ -100,10 +100,33 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var scheduledRecentInsertionCount = 0
+    private lazy var failedDictations: DictationRecoveryQueue = {
+        let queue = DictationRecoveryQueue()
+        queue.isAvailable = { [weak self] in
+            guard let self else { return false }
+            return !self.isPressed && self.postBufferTimer == nil
+                && self.statusBar?.state != .recording && self.statusBar?.state != .transcribing
+                && self.scheduledRecentInsertionCount == 0 && !self.retryInFlight
+                && self.inserter?.hasDeferredInsertion != true
+                && self.inserter?.hasPendingClipboardBorrow != true
+                && self.editSessionOpenProbe?() != true
+        }
+        queue.present = { [weak self] text, available, completed in
+            guard let self else { completed(false); return }
+            let presentationToken = self.takePresentation.current
+            self.inserter.presentManualRecovery(text: text,
+                message: "Delivery could not be confirmed. This text is held in memory until you copy it or close this dialog.",
+                shouldPresent: { [weak self] in
+                    available() && self?.takePresentation.owns(presentationToken) == true
+                }, completion: completed)
+        }
+        return queue
+    }()
     private var historyTerminationInFlight = false
     private var skipHistoryDrainOnce = false
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !failedDictations.hasPending else { NSSound.beep(); return .terminateCancel }
         guard let historyCoordinator else { return .terminateNow }
         if historyTerminationInFlight { return .terminateLater }
         // Existing SIGTERM handling drains active work before calling terminate. A
@@ -731,6 +754,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     guard let self else { return true }
                     return self.isPressed || self.postBufferTimer != nil || self.statusBar?.state == .transcribing
                         || self.scheduledRecentInsertionCount > 0 || self.secureInputRetryTimer != nil
+                        || self.failedDictations.hasPending
                         || (self.editSessionOpenProbe?() ?? false)
                 })
             self.historyCoordinator?.showPreferences = { [weak self] in
@@ -1297,7 +1321,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         source.setEventHandler { [weak self] in
             guard let self else { ApplicationTermination.request(); return }
             let busy = self.statusBar.state == .recording || self.statusBar.state == .transcribing
-                || self.hasPersistInFlight
+                || self.hasPersistInFlight || self.failedDictations.hasPending
             if !busy {
                 ApplicationTermination.request()
                 return
@@ -1320,7 +1344,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// before terminating. Hard deadline so a stuck state can't make the app unkillable.
     private func terminateAfterQuiet(consecutiveIdle: Int, deadline: Date) {
         let busy = statusBar.state == .recording || statusBar.state == .transcribing
-            || hasPersistInFlight
+            || hasPersistInFlight || failedDictations.hasPending
         let idleCount = busy ? 0 : consecutiveIdle + 1
         if idleCount >= 20 || Date() > deadline {
             DiagnosticLogger.shared.log("SIGTERM: quiet — exiting now")
@@ -1412,6 +1436,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// How a "Try Last Dictation Again" ended.
     public enum RetryResult: Equatable {
         case inserted
+        case notDelivered
         /// A dictation was recording, finishing, transcribing or being edited, or a new one
         /// finished during the wait (its text is now the latest, so the old one is not inserted).
         case skippedBusy
@@ -1448,8 +1473,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             completion(.appNotInFront)
                             return
                         }
-                        self.inserter.insert(text: text)
-                        completion(.inserted)
+                        let takeToken = self.takePresentation.beginTake()
+                        self.inserter.insert(text: text, handlesRecovery: true,
+                            destination: .recorded(app.processIdentifier), completion: { [weak self] outcome in
+                                guard let self else { completion(.notDelivered); return }
+                                self.handleConcealedInsertionOutcome(outcome, text: text,
+                                    destination: nil, takeToken: takeToken)
+                                completion(TextInserter.deliveryWasSubmitted(outcome) ? .inserted : .notDelivered)
+                            })
                     }
                 } else if remaining > 0 {
                     attempt(remaining - 1)
@@ -1811,12 +1842,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Recent Dictations: insert an Edit session's text (or one ⤷ component) into the frontmost
     /// app, through the normal inserter.
     func insertRecentText(_ text: String) {
-        guard !text.isEmpty else { return }
-        historyCoordinator?.close()
-        inserter.insert(text: text, refocusing: nil, onFocusLost: { [weak self] in
-            self?.statusBar.state = .copiedToClipboard
-            self?.statusBar.buildMenu()
-        })
+        insertSavedText(text)
     }
 
     /// DevMode: open the edit window with one sample paragraph (no microphone needed).
@@ -2170,6 +2196,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Microphone gate: never silently record silence. If access is missing, this prompts
         // (notDetermined) or shows an actionable alert (denied) and aborts this attempt.
         guard Permissions.ensureMicrophoneForRecording() else { return }
+        guard !failedDictations.blocksNewCapture else {
+            NSSound.beep()
+            recordingOverlay.show(state: .error("Recover or close the waiting dictations before recording more."))
+            return
+        }
 
         takePresentation.beginTake()
         let frontAppAtStart = NSWorkspace.shared.frontmostApplication
@@ -2363,7 +2394,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 DiagnosticLogger.shared.log("SecureInputRetry: Secure Input cleared — auto-inserting")
                 self.inserter.insert(text: text, refocusing: destination?.field,
                     handlesRecovery: true, completion: { [weak self] outcome in
-                        guard let self, self.takePresentation.owns(takeToken) else { return }
+                        guard let self else { return }
                         self.handleConcealedInsertionOutcome(outcome, text: text,
                             destination: destination, takeToken: takeToken)
                     })
@@ -3188,9 +3219,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     // A delayed completion must not overwrite a newer take's cursor
                     // context or its recording/transcribing status.
-                    guard self.takePresentation.owns(takeToken) else { return }
                     self.handleConcealedInsertionOutcome(outcome, text: DictationTrace.strip(insertText),
                         destination: retryDestination, takeToken: takeToken)
+                    guard self.takePresentation.owns(takeToken) else { return }
                     if submitted,
                        self.currentUserInteractionGeneration() == interactionGeneration,
                        NSWorkspace.shared.frontmostApplication?.bundleIdentifier == destinationBundleID {
@@ -3227,6 +3258,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         _ outcome: InsertionOutcome, text: String, destination: SecureInputRetryDestination?,
         takeToken: TakePresentationOwnership.Token
     ) {
+        if outcome == .deliveryFailed {
+            failedDictations.retain(text)
+            return
+        }
         guard takePresentation.owns(takeToken) else { return }
         switch outcome {
         case .secureInput:
@@ -3251,10 +3286,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 self.statusBar.state = .idle
                 self.statusBar.buildMenu()
             }
-        case .deliveryFailed:
-            inserter.presentManualRecovery(text: text,
-                message: "Delivery could not be confirmed.",
-                shouldPresent: { [weak self] in self?.takePresentation.owns(takeToken) == true })
         default: break
         }
     }
@@ -3596,6 +3627,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        insertSavedText(text)
+    }
+
+    /// Recording recents and saved Edit sessions share destination, busy and recovery rules.
+    private func insertSavedText(_ text: String) {
+        guard !text.isEmpty, !isPressed, postBufferTimer == nil,
+              statusBar.state == .idle || statusBar.state == .ready,
+              scheduledRecentInsertionCount == 0, !retryInFlight,
+              !inserter.hasDeferredInsertion, editSessionOpenProbe?() != true else { return }
         lastTranscription = text
         let takeToken = takePresentation.beginTake()
         let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -3607,7 +3647,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             guard self.takePresentation.owns(takeToken), !self.isPressed else { return }
             self.inserter.insert(text: text, handlesRecovery: true,
                 destination: .recorded(targetPID), completion: { [weak self] outcome in
-                    guard let self, self.takePresentation.owns(takeToken) else { return }
+                    guard let self else { return }
                     // Preserve an existing checked concealed publication and its auto-clear.
                     // Never rewrite it as an unmarked string or infer success from scheduling.
                     self.handleConcealedInsertionOutcome(outcome, text: text,
