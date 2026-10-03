@@ -53,7 +53,14 @@ final class MicrophoneCaptureCoordinator {
     private let onReplace: (Int, [Float], String) -> Void
     /// Take bookkeeping (queue only). Indices count samples of the take including pre-roll.
     private var takeEmitted = 0
-    private var secondarySegment: (index: Int, time: Double)?
+    private struct CaptureIdentity: Equatable {
+        let uid: String
+        let generation: UUID
+    }
+    private var secondarySegment: (index: Int, time: Double, identity: CaptureIdentity)?
+    private var headsetEvidenceIdentity: CaptureIdentity?
+    /// Last contiguous source run, including pre-listening before a take begins.
+    private var latestSecondaryRun: (time: Double, identity: CaptureIdentity)?
     /// Headsets judged broken during this take; not reopened until it ends.
     private var quarantined: Set<String> = []
     private var noticedThisTake: Set<String> = []
@@ -78,6 +85,8 @@ final class MicrophoneCaptureCoordinator {
         let started: Double
         var lastPacket: Double?
         var zeroFrames = 0
+        var validFrames = 0
+        var previousValidPacket: (start: Double, duration: Double)?
     }
 
     init(factory: @escaping () -> DeviceCapturing = { DeviceAudioSession() },
@@ -158,6 +167,7 @@ final class MicrophoneCaptureCoordinator {
             self.timer?.cancel(); self.timer = nil
             for entry in self.sessions.values { entry.session.stop() }
             self.sessions = [:]; self.timeline.reset(); self.secondarySegment = nil
+            self.latestSecondaryRun = nil
         }
     }
 
@@ -174,15 +184,22 @@ final class MicrophoneCaptureCoordinator {
            !CaptureStaticJudge.isStatic(headsetWindows) {
             staticStrikes[preferred.uid] = nil
         }
-        headsetWindows = []
-        staticRunStartWindow = nil
+        resetHeadsetEvidence()
         meters = meters.filter { $0.key == base?.uid }
         noticedThisTake = []
         if value {
             retries = [:]; retryAfter = [:]
             let origin = (timeline.cursor ?? now()) - Double(prerollSamples) / 16_000
             takeEmitted = prerollSamples
-            secondarySegment = timeline.prefersSecondary ? (0, origin) : nil
+            if timeline.prefersSecondary, let preferred, let entry = sessions[preferred.uid],
+               let run = latestSecondaryRun {
+                let identity = CaptureIdentity(uid: preferred.uid, generation: entry.generation)
+                let start = max(origin, run.time)
+                if run.identity == identity, let count = timeline.committedSamples(since: start), count <= prerollSamples {
+                    secondarySegment = (prerollSamples - count, start, identity)
+                    headsetEvidenceIdentity = identity
+                }
+            }
             timeline.keepFrom = origin - 0.5
             if let preferred, preferred.uid != base?.uid, preferred.uid == stayOn,
                sessions[preferred.uid]?.lastPacket == nil {
@@ -200,7 +217,7 @@ final class MicrophoneCaptureCoordinator {
     func flush() {
         dispatchPrecondition(condition: .onQueue(queue))
         reconsiderHeadset(allowShortTake: true)
-        emit(timeline.flush(), source: base?.name ?? lastSource)
+        emitBase(timeline.flush())
     }
 
     func recover() {
@@ -247,9 +264,14 @@ final class MicrophoneCaptureCoordinator {
         let routes = Self.routes(devices: devices, systemDefault: systemDefault, pin: pin, stayOn: stayOn)
         let oldBase = base?.uid, oldPreferred = preferred?.uid
         base = routes.base; preferred = routes.preferred
-        if oldPreferred != preferred?.uid { emit(timeline.useBase(), source: base?.name ?? lastSource) }
+        if oldPreferred != preferred?.uid {
+            resetHeadsetEvidence()
+            latestSecondaryRun = nil
+            emitBase(timeline.useBase())
+        }
         if oldBase != base?.uid {
             timeline.reset(); baseWindows = []
+            latestSecondaryRun = nil
             if let oldBase { meters[oldBase] = nil }
             secondarySegment = nil // the old base's history is gone; nothing to rewind to
         }
@@ -288,6 +310,12 @@ final class MicrophoneCaptureCoordinator {
 
     private func remove(_ uid: String) {
         guard let entry = sessions.removeValue(forKey: uid) else { return }
+        if headsetEvidenceIdentity == CaptureIdentity(uid: uid, generation: entry.generation) {
+            resetHeadsetEvidence()
+        }
+        if latestSecondaryRun?.identity == CaptureIdentity(uid: uid, generation: entry.generation) {
+            latestSecondaryRun = nil
+        }
         reportedHealthy.remove(entry.generation)
         meters[uid] = nil
         // A headset that was supplying this take and is closed for any other reason (it left,
@@ -297,12 +325,16 @@ final class MicrophoneCaptureCoordinator {
             announceFallback(entry.device, reason: .stopped)
         }
         entry.session.stop()
-        if uid == preferred?.uid { emit(timeline.useBase(), source: base?.name ?? lastSource) }
+        if uid == preferred?.uid { emitBase(timeline.useBase()) }
     }
 
     private func receive(_ packet: CapturePacket, uid: String, generation: UUID) {
         guard var entry = sessions[uid], entry.generation == generation, enabled else { return }
         guard !packet.samples.isEmpty else { return }
+        guard packet.start.isFinite, packet.samples.allSatisfy({ $0.isFinite }) else {
+            failed(uid, generation: generation, reason: "Microphone delivered nonfinite audio or timestamps")
+            return
+        }
         let digitalSilence = packet.samples.allSatisfy { $0 == 0 }
         entry.zeroFrames = digitalSilence ? entry.zeroFrames + packet.samples.count : 0
         if entry.zeroFrames >= 16_000 {
@@ -310,10 +342,24 @@ final class MicrophoneCaptureCoordinator {
             failed(uid, generation: generation, reason: "Microphone delivered only digital zeros for one second")
             return
         }
-        if !digitalSilence { entry.lastPacket = now() }
+        if digitalSilence {
+            entry.validFrames = 0
+            entry.previousValidPacket = nil
+        } else {
+            if let previous = entry.previousValidPacket {
+                let elapsed = packet.start - previous.start
+                if elapsed <= 0 || abs(elapsed - previous.duration) > CaptureClockGuard.continuityTolerance(duration: previous.duration) {
+                    entry.validFrames = 0
+                }
+            }
+            entry.validFrames = min(80_001, entry.validFrames + packet.samples.count)
+            entry.previousValidPacket = (packet.start, Double(packet.samples.count) / 16_000)
+            entry.lastPacket = now()
+        }
         sessions[uid] = entry
-        // Reset retries only after sustained successful capture, not one stray buffer.
-        if let lastPacket = entry.lastPacket, !digitalSilence && lastPacket - entry.started > 5 {
+        // Five seconds of contiguous, finite, nonzero transport, not time since startup.
+        // Quiet input qualifies: this is transport readiness, not proof of speech quality.
+        if entry.validFrames > 80_000 {
             retries[uid] = 0
             if uid == stayOn, !reportedHealthy.contains(generation), staticStrikes[uid, default: 0] == 0 {
                 reportedHealthy.insert(generation)
@@ -323,21 +369,34 @@ final class MicrophoneCaptureCoordinator {
         // Never switch away from a working base microphone to a zero-filled
         // Bluetooth stream during startup or a mute/route failure.
         if digitalSilence && uid != base?.uid {
-            emit(timeline.useBase(), source: base?.name ?? lastSource)
+            emitBase(timeline.useBase())
             return
         }
         let isBase = uid == base?.uid
+        let identity = CaptureIdentity(uid: uid, generation: generation)
+        if recording, !isBase, headsetEvidenceIdentity != identity {
+            resetHeadsetEvidence()
+            headsetEvidenceIdentity = identity
+        }
         let cursorBefore = timeline.cursor
         let samples = isBase ? timeline.receiveBase(packet) : timeline.receiveSecondary(packet)
-        if recording, !isBase, secondarySegment == nil, !samples.isEmpty {
+        if !isBase, !samples.isEmpty {
             // Where the headset's own audio begins in the take (after any built-in gap fill).
             // A first headset packet that lies wholly behind the cursor adds nothing; the
             // segment starts with the first one that does.
             let headsetStart = max(packet.start, cursorBefore ?? packet.start)
             let headsetCount = min(samples.count, max(0, Int(((packet.end - headsetStart) * 16_000).rounded())))
-            if headsetCount > 0 { secondarySegment = (takeEmitted + samples.count - headsetCount, headsetStart) }
+            if headsetCount > 0 {
+                if latestSecondaryRun?.identity != identity || samples.count > headsetCount {
+                    latestSecondaryRun = (headsetStart, identity)
+                }
+                if recording, secondarySegment == nil {
+                    secondarySegment = (takeEmitted + samples.count - headsetCount, headsetStart, identity)
+                }
+            }
         }
-        emit(samples, source: entry.device.name)
+        if isBase { emitBase(samples) }
+        else { emit(samples, source: entry.device.name) }
         judge(packet, uid: uid, isBase: isBase)
         updateStatus()
     }
@@ -347,6 +406,11 @@ final class MicrophoneCaptureCoordinator {
         lastSource = source
         if recording { takeEmitted += samples.count }
         onSamples(samples, source)
+    }
+
+    private func emitBase(_ samples: [Float]) {
+        if !samples.isEmpty { latestSecondaryRun = nil }
+        emit(samples, source: base?.name ?? lastSource)
     }
 
     /// The chosen headset is judged against the Mac's own microphone over the same two
@@ -375,6 +439,8 @@ final class MicrophoneCaptureCoordinator {
     private func reconsiderHeadset(allowShortTake: Bool = false) {
         let minimum = allowShortTake ? CaptureStaticJudge.wholeTakeMinimumWindows : CaptureStaticJudge.minimumWindows
         guard recording, let preferred, preferred.uid != base?.uid, !quarantined.contains(preferred.uid),
+              let entry = sessions[preferred.uid],
+              headsetEvidenceIdentity == CaptureIdentity(uid: preferred.uid, generation: entry.generation),
               headsetWindows.count >= minimum else { return }
         let recent = Array(headsetWindows.suffix(CaptureStaticJudge.minimumWindows))
         switchIfStatic(preferred.uid, recent, minimumWindows: minimum)
@@ -386,10 +452,13 @@ final class MicrophoneCaptureCoordinator {
         let span = baseWindows.filter { $0.start >= first.start - 0.25 && $0.start <= last.start + 0.25 }
         guard CaptureStaticJudge.isSpeech(span, floorRMS: CaptureStaticJudge.quietLevel(baseWindows)) else { return }
         if let segment = secondarySegment {
+            guard segment.identity == CaptureIdentity(uid: uid, generation: entry.generation) else { return }
             // Replace only the static run (good headset audio before it stays), and never
             // reach back past the built-in history still held.
             let from = max(segment.time, staticRunStart(), timeline.oldestHeld ?? segment.time)
-            let index = min(takeEmitted, segment.index + max(0, Int(((from - segment.time) * 16_000).rounded())))
+            guard let suffixCount = timeline.committedSamples(since: from) else { return }
+            let index = takeEmitted - suffixCount
+            guard index >= segment.index, index <= takeEmitted else { return }
             // Check packet bounds before materializing audio. A base gap or lag may persist
             // for the whole take; repeatedly copying its history would stall this queue.
             // At stop we deliberately preserve the original take if coverage is incomplete:
@@ -417,6 +486,14 @@ final class MicrophoneCaptureCoordinator {
     }
 
     static let staticStrikesBeforeUnhealthy = 2
+
+    private func resetHeadsetEvidence() {
+        if let identity = headsetEvidenceIdentity { meters[identity.uid] = nil }
+        headsetWindows = []
+        staticRunStartWindow = nil
+        headsetEvidenceIdentity = nil
+        secondarySegment = nil
+    }
 
     /// Host time where the headset's current static began: the earliest window from which
     /// every two-second stretch up to now is judged static. Static since the first judged

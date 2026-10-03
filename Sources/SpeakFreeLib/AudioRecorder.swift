@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
+// ai-processed:unverified · session:unknown/agent:audio_file_integrity · 2026-10-02
 import AppKit
 import AVFoundation
 import Foundation
@@ -28,6 +29,16 @@ class AudioRecorder {
     private var pcmSamples: [Float] = [] // writeQueue
     private var audioFile: WavWriter? // writeQueue
     private var writeFailed = false
+    private let writerFactory: (URL) throws -> WavWriter
+    private let installArchive: (URL, URL) throws -> Void
+
+    struct CompletedRecording {
+        let url: URL
+        let samples: [Float]
+        /// nil after successful writes + header/length validation, or a fully checked repair.
+        let archiveError: String?
+        var audioFileIsValid: Bool { archiveError == nil }
+    }
     private var monitorsStarted = false // main
     private var observers: [NSObjectProtocol] = []
     private(set) var pinnedInputDeviceUID: String?
@@ -35,7 +46,11 @@ class AudioRecorder {
     private(set) var stayOnDeviceUID: String?
     var onCaptureStatus: ((String) -> Void)?
 
-    init(factory: @escaping () -> DeviceCapturing = { DeviceAudioSession() }) {
+    init(factory: @escaping () -> DeviceCapturing = { DeviceAudioSession() },
+         writerFactory: @escaping (URL) throws -> WavWriter = { try WavWriter(url: $0) },
+         installArchive: @escaping (URL, URL) throws -> Void = { try WavWriter.installReplacement($0, at: $1) }) {
+        self.writerFactory = writerFactory
+        self.installArchive = installArchive
         capture = MicrophoneCaptureCoordinator(factory: factory, samples: { [weak self] samples, source in
             self?.receive(samples, source: source)
         }, status: { [weak self] message in
@@ -47,21 +62,20 @@ class AudioRecorder {
 
     /// capture.queue. The coordinator found the headset stretch of this take was static and
     /// hands over what the Mac's own microphone heard instead, from `index` on.
-    private func replaceTail(from index: Int, with samples: [Float], source: String) {
+    func replaceTail(from index: Int, with samples: [Float], source: String) {
         guard recording else { return }
         if !recordingSources.contains(source) { recordingSources.append(source) }
         writeQueue.async {
             let keep = min(max(0, index), self.pcmSamples.count)
             self.pcmSamples.removeSubrange(keep...)
             self.pcmSamples += samples
-            // Append even if the truncate step failed, so later audio never lands before it.
-            var failure: Error?
-            do { try self.audioFile?.truncate(toSamples: keep) } catch { failure = error }
-            do { try self.audioFile?.append(samples) } catch { failure = failure ?? error }
-            if let failure, !self.writeFailed {
-                self.writeFailed = true
-                DiagnosticLogger.shared.log("Capture: WAV write failed: \(failure.localizedDescription); in-memory audio retained")
-            }
+            // Once a write fails, only memory is authoritative. Do not append to a stale
+            // file offset; finalization rebuilds the complete archive in a separate file.
+            guard !self.writeFailed else { return }
+            do {
+                try self.audioFile?.truncate(toSamples: keep)
+                try self.audioFile?.append(samples)
+            } catch { self.noteWriteFailure(error) }
         }
     }
 
@@ -164,14 +178,21 @@ class AudioRecorder {
     private func append(_ samples: [Float]) {
         writeQueue.async {
             self.pcmSamples += samples
+            guard !self.writeFailed else { return }
             do { try self.audioFile?.append(samples) }
-            catch {
-                if !self.writeFailed {
-                    self.writeFailed = true
-                    DiagnosticLogger.shared.log("Capture: WAV write failed: \(error.localizedDescription); in-memory audio retained")
-                }
-            }
+            catch { self.noteWriteFailure(error) }
         }
+    }
+
+    private func noteWriteFailure(_ error: Error) {
+        if !writeFailed {
+            if let url = audioFile?.url {
+                do { try AudioArchiveIntegrity.markInvalid(url) }
+                catch { DiagnosticLogger.shared.log("Capture: could not persist invalid-archive marker; file recognition blocked in this process") }
+            }
+            DiagnosticLogger.shared.log("Capture: WAV write failed: \(error.localizedDescription); in-memory audio retained")
+        }
+        writeFailed = true
     }
 
     /// Call at key press, before any file-system work: from here until `startRecording` (or
@@ -194,7 +215,7 @@ class AudioRecorder {
             guard !recording else { return }
             // Disarm on every exit, including a WavWriter failure, so pre-roll trims again.
             defer { armed = false }
-            let file = try WavWriter(url: url)
+            let file = try writerFactory(url)
             outputURL = url
             writeQueue.sync { audioFile = file; pcmSamples = []; writeFailed = false }
             recordingSources = preroll.isEmpty ? [] : [lastSource]
@@ -212,21 +233,32 @@ class AudioRecorder {
         }
     }
 
-    func stopRecording() -> (url: URL, samples: [Float])? {
+    func stopRecording() -> CompletedRecording? {
         capture.queue.sync {
             guard recording, let url = outputURL else { return nil }
             capture.flush()
             recording = false
             capture.setRecording(false)
             var result: [Float] = []
+            var archiveError: String?
             writeQueue.sync {
-                audioFile?.close(); audioFile = nil
+                // Keep the original writer's lease through validation and atomic publication.
+                let lease = try? RecordingActivity.shared.acquire(url)
+                defer { lease?.release() }
+                do { try audioFile?.finish() } catch { noteWriteFailure(error) }
+                audioFile = nil
                 result = pcmSamples; pcmSamples = []
-                Self.recoverArchiveIfHeaderOnly(url: url, samples: result)
+                do {
+                    try Self.finalizeArchive(url: url, samples: result, writeFailed: writeFailed,
+                                             writerFactory: writerFactory, install: installArchive)
+                } catch {
+                    archiveError = error.localizedDescription
+                    DiagnosticLogger.shared.log("AudioRecorder: archive repair failed; file recognition disabled: \(error.localizedDescription)")
+                }
             }
             outputURL = nil
             DiagnosticLogger.shared.log("AudioRecorder: recording stopped, \(result.count) samples (\(String(format: "%.2f", Double(result.count)/16000))s), sources: \(recordingSources.joined(separator: " → "))")
-            return (url, result)
+            return CompletedRecording(url: url, samples: result, archiveError: archiveError)
         }
     }
 

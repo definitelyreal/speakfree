@@ -290,11 +290,12 @@ final class MicrophoneCaptureCoordinatorTests: XCTestCase {
         router.onHeadsetHealth = { health.append(($0, $1)) }
         router.configure(devices: [builtIn, airPods], systemDefault: builtIn, pin: nil, prelisten: true, stayOn: airPods.uid)
         router.start(); router.queue.sync {}
-        sessions[1].deliver?(CapturePacket(start: 0, samples: [0.1]))
-        router.queue.sync { time = 6 }
-        sessions[1].deliver?(CapturePacket(start: 6, samples: [0.1]))
-        sessions[1].deliver?(CapturePacket(start: 6.1, samples: [0.1]))
-        router.queue.sync {}
+        for step in 0..<60 {
+            let t = Double(step) / 10
+            router.queue.sync { time = t }
+            sessions[1].deliver?(CapturePacket(start: t, samples: Array(repeating: 0.000001, count: 1600)))
+            router.queue.sync {}
+        }
         XCTAssertEqual(health.map { $0.1 }, [true], "reported once per stream")
         // Now the headset fails four times in a row.
         for _ in 0..<4 {
@@ -307,6 +308,89 @@ final class MicrophoneCaptureCoordinatorTests: XCTestCase {
         }
         XCTAssertEqual(health.last?.0, airPods.uid)
         XCTAssertEqual(health.last?.1, false)
+        router.stop(); router.queue.sync {}
+    }
+
+    func testLateFirstPacketAndDiscontinuousPacketsDoNotProveSustainedTransport() {
+        var time = 0.0
+        var sessions: [ScriptedCapture] = []
+        var health: [Bool] = []
+        let router = MicrophoneCaptureCoordinator(factory: { let s = ScriptedCapture(); sessions.append(s); return s },
+            samples: { _, _ in }, status: { _ in }, refresh: {}, now: { time })
+        router.onHeadsetHealth = { _, value in health.append(value) }
+        router.configure(devices: [builtIn, airPods], systemDefault: builtIn, pin: nil, prelisten: true, stayOn: airPods.uid)
+        router.start(); router.queue.sync { time = 5.1 }
+        sessions[1].deliver?(CapturePacket(start: 5.1, samples: Array(repeating: 0.000001, count: 1600)))
+        router.queue.sync {}
+        XCTAssertTrue(health.isEmpty, "startup age is not duration of accepted audio")
+        // Six seconds of samples separated by gaps must not qualify as one continuous run.
+        for step in 0..<60 {
+            let t = 6 + Double(step) * 0.2
+            router.queue.sync { time = t }
+            sessions[1].deliver?(CapturePacket(start: t, samples: Array(repeating: 0.000001, count: 1600)))
+            router.queue.sync {}
+        }
+        XCTAssertTrue(health.isEmpty)
+        // Quiet, finite, contiguous capture qualifies without requiring speech.
+        for step in 0..<52 {
+            let t = 18 + Double(step) / 10
+            router.queue.sync { time = t }
+            sessions[1].deliver?(CapturePacket(start: t, samples: Array(repeating: 0.000001, count: 1600)))
+            router.queue.sync {}
+            if step < 49 { XCTAssertTrue(health.isEmpty) }
+        }
+        XCTAssertEqual(health, [true])
+        router.stop(); router.queue.sync {}
+    }
+
+    func testNonfinitePacketsAreRejectedBeforeReadinessOrDelivery() {
+        for invalid in [Float.nan, .infinity, -.infinity] {
+            var time = 0.0
+            var sessions: [ScriptedCapture] = []
+            var delivered: [Float] = []
+            var health: [Bool] = []
+            let router = MicrophoneCaptureCoordinator(factory: { let s = ScriptedCapture(); sessions.append(s); return s },
+                samples: { delivered += $0; _ = $1 }, status: { _ in }, refresh: {}, now: { time })
+            router.onHeadsetHealth = { _, value in health.append(value) }
+            router.configure(devices: [builtIn, airPods], systemDefault: builtIn, pin: nil, prelisten: true, stayOn: airPods.uid)
+            router.start(); router.queue.sync { time = 5.1 }
+            sessions[1].deliver?(CapturePacket(start: 5.1, samples: [0.1, invalid, 0.2]))
+            router.queue.sync {}
+            XCTAssertTrue(delivered.isEmpty)
+            XCTAssertTrue(health.isEmpty)
+            XCTAssertTrue(sessions[1].stopped)
+            router.stop(); router.queue.sync {}
+        }
+    }
+
+    func testDigitalSilenceAndNewGenerationResetTransportQualification() {
+        var time = 0.0
+        var sessions: [ScriptedCapture] = []
+        var health: [Bool] = []
+        let router = MicrophoneCaptureCoordinator(factory: { let s = ScriptedCapture(); sessions.append(s); return s },
+            samples: { _, _ in }, status: { _ in }, refresh: {}, now: { time })
+        router.onHeadsetHealth = { _, value in health.append(value) }
+        router.configure(devices: [builtIn, airPods], systemDefault: builtIn, pin: nil, prelisten: true, stayOn: airPods.uid)
+        router.start(); router.queue.sync {}
+        func packet(_ step: Int, value: Float = 0.000001) {
+            let t = Double(step) / 10
+            router.queue.sync { time = t }
+            sessions.last(where: { $0.device?.uid == airPods.uid && !$0.stopped })!.deliver?(
+                CapturePacket(start: t, samples: Array(repeating: value, count: 1600)))
+            router.queue.sync {}
+        }
+        for step in 0..<48 { packet(step) }
+        packet(48, value: 0)
+        for step in 49..<53 { packet(step) }
+        XCTAssertTrue(health.isEmpty, "digital silence breaks the valid transport run")
+        sessions.last(where: { $0.device?.uid == airPods.uid && !$0.stopped })!.fail?("synthetic restart")
+        router.queue.sync { time = 6 }
+        router.configure(devices: [builtIn, airPods], systemDefault: builtIn, pin: nil, prelisten: true, stayOn: airPods.uid)
+        router.queue.sync {}
+        for step in 60..<108 { packet(step) }
+        XCTAssertTrue(health.isEmpty, "a reopened generation cannot count the previous session's samples")
+        for step in 108..<112 { packet(step) }
+        XCTAssertEqual(health, [true])
         router.stop(); router.queue.sync {}
     }
 

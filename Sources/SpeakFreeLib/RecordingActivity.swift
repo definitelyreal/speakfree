@@ -83,7 +83,7 @@ final class RecordingActivity: @unchecked Sendable {
 
     static func stem(for url: URL) -> String {
         let name = url.lastPathComponent
-        let suffixes = [".builtin.raw.txt", ".bt.raw.txt", ".parakeet.txt", ".whisper.txt",
+        let suffixes = [".archive-damaged", ".archive-repair", ".archive-invalid", ".builtin.raw.txt", ".bt.raw.txt", ".parakeet.txt", ".whisper.txt",
                         ".raw.txt", ".meta.json", ".bt.wav", ".wav", ".txt"]
         let suffix = suffixes.first { name.hasSuffix($0) }
         return suffix.map { String(name.dropLast($0.count)) } ?? name

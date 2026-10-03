@@ -106,6 +106,17 @@ final class EditReviewFixTests: XCTestCase {
         XCTAssertEqual(c.core?.displayedSegments.map(\.currentText), ["Hello there."])
     }
 
+    func testInvalidAudioArchiveKeepsEditTextWithoutAudioComponent() throws {
+        let c = makeController()
+        c.handleFnTap(); c.handleFnTap()
+        let take = try XCTUnwrap(payload(c, "The captured words survived."))
+        try AudioArchiveIntegrity.markInvalid(take.audioURL)
+        defer { AudioRecorder.discardRecoveryArtifacts(for: take.audioURL) }
+        c.deliver(take, kept: true)
+        XCTAssertEqual(c.core?.displayedSegments.map(\.currentText), ["The captured words survived."])
+        XCTAssertNil(c.core?.displayedSegments.first?.componentStems)
+    }
+
     func testATakeThatProducesNothingNeverHangsTheSession() {
         let c = makeController()
         c.handleFnTap()

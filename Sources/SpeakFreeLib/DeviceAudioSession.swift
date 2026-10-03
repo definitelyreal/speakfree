@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
+// ai-suggestion:unverified · session:unknown · 2026-10-02
 import AVFoundation
 import AudioToolbox
 import CTryCatch
@@ -17,6 +18,8 @@ final class DeviceAudioSession: DeviceCapturing {
     private var configurationObserver: NSObjectProtocol?
     private var reportedConfigurationStop = false // worker only
     private var verifyTimer: DispatchSourceTimer? // worker only
+    private let diagnosticGeneration = UUID().uuidString
+    private var lastBindingReadback: CaptureDeviceBinding.Snapshot? // worker only
     private let cancelLock = NSLock()
     private var cancelled = false
     /// Set once the sample clock is steady AND the live input stream still matches the tap
@@ -89,6 +92,7 @@ final class DeviceAudioSession: DeviceCapturing {
         let result = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
             kAudioUnitScope_Global, 0, &deviceID, UInt32(MemoryLayout.size(ofValue: deviceID)))
         guard result == noErr else { throw CaptureError.invalid("Microphone binding failed (\(result))") }
+        logBinding(unit: unit, device: device, stage: "after-bind")
         guard !isCancelled else { throw CaptureError.invalid("Capture request superseded") }
         let format = input.inputFormat(forBus: 0)
         // Checked against the device's LIVE input stream, not the catalog snapshot: on
@@ -103,7 +107,6 @@ final class DeviceAudioSession: DeviceCapturing {
         }
         var clock = CaptureClockGuard()
         var rejected = 0
-        var outputTime: Double?
         var failed = false
         var clockSettled = false
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, when in
@@ -116,7 +119,7 @@ final class DeviceAudioSession: DeviceCapturing {
             let time = AVAudioTime.seconds(forHostTime: when.hostTime)
             guard clock.accept(start: time, frames: Int(buffer.frameLength), rate: buffer.format.sampleRate) else {
                 rejected += 1
-                if outputTime != nil || clockSettled || rejected >= 8 {
+                if clockSettled || rejected >= 8 {
                     failed = true
                     self.reportOnce(failure, "Microphone timestamps disagree with its sample rate (\(Int(format.sampleRate)) Hz)")
                 }
@@ -128,13 +131,23 @@ final class DeviceAudioSession: DeviceCapturing {
                 self.worker.async { self.confirm(device: device, format: format, failure: failure) }
             }
             guard self.isVerified else { return }
-            guard let converted = resampler.convert(buffer), let data = converted.floatChannelData?[0] else { return }
-            let start = outputTime ?? time
-            let samples = Array(UnsafeBufferPointer(start: data, count: Int(converted.frameLength)))
-            outputTime = start + Double(samples.count) / 16_000
-            packet(CapturePacket(start: start, samples: samples))
+            switch resampler.convert(buffer, at: time) {
+            case .pending: return
+            case .failure(let reason):
+                failed = true
+                self.reportOnce(failure, "Microphone conversion failed: \(reason)")
+            case .output(let converted, let start):
+                guard let data = converted.floatChannelData?[0] else {
+                    failed = true
+                    self.reportOnce(failure, "Microphone conversion returned no sample storage")
+                    return
+                }
+                let samples = Array(UnsafeBufferPointer(start: data, count: Int(converted.frameLength)))
+                packet(CapturePacket(start: start, samples: samples))
+            }
         }
         try engine.start()
+        logBinding(unit: unit, device: device, stage: "after-start")
         DiagnosticLogger.shared.log("Capture: started \(device.name), \(format.sampleRate) Hz / \(format.channelCount) ch; checking sample clock")
     }
 
@@ -144,6 +157,7 @@ final class DeviceAudioSession: DeviceCapturing {
         guard !isCancelled, engine != nil else { return }
         cancelLock.lock(); let alreadyFailed = reportedFailure; cancelLock.unlock()
         guard !alreadyFailed else { return }
+        if let unit = engine?.inputNode.audioUnit { logBinding(unit: unit, device: device, stage: "format-confirmation") }
         if case .mismatch(let why) = check(device: device, format: format) {
             DiagnosticLogger.shared.log("Capture: \(device.name) not verified: \(why)")
             reportOnce(failure, "Unverified format: \(why)")
@@ -156,6 +170,9 @@ final class DeviceAudioSession: DeviceCapturing {
         timer.schedule(deadline: .now() + Self.recheckSeconds, repeating: Self.recheckSeconds)
         timer.setEventHandler { [weak self] in
             guard let self, !self.isCancelled else { return }
+            if let unit = self.engine?.inputNode.audioUnit {
+                self.logBinding(unit: unit, device: device, stage: "recheck", onlyIfChanged: true)
+            }
             if case .mismatch(let why) = self.check(device: device, format: format) {
                 self.verifyTimer?.cancel(); self.verifyTimer = nil
                 self.reportOnce(failure, "Microphone format changed: \(why)")
@@ -163,6 +180,17 @@ final class DeviceAudioSession: DeviceCapturing {
         }
         verifyTimer = timer
         timer.resume()
+    }
+
+    /// Worker-only readback. A differing/unknown identity is logged, not used to infer that
+    /// AVAudioEngine's aggregate wrapper selected the wrong physical microphone.
+    private func logBinding(unit: AudioUnit, device: AudioInputDevice, stage: String, onlyIfChanged: Bool = false) {
+        let snapshot = CaptureDeviceBinding.read(unit)
+        if !onlyIfChanged || snapshot != lastBindingReadback {
+            DiagnosticLogger.shared.log(CaptureDeviceBinding.diagnostic(requested: device, observed: snapshot,
+                                                                         stage: stage, generation: diagnosticGeneration))
+        }
+        lastBindingReadback = snapshot
     }
 
     private func check(device: AudioInputDevice, format: AVAudioFormat) -> CaptureFormatCheck.Verdict {
@@ -207,6 +235,47 @@ final class DeviceAudioSession: DeviceCapturing {
     enum CaptureError: LocalizedError {
         case invalid(String)
         var errorDescription: String? { if case .invalid(let message) = self { return message }; return nil }
+    }
+}
+
+// ai-suggestion:unverified · session:unknown · 2026-10-02
+/// Readback is diagnostic evidence, not a routing verdict. AVAudioEngine can expose an
+/// aggregate audio unit; a different numeric device does not establish the physical input.
+enum CaptureDeviceBinding {
+    struct Snapshot: Equatable {
+        let status: OSStatus
+        let byteCount: UInt32
+        let deviceID: AudioDeviceID?
+        let uid: String?
+        let uidStatus: OSStatus?
+    }
+
+    static func read(_ unit: AudioUnit) -> Snapshot {
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                          kAudioUnitScope_Global, 0, &id, &size)
+        guard status == noErr, size == UInt32(MemoryLayout<AudioDeviceID>.size), id != 0 else {
+            return Snapshot(status: status, byteCount: size, deviceID: nil, uid: nil, uidStatus: nil)
+        }
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceUID,
+                                                mScope: kAudioObjectPropertyScopeGlobal,
+                                                mElement: kAudioObjectPropertyElementMain)
+        var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var value: Unmanaged<CFString>?
+        let uidStatus = AudioObjectGetPropertyData(id, &address, 0, nil, &uidSize, &value)
+        let uid = uidStatus == noErr ? value?.takeRetainedValue() as String? : nil
+        return Snapshot(status: status, byteCount: size, deviceID: id, uid: uid, uidStatus: uidStatus)
+    }
+
+    static func diagnostic(requested: AudioInputDevice, observed: Snapshot, stage: String, generation: String) -> String {
+        let prefix = "Capture binding [\(generation), \(stage)]: requested id=\(requested.id) uid=\(requested.uid)"
+        guard let actual = observed.deviceID else {
+            return "\(prefix); current-device unreadable (status=\(observed.status), bytes=\(observed.byteCount)); routing unqualified"
+        }
+        let identity = observed.uid ?? "unreadable(status=\(observed.uidStatus.map(String.init) ?? "unknown"))"
+        let relation = actual == requested.id ? "current-device ID matches" : "different current-device ID; aggregate membership/input routing unqualified"
+        return "\(prefix); current id=\(actual) uid=\(identity); \(relation)"
     }
 }
 

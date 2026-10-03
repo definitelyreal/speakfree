@@ -211,6 +211,106 @@ final class CaptureStaticFailoverTests: XCTestCase {
     private func hiss(_ t: Double) -> [Float] { SyntheticAudio.staticNoise(seconds: 0.1, seed: UInt64((t * 10).rounded() + 100)) }
     private func quiet(_ t: Double) -> [Float] { [Float](repeating: 0.0004, count: 1_600) }
 
+    func testReplacementAfterCaptureGapUsesRecordedSampleIndex() {
+        let h = harness()
+        let tagged: (Double) -> [Float] = { t in Array(repeating: 0.2 + Float(t) * 0.005, count: 1600) }
+        feed(h, from: 0, seconds: 1, base: quiet, headset: tagged)
+        h.router.queue.sync { h.recording = true; h.router.setRecording(true) }
+        var expected: [Float] = []
+        // Both streams omit [2,3). The take therefore contains five seconds, not six.
+        for step in Array(10..<20) + Array(30..<70) {
+            let t = Double(step) / 10
+            let base = voice(t), headset = step < 40 ? tagged(t) : hiss(t)
+            expected += step < 40 ? headset : base
+            h.sessions[0].deliver?(CapturePacket(start: t, samples: base))
+            if !h.sessions[1].stopped { h.sessions[1].deliver?(CapturePacket(start: t, samples: headset)) }
+            h.router.queue.sync {}
+        }
+        h.router.queue.sync { h.router.flush() }
+        XCTAssertEqual(h.replacements.first?.index, 32000, "host time 4 is take sample 32000 after the missing second")
+        XCTAssertEqual(h.take.count, expected.count, "replacement must not retain or append overlapping static")
+        XCTAssertTrue(h.take == expected, "keep both tagged pre-static stretches and the exact base replacement")
+        h.router.stop(); h.router.queue.sync {}
+    }
+
+    func testStaticEvidenceAndReplacementOriginDoNotCrossHeadsetIdentities() {
+        // Exercise both a different UID and a reopened session of the same UID.
+        for sameUID in [false, true] {
+            let h = harness()
+            feed(h, from: 0, seconds: 1, base: quiet, headset: hiss)
+            h.router.queue.sync { h.recording = true; h.router.setRecording(true) }
+            for step in 10..<29 {
+                let t = Double(step) / 10
+                h.sessions[1].deliver?(CapturePacket(start: t, samples: hiss(t)))
+            }
+            h.router.queue.sync {}
+            let oldAudio = h.take
+            let next = sameUID ? airPods : AudioInputDevice(id: 3, uid: "second-headset", name: "Second headset",
+                isBuiltIn: false, isBluetooth: true, nominalSampleRate: 24000, inputChannels: 1)
+            if sameUID {
+                h.sessions[1].fail?("synthetic session restart")
+                h.router.queue.sync { h.clock = 1 }
+            }
+            h.router.configure(devices: [builtIn, next], systemDefault: builtIn, pin: nil,
+                               prelisten: true, stayOn: next.uid)
+            h.router.queue.sync {}
+            let newSession = h.sessions.last!
+            newSession.deliver?(CapturePacket(start: 2.9, samples: voice(2.9)))
+            // Corroboration for the old headset arrives only after its identity is retired.
+            for step in 10..<30 {
+                let t = Double(step) / 10
+                h.sessions[0].deliver?(CapturePacket(start: t, samples: voice(t)))
+            }
+            h.router.queue.sync {}
+            XCTAssertFalse(newSession.stopped, "a new headset/session must not inherit the old one's 19 static windows")
+            XCTAssertFalse(h.events.contains { $0.reason == .staticNoise })
+            XCTAssertTrue(h.replacements.isEmpty)
+            // Now this new source itself delivers enough static to justify a replacement.
+            for step in 30..<60 {
+                let t = Double(step) / 10
+                h.sessions[0].deliver?(CapturePacket(start: t, samples: voice(t)))
+                if !newSession.stopped { newSession.deliver?(CapturePacket(start: t, samples: hiss(t))) }
+                h.router.queue.sync {}
+            }
+            XCTAssertEqual(h.replacements.first?.index, oldAudio.count,
+                           "replacement must begin at the new source, not erase the previous headset")
+            XCTAssertTrue(Array(h.take.prefix(oldAudio.count)) == oldAudio)
+            XCTAssertEqual(h.events.filter { $0.reason == .staticNoise }.map(\.uid), [next.uid])
+            h.router.stop(); h.router.queue.sync {}
+        }
+    }
+
+    func testNewHeadsetReplacementDoesNotErasePreviousHeadsetInPreroll() {
+        let h = harness()
+        let tagged: (Double) -> [Float] = { _ in Array(repeating: 0.3, count: 1600) }
+        feed(h, from: 0, seconds: 1, base: quiet, headset: tagged)
+        let next = AudioInputDevice(id: 3, uid: "second-headset", name: "Second headset", isBuiltIn: false,
+                                    isBluetooth: true, nominalSampleRate: 24000, inputChannels: 1)
+        h.router.configure(devices: [builtIn, next], systemDefault: builtIn, pin: nil, prelisten: true, stayOn: next.uid)
+        h.router.queue.sync {}
+        let session = h.sessions.last!
+        // A remains in the first 0.3 s of pre-roll; B has only supplied its final 0.2 s.
+        for step in 10..<12 {
+            let t = Double(step) / 10
+            session.deliver?(CapturePacket(start: t, samples: hiss(t)))
+            h.sessions[0].deliver?(CapturePacket(start: t, samples: voice(t)))
+        }
+        h.router.queue.sync {
+            h.take = Array(repeating: 0.3, count: 4800) + hiss(1) + hiss(1.1)
+            h.recording = true
+            h.router.setRecording(true, prerollSamples: h.take.count)
+        }
+        for step in 12..<42 {
+            let t = Double(step) / 10
+            h.sessions[0].deliver?(CapturePacket(start: t, samples: voice(t)))
+            if !session.stopped { session.deliver?(CapturePacket(start: t, samples: hiss(t))) }
+            h.router.queue.sync {}
+        }
+        XCTAssertEqual(h.replacements.first?.index, 4800)
+        XCTAssertTrue(Array(h.take.prefix(4800)) == Array(repeating: Float(0.3), count: 4800))
+        h.router.stop(); h.router.queue.sync {}
+    }
+
     // ai-suggestion:unverified · session:unknown · 2026-10-02
     /// Same capture times, but the base worker delivers after the final headset callback.
     private func feedLateBase(_ h: Harness, steps: Int, base: (Double) -> [Float],

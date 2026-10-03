@@ -85,7 +85,7 @@ final class PostBufferContinuationTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: RecordingStore.sentinelFile.path))
 
             let newFinalization = expectation(description: "The next release finalizes once")
-            var result: (url: URL, samples: [Float])?
+            var result: AudioRecorder.CompletedRecording?
             var finalizations = 0
             app.finalize = {
                 finalizations += 1
@@ -116,7 +116,7 @@ final class PostBufferContinuationTests: XCTestCase {
             app.handleRecordingStop()
             app.handleRecordingStart()
             let finalized = expectation(description: "Canceling only the continuation still finalizes the take")
-            var result: (url: URL, samples: [Float])?
+            var result: AudioRecorder.CompletedRecording?
             app.finalize = {
                 result = recorder.stopRecording()
                 finalized.fulfill()

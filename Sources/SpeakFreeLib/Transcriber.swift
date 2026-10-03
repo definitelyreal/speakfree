@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-processed:unverified · session:unknown/agent:audio_file_integrity · 2026-10-02
 import Foundation
 import AVFoundation
 
@@ -84,6 +85,8 @@ public class Transcriber {
         /// Parakeet returned nothing on real speech and no Whisper backup ran (not installed or
         /// turned off). The app may offer the backup download.
         case missed
+        /// Memory recognition completed, but a failed archive repair forbids file backup.
+        case archiveUnavailable
         /// The take was static (a broken microphone stream), so no Whisper rescue ran.
         case staticNoise
 
@@ -98,6 +101,8 @@ public class Transcriber {
                 return "Silence. Nothing to transcribe."
             case .missed:
                 return "Didn't catch that. Try again."
+            case .archiveUnavailable:
+                return "Audio archive unavailable. Whisper backup could not run."
             case .staticNoise:
                 return "Didn't catch that. The mic sounded like static."
             }
@@ -145,6 +150,7 @@ public class Transcriber {
     /// "Load Whisper as fallback for errors" (WhisperFallback.isEnabled). Off = no Whisper
     /// rescue, sparse rescue or shadow check ever runs for a Parakeet take.
     public var whisperFallbackEnabled: Bool = true
+    var cliTranscriptionOverride: ((URL) throws -> String)? // instance-scoped test seam
     var onSecondOpinionStatus: ((SecondOpinionStatus) -> Void)?
 
     // MARK: - Engine lifecycle passthroughs (used by AppDelegate)
@@ -495,7 +501,15 @@ public class Transcriber {
     /// Falls back to CLI (whisper only) if the engine fails or samples are not provided.
     public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil,
                            punctuationMode: PunctuationMode = .off,
-                           inputDevice: String? = nil) async throws -> String {
+                           inputDevice: String? = nil,
+                           audioFileIsValid: Bool = true) async throws -> String {
+        // This value is per take and captured by background work, never mutable shared state.
+        // Explicit memory-only callers can continue. File-backed callers must not turn
+        // a retained damaged WAV into samples and silently treat those as authoritative.
+        if audioFileIsValid && AudioArchiveIntegrity.isInvalid(audioURL) {
+            throw TranscriberError.audioArchiveUnavailable
+        }
+        let fileForRecognition: URL? = audioFileIsValid ? audioURL : nil
         let activityLease = try RecordingActivity.shared.acquireReading(audioURL)
         defer { activityLease.release() }
         let result: String
@@ -543,7 +557,7 @@ public class Transcriber {
                     // inference params, so a persistently failing in-process engine silently
                     // degrading every dictation must be visible in the log health checks read.
                     DiagnosticLogger.shared.log("Transcriber: in-process engine failed (\(error.localizedDescription)) — falling back to whisper CLI")
-                    result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
+                    result = try transcribeWithCLI(audioURL: fileForRecognition, prompt: prompt)
                     markReplacedByWhisperCLI()
                 } else {
                     throw error
@@ -551,7 +565,7 @@ public class Transcriber {
             }
         } else if engine.engineID == "whisper" {
             // Fallback to CLI (whisper only)
-            result = try transcribeWithCLI(audioURL: audioURL, prompt: prompt)
+            result = try transcribeWithCLI(audioURL: fileForRecognition, prompt: prompt)
             markReplacedByWhisperCLI()
         } else {
             // Non-whisper engines have no CLI fallback and need samples.
@@ -593,6 +607,8 @@ public class Transcriber {
                 DiagnosticLogger.shared.log(
                     "Transcriber: take sounded like static (\(CaptureStaticJudge.describe(takeWindows))); no Whisper rescue")
                 onSecondOpinionStatus?(.staticNoise)
+            } else if engine.engineID != "whisper", !audioFileIsValid {
+                onSecondOpinionStatus?(.archiveUnavailable)
             } else if engine.engineID != "whisper", !whisperFallbackEnabled || !Self.modelExists(modelSize: "large-v3-turbo") {
                 onSecondOpinionStatus?(.missed)
             } else if engine.engineID != "whisper" {
@@ -600,7 +616,7 @@ public class Transcriber {
                 secondOpinionAudio = audio
                 onSecondOpinionStatus?(.rechecking(audio))
                 do {
-                    let rescued = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
+                    let rescued = try transcribeWithCLI(audioURL: fileForRecognition, prompt: prompt,
                                                         modelOverride: "large-v3-turbo")
                     if !rescued.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         DiagnosticLogger.shared.log(
@@ -615,7 +631,7 @@ public class Transcriber {
                         "Transcriber: whisper rescue failed (\(error.localizedDescription))")
                 }
             }
-        } else if engine.engineID != "whisper", whisperFallbackEnabled, !takeIsStatic,
+        } else if engine.engineID != "whisper", audioFileIsValid, whisperFallbackEnabled, !takeIsStatic,
                   Self.sparseRescueEligible(
                       parakeetWordCount: cleaned.split(separator: " ").count,
                       durationSeconds: Double((samples ?? []).count) / 16_000.0,
@@ -640,7 +656,7 @@ public class Transcriber {
             secondOpinionAudio = audio
             onSecondOpinionStatus?(.rechecking(audio))
             do {
-                let swap = try transcribeWithCLI(audioURL: audioURL, prompt: prompt,
+                let swap = try transcribeWithCLI(audioURL: fileForRecognition, prompt: prompt,
                                                  modelOverride: "large-v3-turbo")
                 let duration = Double((samples ?? []).count) / 16_000.0
                 let pWords = cleaned.split(separator: " ").count
@@ -674,7 +690,7 @@ public class Transcriber {
                     "Transcriber: sparse-rescue whisper failed (\(error.localizedDescription)) — keeping Parakeet")
             }
         } else if engine.engineID != "whisper", !takeIsStatic,
-                  whisperFallbackEnabled,
+                  audioFileIsValid, whisperFallbackEnabled,
                   Self.secondOpinionTier(aggregateConfidence: engine.lastDiagnostics?.aggregateConfidence) == .shadow,
                   Self.modelExists(modelSize: "large-v3-turbo"),
                   Self.shadowSlot.wait(timeout: .now()) == .success {
@@ -693,7 +709,7 @@ public class Transcriber {
                 guard let self = self, shadowLease != nil else { return }
                 let shadow: String
                 do {
-                    shadow = try self.transcribeWithCLI(audioURL: audioURL, prompt: prompt,
+                    shadow = try self.transcribeWithCLI(audioURL: fileForRecognition, prompt: prompt,
                                                         modelOverride: "large-v3-turbo", background: true)
                 } catch {
                     // A failed shadow must say so — a silent guard hid the modelID bug
@@ -974,8 +990,10 @@ public class Transcriber {
     /// `modelID` is a Parakeet id ("parakeet-tdt-0.6b-v2") and resolving it as a ggml
     /// file can only throw — which is exactly how the 2026-08-20 shadow pass silently
     /// never fired (a garbled two-word take, conf 0.911, no sidecar, no log).
-    private func transcribeWithCLI(audioURL: URL, prompt: String? = nil,
+    private func transcribeWithCLI(audioURL: URL?, prompt: String? = nil,
                                    modelOverride: String? = nil, background: Bool = false) throws -> String {
+        guard let audioURL else { throw TranscriberError.audioArchiveUnavailable }
+        if let cliTranscriptionOverride { return try cliTranscriptionOverride(audioURL) }
         guard let whisperPath = Transcriber.findWhisperBinary() else {
             throw TranscriberError.whisperNotFound
         }
@@ -1143,6 +1161,7 @@ public class Transcriber {
         loadModelIfNeeded: Bool = true,
         isLiveTakeActive: (@Sendable () async -> Bool)? = nil
     ) async throws -> String {
+        guard !AudioArchiveIntegrity.isInvalid(url) else { throw TranscriberError.audioArchiveUnavailable }
         let activityLease = try RecordingActivity.shared.acquireReading(url)
         defer { activityLease.release() }
         // Ensure model loaded
@@ -1268,12 +1287,15 @@ public class Transcriber {
 }
 
 enum TranscriberError: LocalizedError {
+    case audioArchiveUnavailable
     case whisperNotFound
     case modelNotFound(String)
     case transcriptionFailed
 
     var errorDescription: String? {
         switch self {
+        case .audioArchiveUnavailable:
+            return "The audio archive could not be repaired; file recognition is unavailable."
         case .whisperNotFound:
             return "whisper-cpp not found. Install it with: brew install whisper-cpp"
         case .modelNotFound(let size):

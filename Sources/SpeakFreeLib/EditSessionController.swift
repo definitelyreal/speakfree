@@ -232,7 +232,8 @@ final class EditSessionController {
     /// AppDelegate.editFinalizeSink: a take's on-device text.
     func deliver(_ payload: EditFinalizePayload, kept: Bool) {
         guard let core = core, core.state.id == payload.sessionID else { return }
-        let stem = kept ? payload.audioURL.deletingPathExtension().lastPathComponent : nil
+        let stem = kept && !AudioArchiveIntegrity.isInvalid(payload.audioURL)
+            ? payload.audioURL.deletingPathExtension().lastPathComponent : nil
         core.takeTranscribed(payload.segmentID, raw: payload.raw, pipelineText: payload.pipelineText,
                              componentStem: stem)
     }

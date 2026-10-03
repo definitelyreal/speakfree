@@ -38,7 +38,7 @@ public class RecordingStore {
     private static let ensureLock = NSLock()
     private static var ensuredDir: String?
 
-    // M2: cached wav count for the Settings-open hot path (finding 9 — a 22k-file scan on main took
+    // M2: cached retained-audio count for the Settings-open hot path (finding 9 — a 22k-file scan on main took
     // ~1.9s). Keyed on the recordings-dir path so a `configDirOverride` switch auto-invalidates it
     // (tests) and production stays warm. Kept live by finishRecording/deleteAllRecordings/prune.
     // `recordingCount()` stays a live scan (callers/tests rely on it reflecting disk immediately);
@@ -202,6 +202,7 @@ public class RecordingStore {
             let stem = String(name.dropLast(4))
             guard !txts.contains(stem + ".txt") else { continue }
             let url = recordingsDir.appendingPathComponent(name)
+            guard !AudioArchiveIntegrity.isInvalid(url) else { continue }
             guard let attrs = try? fm.attributesOfItem(atPath: url.path),
                   let mtime = attrs[.modificationDate] as? Date, mtime > cutoff,
                   (attrs[.size] as? Int ?? 0) > 44 else { continue }
@@ -442,40 +443,67 @@ public class RecordingStore {
         defer { removal.finish() }
         mutationLock.lock()
         defer { mutationLock.unlock() }
-        let recordings = listRecordings()
-        guard recordings.count > maxCount else { return }
-
-        let toRemove = recordings.suffix(from: maxCount)
-        for recording in toRemove {
-            guard removal.claim(recording.url) else { continue }
+        guard let names = directoryEntryNames(atPath: recordingsDir.path) else { return }
+        let groups = Dictionary(grouping: names.filter { isRecordingArtifact($0) }) {
+            RecordingActivity.stem(for: recordingsDir.appendingPathComponent($0))
+        }
+        // One Keep N budget: primary WAVs and recovery audio count as retained takes.
+        // Marker-only and transcript-only groups do not evict captured audio.
+        // Fixed-width timestamps keep the normal healthy-WAV chronology unchanged.
+        let retainedTakes = groups.keys.filter { stem in
+            let files = groups[stem] ?? []
+            return files.contains(stem + ".wav") || files.contains(where: { name in
+                name.hasSuffix(".archive-damaged") || name.hasSuffix(".archive-repair")
+            })
+        }.sorted(by: >)
+        let audioStems = Set(retainedTakes)
+        // Clean marker-only leftovers through the same lease/type guards below.
+        // Unrelated transcript-only strays remain outside this cleanup inventory.
+        let markerOnly = groups.keys.filter { stem in
+            !audioStems.contains(stem) && (groups[stem] ?? []).contains(stem + ".archive-invalid")
+        }.sorted(by: >)
+        let expired = Array(retainedTakes.dropFirst(maxCount)) + markerOnly
+        guard !expired.isEmpty else { return }
+        var withdrawn = Set<String>()
+        let fm = FileManager.default
+        for stem in expired {
+            let audio = recordingsDir.appendingPathComponent(stem + ".wav")
+            guard removal.claim(audio) else { continue }
+            let files = (groups[stem] ?? []).map { recordingsDir.appendingPathComponent($0) }
             do {
-                try FileManager.default.removeItem(at: recording.url)
-                try? FileManager.default.removeItem(at: sidecarURL(for: recording.url))
-                try? FileManager.default.removeItem(at: rawSidecarURL(for: recording.url))
-                try? FileManager.default.removeItem(at: metaSidecarURL(for: recording.url))
-                let base = recording.url.deletingPathExtension()
-                try? FileManager.default.removeItem(
-                    at: base.appendingPathExtension("builtin.raw.txt"))
-                try? FileManager.default.removeItem(at: base.appendingPathExtension("bt.wav"))
-                try? FileManager.default.removeItem(at: base.appendingPathExtension("bt.raw.txt"))
-                try? FileManager.default.removeItem(at: base.appendingPathExtension("whisper.txt"))
-                try? FileManager.default.removeItem(at: base.appendingPathExtension("parakeet.txt"))
+                // Never recurse through a matching directory or traverse an alias.
+                guard try files.allSatisfy({
+                    try fm.attributesOfItem(atPath: $0.path)[.type] as? FileAttributeType == .typeRegular
+                }) else { continue }
+                // Remove the canonical audio first. A failure leaves every companion,
+                // especially the durable invalid marker, at its original location.
+                if fm.fileExists(atPath: audio.path) {
+                    guard files.contains(audio) else { continue }
+                    try fm.removeItem(at: audio)
+                }
+                withdrawn.insert(stem)
+                let recovery = AudioRecorder.recoveryArtifactURLs(for: audio)
+                // Recovery artifacts remain as a retryable group if sidecar deletion fails.
+                for file in files where file != audio && !recovery.contains(file) {
+                    try fm.removeItem(at: file)
+                }
+                // The invalid marker is last, after audio and all other companions.
+                for file in recovery where files.contains(file) { try fm.removeItem(at: file) }
+                AudioArchiveIntegrity.forget(audio)
             } catch {
-                fputs("Warning: could not remove old recording \(recording.url.path): \(error.localizedDescription)\n", stderr)
+                DiagnosticLogger.shared.log("RecordingStore: could not prune recording group \(stem): \(error.localizedDescription)")
             }
         }
-        // Edit Mode sessions follow the same cap and never outlive all of their recordings.
         EditRecents.prune(maxCount: maxCount)
-        // M2: the cached count no longer reflects disk — recompute lazily on the next read.
         invalidateCachedCount()
-        if !toRemove.isEmpty {
-            filterRecentIndexLocked(removing: Set(toRemove.map { $0.url.deletingPathExtension().lastPathComponent }))
-        }
+        // Protected or failed-to-withdraw takes remain indexed. A removed WAV must
+        // not leave its timestamp behind merely because it had recovery companions.
+        if !withdrawn.isEmpty { filterRecentIndexLocked(removing: withdrawn) }
     }
 
     // MARK: - Cached recording count (M2)
 
-    /// Fast wav count for the Settings-open hot path. Lazily computed once per dir via a live scan,
+    /// Fast retained-audio count for the Settings-open hot path. Lazily computed once per dir via a live scan,
     /// then kept current by finishRecording/deleteAllRecordings/prune — so Settings-open stops
     /// rescanning the whole corpus on the main thread. Not a replacement for `recordingCount()`,
     /// which stays a live scan for callers that manipulate the folder directly.
@@ -513,20 +541,23 @@ public class RecordingStore {
         cachedCountDir = nil
     }
 
-    /// True when the recordings folder currently holds at least one audio file.
-    /// Gates the Settings "Open Recordings / Transcripts Folder" button and the notice.
+    /// True when retained audio exists, including nonplayable recovery evidence.
+    /// Gates the recordings-folder/removal affordances and the launch notice.
     public static func hasAudioFiles() -> Bool {
         recordingCount() > 0
     }
 
-    /// Number of recordings (wav files) on disk.
+    /// Number of retained audio stems, distinct from the playable WAV listing.
+    /// Multiple recovery copies count once; markers/transcripts alone contain no audio.
     public static func recordingCount() -> Int {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: recordingsDir.path) else { return 0 }
-        return files.filter {
-            $0.hasSuffix(".\(fileExtension)") && !$0.hasSuffix(".bt.wav")
-                && $0.hasPrefix(filePrefix)
-        }.count
+        let audioSuffixes = [".\(fileExtension)", ".archive-damaged", ".archive-repair"]
+        return Set(files.compactMap { name -> String? in
+            guard name.hasPrefix(filePrefix), !name.hasSuffix(".bt.wav"),
+                  let suffix = audioSuffixes.first(where: { name.hasSuffix($0) }) else { return nil }
+            return String(name.dropLast(suffix.count))
+        }).count
     }
 
     /// Total number of recording artifacts on disk (wavs + transcript/meta sidecars) —
@@ -549,6 +580,10 @@ public class RecordingStore {
         mutationLock.lock()
         defer { mutationLock.unlock() }
         if keep {
+            guard !AudioArchiveIntegrity.isInvalid(audioURL) else {
+                DiagnosticLogger.shared.log("RecordingStore: invalid archive; not attaching a transcript to damaged audio")
+                return
+            }
             // PR-C: a concurrent "Delete All" can remove the wav mid-dictation. Writing
             // sidecars now would resurrect orphaned transcripts with no audio behind them —
             // skip the writes if the wav is already gone.
@@ -565,6 +600,7 @@ public class RecordingStore {
             bumpCachedCount(by: 1)
         } else {
             try? FileManager.default.removeItem(at: audioURL)
+            AudioRecorder.discardRecoveryArtifacts(for: audioURL)
         }
     }
 
@@ -576,6 +612,7 @@ public class RecordingStore {
     /// archive holds 905 real dual-capture takes, and every one of those files must
     /// still be excluded from recording counts and still be deleted by Delete All.
     private static let artifactSuffixes = [
+        ".archive-damaged", ".archive-repair", ".archive-invalid",
         ".builtin.raw.txt", ".bt.raw.txt", ".parakeet.txt", ".whisper.txt", ".raw.txt", ".edit.json", ".meta.json", ".bt.wav", ".wav", ".txt",
     ]
 
@@ -602,6 +639,7 @@ public class RecordingStore {
         let removal = RecordingActivity.shared.beginRemoval(in: recordingsDir)
         defer { removal.finish() }
         let result = RecordingRemoval.run(directory: recordingsDir, activity: removal, progress: progress, trash: trash)
+        AudioArchiveIntegrity.forgetMissingArchives(in: recordingsDir)
         invalidateCachedCount()
         // Drop the names of trashed takes from the recent-takes index.
         mutationLock.lock()
@@ -647,7 +685,16 @@ public class RecordingStore {
                 var isDir: ObjCBool = false
                 guard fm.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else { continue }
                 do {
+                    if url.pathExtension == "archive-invalid" {
+                        let audio = recordingsDir.appendingPathComponent(RecordingActivity.stem(for: url) + ".wav")
+                        if fm.fileExists(atPath: audio.path) {
+                            try fm.removeItem(at: audio)
+                            removed += 1
+                        }
+                    }
                     try fm.removeItem(at: url)
+                    let audio = recordingsDir.appendingPathComponent(RecordingActivity.stem(for: url) + ".wav")
+                    if !fm.fileExists(atPath: audio.path) { AudioArchiveIntegrity.forget(audio) }
                     removed += 1
                 } catch {
                     failed += 1

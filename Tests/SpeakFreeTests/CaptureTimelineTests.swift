@@ -45,6 +45,30 @@ final class CaptureTimelineTests: XCTestCase {
         XCTAssertEqual(timeline.receiveSecondary(packet(400, 800, offset: 10_000)), (800..<1200).map { Float($0) + 10_000 })
     }
 
+    func testCommittedMappingCountsSamplesAcrossHolesAndClippedOverlap() {
+        var timeline = CaptureTimeline()
+        _ = timeline.receiveSecondary(packet(0, 16000))
+        _ = timeline.receiveSecondary(packet(32000, 16000))
+        _ = timeline.receiveSecondary(packet(40000, 16000)) // Only 8000 new samples.
+        XCTAssertEqual(timeline.committedSamples(since: 0), 40000)
+        XCTAssertEqual(timeline.committedSamples(since: 2), 24000)
+        XCTAssertEqual(timeline.committedSamples(since: 3), 8000)
+        XCTAssertNil(timeline.committedSamples(since: 1.5), "a boundary inside a missing interval is not a recorded index")
+    }
+
+    func testCommittedMappingTracksRewindAndReset() {
+        var timeline = CaptureTimeline()
+        _ = timeline.receiveSecondary(packet(0, 16000))
+        _ = timeline.receiveSecondary(packet(32000, 16000))
+        _ = timeline.receiveBase(packet(32000, 32000))
+        XCTAssertEqual(timeline.rewind(to: 2).count, 32000)
+        XCTAssertEqual(timeline.committedSamples(since: 0), 48000)
+        XCTAssertEqual(timeline.committedSamples(since: 2), 32000)
+        XCTAssertNil(timeline.committedSamples(since: 1.5))
+        timeline.reset()
+        XCTAssertNil(timeline.committedSamples(since: 0))
+    }
+
     func testRewindCoverageAllowsUnalignedMicrophoneGrids() {
         for offset in [-0.5, -0.49, 0.49, 0.5] {
             var timeline = CaptureTimeline()

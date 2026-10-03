@@ -1,5 +1,7 @@
 // ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-processed:unverified · session:unknown/agent:audio_file_integrity · 2026-10-02
 import Foundation
+import Darwin
 import AVFoundation
 
 /// Crash-safe 16 kHz mono s16 WAV writer.
@@ -16,6 +18,11 @@ import AVFoundation
 /// All calls must come from one queue (AudioRecorder's writeQueue) — the class is not
 /// itself thread-safe, matching how the AVAudioFile it replaces was used.
 final class WavWriter {
+    /// Instance-scoped injection at real I/O boundaries; production uses no hook.
+    enum IOOperation { case append, truncate, patchRIFF, patchData, seekEnd, synchronize, close }
+    private let beforeIO: (IOOperation) throws -> Void
+    private var closed = false
+    private var firstFailure: Error?
     private let handle: FileHandle
     private let activityLease: RecordingActivity.Lease
     let url: URL
@@ -24,7 +31,8 @@ final class WavWriter {
     /// Patch the header every ~5 s of audio (16 kHz).
     private let headerPatchInterval = 80_000
 
-    init(url: URL) throws {
+    init(url: URL, beforeIO: @escaping (IOOperation) throws -> Void = { _ in }) throws {
+        self.beforeIO = beforeIO
         self.url = url
         // Register before the file becomes visible to a maintenance snapshot.
         activityLease = try RecordingActivity.shared.acquire(url)
@@ -44,13 +52,19 @@ final class WavWriter {
     func append(_ samples: [Float]) throws {
         guard !samples.isEmpty else { return }
         let data = Self.pcmData(samples)
-        try handle.write(contentsOf: data)
-        samplesWritten += samples.count
-        if samplesWritten - samplesAtLastPatch >= headerPatchInterval {
-            // A patch failure must not poison the stream: if it throws mid-seek, the
-            // offset could sit in the header region and the NEXT append would write
-            // PCM over it. Restore end-of-file positioning before continuing.
-            do { try patchHeader() } catch { try? handle.seekToEnd() }
+        do {
+            try beforeIO(.append)
+            try handle.write(contentsOf: data)
+            samplesWritten += samples.count
+            if samplesWritten - samplesAtLastPatch >= headerPatchInterval {
+                // Restore end positioning on failure so legacy callers cannot overwrite
+                // the header with a later append. Live recording stops disk writes.
+                try patchHeader()
+            }
+        } catch {
+            firstFailure = firstFailure ?? error
+            try? handle.seekToEnd()
+            throw error
         }
     }
 
@@ -74,9 +88,12 @@ final class WavWriter {
     private func patchHeader() throws {
         let dataBytes = UInt32(samplesWritten * 2)
         try handle.seek(toOffset: 4)
+        try beforeIO(.patchRIFF)
         try handle.write(contentsOf: WavWriter.le32(36 + dataBytes))
         try handle.seek(toOffset: 40)
+        try beforeIO(.patchData)
         try handle.write(contentsOf: WavWriter.le32(dataBytes))
+        try beforeIO(.seekEnd)
         try handle.seekToEnd()
         samplesAtLastPatch = samplesWritten
     }
@@ -85,18 +102,41 @@ final class WavWriter {
     /// the built-in microphone's audio). The header is patched so the file stays valid.
     func truncate(toSamples count: Int) throws {
         let keep = min(max(0, count), samplesWritten)
-        try handle.truncate(atOffset: UInt64(44 + keep * 2))
-        samplesWritten = keep
-        samplesAtLastPatch = min(samplesAtLastPatch, keep)
-        do { try patchHeader() } catch { try? handle.seekToEnd(); throw error }
+        do {
+            try beforeIO(.truncate)
+            try handle.truncate(atOffset: UInt64(44 + keep * 2))
+            samplesWritten = keep
+            samplesAtLastPatch = min(samplesAtLastPatch, keep)
+            try patchHeader()
+        } catch {
+            firstFailure = firstFailure ?? error
+            try? handle.seekToEnd()
+            throw error
+        }
     }
 
-    /// Final header patch + close. Safe to call once; the deinit also closes defensively.
-    func close() {
-        defer { activityLease.release() }
-        try? patchHeader()
-        try? handle.close()
+    /// Report every write/finalization failure, including failures earlier in the take.
+    /// Even on error, attempt to close the handle before the archive is repaired.
+    func finish(synchronize: Bool = false) throws {
+        guard !closed else {
+            if let firstFailure { throw firstFailure }
+            return
+        }
+        defer { closed = true; activityLease.release() }
+        do {
+            try patchHeader()
+            if synchronize {
+                try beforeIO(.synchronize)
+                try handle.synchronize()
+            }
+        } catch { firstFailure = firstFailure ?? error }
+        do { try beforeIO(.close); try handle.close() }
+        catch { firstFailure = firstFailure ?? error; try? handle.close() }
+        if let firstFailure { throw firstFailure }
     }
+
+    /// Best-effort close for legacy callers. Live recording uses throwing `finish()`.
+    func close() { try? finish() }
 
     deinit { try? handle.close() }
 
@@ -124,6 +164,39 @@ final class WavWriter {
         d.append(le16(16))                   // bits per sample
         d.append(contentsOf: Array("data".utf8)); d.append(le32(dataBytes))
         return d
+    }
+
+    /// Compare the canonical header and expected file length without reading PCM samples.
+    static func matchesHeader(_ url: URL, sampleCount: Int) throws -> Bool {
+        let reader = try FileHandle(forReadingFrom: url)
+        defer { try? reader.close() }
+        guard sampleCount <= (Int(UInt32.max) - 36) / 2,
+              try reader.seekToEnd() == UInt64(44 + sampleCount * 2) else { return false }
+        try reader.seek(toOffset: 0)
+        return try reader.read(upToCount: 44) == header(dataBytes: UInt32(sampleCount * 2))
+    }
+
+    /// Compare the complete canonical header and quantized PCM, including same-size corruption.
+    static func matches(_ url: URL, samples: [Float]) throws -> Bool {
+        let reader = try FileHandle(forReadingFrom: url)
+        defer { try? reader.close() }
+        guard samples.count <= (Int(UInt32.max) - 36) / 2,
+              try reader.seekToEnd() == UInt64(44 + samples.count * 2) else { return false }
+        try reader.seek(toOffset: 0)
+        guard try reader.read(upToCount: 44) == header(dataBytes: UInt32(samples.count * 2)) else { return false }
+        for start in stride(from: 0, to: samples.count, by: 16_000) {
+            let pcm = pcmData(Array(samples[start..<min(start + 16_000, samples.count)]))
+            guard try reader.read(upToCount: pcm.count) == pcm else { return false }
+        }
+        return true
+    }
+
+    /// Same-directory rename publishes a completely written, validated replacement atomically.
+    /// The caller has already preserved the old file before this operation is admitted.
+    static func installReplacement(_ replacement: URL, at original: URL) throws {
+        guard rename(replacement.path, original.path) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
     }
 
     // MARK: - Orphan repair (recovery path)

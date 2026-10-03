@@ -69,6 +69,17 @@ enum RecordingRemoval {
         }
         if status != 0 { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
     }
+    /// A marker may leave the live folder only when its canonical WAV is absent.
+    /// Inaccessible is not absent: retain the durable block on any other stat error.
+    private static func isMissing(_ url: URL) -> Bool {
+        do { _ = try FileManager.default.attributesOfItem(atPath: url.path); return false }
+        catch {
+            let failure = error as NSError
+            return failure.domain == NSCocoaErrorDomain
+                && [NSFileReadNoSuchFileError, NSFileNoSuchFileError].contains(failure.code)
+        }
+    }
+
     struct Progress: Sendable {
         enum Phase: String, Sendable { case preparing, moving, finishing }
         let phase: Phase
@@ -250,7 +261,10 @@ enum RecordingRemoval {
                 break
             }
             var groupFailed = false
-            for record in expected {
+            let invalidName = stem + ".archive-invalid"
+            let restoreOrder = expected.filter { $0["name"] as? String == invalidName }
+                + expected.filter { $0["name"] as? String != invalidName }
+            for record in restoreOrder {
                 guard let name = record["name"] as? String else { groupFailed = true; continue }
                 let source = recovery.appendingPathComponent(name)
                 let destination = directory.appendingPathComponent(name)
@@ -260,7 +274,12 @@ enum RecordingRemoval {
                     try move(source, destination)
                     restored += 1
                 }
-                catch { groupFailed = true }
+                catch {
+                    groupFailed = true
+                    // Do not publish the WAV when its durable rejection marker
+                    // remains in recovery. A later retry verifies the same journal.
+                    if name == invalidName { break }
+                }
             }
             let complete = expected.allSatisfy { record in
                 guard let name = record["name"] as? String else { return false }
@@ -342,6 +361,10 @@ enum RecordingRemoval {
     static func run(directory: URL,
                     activity: RecordingActivity.Removal? = nil,
                     progress: @Sendable (Progress) -> Void = { _ in },
+                    listDirectory: (URL) throws -> [URL] = {
+                        try FileManager.default.contentsOfDirectory(at: $0,
+                            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                    },
                     trash: (URL) throws -> URL? = systemTrash,
                     move: (URL, URL) throws -> Void = moveWithoutReplacing) -> Result {
         let started = ProcessInfo.processInfo.systemUptime
@@ -377,8 +400,7 @@ enum RecordingRemoval {
             }
             let type = try fm.attributesOfItem(atPath: directory.path)[.type] as? FileAttributeType
             guard type == .typeDirectory else { return finish(0, 0, enumeration: true) }
-            targets = try fm.contentsOfDirectory(at: directory,
-                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]).filter {
+            targets = try listDirectory(directory).filter {
                 guard RecordingStore.isRecordingArtifact($0.lastPathComponent) else { return false }
                 let values = try $0.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
                 return values.isRegularFile == true && values.isSymbolicLink != true
@@ -426,7 +448,9 @@ enum RecordingRemoval {
         var moved: [URL] = []
         var failed = 0
         var lastUpdate = -Double.infinity
-        for (index, url) in targets.enumerated() {
+        let moveOrder = targets.filter { $0.pathExtension != "archive-invalid" }
+            + targets.filter { $0.pathExtension == "archive-invalid" }
+        for (index, url) in moveOrder.enumerated() {
             guard removal.claim(url) else {
                 retainedGroups.insert(RecordingActivity.group(for: url))
                 continue
@@ -434,6 +458,10 @@ enum RecordingRemoval {
             do {
                 guard try fm.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType == .typeRegular else {
                     throw Failure.sourceChanged
+                }
+                if url.pathExtension == "archive-invalid" {
+                    let audio = directory.appendingPathComponent(RecordingActivity.stem(for: url) + ".wav")
+                    guard isMissing(audio) else { throw Failure.sourceChanged }
                 }
                 try move(url, staging.appendingPathComponent(url.lastPathComponent))
                 moved.append(url)
@@ -478,7 +506,9 @@ enum RecordingRemoval {
                     stranded += originals.count
                     continue
                 }
-                for (index, original) in originals.enumerated() {
+                let restoreOrder = originals.filter { $0.pathExtension == "archive-invalid" }
+                    + originals.filter { $0.pathExtension != "archive-invalid" }
+                for (index, original) in restoreOrder.enumerated() {
                     do {
                         // Keep this explicit even for injected movers; production
                         // rename also rejects occupied destinations atomically.

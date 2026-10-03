@@ -1,5 +1,6 @@
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
+// ai-processed:unverified · session:unknown/agent:audio_file_integrity · 2026-10-02
 import AppKit
 import ApplicationServices
 import AVFoundation
@@ -174,10 +175,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationWillTerminate(_ notification: Notification) {
         // Close an in-flight recording FIRST (2026-07-25 audit F7): a clean quit
         // (Cmd-Q, logout, Sparkle relaunch) previously left the wav header uncommitted —
-        // total loss, same as a crash. stopRecording() drains the write queue and
-        // patches the header; the wav then survives for the launch orphan sweep.
-        if recorder?.stopRecording() != nil {
-            DiagnosticLogger.shared.log("Terminate: closed in-flight recording for recovery")
+        // total loss, same as a crash. stopRecording() drains and validates the archive.
+        // Retained, valid audio survives for the launch orphan sweep; Keep None
+        // discards this unfinished take and its recovery artifacts during quit.
+        if let recording = recorder?.stopRecording() {
+            if !DevMode.effectiveSaveRecordings(Config.load()) {
+                try? FileManager.default.removeItem(at: recording.url)
+                AudioRecorder.discardRecoveryArtifacts(for: recording.url)
+                RecordingStore.clearSentinel(recordingURL: recording.url)
+            }
+            DiagnosticLogger.shared.log(recording.audioFileIsValid
+                ? "Terminate: closed in-flight recording"
+                : "Terminate: audio archive unavailable after failed repair")
         }
         // An open Edit session stops its cleanup calls and keeps its draft (when saving is on).
         MainActor.assumeIsolated { editSessionController?.terminate() }
@@ -1149,7 +1158,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 switch status {
                 case .rechecking:
                     self.recordingOverlay.updateStreamingText(status.message)
-                case .failed, .staticNoise:
+                case .failed, .staticNoise, .archiveUnavailable:
                     self.recordingOverlay.lingerWithMessageThenHide(status.message)
                 case .missed:
                     self.offerWhisperFallbackDownloadIfNeeded()
@@ -2439,6 +2448,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let result = recorder.stopRecording() {
             try? FileManager.default.removeItem(at: result.url)
+            AudioRecorder.discardRecoveryArtifacts(for: result.url)
             RecordingStore.clearSentinel(recordingURL: result.url)
         }
         if let lease = recordingActivityLease {
@@ -2691,7 +2701,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // Threshold + RMS live in FinalizePipeline so the test harness gates on the SAME values.
         let gate = FinalizePipeline.resolveGateSamples(
             memorySamples: recording.samples,
-            readWav: { try? ProcessCommand.loadSamples(from: audioURL) }
+            readWav: { recording.audioFileIsValid ? try? ProcessCommand.loadSamples(from: audioURL) : nil }
         )
         if let failure = gate.failure {
             if case .captureFailed = failure {
@@ -2732,6 +2742,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if !DevMode.effectiveSaveRecordings(config) {
                 try? FileManager.default.removeItem(at: audioURL)
+                AudioRecorder.discardRecoveryArtifacts(for: audioURL)
             }
             if isCaptureFailure {
                 statusBar.state = .captureFailed
@@ -2944,7 +2955,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     try await TakeRecorder.$current.withValue(takeRecorder) {
                         try await transcriber.transcribe(
                             audioURL: audioURL, samples: samples, prompt: prompt,
-                            punctuationMode: mode, inputDevice: metaDevice)
+                            punctuationMode: mode, inputDevice: metaDevice,
+                            audioFileIsValid: recording.audioFileIsValid)
                     }
                 }
                 timing.inferEnd = CFAbsoluteTimeGetCurrent()
@@ -3042,11 +3054,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         unsure: takeRecorder.unsureWords,
                         targetBundleID: metaTargetApp, element: capturedElement) : nil
                     DispatchQueue.main.async {
-                        if keepRecording {
+                        if keepRecording && recording.audioFileIsValid {
                             self.statusBar.noteFinishedRecording(url: audioURL, text: text)
                         }
                         self.historyCoordinator?.recordDictation(text, app: metaTargetApp,
-                            archiveID: keepRecording ? audioURL.deletingPathExtension().lastPathComponent : nil)
+                            archiveID: keepRecording && recording.audioFileIsValid ? audioURL.deletingPathExtension().lastPathComponent : nil)
                         self.presentFinalizedText(
                             text,
                             sampleCount: samples.count,
@@ -3061,6 +3073,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             engine: metaEngine,
                             trace: trace
                         )
+                        if !recording.audioFileIsValid && !text.isEmpty && self.takePresentation.owns(takeToken) {
+                            self.recordingOverlay.lingerWithMessageThenHide(
+                                "Audio archive unavailable. Dictation used captured audio.", duration: 4)
+                        }
                     }
                     if persistAfterInsert {
                         persist()
@@ -3078,6 +3094,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     ? 0 : Config.effectiveMaxRecordings(retentionConfig.maxRecordings)
                 if !keepRecording {
                     try? FileManager.default.removeItem(at: audioURL)
+                    AudioRecorder.discardRecoveryArtifacts(for: audioURL)
                 }
                 if maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
@@ -3129,7 +3146,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             NSApp.activate(ignoringOtherApps: true)
                             let alert = NSAlert()
                             alert.messageText = "Transcription Failed"
-                            let recordingNote = keepRecording
+                            let recordingNote = !recording.audioFileIsValid
+                                ? "The audio archive could not be repaired. File recovery is unavailable."
+                                : keepRecording
                                 ? "Your recording was kept and can be transcribed from the recordings folder."
                                 : "The recording was discarded (saving recordings is off)."
                             alert.informativeText = "The engine reported an error. \(recordingNote)"
