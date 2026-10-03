@@ -62,7 +62,12 @@ public struct HistorySettings: Codable, Equatable {
             case 56, 60: primaryModifier = "shift"
             case 58, 61: primaryModifier = "option"
             case 59, 62: primaryModifier = "ctrl"
-            case 63: return false // History chords do not support Fn as a modifier.
+            case 63:
+                // Compact keyboards produce these virtual keys through Fn, which
+                // starts primary dictation before the recorded chord completes.
+                // Includes the function keys accepted by Settings' HotkeyValidator.
+                return [115, 116, 117, 119, 121,
+                        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113].contains(keyCode)
             default: return keyCode == dictation.keyCode
             }
             let primaryFlag = HotkeyConfig(keyCode: dictation.keyCode, modifiers: [primaryModifier]).modifierFlags
@@ -118,7 +123,8 @@ public struct HistorySettings: Codable, Equatable {
         if values.contains(.allShortcut) { allShortcut = (try? values.decode(Shortcut.self, forKey: .allShortcut)) ?? .unassigned }
         // Preserve an explicitly disabled legacy shortcut, and let a legacy custom
         // Clipboard binding win over the newly introduced Dictations default.
-        let legacyDisabled = (try? values.decode([String].self, forKey: .shortcutModifiers))?.isEmpty == true
+        let hasLegacyShortcut = values.contains(.shortcutKeyCode) || values.contains(.shortcutModifiers)
+        let legacyDisabled = hasLegacyShortcut && !shortcut(for: .clipboard).isAssigned
         if !values.contains(.dictationShortcut), legacyDisabled || shortcut(for: .clipboard).matches(dictationShortcut) {
             dictationShortcut = .unassigned
         }

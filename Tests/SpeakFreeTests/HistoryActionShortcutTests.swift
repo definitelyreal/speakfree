@@ -48,6 +48,25 @@ final class HistoryActionShortcutTests: XCTestCase {
         XCTAssertFalse(modern.shortcut(for: .clipboard).isAssigned)
     }
 
+    func testMalformedLegacyShortcutMigrationPreservesDecodedDisabledState() throws {
+        let variants = [#""shortcutModifiers":null"#, #""shortcutModifiers":"bad""#,
+                        #""shortcutModifiers":["shift"]"#, #""shortcutModifiers":["future"]"#,
+                        #""shortcutKeyCode":-1"#, #""shortcutKeyCode":999"#]
+        for legacy in variants {
+            let config = try Config.decode(from: Data("{\"hotkey\":{\"keyCode\":63,\"modifiers\":[]},\"modelSize\":\"custom\",\"language\":\"de\",\"history\":{\(legacy)}}".utf8))
+            let settings = try XCTUnwrap(config.history)
+            XCTAssertFalse(settings.shortcut(for: .clipboard).isAssigned)
+            XCTAssertFalse(settings.dictationShortcut.isAssigned, legacy)
+            XCTAssertEqual(config.modelSize, "custom"); XCTAssertEqual(config.language, "de")
+            let newer = "{\(legacy),\"dictationShortcut\":{\"keyCode\":8,\"modifiers\":[\"ctrl\"]}}"
+            let explicit = try JSONDecoder().decode(HistorySettings.self, from: Data(newer.utf8))
+            XCTAssertEqual(explicit.dictationShortcut.label, "⌃C")
+        }
+        let fresh = try JSONDecoder().decode(HistorySettings.self, from: Data("{}".utf8))
+        XCTAssertTrue(fresh.dictationShortcut.isAssigned)
+        XCTAssertTrue(fresh.shortcut(for: .clipboard).isAssigned)
+    }
+
     func testClearedAndCustomActionShortcutsRoundTripWithoutResettingConfig() throws {
         var config = Config.defaultConfig
         config.modelPath = "/synthetic/custom-model"; config.language = "de"
@@ -232,6 +251,46 @@ final class HistoryActionShortcutTests: XCTestCase {
         XCTAssertNil(settings.validationError(for: optionShiftV, action: .all, dictation: .init(keyCode: 58, modifiers: ["control"])))
         let optionControlV = HistorySettings.Shortcut(keyCode: 9, modifiers: ["option", "ctrl"])
         XCTAssertNotNil(settings.validationError(for: optionControlV, action: .all, dictation: .init(keyCode: 58, modifiers: ["control"])))
+    }
+
+    func testKnownFnLayerKeysAreRejectedWithoutReleasingIndependentVActions() {
+        var registrations: [HistorySettings.Action] = [], removals = 0
+        let shortcut = HistoryShortcut(register: { action, _, _ in
+            registrations.append(action); return (noErr, self.key(action))
+        }, unregister: { _ in removals += 1 }, installEventHandler: false)
+        var settings = HistorySettings()
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        let fnLayerCodes: [UInt16] = [115, 116, 117, 119, 121,
+                                     122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113]
+        for code in fnLayerCodes {
+            let candidate = HistorySettings.Shortcut(keyCode: code, modifiers: ["cmd"])
+            XCTAssertNotNil(settings.validationError(for: candidate, action: .all, dictation: dictation), "Fn-layer key \(code)")
+            settings.allShortcut = candidate
+            XCTAssertNotNil(shortcut.configure(settings, dictation: dictation))
+            XCTAssertEqual(registrations, [.clipboard, .dictation])
+            XCTAssertEqual(removals, 0, "unaffected V bindings stay registered")
+        }
+        var pressed: [HistorySettings.Action] = []; shortcut.onPress = { pressed.append($0) }
+        [1, 2, 3].forEach { shortcut.receive(actionID: $0) }
+        XCTAssertEqual(pressed, [.dictation, .clipboard])
+    }
+
+    func testFnLayerCollisionStillRequiresPrimaryModifiers() {
+        let primary = HotkeyConfig(keyCode: 63, modifiers: ["control"])
+        var settings = HistorySettings(), registered: [HistorySettings.Action] = []
+        let shortcut = HistoryShortcut(register: { action, _, _ in
+            registered.append(action); return (noErr, self.key(action))
+        }, unregister: { _ in }, installEventHandler: false)
+        let commandDelete = HistorySettings.Shortcut(keyCode: 117, modifiers: ["cmd"])
+        XCTAssertNil(settings.validationError(for: commandDelete, action: .all, dictation: primary))
+        settings.allShortcut = commandDelete
+        XCTAssertNil(shortcut.configure(settings, dictation: primary))
+        XCTAssertEqual(Set(registered), [.dictation, .clipboard, .all])
+        let controlDelete = HistorySettings.Shortcut(keyCode: 117, modifiers: ["ctrl"])
+        XCTAssertNotNil(settings.validationError(for: controlDelete, action: .all, dictation: primary))
+        settings.allShortcut = controlDelete
+        XCTAssertNotNil(shortcut.configure(settings, dictation: primary))
+        XCTAssertNotNil(shortcut.availabilityErrors[.all])
     }
 
     private func event(_ code: UInt16, flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
