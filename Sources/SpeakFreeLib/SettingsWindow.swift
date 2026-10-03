@@ -272,7 +272,8 @@ final class KeyMonitorHolder: ObservableObject {
         self.removeMonitor = removeMonitor
     }
 
-    func install(onCapture: @escaping (UInt16, [String]) -> Void, onCancel: @escaping () -> Void) {
+    func install(onCapture: @escaping (UInt16, [String]) -> Void, onCancel: @escaping () -> Void,
+                 allowsFocusTraversal: Bool = false, onClear: (() -> Void)? = nil) {
         remove()
         state = SettingsKeyRecorderState()
         capturedKey = nil
@@ -289,6 +290,18 @@ final class KeyMonitorHolder: ObservableObject {
         monitor = installMonitor { [weak self] event in
             guard let self else { return event }
             guard event.type != .keyDown || !event.isARepeat else { return nil }
+            let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control, .function])
+            if allowsFocusTraversal, event.type == .keyDown, event.keyCode == 48,
+               modifiers.isEmpty || modifiers == .shift {
+                self.remove()
+                onCancel()
+                return event // Inline fields leave Tab/Shift-Tab to ordinary focus traversal.
+            }
+            if event.type == .keyDown, [51, 117].contains(event.keyCode), modifiers.isEmpty, let onClear {
+                self.capturedKey = event.keyCode
+                onClear()
+                return nil
+            }
             switch self.state.receive(type: event.type, keyCode: event.keyCode, flags: event.modifierFlags) {
             case .ignore: break
             case .cancel: onCancel()

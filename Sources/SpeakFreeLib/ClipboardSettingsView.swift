@@ -81,8 +81,7 @@ struct SettingsView: View {
 struct ClipboardSettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     var isReview = false
-    @State private var recordingShortcut = false
-    @State private var shortcutError: String?
+    @State private var recordingAction: HistorySettings.Action?
     @State private var clearConfirmation = false
     @State private var registrationError: String?
 
@@ -95,7 +94,7 @@ struct ClipboardSettingsView: View {
                             .font(.title2.weight(.semibold))
                         Text("One history for what you say and copy.")
                             .foregroundStyle(.secondary)
-                        Text("Clipboard managers can interfere with speakfree while it pastes a dictation. We built history into speakfree so your dictations and copied items can share one shortcut.")
+                        Text("Clipboard managers can interfere with speakfree while it pastes a dictation. Keep your dictations and copied items together here.")
                     }
                     GroupBox("History") {
                         VStack(alignment: .leading, spacing: 18) {
@@ -113,16 +112,20 @@ struct ClipboardSettingsView: View {
                             Text("Text, formatting, images, and file references. Up to 200 items and 128 MB; items larger than 32 MB are skipped. PNG is preferred when an image also offers TIFF. File references depend on the original files staying available.")
                                 .font(.callout).foregroundStyle(.secondary)
                             Divider()
-                            HStack {
-                                Text("History shortcut")
-                                Spacer()
-                                Button(viewModel.historySettings.shortcutLabel) { recordingShortcut = true }
-                                    .frame(minWidth: 100)
+                            ForEach(HistorySettings.Action.allCases) { action in
+                                InlineHistoryShortcutRecorder(action: action,
+                                    shortcut: viewModel.historySettings.shortcut(for: action),
+                                    recordingAction: $recordingAction,
+                                    validate: { shortcut in
+                                        viewModel.historySettings.validationError(for: shortcut, action: action,
+                                            dictation: HotkeyConfig(keyCode: viewModel.hotkeyKeyCode,
+                                                                   modifiers: viewModel.hotkeyModifiers))
+                                    }, onChange: { shortcut in
+                                        viewModel.historySettings.setShortcut(shortcut, for: action)
+                                    })
                                     .disabled(viewModel.historySettings.retention == .off)
                             }
-                            if let error = shortcutError ?? registrationError { Text(error).foregroundStyle(.red) }
-                            Text("Choose the shortcut you already use for clipboard history. Disable it in your other clipboard app first.")
-                                .font(.callout).foregroundStyle(.secondary)
+                            if let error = registrationError { Text(error).font(.callout).foregroundStyle(.red) }
                         }
                     }
                     Text("Off stops new entries. Until quit keeps history in memory and removes its saved copy from disk. Choosing an item in History makes it your current clipboard.")
@@ -153,32 +156,14 @@ struct ClipboardSettingsView: View {
                 }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollContentBackground(.hidden)
-            if recordingShortcut {
-                KeyRecorderOverlay(onCapture: { code, modifiers in
-                    // History needs a chord; a modifier pressed and released by itself
-                    // leaves the recorder open for another attempt.
-                    if modifiers.isEmpty && [54, 55, 56, 58, 59, 60, 61, 62, 63].contains(code) { return }
-                    guard HistorySettings.isSafeShortcut(modifiers) else {
-                        shortcutError = "Use a key with Command, Option, or Control."
-                        recordingShortcut = false
-                        return
-                    }
-                    guard code != viewModel.hotkeyKeyCode || HistorySettings.normalizedModifiers(modifiers) != HistorySettings.normalizedModifiers(viewModel.hotkeyModifiers) else {
-                        shortcutError = "Choose a different shortcut from your dictation key."
-                        recordingShortcut = false
-                        return
-                    }
-                    viewModel.historySettings.shortcutKeyCode = code
-                    viewModel.historySettings.shortcutModifiers = modifiers
-                    shortcutError = nil
-                    recordingShortcut = false
-                }, onCancel: { recordingShortcut = false })
-            }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { updateRegistrationError() }
         .onReceive(NotificationCenter.default.publisher(for: HistoryCoordinator.shortcutStatusChanged)) { _ in updateRegistrationError() }
-        .onChange(of: viewModel.historySettings) { _ in if !isReview { viewModel.save() } }
+        .onChange(of: viewModel.historySettings) { settings in
+            if settings.retention == .off { recordingAction = nil }
+            if !isReview { viewModel.save() }
+        }
         .alert("Clear history on this Mac?", isPresented: $clearConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Clear History", role: .destructive) {

@@ -54,16 +54,16 @@ enum HistoryPickerKeyAction: Equatable {
         case (36, []), (76, []): return .activate(copyOnly: false)
         case (36, .command), (76, .command): return .activate(copyOnly: true)
         case (43, .command): return .preferences
-        case (18, .command): return .filter(.all)
-        case (19, .command): return .filter(.dictation)
-        case (20, .command): return .filter(.clipboard)
+        case (18, .command): return .filter(.dictation)
+        case (19, .command): return .filter(.clipboard)
+        case (20, .command): return .filter(.all)
         default: return nil
         }
     }
 }
 
 final class HistoryPickerModel: ObservableObject {
-    enum Filter: String, CaseIterable { case all, dictation, clipboard }
+    enum Filter: String, CaseIterable { case dictation, clipboard, all }
     enum KeyboardFocus: Hashable { case search, filter(Filter), row, plainText }
     enum PasteBehavior { case ready, pasting, copyOnly }
     @Published var pasteBehavior: PasteBehavior = .ready
@@ -258,14 +258,14 @@ struct HistoryPickerView: View {
                         .onSubmit { model.activate() }
                 }.padding(.horizontal, 12).frame(height: 40)
                 HStack(spacing: 5) {
-                    chip(.all, label: "All", shortcut: "⌘1") { Text("All") }
-                    chip(.dictation, label: "Dictations", shortcut: "⌘2") {
+                    chip(.dictation, label: "Dictations", shortcut: "⌘1") {
                         Image(nsImage: StatusBarController.drawLogo(active: false))
                             .renderingMode(.template).resizable().scaledToFit().frame(width: 16, height: 16)
                     }
-                    chip(.clipboard, label: "Clipboard", shortcut: "⌘3") {
+                    chip(.clipboard, label: "Clipboard", shortcut: "⌘2") {
                         Image(systemName: "clipboard")
                     }
+                    chip(.all, label: "All", shortcut: "⌘3") { Text("All") }
                     Spacer(minLength: 0)
                     if !model.showsClipboardDisabled {
                         Text("\(model.visible.count)").foregroundStyle(.secondary)

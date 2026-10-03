@@ -8,6 +8,26 @@ import XCTest
 @testable import SpeakFreeLib
 
 final class UpdateLogCoverageTests: XCTestCase {
+    func testArchiveAndBindingRuntimeDiagnosticsKeepUpdateSemantics() {
+        for line in ["Terminate: closed in-flight recording", "Terminate: audio archive unavailable after failed repair",
+                     "History paste: cancelled reason=external-input"] {
+            XCTAssertEqual(UpdateLogEvent.classify("[00:00:00] " + line), .activity)
+        }
+        let requested = AudioInputDevice(id: 42, uid: "dictation-recording-input", name: "Test input",
+            isBuiltIn: false, isBluetooth: true, nominalSampleRate: 24_000, inputChannels: 1)
+        let states = [
+            CaptureDeviceBinding.Snapshot(status: 0, byteCount: 4, deviceID: 42, uid: "dictation-recording-input", uidStatus: 0),
+            CaptureDeviceBinding.Snapshot(status: 0, byteCount: 4, deviceID: 99, uid: "aggregate", uidStatus: 0),
+            CaptureDeviceBinding.Snapshot(status: -1, byteCount: 0, deviceID: nil, uid: nil, uidStatus: nil),
+            CaptureDeviceBinding.Snapshot(status: 0, byteCount: 4, deviceID: 42, uid: nil, uidStatus: -2),
+        ]
+        for observed in states {
+            let line = CaptureDeviceBinding.diagnostic(requested: requested, observed: observed,
+                stage: "recheck", generation: "test-generation")
+            XCTAssertEqual(UpdateLogEvent.classify("[00:00:00] " + line), .unrelated, line)
+        }
+    }
+
     func testLinesThatBlockedTheSeptember24InstallAreClassified() {
         for line in [
             "[21:14:02] Capture route: Pre-listening: MacBook Pro Microphone · dictation: AirPods Pro",
@@ -122,6 +142,8 @@ final class UpdateLogCoverageTests: XCTestCase {
             "AppDelegate.swift: DiagnosticLogger.shared.log(message) ",
             "AppDelegate.swift: DiagnosticLogger.shared.log(message) ",
             "AppDelegate.swift: DiagnosticLogger.shared.log(latency.logLine( ",
+            "AppDelegate.swift: DiagnosticLogger.shared.log(recording.audioFi",
+            "DeviceAudioSession.swift: DiagnosticLogger.shared.log(CaptureDeviceBind",
             "TextInserter.swift: DiagnosticLogger.shared.log(record.logLine) o",
             "TextInserter.swift: DiagnosticLogger.shared.log(record.userPasteL",
         ]

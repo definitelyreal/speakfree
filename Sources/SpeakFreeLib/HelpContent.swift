@@ -304,11 +304,12 @@ public enum HelpContent {
     private static func history(_ f: HelpFacts) -> HelpTopic {
         HelpTopic(id: "history", title: "History & Clipboard", blocks: [
             .paragraph("History brings recent dictations and optional clipboard items into one "
-                       + "small searchable menu. Its default shortcut is ⇧⌘V; change it under "
-                       + "Settings → Clipboard."),
+                       + "small searchable menu. ⌥⇧V opens Dictations and ⇧⌘V opens Clipboard. "
+                       + "Set shortcuts for Dictations, Clipboard and All directly in the key "
+                       + "fields under Settings → Clipboard; All starts without a shortcut."),
             .paragraph("Type to search, use arrow keys to select, and press Return or click a "
-                       + "row once to paste. ⌘↓ and ⌘↑ move by a page. All, Dictation and "
-                       + "Clipboard filter the same history."),
+                       + "row once to paste. ⌘↓ and ⌘↑ move by a page. Dictations, Clipboard "
+                       + "and All filter the same history. ⌘1, ⌘2 and ⌘3 select them in that order."),
             .paragraph("Clipboard capture is optional. When it is off, the dim Clipboard "
                        + "filter explains how to enable it and offers a Preferences button."),
             .paragraph("Choose Off, Until speakfree quits, or 7 days on this Mac for history "

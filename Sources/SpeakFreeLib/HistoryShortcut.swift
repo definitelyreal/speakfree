@@ -1,15 +1,17 @@
-// ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
+// ai-suggestion:unverified · session:unknown/agent:audio_file_integrity · 2026-10-03
 import Carbon
 import Foundation
 
-/// Carbon registration reports an occupied global shortcut without adding another
-/// event tap. It cannot discover every app-local shortcut; the user can change it.
+/// Independent Carbon registrations report occupied global shortcuts without another event tap.
 final class HistoryShortcut {
-    private var key: EventHotKeyRef?
+    typealias Action = HistorySettings.Action
+    typealias Register = (Action, UInt16, UInt32) -> (OSStatus, EventHotKeyRef?)
+    private struct Registration { let shortcut: HistorySettings.Shortcut; let key: EventHotKeyRef }
+    private var registrations: [Action: Registration] = [:]
     private var handler: EventHandlerRef?
-    var onPress: (() -> Void)?
+    var onPress: ((Action) -> Void)?
     var onAvailabilityChanged: ((String?) -> Void)?
-    typealias Register = (UInt16, UInt32) -> (OSStatus, EventHotKeyRef?)
+    private(set) var availabilityErrors: [Action: String] = [:]
     private let register: Register
     private let unregister: (EventHotKeyRef) -> Void
     private let recordingGate: ShortcutRecordingGate
@@ -21,16 +23,13 @@ final class HistoryShortcut {
          register: @escaping Register = HistoryShortcut.registerGlobally,
          unregister: @escaping (EventHotKeyRef) -> Void = { _ = UnregisterEventHotKey($0) },
          installEventHandler: Bool = true) {
-        self.recordingGate = recordingGate
-        self.register = register
-        self.unregister = unregister
+        self.recordingGate = recordingGate; self.register = register; self.unregister = unregister
         recordingObserver = recordingGate.notificationCenter.addObserver(
             forName: ShortcutRecordingGate.changed, object: nil, queue: .main
         ) { [weak self] note in
             guard let self, (note.object as? ShortcutRecordingGate) === self.recordingGate,
                   let settings = self.latestSettings, let dictation = self.latestDictation else { return }
-            let error = self.configure(settings, dictation: dictation)
-            self.onAvailabilityChanged?(error)
+            self.onAvailabilityChanged?(self.configure(settings, dictation: dictation))
         }
         guard installEventHandler else { return }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -40,47 +39,81 @@ final class HistoryShortcut {
             guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
                                     nil, MemoryLayout<EventHotKeyID>.size, nil, &id) == noErr,
                   id.signature == 0x53464849 else { return OSStatus(eventNotHandledErr) }
-            let shortcut = Unmanaged<HistoryShortcut>.fromOpaque(context).takeUnretainedValue()
-            guard !shortcut.recordingGate.snapshot.isActive else { return noErr }
-            shortcut.onPress?()
+            Unmanaged<HistoryShortcut>.fromOpaque(context).takeUnretainedValue().receive(actionID: id.id)
             return noErr
         }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &handler)
     }
 
-    func configure(_ settings: HistorySettings, dictation: HotkeyConfig) -> String? {
-        latestSettings = settings
-        latestDictation = dictation
-        if let key { unregister(key); self.key = nil }
-        guard !recordingGate.snapshot.isActive else { return nil }
-        guard settings.retention != .off, !settings.shortcutModifiers.isEmpty else { return nil }
-        guard HistorySettings.isSafeShortcut(settings.shortcutModifiers) else {
-            return "Use Command, Option, or Control with the history key."
-        }
-        let mods = HistorySettings.normalizedModifiers(settings.shortcutModifiers)
-        if settings.shortcutKeyCode == dictation.keyCode && mods == HistorySettings.normalizedModifiers(dictation.modifiers) {
-            return "History and dictation need different shortcuts. Change History's shortcut in Settings."
-        }
-        var flags: UInt32 = 0
-        if mods.contains("cmd") || mods.contains("command") { flags |= UInt32(cmdKey) }
-        if mods.contains("shift") { flags |= UInt32(shiftKey) }
-        if mods.contains("option") || mods.contains("alt") { flags |= UInt32(optionKey) }
-        if mods.contains("ctrl") || mods.contains("control") { flags |= UInt32(controlKey) }
-        guard flags != 0 else { return "That shortcut uses an unsupported modifier." }
-        let (status, registeredKey) = register(settings.shortcutKeyCode, flags)
-        key = registeredKey
-        return status == noErr ? nil : "The history shortcut is unavailable. Choose another in Settings → Clipboard."
+    /// The Carbon handler and deterministic tests share this dispatch boundary.
+    func receive(actionID: UInt32) {
+        guard !recordingGate.snapshot.isActive,
+              let action = Action.allCases.first(where: { $0.carbonID == actionID }),
+              registrations[action] != nil else { return }
+        onPress?(action)
     }
 
-    private static func registerGlobally(_ code: UInt16, _ flags: UInt32) -> (OSStatus, EventHotKeyRef?) {
+    func configure(_ settings: HistorySettings, dictation: HotkeyConfig) -> String? {
+        latestSettings = settings; latestDictation = dictation; availabilityErrors = [:]
+        guard !recordingGate.snapshot.isActive, settings.retention != .off else {
+            for action in Action.allCases { remove(action) }
+            return nil
+        }
+        // Preserve unchanged valid registrations: a failed edit to one action must not
+        // release another action's working shortcut to a competing application.
+        for action in Action.allCases {
+            let desired = settings.shortcut(for: action)
+            if !desired.isAssigned || desired.validationError != nil || desired.conflictsWithDictation(dictation)
+                || registrations[action].map({ !$0.shortcut.matches(desired) }) == true { remove(action) }
+        }
+        // Existing registrations win conflicts. On migration, Clipboard's legacy custom
+        // shortcut wins over the newly introduced Dictations default.
+        let priority: [Action] = [.clipboard, .dictation, .all]
+        let order = priority.filter { registrations[$0] != nil } + priority.filter { registrations[$0] == nil }
+        for action in order {
+            let desired = settings.shortcut(for: action)
+            guard desired.isAssigned else { continue }
+            if let error = desired.validationError { availabilityErrors[action] = error; continue }
+            if desired.conflictsWithDictation(dictation) {
+                availabilityErrors[action] = "\(desired.label) conflicts with your dictation key. Choose a different shortcut."
+                continue
+            }
+            if let owner = Action.allCases.first(where: { $0 != action && registrations[$0]?.shortcut.matches(desired) == true }) {
+                availabilityErrors[action] = "\(desired.label) is already used by \(owner.title). Choose a different shortcut."
+                continue
+            }
+            if registrations[action] != nil { continue }
+            let (status, key) = register(action, desired.keyCode, Self.carbonFlags(desired.modifiers))
+            if status == noErr, let key { registrations[action] = .init(shortcut: desired, key: key) }
+            else {
+                if let key { unregister(key) }
+                availabilityErrors[action] = "\(desired.label) is unavailable. Choose another shortcut or disable it in the other app."
+            }
+        }
+        let errors = Action.allCases.compactMap { action in availabilityErrors[action].map { "\(action.title): \($0)" } }
+        return errors.isEmpty ? nil : errors.joined(separator: "\n")
+    }
+
+    private func remove(_ action: Action) {
+        if let registration = registrations.removeValue(forKey: action) { unregister(registration.key) }
+    }
+    private static func carbonFlags(_ modifiers: [String]) -> UInt32 {
+        let values = HistorySettings.normalizedModifiers(modifiers)
+        var flags: UInt32 = 0
+        if values.contains("cmd") { flags |= UInt32(cmdKey) }
+        if values.contains("shift") { flags |= UInt32(shiftKey) }
+        if values.contains("option") { flags |= UInt32(optionKey) }
+        if values.contains("ctrl") { flags |= UInt32(controlKey) }
+        return flags
+    }
+    private static func registerGlobally(_ action: Action, _ code: UInt16, _ flags: UInt32) -> (OSStatus, EventHotKeyRef?) {
         var key: EventHotKeyRef?
-        let status = RegisterEventHotKey(UInt32(code), flags, EventHotKeyID(signature: 0x53464849, id: 1),
+        let status = RegisterEventHotKey(UInt32(code), flags, EventHotKeyID(signature: 0x53464849, id: action.carbonID),
                                         GetApplicationEventTarget(), OptionBits(kEventHotKeyExclusive), &key)
         return (status, key)
     }
-
     deinit {
         if let recordingObserver { recordingGate.notificationCenter.removeObserver(recordingObserver) }
-        if let key { unregister(key) }
+        for registration in registrations.values { unregister(registration.key) }
         if let handler { RemoveEventHandler(handler) }
     }
 }

@@ -83,11 +83,14 @@ enum UpdateLogEvent {
             "AudioRecorder: kept ", "Latency: ",
             // Stay on static switch (2026-09-25): capture left the headset for the Mac's mic,
             // mid-take or at its start. It belongs to a take, so it restarts the quiet wait.
-            "Capture switch:"
+            "Capture switch:", "History paste:"
         ]
         if activityPrefixes.contains(where: message.hasPrefix) { return .activity }
         // Periodic health checks describe subsystem health, not a dictation boundary.
         if message.hasPrefix("Health check:") { return .unrelated }
+        // Device binding is diagnostic metadata, not capture activity. Device UIDs
+        // may themselves contain words such as "recording" or "dictation".
+        if message.hasPrefix("Capture binding [") { return .unrelated }
         // Route and notice status lines describe configuration, not a dictation boundary.
         if message.hasPrefix("Capture route:") || message.hasPrefix("RecordingsNotice:") || message.hasPrefix("Stay on notice:")
             || message.hasPrefix("Report a Problem:") || message.hasPrefix("DictationTrace:") { return .unrelated }

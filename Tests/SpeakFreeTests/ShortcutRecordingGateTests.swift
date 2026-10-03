@@ -70,11 +70,12 @@ final class ShortcutRecordingGateTests: XCTestCase {
         let gate = ShortcutRecordingGate(notificationCenter: NotificationCenter())
         var registrations: [(UInt16, UInt32)] = [], unregistrations = 0
         let key = try XCTUnwrap(OpaquePointer(bitPattern: 1))
-        let shortcut = HistoryShortcut(recordingGate: gate, register: { code, flags in
+        let shortcut = HistoryShortcut(recordingGate: gate, register: { _, code, flags in
             registrations.append((code, flags)); return (noErr, key)
         }, unregister: { _ in unregistrations += 1 }, installEventHandler: false)
         shortcut.onAvailabilityChanged = { error in XCTAssertNil(error) }
         var settings = HistorySettings()
+        settings.dictationShortcut = .unassigned // This existing test isolates Clipboard's registration lifecycle.
         let dictation = HotkeyConfig(keyCode: 63, modifiers: [])
         XCTAssertNil(shortcut.configure(settings, dictation: dictation))
         XCTAssertEqual(registrations.count, 1)
@@ -91,12 +92,13 @@ final class ShortcutRecordingGateTests: XCTestCase {
         let gate = ShortcutRecordingGate(notificationCenter: NotificationCenter())
         var registrations = 0, messages: [String?] = []
         let key = try XCTUnwrap(OpaquePointer(bitPattern: 1))
-        let shortcut = HistoryShortcut(recordingGate: gate, register: { _, _ in
+        let shortcut = HistoryShortcut(recordingGate: gate, register: { _, _, _ in
             registrations += 1
             return registrations == 1 ? (noErr, key) : (OSStatus(eventHotKeyExistsErr), nil)
         }, unregister: { _ in }, installEventHandler: false)
         shortcut.onAvailabilityChanged = { messages.append($0) }
         var settings = HistorySettings()
+        settings.dictationShortcut = .unassigned // This existing test isolates Clipboard's registration lifecycle.
         let dictation = HotkeyConfig(keyCode: 63, modifiers: [])
         XCTAssertNil(shortcut.configure(settings, dictation: dictation))
         let lease = gate.begin(); gate.finish(lease)
