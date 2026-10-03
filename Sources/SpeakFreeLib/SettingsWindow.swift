@@ -297,7 +297,8 @@ final class KeyMonitorHolder: ObservableObject {
                 onCancel()
                 return event // Inline fields leave Tab/Shift-Tab to ordinary focus traversal.
             }
-            if event.type == .keyDown, [51, 117].contains(event.keyCode), modifiers.isEmpty, let onClear {
+            // Fn+Delete arrives as forward Delete with the function flag still set.
+            if event.type == .keyDown, [51, 117].contains(event.keyCode), modifiers.subtracting(.function).isEmpty, let onClear {
                 self.capturedKey = event.keyCode
                 onClear()
                 return nil

@@ -313,7 +313,15 @@ final class HistoryReplayTests: XCTestCase {
             h.finishValidation()
             XCTAssertEqual(h.pastes, 0)
             XCTAssertEqual(h.subject.model.pasteBehavior, .copyOnly)
-            if !secure { XCTAssertEqual(h.board.string(forType: .string), "New synthetic copy") }
+            if secure {
+                XCTAssertEqual(h.subject.model.status,
+                    "Secure Input is on. Copy this item, then paste where you want it.")
+                XCTAssertTrue(h.diagnoses.contains("refused secureInput"))
+            } else {
+                XCTAssertEqual(h.board.string(forType: .string), "New synthetic copy")
+                XCTAssertEqual(h.subject.model.status,
+                    "The clipboard or destination changed. Choose Copy, then paste where you want it.")
+            }
         }
     }
 

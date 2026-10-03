@@ -437,7 +437,9 @@ final class HistoryCoordinator {
                         return
                     }
                     self.environment.diagnose("refused " + refusal.rawValue)
-                    self.retainCopy("The clipboard or destination changed. Choose Copy, then paste where you want it.")
+                    self.retainCopy(refusal == .secureInput
+                        ? "Secure Input is on. Copy this item, then paste where you want it."
+                        : "The clipboard or destination changed. Choose Copy, then paste where you want it.")
                     return
                 }
                 // No scheduling or AX reads after this gate. The inserter checks the

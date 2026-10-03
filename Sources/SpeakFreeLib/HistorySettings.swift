@@ -116,8 +116,10 @@ public struct HistorySettings: Codable, Equatable {
         }
         if values.contains(.dictationShortcut) { dictationShortcut = (try? values.decode(Shortcut.self, forKey: .dictationShortcut)) ?? .unassigned }
         if values.contains(.allShortcut) { allShortcut = (try? values.decode(Shortcut.self, forKey: .allShortcut)) ?? .unassigned }
-        // A legacy custom Clipboard binding wins over the newly introduced default.
-        if !values.contains(.dictationShortcut), shortcut(for: .clipboard).matches(dictationShortcut) {
+        // Preserve an explicitly disabled legacy shortcut, and let a legacy custom
+        // Clipboard binding win over the newly introduced Dictations default.
+        let legacyDisabled = (try? values.decode([String].self, forKey: .shortcutModifiers))?.isEmpty == true
+        if !values.contains(.dictationShortcut), legacyDisabled || shortcut(for: .clipboard).matches(dictationShortcut) {
             dictationShortcut = .unassigned
         }
     }

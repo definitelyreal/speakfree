@@ -36,6 +36,18 @@ final class HistoryActionShortcutTests: XCTestCase {
         }
     }
 
+    func testLegacyExplicitlyDisabledShortcutDoesNotEnableNewDictationsBinding() throws {
+        let legacy = try JSONDecoder().decode(HistorySettings.self, from: Data(#"{"shortcutModifiers":[]}"#.utf8))
+        XCTAssertFalse(legacy.shortcut(for: .clipboard).isAssigned)
+        XCTAssertFalse(legacy.dictationShortcut.isAssigned, "an existing disabled shortcut must stay disabled after migration")
+        let fresh = try JSONDecoder().decode(HistorySettings.self, from: Data("{}".utf8))
+        XCTAssertEqual(fresh.dictationShortcut.label, "⌥⇧V")
+        let modern = try JSONDecoder().decode(HistorySettings.self, from: Data(
+            #"{"shortcutModifiers":[],"dictationShortcut":{"keyCode":8,"modifiers":["ctrl"]}}"#.utf8))
+        XCTAssertEqual(modern.dictationShortcut.label, "⌃C", "explicit newer settings remain authoritative")
+        XCTAssertFalse(modern.shortcut(for: .clipboard).isAssigned)
+    }
+
     func testClearedAndCustomActionShortcutsRoundTripWithoutResettingConfig() throws {
         var config = Config.defaultConfig
         config.modelPath = "/synthetic/custom-model"; config.language = "de"
@@ -243,6 +255,23 @@ final class HistoryActionShortcutTests: XCTestCase {
                 XCTAssertFalse(gate.snapshot.isActive)
             }
             holder.remove()
+        }
+    }
+
+    func testInlineForwardDeleteIgnoresFnButPreservesOtherModifiers() throws {
+        for flags: NSEvent.ModifierFlags in [.function, [.function, .command], [.function, .option],
+                                             [.function, .control], [.function, .shift]] {
+            var handler: KeyMonitorHolder.EventHandler?, clears = 0, captures: [UInt16] = []
+            let gate = ShortcutRecordingGate(notificationCenter: NotificationCenter(), keyIsDown: { _ in false })
+            let holder = KeyMonitorHolder(recordingGate: gate, notificationCenter: NotificationCenter(),
+                installMonitor: { handler = $0; return NSObject() }, removeMonitor: { _ in })
+            holder.install(onCapture: { key, _ in captures.append(key) }, onCancel: {}, allowsFocusTraversal: true,
+                onClear: { clears += 1; holder.remove() })
+            XCTAssertNil(handler?(try event(117, flags: flags)))
+            XCTAssertEqual(clears, flags == .function ? 1 : 0)
+            XCTAssertEqual(captures, flags == .function ? [] : [117])
+            holder.remove()
+            XCTAssertFalse(gate.snapshot.isActive)
         }
     }
 
