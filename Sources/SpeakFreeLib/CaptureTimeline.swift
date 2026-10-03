@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-suggestion:unverified · session:unknown · 2026-10-02
 import Foundation
 
 struct CapturePacket {
@@ -21,6 +22,37 @@ struct CaptureTimeline {
     static let maxHistorySeconds: Double = 180
     /// Start of the oldest built-in packet still held.
     var oldestHeld: Double? { fallback.first?.start }
+
+    /// Validate the entire suffix `rewind` would emit without copying any samples. The two
+    /// microphones may have different sample-grid origins, so the first/last boundary can
+    /// round by half a sample. Internal base-packet gaps get only floating-point tolerance;
+    /// granting a sample per packet would silently swallow real missing audio.
+    func canRewind(to start: Double, preservingThrough end: Double) -> Bool {
+        guard start.isFinite, end.isFinite, start <= end, let newest = fallback.last?.end else { return false }
+        let halfSample = 0.5 / 16_000.0
+        let precision = min(halfSample, max(abs(start), abs(end), abs(newest), 1).ulp * 4)
+        // A trailing base stream is the common refusal: check it in constant time.
+        guard newest + halfSample + precision >= end else { return false }
+        var replayCursor = start
+        var hasSamples = false
+        var sampleCount = 0
+        for packet in fallback {
+            guard !packet.samples.isEmpty, packet.end > replayCursor else { continue }
+            let allowance = hasSamples ? precision : halfSample + precision
+            guard packet.start <= replayCursor + allowance else { return false }
+            // Match commit's clipping, including an overlap shorter than half a sample.
+            let skipped = min(packet.samples.count, max(0, Int(((replayCursor - packet.start) * 16_000).rounded())))
+            guard skipped < packet.samples.count else { continue }
+            sampleCount += packet.samples.count - skipped
+            replayCursor = packet.end
+            hasSamples = true
+        }
+        // One rounding disagreement is possible at the cross-microphone boundaries. Do
+        // not grant that allowance repeatedly across overlapping base packets.
+        let expected = max(0, Int(((replayCursor - start) * 16_000).rounded()))
+        return hasSamples && replayCursor + halfSample + precision >= end
+            && abs(sampleCount - expected) <= 1
+    }
 
     mutating func receiveBase(_ packet: CapturePacket) -> [Float] {
         fallback.append(packet)

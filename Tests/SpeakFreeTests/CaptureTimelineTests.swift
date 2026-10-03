@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
+// ai-suggestion:unverified · session:unknown · 2026-10-02
 import XCTest
 @testable import SpeakFreeLib
 
@@ -42,6 +43,67 @@ final class CaptureTimelineTests: XCTestCase {
         var timeline = CaptureTimeline()
         _ = timeline.receiveBase(packet(0, 800))
         XCTAssertEqual(timeline.receiveSecondary(packet(400, 800, offset: 10_000)), (800..<1200).map { Float($0) + 10_000 })
+    }
+
+    func testRewindCoverageAllowsUnalignedMicrophoneGrids() {
+        for offset in [-0.5, -0.49, 0.49, 0.5] {
+            var timeline = CaptureTimeline()
+            let start = 12345.0
+            let baseStart = start + offset / 16_000
+            _ = timeline.receiveSecondary(CapturePacket(start: start, samples: [1]))
+            for i in 0..<20 {
+                _ = timeline.receiveBase(CapturePacket(start: baseStart + Double(i) / 10,
+                                                       samples: Array(repeating: 0.25, count: 1600)))
+            }
+            let cursor = timeline.cursor
+            XCTAssertTrue(timeline.canRewind(to: start, preservingThrough: start + 2), "offset \(offset)")
+            XCTAssertEqual(timeline.cursor, cursor, "coverage inspection must not advance or rewind capture")
+            let audio = timeline.rewind(to: start)
+            XCTAssertLessThanOrEqual(abs(audio.count - 32000), 1, "only boundary-grid rounding is allowed")
+        }
+    }
+
+    func testRewindCoverageRejectsEvenOneMissingInternalSample() {
+        var timeline = CaptureTimeline()
+        _ = timeline.receiveSecondary(packet(0, 1))
+        _ = timeline.receiveBase(packet(0, 1600))
+        _ = timeline.receiveBase(packet(1601, 1600))
+        XCTAssertFalse(timeline.canRewind(to: 0, preservingThrough: 0.2))
+        // rewind emits the whole suffix, so gaps after the requested end must fail too.
+        XCTAssertFalse(timeline.canRewind(to: 0, preservingThrough: 0.05))
+    }
+
+    func testRewindCoverageDoesNotAccumulateRoundingAtRepeatedOverlaps() {
+        var timeline = CaptureTimeline()
+        _ = timeline.receiveSecondary(packet(0, 1))
+        for i in 0..<20 {
+            let start = Double(i) * (0.1 - 0.49 / 16_000)
+            _ = timeline.receiveBase(CapturePacket(start: start, samples: Array(repeating: 0.25, count: 1600)))
+        }
+        XCTAssertFalse(timeline.canRewind(to: 0, preservingThrough: 1.9),
+                       "rounding under half a sample per packet still duplicates multiple samples overall")
+    }
+
+    func testRewindCoverageRejectsLongLagAndGapWithoutChangingHistory() {
+        let samples = Array(repeating: Float(0.25), count: 1600)
+        for gap in [0.0, 1.0 / 16_000] {
+            var timeline = CaptureTimeline()
+            timeline.keepFrom = 0
+            _ = timeline.receiveSecondary(packet(0, 1))
+            for i in 0..<1799 {
+                let start = Double(i) / 10 + (i >= 900 ? gap : 0)
+                _ = timeline.receiveBase(CapturePacket(start: start, samples: samples))
+            }
+            let cursor = timeline.cursor, oldest = timeline.oldestHeld
+            // Repeated late callbacks must not require a rewind/materialized waveform to
+            // decide: both the trailing stream and the internal one-sample gap are refusals.
+            for _ in 0..<100 {
+                XCTAssertFalse(timeline.canRewind(to: 0, preservingThrough: 180))
+                XCTAssertEqual(timeline.canRewind(to: 0, preservingThrough: 179), gap == 0)
+            }
+            XCTAssertEqual(timeline.cursor, cursor)
+            XCTAssertEqual(timeline.oldestHeld, oldest)
+        }
     }
 
     func testWrongRateIsRejectedBeforeAnySamplesAreAccepted() {

@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
+// ai-suggestion:unverified · session:unknown · 2026-10-02
 import Foundation
 
 /// Dictation left the chosen headset for the Mac's own microphone.
@@ -64,6 +65,9 @@ final class MicrophoneCaptureCoordinator {
     /// 100 ms window shapes: the headset's during the take, the base's for the last 30 s.
     private var meters: [String: CaptureWindowMeter] = [:]
     private var headsetWindows: [CaptureWindowStats] = []
+    /// Earliest window of the current consecutive run of static two-second stretches.
+    /// Advanced once per new headset window, never rescanned on late base callbacks.
+    private var staticRunStartWindow: Int?
     private var baseWindows: [CaptureWindowStats] = []
     static let baseWindowHistory = 300
 
@@ -171,6 +175,7 @@ final class MicrophoneCaptureCoordinator {
             staticStrikes[preferred.uid] = nil
         }
         headsetWindows = []
+        staticRunStartWindow = nil
         meters = meters.filter { $0.key == base?.uid }
         noticedThisTake = []
         if value {
@@ -194,7 +199,7 @@ final class MicrophoneCaptureCoordinator {
 
     func flush() {
         dispatchPrecondition(condition: .onQueue(queue))
-        judgeShortTakeAtEnd()
+        reconsiderHeadset(allowShortTake: true)
         emit(timeline.flush(), source: base?.name ?? lastSource)
     }
 
@@ -350,25 +355,29 @@ final class MicrophoneCaptureCoordinator {
     private func judge(_ packet: CapturePacket, uid: String, isBase: Bool) {
         guard isBase || (recording && uid == preferred?.uid) else { return }
         let windows = meters[uid, default: CaptureWindowMeter()].add(packet.samples, start: packet.start)
-        guard !windows.isEmpty else { return }
         if isBase {
             baseWindows += windows
             if baseWindows.count > Self.baseWindowHistory { baseWindows.removeFirst(baseWindows.count - Self.baseWindowHistory) }
+            // The workers can deliver in either order. Even a partial window can finish the
+            // replacement history after the headset's final callback.
+            reconsiderHeadset()
             return
         }
+        guard !windows.isEmpty else { return }
+        let oldCount = headsetWindows.count
         headsetWindows += windows
-        let recent = Array(headsetWindows.suffix(CaptureStaticJudge.minimumWindows))
-        guard recent.count == CaptureStaticJudge.minimumWindows else { return }
-        switchIfStatic(uid, recent, minimumWindows: CaptureStaticJudge.minimumWindows)
+        updateStaticRun(after: oldCount)
+        reconsiderHeadset()
     }
 
-    /// At the end of a take shorter than two seconds of headset audio, judge what there is
-    /// (from one second): a short "Yes, send it" on a static headset is otherwise lost.
-    private func judgeShortTakeAtEnd() {
+    /// Reconsider the most recent headset stretch when either stream advances and at stop.
+    /// Only stop may judge less than two seconds (from one second, as before).
+    private func reconsiderHeadset(allowShortTake: Bool = false) {
+        let minimum = allowShortTake ? CaptureStaticJudge.wholeTakeMinimumWindows : CaptureStaticJudge.minimumWindows
         guard recording, let preferred, preferred.uid != base?.uid, !quarantined.contains(preferred.uid),
-              headsetWindows.count >= CaptureStaticJudge.wholeTakeMinimumWindows,
-              headsetWindows.count < CaptureStaticJudge.minimumWindows else { return }
-        switchIfStatic(preferred.uid, headsetWindows, minimumWindows: CaptureStaticJudge.wholeTakeMinimumWindows)
+              headsetWindows.count >= minimum else { return }
+        let recent = Array(headsetWindows.suffix(CaptureStaticJudge.minimumWindows))
+        switchIfStatic(preferred.uid, recent, minimumWindows: minimum)
     }
 
     private func switchIfStatic(_ uid: String, _ recent: [CaptureWindowStats], minimumWindows: Int) {
@@ -376,19 +385,25 @@ final class MicrophoneCaptureCoordinator {
               let first = recent.first, let last = recent.last, let base, let entry = sessions[uid] else { return }
         let span = baseWindows.filter { $0.start >= first.start - 0.25 && $0.start <= last.start + 0.25 }
         guard CaptureStaticJudge.isSpeech(span, floorRMS: CaptureStaticJudge.quietLevel(baseWindows)) else { return }
-        DiagnosticLogger.shared.log("Capture switch: \(entry.device.name) sounded like static (\(CaptureStaticJudge.describe(recent))) "
-            + "while \(base.name) heard a voice; the take continues on \(base.name)")
-        quarantined.insert(uid)
         if let segment = secondarySegment {
             // Replace only the static run (good headset audio before it stays), and never
             // reach back past the built-in history still held.
             let from = max(segment.time, staticRunStart(), timeline.oldestHeld ?? segment.time)
             let index = min(takeEmitted, segment.index + max(0, Int(((from - segment.time) * 16_000).rounded())))
+            // Check packet bounds before materializing audio. A base gap or lag may persist
+            // for the whole take; repeatedly copying its history would stall this queue.
+            // At stop we deliberately preserve the original take if coverage is incomplete:
+            // static is a statistical judgment, not permission to truncate possible words.
+            guard let committedEnd = timeline.cursor,
+                  timeline.canRewind(to: from, preservingThrough: committedEnd) else { return }
             let replacement = timeline.rewind(to: from)
             takeEmitted = index + replacement.count
             lastSource = base.name
             onReplace(index, replacement, base.name)
         }
+        DiagnosticLogger.shared.log("Capture switch: \(entry.device.name) sounded like static (\(CaptureStaticJudge.describe(recent))) "
+            + "while \(base.name) heard a voice; the take continues on \(base.name)")
+        quarantined.insert(uid)
         secondarySegment = nil
         remove(uid)
         announceFallback(entry.device, reason: .staticNoise)
@@ -409,9 +424,20 @@ final class MicrophoneCaptureCoordinator {
     private func staticRunStart() -> Double {
         let n = CaptureStaticJudge.minimumWindows
         guard headsetWindows.count >= n else { return -.infinity }
-        var k = headsetWindows.count - n
-        while k > 0, CaptureStaticJudge.isStatic(Array(headsetWindows[(k - 1)..<(k - 1 + n)])) { k -= 1 }
+        let k = staticRunStartWindow ?? headsetWindows.count - n
         return k == 0 ? -.infinity : headsetWindows[k].start
+    }
+
+    private func updateStaticRun(after oldCount: Int) {
+        let n = CaptureStaticJudge.minimumWindows
+        guard headsetWindows.count >= n else { return }
+        for k in max(0, oldCount - n + 1)...(headsetWindows.count - n) {
+            if CaptureStaticJudge.isStatic(Array(headsetWindows[k..<(k + n)])) {
+                if staticRunStartWindow == nil { staticRunStartWindow = k }
+            } else {
+                staticRunStartWindow = nil
+            }
+        }
     }
 
     private func announceFallback(_ device: AudioInputDevice, reason: CaptureFallback.Reason) {

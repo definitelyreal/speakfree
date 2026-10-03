@@ -211,6 +211,159 @@ final class CaptureStaticFailoverTests: XCTestCase {
     private func hiss(_ t: Double) -> [Float] { SyntheticAudio.staticNoise(seconds: 0.1, seed: UInt64((t * 10).rounded() + 100)) }
     private func quiet(_ t: Double) -> [Float] { [Float](repeating: 0.0004, count: 1_600) }
 
+    // ai-suggestion:unverified · session:unknown · 2026-10-02
+    /// Same capture times, but the base worker delivers after the final headset callback.
+    private func feedLateBase(_ h: Harness, steps: Int, base: (Double) -> [Float],
+                              headset: (Double) -> [Float]) -> [Float] {
+        for step in 0..<steps {
+            let t = 1 + Double(step) / 10
+            h.sessions[1].deliver?(CapturePacket(start: t, samples: headset(t)))
+        }
+        h.router.queue.sync {}
+        var expected: [Float] = []
+        for step in 0..<steps {
+            let t = 1 + Double(step) / 10
+            let samples = base(t)
+            expected += samples
+            h.sessions[0].deliver?(CapturePacket(start: t, samples: samples))
+            h.router.queue.sync {}
+            if step < steps - 1 {
+                XCTAssertTrue(h.replacements.isEmpty, "do not truncate headset audio while its replacement is incomplete")
+            }
+        }
+        return expected
+    }
+
+    func testLateBaseEvidenceAfterFinalHeadsetCallbackReplacesCompleteWaveform() {
+        let h = harness()
+        feed(h, from: 0, seconds: 1, base: quiet, headset: hiss)
+        h.router.queue.sync { h.recording = true; h.router.setRecording(true) }
+        let expected = feedLateBase(h, steps: 20, base: voice, headset: hiss)
+        XCTAssertEqual(h.events.map(\.reason), [.staticNoise])
+        XCTAssertEqual(h.replacements.count, 1)
+        XCTAssertEqual(h.take, expected)
+        h.router.stop(); h.router.queue.sync {}
+    }
+
+    func testLateBaseEvidenceWithUnalignedClockPreservesBaseWaveform() {
+        for offset in [-0.25 / 16_000.0, 0.25 / 16_000.0] {
+            let h = harness()
+            feed(h, from: 0, seconds: 1, base: quiet, headset: hiss)
+            h.router.queue.sync { h.recording = true; h.router.setRecording(true) }
+            for step in 0..<20 {
+                let t = 1 + Double(step) / 10
+                h.sessions[1].deliver?(CapturePacket(start: t, samples: hiss(t)))
+            }
+            var expected: [Float] = []
+            for step in 0..<20 {
+                let t = 1 + Double(step) / 10 + offset
+                let samples = voice(t)
+                expected += samples
+                h.sessions[0].deliver?(CapturePacket(start: t, samples: samples))
+            }
+            h.router.queue.sync { h.router.flush() }
+            XCTAssertEqual(h.events.map(\.reason), [.staticNoise])
+            XCTAssertTrue(h.take == expected, "unaligned clocks must retain the exact base samples")
+            h.router.stop(); h.router.queue.sync {}
+        }
+    }
+
+    func testShortTakeWithLateBaseTailPreservesOriginalAtStop() {
+        let h = harness()
+        feed(h, from: 0, seconds: 1, base: quiet, headset: hiss)
+        h.router.queue.sync { h.recording = true; h.router.setRecording(true) }
+        for step in 0..<15 {
+            let t = 1 + Double(step) / 10
+            h.sessions[1].deliver?(CapturePacket(start: t, samples: hiss(t)))
+        }
+        h.router.queue.sync {}
+        let original = h.take
+        for step in 0..<14 {
+            let t = 1 + Double(step) / 10
+            h.sessions[0].deliver?(CapturePacket(start: t, samples: voice(t)))
+        }
+        h.router.queue.sync { h.router.flush(); h.recording = false; h.router.setRecording(false) }
+        XCTAssertTrue(h.events.isEmpty)
+        XCTAssertTrue(h.replacements.isEmpty)
+        XCTAssertTrue(h.take == original, "no last-word truncation to recover the earlier 1.4 seconds")
+        h.sessions[0].deliver?(CapturePacket(start: 2.4, samples: voice(2.4)))
+        h.router.queue.sync {}
+        XCTAssertTrue(h.replacements.isEmpty, "late callbacks must not rewrite a closed take")
+        XCTAssertTrue(h.take == original)
+        h.router.stop(); h.router.queue.sync {}
+    }
+
+    func testLongStaticTakeWithLateBaseEvidenceIsRecoveredWhenFlushed() {
+        let h = harness()
+        feed(h, from: 0, seconds: 1, base: quiet, headset: hiss)
+        h.router.queue.sync { h.recording = true; h.router.setRecording(true) }
+        let expected = feedLateBase(h, steps: 32, base: voice, headset: hiss)
+        h.router.queue.sync { h.router.flush(); h.recording = false; h.router.setRecording(false) }
+        XCTAssertEqual(h.events.map(\.reason), [.staticNoise])
+        XCTAssertEqual(h.replacements.count, 1)
+        XCTAssertEqual(h.take, expected, "stop must preserve the full replacement without duplicating its tail")
+        h.router.stop(); h.router.queue.sync {}
+    }
+
+    func testLateBaseEvidenceDoesNotReplaceWorkingHeadsetOrQuietRoom() {
+        for workingHeadset in [false, true] {
+            let h = harness()
+            let headset: (Double) -> [Float] = workingHeadset ? voice : hiss
+            let base: (Double) -> [Float] = workingHeadset ? voice : quiet
+            feed(h, from: 0, seconds: 1, base: quiet, headset: headset)
+            h.router.queue.sync { h.recording = true; h.router.setRecording(true) }
+            _ = feedLateBase(h, steps: 24, base: base, headset: headset)
+            let original = h.take
+            h.router.queue.sync { h.router.flush() }
+            XCTAssertTrue(h.events.isEmpty)
+            XCTAssertTrue(h.replacements.isEmpty)
+            XCTAssertEqual(h.take, original)
+            h.router.stop(); h.router.queue.sync {}
+        }
+    }
+
+    func testLateBaseEvidenceWithMissingTailDoesNotTruncateTakeAtStop() {
+        let h = harness()
+        feed(h, from: 0, seconds: 1, base: quiet, headset: hiss)
+        h.router.queue.sync { h.recording = true; h.router.setRecording(true) }
+        for step in 0..<24 {
+            let t = 1 + Double(step) / 10
+            h.sessions[1].deliver?(CapturePacket(start: t, samples: hiss(t)))
+        }
+        h.router.queue.sync {}
+        let original = h.take
+        for step in 0..<20 {
+            let t = 1 + Double(step) / 10
+            h.sessions[0].deliver?(CapturePacket(start: t, samples: voice(t)))
+        }
+        h.router.queue.sync { h.router.flush() }
+        XCTAssertTrue(h.events.isEmpty)
+        XCTAssertTrue(h.replacements.isEmpty)
+        XCTAssertEqual(h.take, original)
+        h.router.stop(); h.router.queue.sync {}
+    }
+
+    func testLateBaseEvidenceWithHistoryGapDoesNotSpliceOutMissingAudio() {
+        let h = harness()
+        feed(h, from: 0, seconds: 1, base: quiet, headset: hiss)
+        h.router.queue.sync { h.recording = true; h.router.setRecording(true) }
+        for step in 0..<24 {
+            let t = 1 + Double(step) / 10
+            h.sessions[1].deliver?(CapturePacket(start: t, samples: hiss(t)))
+        }
+        h.router.queue.sync {}
+        let original = h.take
+        for step in 0..<24 where step != 8 {
+            let t = 1 + Double(step) / 10
+            h.sessions[0].deliver?(CapturePacket(start: t, samples: voice(t)))
+        }
+        h.router.queue.sync { h.router.flush() }
+        XCTAssertTrue(h.events.isEmpty)
+        XCTAssertTrue(h.replacements.isEmpty)
+        XCTAssertEqual(h.take, original)
+        h.router.stop(); h.router.queue.sync {}
+    }
+
     func testStaticHeadsetSwitchesToTheMacMicMidTakeAndKeepsTheMacAudio() {
         let h = harness()
         XCTAssertEqual(h.sessions.map { $0.device?.uid }, [builtIn.uid, airPods.uid])
