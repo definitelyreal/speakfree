@@ -40,8 +40,13 @@ final class TranscriberArchiveIntegrityTests: XCTestCase {
         Config.configDirOverride = previousConfig
         try? FileManager.default.removeItem(at: directory)
     }
+    /// A tone that rises and falls at syllable rate. A perfectly steady tone has no speech
+    /// envelope, so WhisperHallucinationGuard (2026-10-04) would rightly refuse a rescue on it.
     private func tone(_ seconds: Double) -> [Float] {
-        (0..<Int(seconds * 16_000)).map { Float(0.14 * sin(2 * Double.pi * 150 * Double($0) / 16_000)) }
+        (0..<Int(seconds * 16_000)).map {
+            let t = Double($0) / 16_000
+            return Float(0.14 * (0.55 + 0.45 * sin(2 * Double.pi * 3 * t)) * sin(2 * Double.pi * 150 * t))
+        }
     }
     private var url: URL { directory.appendingPathComponent("take.wav") }
     private func transcriber(_ engine: ArchiveEngine) -> Transcriber {
