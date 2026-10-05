@@ -24,6 +24,8 @@ final class DictationPasteProvider: NSObject, NSPasteboardItemDataProvider {
     let text: String
     /// Number of times AppKit asked for the text (normally 0 or 1; see the caching note above).
     private(set) var provideCount = 0
+    /// Reads that count as a receipt (`provideCount` minus speakfree's own reads).
+    private(set) var receiptCount = 0
     /// Called on the main thread for each read that counts as a receipt.
     var onRead: (() -> Void)?
 
@@ -39,7 +41,10 @@ final class DictationPasteProvider: NSObject, NSPasteboardItemDataProvider {
         let record = { [weak self] in
             guard let self else { return }
             self.provideCount += 1
-            if counts { self.onRead?() }
+            if counts {
+                self.receiptCount += 1
+                self.onRead?()
+            }
         }
         // Receipt bookkeeping only ever runs on main (the pending-restore state lives there).
         // Observed: AppKit already calls this on main. Never mutate the pasteboard from here.

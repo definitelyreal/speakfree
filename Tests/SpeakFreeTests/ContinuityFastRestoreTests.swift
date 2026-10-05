@@ -243,7 +243,11 @@ final class ContinuityFastRestoreTests: XCTestCase {
         // Backstop longer than the remote route's fixed 0.4 s paste delay, as in production.
         let inserter = makeInserter(pasteboard: pb, gate: gate, sink: sink, running: fieldRunning, backstop: 0.7)
         inserter.frontmostBundleIDProvider = { "com.apple.ScreenContinuity" }
-        inserter.executeAppleScript = { _ in nil }
+        var remotePastes = 0
+        inserter.executeAppleScript = { source in
+            if source.contains("keystroke \"v\" using command down") { remotePastes += 1 }
+            return nil
+        }
         var clears: [Bool] = []
         var writer = PasteboardWriter()
         let realClear = writer.clear
@@ -254,6 +258,7 @@ final class ContinuityFastRestoreTests: XCTestCase {
         XCTAssertEqual(clears.first, false, "the remote route's write is not host-only")
         XCTAssertFalse(gate.isWatching, "the remote route never arms the Cmd+V gate")
         RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        XCTAssertEqual(remotePastes, 1, "the remote paste went out before the backstop")
         XCTAssertEqual(sink.records.map(\.route), [.remote])
         XCTAssertEqual(sink.records.map(\.trigger), ["backstop"])
         XCTAssertEqual(sink.records.first?.earlyOffReason, "route")
@@ -264,6 +269,25 @@ final class ContinuityFastRestoreTests: XCTestCase {
     /// publishing (before its read handler was attached). Simulated with a writer that reads
     /// the scratch board right after writing.
     func test_canaryReadDuringPublication_stillCountsAsRead() throws {
+        let (result, store) = runCanary { _ = $0.string(forType: .string) }  // a reader winning the race
+        XCTAssertEqual(result?.outcome, .read)
+        XCTAssertEqual(store.state.verdict, .untrusted)
+        XCTAssertEqual(store.currentUntrustedReason(runningBundleIDs: fieldRunning), "canary-read")
+    }
+
+    /// speakfree's own read during publication is not another app's read, same as `onRead`.
+    func test_canaryOwnReadDuringPublication_doesNotCount() throws {
+        let (result, store) = runCanary { pb in
+            _ = TextInserter.withOwnPasteboardRead { pb.string(forType: .string) }
+        }
+        XCTAssertEqual(result?.outcome, .clean)
+        XCTAssertNil(store.currentUntrustedReason(runningBundleIDs: fieldRunning))
+    }
+
+    /// One lock-mode canary on a scratch board whose writer runs `readInsideWrite` right after
+    /// publishing (before the canary attaches its read handler).
+    private func runCanary(readInsideWrite: @escaping (NSPasteboard) -> Void)
+        -> (ClipboardCanaryResult?, ClipboardTrustStore) {
         let pb = makePasteboard()
         setUserClipboard(pb, "HIS COPY")
         let store = ClipboardTrustStore(fileURL: nil)
@@ -283,7 +307,7 @@ final class ContinuityFastRestoreTests: XCTestCase {
         var writer = PasteboardWriter()
         writer.write = { pb, items in
             let ok = pb.writeObjects(items)
-            _ = pb.string(forType: .string)  // a reader that wins the race with the handler
+            readInsideWrite(pb)
             return ok
         }
         env.pasteboardWriter = writer
@@ -294,10 +318,19 @@ final class ContinuityFastRestoreTests: XCTestCase {
         canary.startIfDue(mode: .lock)
         uptime += 1
         wait(for: [exp], timeout: 3)
-        XCTAssertEqual(result?.outcome, .read)
-        XCTAssertEqual(store.state.verdict, .untrusted)
-        XCTAssertEqual(store.currentUntrustedReason(runningBundleIDs: fieldRunning), "canary-read")
-        XCTAssertEqual(pb.string(forType: .string), "HIS COPY")
+        XCTAssertEqual(pb.string(forType: .string), "HIS COPY", "the canary put his clipboard back")
+        return (result, store)
+    }
+
+    /// The tap's disabled-by-timeout notice passes through, and with no tap nothing is re-enabled.
+    func test_tapCallback_disabledNotice_passesThrough() throws {
+        let event = try syntheticUserCmdV()
+        let gate = UserPasteRestoreGate()
+        for type in [CGEventType.tapDisabledByTimeout, .tapDisabledByUserInput] {
+            let passed = HotkeyManager.pasteWatchTapEvent(type: type, event: event, gate: gate, tap: nil)?
+                .takeUnretainedValue()
+            XCTAssertTrue(passed === event)
+        }
     }
 
     func test_canaryCaught_syntheticCmdV_leavesTheDictation_backstopRestores() throws {

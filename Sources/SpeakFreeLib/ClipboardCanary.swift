@@ -234,7 +234,8 @@ final class ClipboardCanary {
         run = current
         // A read served before `onRead` was set (none is expected: AppKit calls the provider on
         // main, and this runs in one main-thread turn) still counts. Errs toward "read".
-        if provider.provideCount > 0 { current.readAt = env.uptime() }
+        // speakfree's own reads never count, same as `onRead`.
+        if provider.receiptCount > 0 { current.readAt = env.uptime() }
         env.store.update { $0.lastAttemptAt = env.now() }
 
         // The user's own Cmd+V during the run puts their clipboard back first (tap thread).
