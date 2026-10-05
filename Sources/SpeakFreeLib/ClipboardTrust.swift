@@ -25,6 +25,11 @@ enum ClipboardReaderCompliance: String, Codable, Equatable {
     case ignoresMarkers = "ignores markers"
     /// A clipboard history tool whose behavior with the markers is not verified.
     case unknown = "unknown"
+    /// Apple Continuity (Universal Clipboard, iPhone Mirroring, Universal Control): ignores the
+    /// nspasteboard.org markers but never reads an item written `.currentHostOnly` ("this Mac
+    /// only"). Trusted only while every dictation write is host-only
+    /// (`TextInserter.localDictationWritesAreHostOnly`); otherwise it counts as an eager syncer.
+    case respectsHostOnly = "respects this-Mac-only"
 }
 
 struct ClipboardReader: Equatable {
@@ -78,9 +83,29 @@ enum ClipboardReaderCatalog {
                         evidence: "not verified"),
     ]
 
+    /// Apple's Continuity processes that carry the clipboard to the user's other devices. They
+    /// are checked BEFORE the remote-viewer rule (iPhone Mirroring is also a remote viewer for
+    /// insertion, `AppCompatibility.remoteDesktopBundleIDs`, which is unchanged), because the
+    /// clipboard they sync is Universal Clipboard, which skips host-only items. Measured on a
+    /// development Mac 2026-09-24: 9 of 17 marked plain writes read, 0 of 13 host-only writes
+    /// (internal fast-clipboard research). The canary overrides this: a host-only canary read
+    /// while one of them runs turns the fast path off like any other read.
+    /// Before this (field logs 2026-10-02..04), iPhone Mirroring's always-running background
+    /// process counted as an eager syncer and turned early restore off for every paste.
+    static let continuity: [ClipboardReader] = [
+        ClipboardReader(bundleID: "com.apple.ScreenContinuity", name: "iPhone Mirroring",
+                        compliance: .respectsHostOnly,
+                        evidence: "syncs via Universal Clipboard (0 of 13 host-only writes read, measured 2026-09-24); "
+                            + "not yet measured with a mirroring session connected"),
+        ClipboardReader(bundleID: "com.apple.universalcontrol", name: "Universal Control",
+                        compliance: .respectsHostOnly,
+                        evidence: "syncs via Universal Clipboard (0 of 13 host-only writes read, measured 2026-09-24); "
+                            + "not yet measured with another device connected"),
+    ]
+
     /// Every reader the table knows, including the eager syncers `AppCompatibility` lists.
     static var all: [ClipboardReader] {
-        managers + AppCompatibility.clipboardSyncerBundleIDs.sorted().map {
+        managers + continuity + AppCompatibility.clipboardSyncerBundleIDs.sorted().map {
             ClipboardReader(bundleID: $0, name: $0, compliance: .ignoresMarkers,
                             evidence: "copies the clipboard to another machine on every change")
         }
@@ -96,6 +121,7 @@ enum ClipboardReaderCatalog {
         guard let bundleID, !bundleID.isEmpty else { return nil }
         let lower = bundleID.lowercased()
         if let manager = managers.first(where: { $0.bundleID.lowercased() == lower }) { return manager }
+        if let apple = continuity.first(where: { $0.bundleID.lowercased() == lower }) { return apple }
         if AppCompatibility.isClipboardSyncer(bundleID: bundleID) {
             return ClipboardReader(bundleID: bundleID, name: bundleID, compliance: .ignoresMarkers,
                                    evidence: "copies the clipboard to another machine on every change")
@@ -220,7 +246,10 @@ enum ClipboardTrust {
     /// The canary overrides the table: a read turns the fast path off even when every running
     /// reader is marked as respecting the markers, and repeated recent clean runs vouch for
     /// "unknown" managers that were running during them.
-    static func untrustedReason(running: [ClipboardReader], verdict: ClipboardCanaryVerdict) -> String? {
+    /// `hostOnlyWrites` says whether every dictation write is `.currentHostOnly`; Apple
+    /// Continuity readers are trusted only then (production passes the inserter's constant).
+    static func untrustedReason(running: [ClipboardReader], verdict: ClipboardCanaryVerdict,
+                                hostOnlyWrites: Bool = TextInserter.localDictationWritesAreHostOnly) -> String? {
         if verdict == .untrusted { return "canary-read" }
         var covered = Set<String>()
         if case .trusted(let readers) = verdict { covered = readers }
@@ -231,6 +260,9 @@ enum ClipboardTrust {
             if reader.compliance == .unknown, covered.contains(reader.bundleID.lowercased()) { continue }
             switch reader.compliance {
             case .ignoresMarkers: return "syncer:\(reader.bundleID)"
+            case .respectsHostOnly:
+                if hostOnlyWrites { continue }
+                return "syncer:\(reader.bundleID)"
             case .unknown: return "unknown-reader:\(reader.bundleID)"
             case .respectsMarkers: continue
             }

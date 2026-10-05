@@ -456,17 +456,7 @@ class HotkeyManager {
             callback: { _, type, event, userInfo -> Unmanaged<CGEvent>? in
                 guard let userInfo else { return Unmanaged.passUnretained(event) }
                 let context = Unmanaged<PasteTapContext>.fromOpaque(userInfo).takeUnretainedValue()
-                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    // Re-enable only while there is something to watch; otherwise it stays off.
-                    if let tap = context.tap, context.gate.isWatchingWithoutWaiting() {
-                        CGEvent.tapEnable(tap: tap, enable: true)
-                    }
-                    return Unmanaged.passUnretained(event)
-                }
-                if type == .keyDown {
-                    _ = context.gate.handleKeyDown(event, type: type)
-                }
-                return Unmanaged.passUnretained(event)  // always delivered, unchanged
+                return HotkeyManager.pasteWatchTapEvent(type: type, event: event, gate: context.gate, tap: context.tap)
             },
             userInfo: contextPtr.toOpaque()
         ) else {
@@ -505,6 +495,23 @@ class HotkeyManager {
         }
         CGEvent.tapEnable(tap: tap, enable: pasteGate.isWatching)
         DiagnosticLogger.shared.log("HotkeyManager: paste-watch tap created (off until a clipboard paste)")
+    }
+
+    /// The paste-watch tap's callback body (TAP THREAD). Internal so tests can hand it synthetic
+    /// events without installing a tap. Every event is delivered unchanged.
+    static func pasteWatchTapEvent(type: CGEventType, event: CGEvent, gate: UserPasteRestoreGate,
+                                   tap: CFMachPort?) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // Re-enable only while there is something to watch; otherwise it stays off.
+            if let tap, gate.isWatchingWithoutWaiting() {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+        if type == .keyDown {
+            _ = gate.handleKeyDown(event, type: type)
+        }
+        return Unmanaged.passUnretained(event)  // always delivered, unchanged
     }
 
     private func tearDownPasteWatchTap() {
