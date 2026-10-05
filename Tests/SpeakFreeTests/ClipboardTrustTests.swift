@@ -338,7 +338,9 @@ final class ClipboardTrustTests: XCTestCase {
         XCTAssertTrue(unknown.contains("com.tapbots.Pastebot2Mac"))
         XCTAssertEqual(Set(respects).intersection(ignores), [])
         XCTAssertEqual(Set(respects).intersection(unknown), [])
-        XCTAssertEqual(ClipboardReaderCatalog.all.count, respects.count + ignores.count + unknown.count)
+        let hostOnly = ClipboardReaderCatalog.sorted(.respectsHostOnly).map(\.bundleID)
+        XCTAssertEqual(ClipboardReaderCatalog.all.count,
+                       respects.count + ignores.count + unknown.count + hostOnly.count)
         XCTAssertEqual(ClipboardReaderCatalog.reader(bundleID: "COM.RAYCAST.MACOS")?.compliance, .respectsMarkers)
         XCTAssertNil(ClipboardReaderCatalog.reader(bundleID: "com.apple.finder"))
     }

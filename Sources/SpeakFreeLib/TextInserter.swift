@@ -2131,6 +2131,12 @@ class TextInserter {
     /// can skip the item from its type list alone, and the text itself is supplied by `provider`
     /// only when a process reads it. Only a confirmed publication supplies a generation.
     /// The item retains the provider until it has served the text.
+    ///
+    /// `localDictationWritesAreHostOnly` is the one switch for "this Mac only": the write below
+    /// and the clipboard trust check (`ClipboardTrust.untrustedReason`) both read it, so Apple
+    /// Continuity readers stop being trusted the moment a dictation write is not host-only.
+    static let localDictationWritesAreHostOnly = true
+
     @discardableResult
     static func writeLazyDictation(provider: DictationPasteProvider, to pasteboard: NSPasteboard,
                                    writer: PasteboardWriter = PasteboardWriter(),
@@ -2140,7 +2146,8 @@ class TextInserter {
         for marker in DictationPasteProvider.markerTypes {
             item.setData(Data(), forType: marker)
         }
-        return writer.replace([item], on: pasteboard, expectedGeneration: expectedGeneration, hostOnly: true)
+        return writer.replace([item], on: pasteboard, expectedGeneration: expectedGeneration,
+                              hostOnly: localDictationWritesAreHostOnly)
     }
 
     /// The restore decision: restore the prior clipboard only if OUR write is still live, i.e. the

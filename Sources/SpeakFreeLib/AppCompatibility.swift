@@ -358,6 +358,8 @@ enum AppCompatibility {
         "com.bartelsmedia.ShareMouse",       // ShareMouse
     ]
 
+    /// Not the fast-restore trust decision: that is `ClipboardReaderCatalog.reader`, which checks
+    /// Apple Continuity readers (iPhone Mirroring, a remote viewer here) before this rule.
     static func isClipboardSyncer(bundleID: String?) -> Bool {
         guard let bundleID, !bundleID.isEmpty else { return false }
         if matches(clipboardSyncerBundleIDs, bundleID) { return true }
