@@ -41,7 +41,6 @@ final class AudioGoldenTests: XCTestCase {
         config.engine = "whisper"
         config.modelSize = "tiny.en"
         config.spokenPunctuation = .hybrid
-        config.whisperFallback = FlexBool(false)
         let previousEngine = ProcessInfo.processInfo.environment["SPEAKFREE_ENGINE"]
         setenv("SPEAKFREE_ENGINE", "whisper", 1)
         defer {

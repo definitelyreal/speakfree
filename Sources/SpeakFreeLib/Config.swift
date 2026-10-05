@@ -92,12 +92,9 @@ public struct Config: Codable {
     // handover is controlled by inputDeviceUID/preBuffer, independently of this old flag.
     public var dualMicCapture: FlexBool?
 
-    /// Parakeet only (the maintainer 2026-09-23, "Load Whisper as fallback for errors"): re-check a
-    /// take with Whisper when Parakeet returns nothing or far too little. nil = on whenever the
-    /// Whisper model is on disk (the behavior before the setting existed); false = never.
-    public var whisperFallback: FlexBool?
-    /// When the user last chose "Not Now" on the backup-model download offer (Unix seconds).
-    public var whisperFallbackOfferDeclinedAt: Double?
+    // Removed 2026-10-05 with the Whisper backup: `whisperFallback` and
+    // `whisperFallbackOfferDeclinedAt`. Older config files may still carry them; decoding
+    // ignores unknown keys and the next save drops them.
 
     // App compatibility (2026-09-24). Per-app insertion method chosen in Settings → Advanced,
     // keyed by bundle ID (matched case-insensitively). Absent or "automatic" = speakfree's own

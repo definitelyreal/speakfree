@@ -7,7 +7,7 @@
 // noise-relative candidate, and reports how long each would have waited. With --asr it then runs
 // Parakeet on the audio each policy would have kept and compares the words, so a candidate that
 // clips a real trailing word shows up as a lost-word take. The engine is called directly (not
-// Transcriber) so no rescue path re-reads the untruncated WAV from disk.
+// Transcriber) so no whisper-cli fallback re-reads the untruncated WAV from disk.
 //
 // Manifest: JSON array of {"id": String, "wav": path, "releaseSample": Int}.
 // Output JSON has timings and word COUNTS only; with --words it also includes the differing

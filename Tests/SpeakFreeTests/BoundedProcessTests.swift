@@ -37,9 +37,8 @@ final class BoundedProcessTests: XCTestCase {
     }
 
     func testBudgetsScaleWithAudioButStayBounded() {
-        XCTAssertEqual(Transcriber.cliTimeout(audioDuration: 3, background: false), 30)
-        XCTAssertEqual(Transcriber.cliTimeout(audioDuration: 600, background: false), 1215)
-        XCTAssertEqual(Transcriber.cliTimeout(audioDuration: 600, background: true), 120)
-        XCTAssertEqual(Transcriber.cliTimeout(audioDuration: 3600, background: false), 1800)
+        XCTAssertEqual(Transcriber.cliTimeout(audioDuration: 3), 30)
+        XCTAssertEqual(Transcriber.cliTimeout(audioDuration: 600), 1215)
+        XCTAssertEqual(Transcriber.cliTimeout(audioDuration: 3600), 1800)
     }
 }

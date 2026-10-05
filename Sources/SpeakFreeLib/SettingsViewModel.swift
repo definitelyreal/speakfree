@@ -29,13 +29,6 @@ public class SettingsViewModel: ObservableObject {
     @Published public var screenContext: Bool
     @Published public var preBuffer: Bool
     @Published public var keepModelLoaded: String
-    /// "Load Whisper as fallback for errors" (Parakeet only; WhisperFallback). The stored value:
-    /// nil = never touched (on whenever the model is installed). Saved back as-is so an untouched
-    /// setting never becomes an explicit choice.
-    @Published public var whisperFallbackSetting: Bool?
-    /// Bumped when the backup download changes state so the Settings row redraws.
-    @Published public var whisperFallbackDownloadGeneration = 0
-    private var whisperFallbackObserver: NSObjectProtocol?
     @Published public var diagnosticLogging: Bool
     @Published public var streamingEnabled: Bool
     @Published public var languageModels: [String: String]
@@ -87,7 +80,6 @@ public class SettingsViewModel: ObservableObject {
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
-        self.whisperFallbackSetting = c.whisperFallback?.value
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
         // Must match AppDelegate's runtime gate (`?? true`) and Config's documented
@@ -106,13 +98,6 @@ public class SettingsViewModel: ObservableObject {
         self.compatibilityReportEnabled = c.compatibilityReport?.value ?? false
         self.insertionConfirmations = c.insertionConfirmations?.values ?? [:]
         self.dictationTrace = TraceGate.encoding(forSetting: c.dictationTrace)?.rawValue ?? "off"
-        whisperFallbackObserver = NotificationCenter.default.addObserver(
-            forName: WhisperFallback.downloadStateChanged, object: nil, queue: .main
-        ) { [weak self] _ in self?.whisperFallbackDownloadGeneration += 1 }
-    }
-
-    deinit {
-        if let whisperFallbackObserver { NotificationCenter.default.removeObserver(whisperFallbackObserver) }
     }
 
     /// Re-read config from disk and refresh baseConfig plus every published field.
@@ -138,7 +123,6 @@ public class SettingsViewModel: ObservableObject {
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
-        self.whisperFallbackSetting = c.whisperFallback?.value
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
         // Must match AppDelegate's runtime gate (`?? true`) and Config's documented
@@ -210,7 +194,6 @@ public class SettingsViewModel: ObservableObject {
         config.screenContext = FlexBool(screenContext)
         config.preBuffer = FlexBool(preBuffer)
         config.keepModelLoaded = keepModelLoaded
-        config.whisperFallback = whisperFallbackSetting.map { FlexBool($0) }
         config.diagnosticLogging = FlexBool(diagnosticLogging)
         config.streamingEnabled = FlexBool(streamingEnabled)
         config.languageModels = languageModels.isEmpty ? nil : languageModels

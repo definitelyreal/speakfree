@@ -33,7 +33,7 @@ final class TranscriberArchiveIntegrityTests: XCTestCase {
             .deletingLastPathComponent().appendingPathComponent("build/26-10-02-pinned-audio/transcriber-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory.appendingPathComponent("models"), withIntermediateDirectories: true)
         previousConfig = Config.configDirOverride; Config.configDirOverride = directory
-        // Availability control only. The injected CLI boundary below never loads a model or runs a process.
+        // A Whisper model on disk. The injected CLI boundary below never loads it or runs a process.
         try Data().write(to: directory.appendingPathComponent("models/ggml-large-v3-turbo.bin"))
     }
     override func tearDownWithError() throws {
@@ -41,7 +41,7 @@ final class TranscriberArchiveIntegrityTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
     }
     /// A tone that rises and falls at syllable rate. A perfectly steady tone has no speech
-    /// envelope, so WhisperHallucinationGuard (2026-10-04) would rightly refuse a rescue on it.
+    /// envelope, so WhisperHallucinationGuard (2026-10-04) would rightly refuse Whisper text on it.
     private func tone(_ seconds: Double) -> [Float] {
         (0..<Int(seconds * 16_000)).map {
             let t = Double($0) / 16_000
@@ -52,7 +52,7 @@ final class TranscriberArchiveIntegrityTests: XCTestCase {
     private func transcriber(_ engine: ArchiveEngine) -> Transcriber {
         Transcriber(engine: engine, modelID: "test-model", language: "en")
     }
-    func testInvalidArchiveKeepsMemoryEngineTextAndBlocksEmptyRescue() async throws {
+    func testInvalidArchiveKeepsMemoryEngineText() async throws {
         let engine = ArchiveEngine(text: "memory words remain available")
         let transcriber = transcriber(engine)
         var cliCalls = 0
@@ -60,16 +60,12 @@ final class TranscriberArchiveIntegrityTests: XCTestCase {
         let text = try await transcriber.transcribe(audioURL: url, samples: tone(2), audioFileIsValid: false)
         XCTAssertEqual(text, engine.text)
         engine.text = ""
-        var statuses: [Transcriber.SecondOpinionStatus] = []
-        transcriber.onSecondOpinionStatus = { statuses.append($0) }
+        var statuses: [Transcriber.TakeStatus] = []
+        transcriber.onTakeStatus = { statuses.append($0) }
         let empty = try await transcriber.transcribe(audioURL: url, samples: tone(2), audioFileIsValid: false)
         XCTAssertEqual(empty, "")
-        XCTAssertEqual(statuses, [.archiveUnavailable])
+        XCTAssertEqual(statuses, [.missed])
         XCTAssertEqual(cliCalls, 0)
-        // The same transcriber permits rescue for a different take whose archive is valid.
-        let rescued = try await transcriber.transcribe(audioURL: url, samples: tone(2), audioFileIsValid: true)
-        XCTAssertEqual(rescued, "stale file words")
-        XCTAssertEqual(cliCalls, 1)
     }
     func testInvalidArchiveBlocksWhisperEngineErrorFallbackAndNoSamplesCLI() async throws {
         let engine = ArchiveEngine("whisper", text: "unused")
@@ -86,23 +82,6 @@ final class TranscriberArchiveIntegrityTests: XCTestCase {
         XCTAssertEqual(cliCalls, 0)
         _ = try await transcriber.transcribe(audioURL: url, samples: tone(1), audioFileIsValid: true)
         XCTAssertEqual(cliCalls, 1)
-    }
-    func testInvalidArchiveBlocksSparseAndShadowPaths() async throws {
-        let engine = ArchiveEngine(text: "Brief")
-        let transcriber = transcriber(engine)
-        let forbidden = expectation(description: "invalid file cannot reach synchronous or background CLI")
-        forbidden.isInverted = true
-        transcriber.cliTranscriptionOverride = { _ in forbidden.fulfill(); return "stale file words" }
-        _ = try await transcriber.transcribe(audioURL: url, samples: tone(10), audioFileIsValid: false)
-        engine.text = "These are several ordinary words for the shadow control"
-        engine.lastDiagnostics = TranscriptionDiagnostics(aggregateConfidence: 0.8)
-        _ = try await transcriber.transcribe(audioURL: url, samples: tone(2), audioFileIsValid: false)
-        await fulfillment(of: [forbidden], timeout: 0.2)
-        // Show that the low-confidence control genuinely reaches the same CLI boundary when valid.
-        let allowed = expectation(description: "valid shadow reaches CLI")
-        transcriber.cliTranscriptionOverride = { _ in allowed.fulfill(); return "shadow control" }
-        _ = try await transcriber.transcribe(audioURL: url, samples: tone(2), audioFileIsValid: true)
-        await fulfillment(of: [allowed], timeout: 1)
     }
     func testPersistedInvalidMarkerRejectsCanonicalDirectoryAndFileAliases() async throws {
         let writer = try WavWriter(url: url); try writer.append(tone(1)); try writer.finish()

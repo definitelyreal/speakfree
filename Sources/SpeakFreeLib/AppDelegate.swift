@@ -282,8 +282,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Set when key press found the model out of memory and began loading it (diagnostic only;
     /// read and cleared by finalize for the `Latency:` line).
     private var modelPreloadStartedAtPress = false
-    /// In-flight Whisper backup download started from the fallback offer or Settings.
-    private var whisperFallbackDownload: ModelDownloadCoordinator?
     /// Sidecar writes still running after their text was inserted. Graceful termination waits
     /// for these as it does for an active dictation (2026-09-22 review: exiting mid-write left
     /// the WAV and sentinel behind, and launch recovery would transcribe it).
@@ -725,7 +723,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         let engine = EngineFactory.make(config: config)
         transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
-        wireSecondOpinionStatus(for: transcriber)
+        wireTakeStatus(for: transcriber)
         activeEngineID = engineID
         transcriber.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
         DiagnosticLogger.shared.log("Transcriber configured: \(modelID) (engine: \(engineID))")
@@ -742,10 +740,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
-        transcriber.whisperFallbackEnabled = WhisperFallback.isEnabled(config)
-        if !WhisperFallback.isEnabled(config) || effectiveEngineID != "parakeet" {
-            statusBar.backupOfferHandler = nil
-        }
         transcriber.startMemoryPressureMonitoring()
         // Recovery after the warm-up is marked running, never before (LaunchModelSequence,
         // pinned by LaunchRecoveryGateTests).
@@ -1122,7 +1116,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             let old = transcriber
             let engine = EngineFactory.make(config: config)
             transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
-            wireSecondOpinionStatus(for: transcriber)
+            wireTakeStatus(for: transcriber)
             activeEngineID = effectiveEngineID
             if let old { Task { await old.unloadModel() } }
         }
@@ -1140,10 +1134,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Configure model persistence
         transcriber.keepModelLoaded = config.keepModelLoaded ?? "auto"
-        transcriber.whisperFallbackEnabled = WhisperFallback.isEnabled(config)
-        if !WhisperFallback.isEnabled(config) || effectiveEngineID != "parakeet" {
-            statusBar.backupOfferHandler = nil
-        }
         transcriber.startMemoryPressureMonitoring()
         if needsNewEngine { warmUpEngine(effectiveEngineID) }
 
@@ -1151,130 +1141,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         print("Config reloaded: hotkey=\(KeyCodes.describe(keyCode: config.hotkey.keyCode, modifiers: config.hotkey.modifiers)) model=\(modelID) engine=\(effectiveEngineID)")
     }
 
-    private func wireSecondOpinionStatus(for transcriber: Transcriber) {
-        transcriber.onSecondOpinionStatus = { [weak self] status in
+    private func wireTakeStatus(for transcriber: Transcriber) {
+        transcriber.onTakeStatus = { [weak self] status in
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 switch status {
-                case .rechecking:
-                    self.recordingOverlay.updateStreamingText(status.message)
-                case .failed, .staticNoise, .archiveUnavailable, .likelyHallucination:
+                case .staticNoise, .likelyHallucination:
                     self.recordingOverlay.lingerWithMessageThenHide(status.message)
                 case .missed:
-                    self.offerWhisperFallbackDownloadIfNeeded()
-                    let hint = self.statusBar.backupOfferHandler != nil
-                        ? " A backup model is offered in the menu." : ""
-                    self.recordingOverlay.lingerWithMessageThenHide(status.message + hint, duration: 4)
+                    self.recordingOverlay.lingerWithMessageThenHide(status.message, duration: 4)
                 }
             }
-        }
-    }
-
-    /// After a missed take with no backup installed: offer the Whisper backup in the menu (then
-    /// once per cooldown). Never a modal from here: this runs inside a main-queue block, and a
-    /// modal there would hold every queued hotkey event until dismissed (2026-09-23 review), and
-    /// would steal focus from the app being dictated into.
-    private func offerWhisperFallbackDownloadIfNeeded() {
-        let current = Config.load()
-        guard WhisperFallback.shouldOfferDownload(
-            config: current, engine: activeEngineID,
-            modelPresent: Transcriber.modelExists(modelSize: WhisperFallback.modelSize),
-            downloading: whisperFallbackDownload != nil, now: Date()) else { return }
-        DiagnosticLogger.shared.log("Whisper fallback: backup offer shown in menu")
-        statusBar.backupOfferHandler = { [weak self] in self?.presentWhisperFallbackOffer() }
-    }
-
-    /// The user chose the menu offer (a menu action, not a queued main-queue block).
-    private func presentWhisperFallbackOffer() {
-        guard !isPressed else { return }
-        // The offer may have gone stale (Settings turned it off, engine switched, model installed).
-        guard WhisperFallback.shouldOfferDownload(
-            config: Config.load(), engine: activeEngineID,
-            modelPresent: Transcriber.modelExists(modelSize: WhisperFallback.modelSize),
-            downloading: whisperFallbackDownload != nil, now: Date()) else {
-            statusBar.backupOfferHandler = nil
-            return
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = WhisperFallback.offerTitle
-        alert.informativeText = WhisperFallback.offerMessage
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Download Backup")
-        alert.addButton(withTitle: "Not Now")
-        let accepted = alert.runModal() == .alertFirstButtonReturn
-        statusBar.backupOfferHandler = nil
-        var updated = Config.load()
-        if accepted {
-            DiagnosticLogger.shared.log("Whisper fallback: user accepted the backup download")
-            updated.whisperFallback = FlexBool(true)
-            try? updated.save()
-            config?.whisperFallback = FlexBool(true)
-            startWhisperFallbackDownload()
-        } else {
-            DiagnosticLogger.shared.log("Whisper fallback: user declined the backup download")
-            updated.whisperFallbackOfferDeclinedAt = Date().timeIntervalSince1970
-            try? updated.save()
-            config?.whisperFallbackOfferDeclinedAt = updated.whisperFallbackOfferDeclinedAt
-        }
-    }
-
-    public var isWhisperFallbackDownloading: Bool { whisperFallbackDownload != nil }
-
-    /// Background download of the backup model; progress on its own menu line, updated only when
-    /// the whole percent changes (URLSession reports every write).
-    func startWhisperFallbackDownload() {
-        guard whisperFallbackDownload == nil else { return }
-        statusBar.backupOfferHandler = nil
-        let coordinator = ModelDownloadCoordinator()
-        whisperFallbackDownload = coordinator
-        var lastPercent = -1
-        statusBar.backupDownloadMessage = "Downloading backup model\u{2026} 0%"
-        NotificationCenter.default.post(name: WhisperFallback.downloadStateChanged, object: nil)
-        coordinator.onProgress = { [weak self, weak coordinator] fraction, _, _ in
-            // Ignore progress queued before a cancel.
-            guard let self, let coordinator, self.whisperFallbackDownload === coordinator else { return }
-            let percent = Int(fraction * 100)
-            guard percent != lastPercent else { return }
-            lastPercent = percent
-            self.statusBar.backupDownloadMessage = "Downloading backup model\u{2026} \(percent)%"
-        }
-        coordinator.onSuccess = { [weak self] _ in
-            guard let self else { return }
-            self.whisperFallbackDownload = nil
-            self.transcriber?.whisperFallbackEnabled = WhisperFallback.isEnabled(Config.load())
-            DiagnosticLogger.shared.log("Whisper fallback: backup model installed")
-            self.showBackupStatusBriefly("Backup model ready for next time")
-            NotificationCenter.default.post(name: WhisperFallback.downloadStateChanged, object: nil)
-        }
-        coordinator.onFailure = { [weak self] error in
-            guard let self else { return }
-            self.whisperFallbackDownload = nil
-            DiagnosticLogger.shared.log("Whisper fallback: backup download failed (\(error.localizedDescription))")
-            self.showBackupStatusBriefly("Backup model download failed. Try again in Settings.", seconds: 60)
-            NotificationCenter.default.post(name: WhisperFallback.downloadStateChanged, object: nil)
-        }
-        DiagnosticLogger.shared.log("Whisper fallback: downloading \(WhisperFallback.modelSize)")
-        coordinator.start(modelSize: WhisperFallback.modelSize)
-    }
-
-    /// Settings unchecked the option mid-download.
-    func cancelWhisperFallbackDownload() {
-        guard let coordinator = whisperFallbackDownload else { return }
-        coordinator.onProgress = nil
-        coordinator.onSuccess = nil
-        coordinator.onFailure = nil
-        coordinator.cancel()
-        whisperFallbackDownload = nil
-        statusBar.backupDownloadMessage = nil
-        NotificationCenter.default.post(name: WhisperFallback.downloadStateChanged, object: nil)
-        DiagnosticLogger.shared.log("Whisper fallback: backup download cancelled from Settings")
-    }
-
-    private func showBackupStatusBriefly(_ message: String, seconds: TimeInterval = 8) {
-        statusBar.backupDownloadMessage = message
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
-            if self?.statusBar.backupDownloadMessage == message { self?.statusBar.backupDownloadMessage = nil }
         }
     }
 
@@ -2955,7 +2832,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     try await TakeRecorder.$current.withValue(takeRecorder) {
                         try await transcriber.transcribe(
                             audioURL: audioURL, samples: samples, prompt: prompt,
-                            punctuationMode: mode, inputDevice: metaDevice,
+                            punctuationMode: mode,
                             audioFileIsValid: recording.audioFileIsValid)
                     }
                 }
@@ -2973,7 +2850,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 let meta = RecordingStore.RecordingMeta(
                     appVersion: SpeakFree.version,
                     engine: takeRecorder.engine ?? metaEngine,
-                    model: takeRecorder.model ?? transcriber.modelID,
+                    model: transcriber.modelID,
                     inputDevice: metaDevice,
                     date: ISO8601DateFormatter().string(from: Date()),
                     durationSeconds: Double(samples.count) / 16_000.0,

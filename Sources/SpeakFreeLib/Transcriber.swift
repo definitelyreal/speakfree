@@ -61,62 +61,25 @@ public enum HallucinationFilterTuning {
 }
 
 public class Transcriber {
-    private static let shadowSlot = DispatchSemaphore(value: 1)
-    enum SecondOpinionStatus: Equatable {
-        /// What the audio contained, as far as the evidence can tell. The maintainer's copy
-        /// rule (2026-08-22): the status line is two sentences, the first describing
-        /// the audio, the second the action or outcome. This is the first sentence.
-        enum AudioDescriptor: Equatable {
-            /// Sustained or voiced speech energy, but the model got nothing usable.
-            case garbled
-            /// No sustained speech energy and no voiced pitch: the take reads as silence.
-            case silence
-
-            var sentence: String {
-                switch self {
-                case .garbled: return "Garbled audio."
-                case .silence: return "Silence."
-                }
-            }
-        }
-
-        case rechecking(AudioDescriptor)
-        case failed(AudioDescriptor)
-        /// Parakeet returned nothing on real speech and no Whisper backup ran (not installed or
-        /// turned off). The app may offer the backup download.
+    /// What the user is told when a take ends with nothing to type. The status line is two
+    /// sentences: what happened, then what to do. No em-dashes in UI copy.
+    enum TakeStatus: Equatable {
+        /// The engine returned nothing on real speech.
         case missed
-        /// Memory recognition completed, but a failed archive repair forbids file backup.
-        case archiveUnavailable
-        /// The take was static (a broken microphone stream), so no Whisper rescue ran.
+        /// The take was static (a broken microphone stream).
         case staticNoise
-        /// Whisper returned text that is very likely invented (WhisperHallucinationGuard), so
-        /// nothing was typed. Same line as a missed take, but never offers a download.
+        /// The Whisper engine returned text that is very likely invented
+        /// (WhisperHallucinationGuard), so nothing was typed. Same line as a missed take.
         case likelyHallucination
 
-        /// Full status line. No em-dashes in UI copy (the maintainer's standing rule).
         var message: String {
             switch self {
-            case .rechecking(let audio):
-                return "\(audio.sentence) Trying Whisper…"
-            case .failed(.garbled):
-                return "Garbled audio. Whisper found nothing."
-            case .failed(.silence):
-                return "Silence. Nothing to transcribe."
             case .missed, .likelyHallucination:
                 return "Didn't catch that. Try again."
-            case .archiveUnavailable:
-                return "Audio archive unavailable. Whisper backup could not run."
             case .staticNoise:
                 return "Didn't catch that. The mic sounded like static."
             }
         }
-    }
-
-    /// Pick the status line's audio descriptor from the take's evidence. Pure, so the
-    /// copy decision is unit-tested without a rescue run; the overlay never sees the
-    /// evidence itself (Transcriber stays UI-agnostic, the callback carries the enum).
-    static func audioDescriptor(for evidence: AudioEvidence) -> SecondOpinionStatus.AudioDescriptor {
-        (evidence.hasSustainedSpeechEnergy || evidence.hasVoicedSpeech) ? .garbled : .silence
     }
 
     struct AudioEvidence: Equatable {
@@ -150,16 +113,8 @@ public class Transcriber {
     let modelID: String
     let language: String
     public var suppressAutoPunctuation: Bool = false
-    /// "Load Whisper as fallback for errors" (WhisperFallback.isEnabled). Off = no Whisper
-    /// rescue, sparse rescue or shadow check ever runs for a Parakeet take.
-    public var whisperFallbackEnabled: Bool = true
     var cliTranscriptionOverride: ((URL) throws -> String)? // instance-scoped test seam
-    /// Instance-scoped test seam: whether the Whisper backup model is on disk.
-    var whisperBackupAvailableOverride: Bool?
-    private func whisperBackupAvailable() -> Bool {
-        whisperBackupAvailableOverride ?? Self.modelExists(modelSize: "large-v3-turbo")
-    }
-    var onSecondOpinionStatus: ((SecondOpinionStatus) -> Void)?
+    var onTakeStatus: ((TakeStatus) -> Void)?
 
     // MARK: - Engine lifecycle passthroughs (used by AppDelegate)
 
@@ -440,9 +395,9 @@ public class Transcriber {
     }
 
     /// One line per refused Whisper text. No text in the log, only its length and the evidence.
-    static func logBlockedWhisper(_ verdict: WhisperHallucinationGuard.Verdict, chars: Int, path: String) {
+    static func logBlockedWhisper(_ verdict: WhisperHallucinationGuard.Verdict, chars: Int) {
         DiagnosticLogger.shared.log(
-            "Transcriber: whisper \(path) text not typed, likely invented (\(verdict.reason ?? "?"); "
+            "Transcriber: whisper engine text not typed, likely invented (\(verdict.reason ?? "?"); "
                 + "\(verdict.noise.summary); \(chars) chars kept in sidecar only)")
     }
 
@@ -500,13 +455,13 @@ public class Transcriber {
         }
         // Attribution phrases must end on a word boundary: "translated bypass" is ordinary
         // text, not "translated by" followed by a credit. Keep this final gate consistent
-        // with the Whisper guard so accepted backup text can actually reach insertion.
+        // with the Whisper guard so text it accepts can actually reach insertion.
         if Self.captionCreditPattern.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil {
             return true
         }
 
         // Formatting alone is not a sound caption. Share the guard's bounded label list
-        // so a genuine wrapped sentence survives the final filter as well as the rescue.
+        // so a genuine wrapped sentence survives the final filter as well as the guard.
         if WhisperHallucinationGuard.isSoundTag(trimmed) { return true }
 
         return false
@@ -522,7 +477,6 @@ public class Transcriber {
     /// Falls back to CLI (whisper only) if the engine fails or samples are not provided.
     public func transcribe(audioURL: URL, samples: [Float]? = nil, prompt: String? = nil,
                            punctuationMode: PunctuationMode = .off,
-                           inputDevice: String? = nil,
                            audioFileIsValid: Bool = true) async throws -> String {
         // This value is per take and captured by background work, never mutable shared state.
         // Explicit memory-only callers can continue. File-backed callers must not turn
@@ -534,19 +488,14 @@ public class Transcriber {
         let activityLease = try RecordingActivity.shared.acquireReading(audioURL)
         defer { activityLease.release() }
         let result: String
-        // Set when a rescue fires; carries the descriptor so the failure line can keep
-        // the same first sentence the "trying" line opened with.
-        var secondOpinionAudio: SecondOpinionStatus.AudioDescriptor?
         // Per-take provenance for the dictation trace and the meta sidecar (see TakeRecorder).
         let recorder = TakeRecorder.current
         recorder?.engineDiagnostics = nil
         recorder?.engineTextKept = false
         recorder?.engine = nil
-        recorder?.model = nil
         recorder?.inferencePath = nil
         recorder?.modelWaitSeconds = nil
-        func markReplacedByWhisperCLI(model: String? = nil) {
-            if let model { recorder?.model = model }
+        func markReplacedByWhisperCLI() {
             recorder?.engine = "whisper"
             recorder?.engineTextKept = false
         }
@@ -601,16 +550,15 @@ public class Transcriber {
             let verdict = WhisperHallucinationGuard.assess(
                 whisperText: cleaned, samples: samples ?? [], parakeetText: nil)
             if verdict.block {
-                Self.logBlockedWhisper(verdict, chars: cleaned.count, path: "engine")
+                Self.logBlockedWhisper(verdict, chars: cleaned.count)
                 RecordingStore.saveAuxiliaryTranscription(text: cleaned, kind: .whisper, for: audioURL)
                 cleaned = ""
-                onSecondOpinionStatus?(.likelyHallucination)
+                onTakeStatus?(.likelyHallucination)
             }
         }
 
         let evidence = Self.audioEvidence(in: samples ?? [])
-        // A broken microphone stream (2026-09-25 AirPods static) has no words to recover:
-        // no Whisper second opinion of any kind runs on it.
+        // A broken microphone stream (2026-09-25 AirPods static) has no words to recover.
         let takeWindows = CaptureStaticJudge.windows(of: samples ?? [])
         let takeIsStatic = CaptureStaticJudge.isStatic(takeWindows, minimumWindows: CaptureStaticJudge.wholeTakeMinimumWindows)
         let wordCount = cleaned.split(whereSeparator: { $0.isWhitespace }).count
@@ -620,167 +568,25 @@ public class Transcriber {
             DiagnosticLogger.shared.log(
                 "Transcriber: take sounded like static (\(CaptureStaticJudge.describe(takeWindows))); dropped \(wordCount) words")
             cleaned = ""
-            onSecondOpinionStatus?(.staticNoise)
+            onTakeStatus?(.staticNoise)
         } else if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            evidence.hasSustainedSpeechEnergy {
             DiagnosticLogger.shared.log(String(
                 format: "Transcriber: speech-energy-present but model-empty "
                     + "(%.2fs, peak-window-rms %.3f, speech-windows %d)",
                 evidence.durationSeconds, evidence.peakWindowRMS, evidence.speechWindowCount))
-            // ACTIVE whisper rescue (2026-08-20): Parakeet (post empty-retries) produced
-            // nothing on audio with sustained speech — the take is otherwise LOST, so a
-            // slower second opinion is strictly better than silence. Corpus evidence:
-            // whisper-large-v3-turbo recovered coherent text from takes Parakeet zeroed
-            // (field-recording forensics; dozens of empty-sentinel takes in the corpus).
-            // Guarded on the whisper model actually being on disk; failure keeps empty.
-            if engine.engineID != "whisper", takeIsStatic {
-                // 2026-09-25: Whisper "rescued" static from a broken headset stream into
-                // invented sentences that were typed into Signal and Claude. Static has no
-                // words to recover; say so instead (and offer no backup download for it).
-                DiagnosticLogger.shared.log(
-                    "Transcriber: take sounded like static (\(CaptureStaticJudge.describe(takeWindows))); no Whisper rescue")
-                onSecondOpinionStatus?(.staticNoise)
-            } else if engine.engineID != "whisper", !audioFileIsValid {
-                onSecondOpinionStatus?(.archiveUnavailable)
-            } else if engine.engineID != "whisper", !whisperFallbackEnabled || !whisperBackupAvailable() {
-                onSecondOpinionStatus?(.missed)
-            } else if engine.engineID != "whisper" {
-                let audio = Self.audioDescriptor(for: evidence)
-                secondOpinionAudio = audio
-                onSecondOpinionStatus?(.rechecking(audio))
-                do {
-                    let rescued = try transcribeWithCLI(audioURL: fileForRecognition, prompt: prompt,
-                                                        modelOverride: "large-v3-turbo")
-                    if !rescued.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        let verdict = WhisperHallucinationGuard.assess(
-                            whisperText: rescued, samples: samples ?? [], parakeetText: cleaned)
-                        if verdict.block {
-                            // 2026-10-04 airplane: "*Dramatic music*", "- Thank you." and
-                            // subtitle dialogue were typed from noise Parakeet heard nothing in.
-                            Self.logBlockedWhisper(verdict, chars: rescued.count, path: "rescue")
-                            RecordingStore.saveAuxiliaryTranscription(text: rescued, kind: .whisper, for: audioURL)
-                            secondOpinionAudio = nil
-                            onSecondOpinionStatus?(.likelyHallucination)
-                        } else {
-                            DiagnosticLogger.shared.log(
-                                "Transcriber: whisper rescue recovered \(rescued.count) chars from an empty take")
-                            cleaned = rescued.replacingOccurrences(
-                                of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
-                            markReplacedByWhisperCLI(model: "large-v3-turbo")
-                        }
-                    }
-                } catch {
-                    // A failed rescue must say so — a silent catch hid the modelID bug above.
+            // Parakeet (after its own empty-result retries) heard nothing on real speech. There
+            // is no second engine behind it (the Whisper backup was removed 2026-10-05: across
+            // 22,179 archived takes it typed text 16 times, 13 of them invented, and it cost
+            // 2 to 4 s per run), so the take is reported as missed.
+            if engine.engineID != "whisper" {
+                if takeIsStatic {
                     DiagnosticLogger.shared.log(
-                        "Transcriber: whisper rescue failed (\(error.localizedDescription))")
-                }
-            }
-        } else if engine.engineID != "whisper", audioFileIsValid, whisperFallbackEnabled, !takeIsStatic,
-                  Self.sparseRescueEligible(
-                      parakeetWordCount: cleaned.split(separator: " ").count,
-                      durationSeconds: Double((samples ?? []).count) / 16_000.0,
-                      speechDurationSeconds: Double(evidence.speechWindowCount)
-                          * Double(Self.audioEvidenceWindowSize) / Self.audioEvidenceSampleRate),
-                  whisperBackupAvailable(),
-                  // Over the confabulation cap the rescue can never replace the text, so the
-                  // synchronous 3 s run could only write a sidecar (2026-09-22: the 20.3 s take).
-                  evidence.durationSeconds <= Self.swapMaxDurationSeconds,
-                  sparseGateAllowsRescue(
-                      parakeetText: cleaned, evidence: evidence, audioURL: audioURL,
-                      prompt: prompt, inputDevice: inputDevice, samples: samples ?? []) {
-            // SPARSE rescue (revised 2026-08-21): the confidence-triggered active swap
-            // was WITHDRAWN same-day — the 23-take active-band adjudication measured it
-            // helping 30% and harming 43%, and no veto set separated the two. What the
-            // data does support: when Parakeet returned drastically fewer words than the
-            // audio carries (<0.5 words/sec, the dropped-sentence shape), whisper gets a
-            // synchronous shot and replaces ONLY when materially longer (>=2x words) and
-            // under the 20s confabulation cap. Everything else is shadow-only.
-            let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
-            let audio = Self.audioDescriptor(for: evidence)
-            secondOpinionAudio = audio
-            onSecondOpinionStatus?(.rechecking(audio))
-            do {
-                let swap = try transcribeWithCLI(audioURL: fileForRecognition, prompt: prompt,
-                                                 modelOverride: "large-v3-turbo")
-                let duration = Double((samples ?? []).count) / 16_000.0
-                let pWords = cleaned.split(separator: " ").count
-                let wWords = swap.split(separator: " ").count
-                // Zero-word takes always rescue regardless of the ratio (mostly silent holds), so
-                // they must not train it.
-                let swapVerdict = WhisperHallucinationGuard.assess(
-                    whisperText: swap, samples: samples ?? [], parakeetText: cleaned)
-                // An invented swap is no gain: it must not teach the gate to rescue more.
-                if pWords > 0 {
-                    SparseRescueGate.shared.recordRescue(
-                        device: inputDevice,
-                        gained: !swapVerdict.block
-                            && Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords))
-                }
-                if swapVerdict.block {
-                    // Parakeet's own words stay; only the invented Whisper swap is refused.
-                    Self.logBlockedWhisper(swapVerdict, chars: swap.count, path: "sparse rescue")
-                    RecordingStore.saveAuxiliaryTranscription(text: swap, kind: .whisper, for: audioURL)
-                    if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        secondOpinionAudio = nil
-                        onSecondOpinionStatus?(.likelyHallucination)
-                    }
-                } else if duration <= Self.swapMaxDurationSeconds,
-                   Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords),
-                   Self.activeSwapVeto(parakeet: cleaned, whisper: swap,
-                                       durationSeconds: duration) == nil {
-                    RecordingStore.saveAuxiliaryTranscription(text: cleaned, kind: .parakeet, for: audioURL)
-                    DiagnosticLogger.shared.log(String(
-                        format: "Transcriber: SPARSE whisper rescue (%.2f) — %d words replace %d over %.1fs",
-                        conf, wWords, pWords, duration))
-                    cleaned = swap.replacingOccurrences(
-                        of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
-                    markReplacedByWhisperCLI(model: "large-v3-turbo")
+                        "Transcriber: take sounded like static (\(CaptureStaticJudge.describe(takeWindows))); nothing typed")
+                    onTakeStatus?(.staticNoise)
                 } else {
-                    DiagnosticLogger.shared.log(String(
-                        format: "Transcriber: sparse rescue declined (%.2f, %d vs %d words) — whisper to sidecar",
-                        conf, wWords, pWords))
-                    RecordingStore.saveAuxiliaryTranscription(text: swap, kind: .whisper, for: audioURL)
+                    onTakeStatus?(.missed)
                 }
-            } catch {
-                DiagnosticLogger.shared.log(
-                    "Transcriber: sparse-rescue whisper failed (\(error.localizedDescription)) — keeping Parakeet")
-            }
-        } else if engine.engineID != "whisper", !takeIsStatic,
-                  audioFileIsValid, whisperFallbackEnabled,
-                  Self.secondOpinionTier(aggregateConfidence: engine.lastDiagnostics?.aggregateConfidence) == .shadow,
-                  whisperBackupAvailable(),
-                  Self.shadowSlot.wait(timeout: .now()) == .success {
-            // SHADOW second opinion (2026-08-20): the take reads as suspect (corpus:
-            // clean takes score >=0.94, garbled-but-fluent 0.73-0.83) but replacing text
-            // automatically isn't yet earned — so whisper runs in the background, writes
-            // a .whisper.txt sidecar beside the recording, and logs agreement. Never
-            // blocks or changes what the user gets; the sidecars are the tuning corpus
-            // for an eventual active low-confidence swap.
-            let parakeetText = cleaned
-            let conf = engine.lastDiagnostics?.aggregateConfidence ?? 0
-            // Acquire before dispatch: the parent can finish before this worker starts.
-            let shadowLease = try? RecordingActivity.shared.acquireReading(audioURL)
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                defer { shadowLease?.release(); Self.shadowSlot.signal() }
-                guard let self = self, shadowLease != nil else { return }
-                let shadow: String
-                do {
-                    shadow = try self.transcribeWithCLI(audioURL: fileForRecognition, prompt: prompt,
-                                                        modelOverride: "large-v3-turbo", background: true)
-                } catch {
-                    // A failed shadow must say so — a silent guard hid the modelID bug
-                    // (2026-08-20: every shadow threw modelNotFound("parakeet-tdt-0.6b-v2")
-                    // and left no trace).
-                    DiagnosticLogger.shared.log(
-                        "Transcriber: shadow whisper failed (\(error.localizedDescription))")
-                    return
-                }
-                RecordingStore.saveAuxiliaryTranscription(text: shadow, kind: .whisper, for: audioURL)
-                let agree = TextPipeline.normalizedForComparison(shadow)
-                    == TextPipeline.normalizedForComparison(parakeetText)
-                DiagnosticLogger.shared.log(String(
-                    format: "Transcriber: shadow whisper on low-confidence take (%.2f) — %@ (%d vs %d chars)",
-                    conf, agree ? "agrees" : "DIFFERS", shadow.count, parakeetText.count))
             }
         }
 
@@ -794,14 +600,7 @@ public class Transcriber {
                 return cleaned
             }
             print("Transcriber: filtered hallucination: \"\(cleaned)\"")
-            if let audio = secondOpinionAudio {
-                onSecondOpinionStatus?(.failed(audio))
-            }
             return ""
-        }
-        if let audio = secondOpinionAudio,
-           cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            onSecondOpinionStatus?(.failed(audio))
         }
         return cleaned
     }
@@ -817,153 +616,6 @@ public class Transcriber {
     /// and the take is dropped exactly as before. Each retry gets a fresh decoder state (the engine
     /// builds one per call), which is what lets a transient bad decode clear.
     static let maxEmptyRetriesOnVoicedSpeech = 2
-
-    /// Aggregate-confidence bound under which a background whisper "shadow" pass runs on a
-    /// Parakeet take. Corpus (1,055 takes with diagnostics, 2026-08-20): clean takes score
-    /// p25 = 0.945 / median 0.966, the known garbled-but-fluent failures score 0.73–0.83,
-    /// and conf < 0.92 selects 8.8% of takes — wide enough to collect tuning data, cheap
-    /// enough to run as a background CLI call. The shadow NEVER alters inserted text.
-    static let whisperShadowConfidenceThreshold: Float = 0.92
-
-    /// Below this bound the take is presumed garbled and whisper's transcript REPLACES
-    /// Parakeet's (the maintainer approved the active swap 2026-08-20). The band is deliberately
-    /// well under the shadow bound: every known word-salad take scored 0.73–0.83, while
-    /// 0.85–0.92 is a mixed band that stays observe-only until the sidecar corpus proves
-    /// it. Cost: one synchronous whisper-CLI call (~1.1–1.6 s) on ~2–3% of takes.
-    static let whisperActiveSwapConfidenceThreshold: Float = 0.85
-
-    /// Pure decision for what the whisper second opinion does on a non-empty Parakeet
-    /// take. Split out so the tiers are unit-testable without live engines.
-    ///
-    /// REVISED 2026-08-21 (23-take active-band adjudication): a confidence-triggered
-    /// swap in 0.5–0.85 helps 30% and HARMS 43% — near coin-flip, net negative — and
-    /// no text-feature veto set separates the two (the mixed-band train/test showed the
-    /// same). So confidence alone NEVER triggers a swap any more; every sub-0.92 take
-    /// is shadow-only, and replacement is reserved for the two shapes the data actually
-    /// supports: the empty rescue, and the sparse rescue below.
-    enum SecondOpinionTier: Equatable { case none, shadow }
-    static func secondOpinionTier(aggregateConfidence conf: Float?) -> SecondOpinionTier {
-        guard let conf = conf, conf > 0.15 else { return .none }  // 0.1 = empty sentinel, handled by rescue
-        if conf < whisperShadowConfidenceThreshold { return .shadow }
-        return .none
-    }
-
-    /// Sparse rescue: Parakeet returned drastically fewer words than the *speech* in the take
-    /// carries (< 0.5 words per second of ACTUAL speech — the dropped-sentence failure shape).
-    /// Density is measured against speech-seconds, not wall-clock: a short phrase inside a long,
-    /// mostly-silent recording is not sparse and must not pull a whisper recheck. Concretely,
-    /// one production take was 6 words over 2.5 s of speech in a 19 s take (0.98 conf) — a
-    /// clean short utterance the old wall-clock ratio (6/19 = 0.32) wrongly flagged; against
-    /// speech (6/2.5 = 2.4) it is obviously not sparse. The wall-clock `>= 5` floor STAYS so a
-    /// near-empty take (0 Parakeet words) is still eligible for recovery regardless of how little
-    /// speech it carries — both historical accepted rescues were 0-word takes. Whisper's candidate
-    /// must be materially longer (≥ 2×) to replace, so a whisper collapse ("Oh!") can never
-    /// displace a short-but-real Parakeet take, and the >20s confabulation cap applies at the call
-    /// site.
-    static func sparseRescueEligible(parakeetWordCount: Int,
-                                     durationSeconds: Double,
-                                     speechDurationSeconds: Double) -> Bool {
-        durationSeconds >= 5
-            && Double(parakeetWordCount) / max(speechDurationSeconds, 0.1) < 0.5
-    }
-    /// Noise-relative gate on the sparse rescue (see `SparseRescueGate`). Returns false when the
-    /// take is only "sparse" because room noise counted as speech; such takes skip the 3 s
-    /// synchronous rescue and are occasionally re-checked with Whisper in the background.
-    private func sparseGateAllowsRescue(
-        parakeetText: String, evidence: AudioEvidence, audioURL: URL, prompt: String?,
-        inputDevice: String?, samples: [Float]
-    ) -> Bool {
-        let pWords = parakeetText.split(separator: " ").count
-        let windowSeconds = Double(Self.audioEvidenceWindowSize) / Self.audioEvidenceSampleRate
-        let (decision, speech, ratio) = SparseRescueGate.shared.decide(
-            device: inputDevice, parakeetWords: pWords, durationSeconds: evidence.durationSeconds,
-            windowRMS: evidence.windowRMS, windowSeconds: windowSeconds,
-            noiseFloor: evidence.noiseFloorRMS)
-        guard case .skip(let backgroundCheck) = decision else { return true }
-        let fixedSpeech = Double(evidence.speechWindowCount) * windowSeconds
-        DiagnosticLogger.shared.log(String(
-            format: "Transcriber: sparse rescue skipped: %d words over %.1fs speech at %.1fx noise floor %.4f "
-                + "(fixed bar counted %.1fs of %.1fs)%@",
-            pWords, speech, ratio, evidence.noiseFloorRMS, fixedSpeech, evidence.durationSeconds,
-            backgroundCheck ? "; checking in background" : ""))
-        guard backgroundCheck, Self.shadowSlot.wait(timeout: .now()) == .success else { return false }
-        // Acquire before dispatch: the parent can finish before this worker starts.
-        let lease = try? RecordingActivity.shared.acquireReading(audioURL)
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            defer { lease?.release(); Self.shadowSlot.signal() }
-            guard let self, lease != nil else { return }
-            do {
-                let check = try self.transcribeWithCLI(audioURL: audioURL, prompt: prompt,
-                                                       modelOverride: "large-v3-turbo", background: true)
-                let wWords = check.split(separator: " ").count
-                let invented = WhisperHallucinationGuard.assess(
-                    whisperText: check, samples: samples, parakeetText: parakeetText).block
-                let gained = !invented
-                    && Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords)
-                RecordingStore.saveAuxiliaryTranscription(text: check, kind: .whisper, for: audioURL)
-                SparseRescueGate.shared.recordSkipCheck(device: inputDevice, wouldHaveGained: gained)
-                DiagnosticLogger.shared.log(String(
-                    format: "Transcriber: sparse-skip check %@ (%d vs %d words); gate ratio now %.2f",
-                    gained ? "MISSED WORDS" : (invented ? "refused as invented" : "confirmed skip"), wWords, pWords,
-                    SparseRescueGate.shared.ratio(for: inputDevice)))
-            } catch {
-                DiagnosticLogger.shared.log(
-                    "Transcriber: sparse-skip check failed (\(error.localizedDescription))")
-            }
-        }
-        return false
-    }
-
-    static func sparseRescueAccepts(parakeetWordCount: Int, whisperWordCount: Int) -> Bool {
-        whisperWordCount >= 2 * max(parakeetWordCount, 1)
-    }
-
-    /// Literal spoken-punctuation command words. In the 64-take mixed-band adjudication
-    /// (2026-08-21) whisper's dominant failure was OVER-NORMALIZING these to glyphs or
-    /// garbling them ("Gamma", "Conlon") — a candidate that lost command words is almost
-    /// always whisper error, never Parakeet error.
-    private static let commandWordPattern =
-        "\\b(?:comma|period|question mark|exclamation (?:mark|point)|new line|new paragraph)\\b"
-
-    /// Names whisper drifted on in the adjudication (clod/Koda/favorable/codecs). A swap
-    /// candidate that LOSES one of these while Parakeet had it is rejected.
-    /// "Karma" was removed 2026-08-21: it is a mishear alias rather than an intended word,
-    /// so protecting Parakeet's "Karma" outputs only
-    /// blocked whisper from fixing them.
-    /// User terms from vocabulary.txt are not yet included automatically.
-    static let swapProtectedTerms = [
-        "Claude", "Codex", "Fable", "Opus", "Parakeet", "speakfree",
-        "Anthropic", "Zander", "Airtable", "Premiere",
-    ]
-
-    /// Whisper's confabulation risk concentrates on long takes (both BOTH_BAD rows in the
-    /// adjudication were >39s whisper inventions). Above this, swap downgrades to shadow.
-    static let swapMaxDurationSeconds: Double = 20
-
-    /// Veto an active swap candidate. Returns the reason (for the log) or nil to allow.
-    /// Derived from the 2026-08-21 adjudication of all 64 archived mixed-band takes:
-    /// whisper wins only specific failure shapes, so the swap must refuse the shapes
-    /// where whisper is the danger.
-    static func activeSwapVeto(parakeet: String, whisper: String,
-                               durationSeconds: Double) -> String? {
-        if durationSeconds > swapMaxDurationSeconds {
-            return "take >\(Int(swapMaxDurationSeconds))s — whisper confabulation risk"
-        }
-        func commandCount(_ s: String) -> Int {
-            (try? NSRegularExpression(pattern: commandWordPattern, options: .caseInsensitive))
-                .map { $0.numberOfMatches(in: s, range: NSRange(s.startIndex..., in: s)) } ?? 0
-        }
-        if commandCount(whisper) < commandCount(parakeet) {
-            return "whisper lost spoken punctuation commands"
-        }
-        for term in swapProtectedTerms {
-            if parakeet.localizedCaseInsensitiveContains(term),
-               !whisper.localizedCaseInsensitiveContains(term) {
-                return "whisper lost protected term '\(term)'"
-            }
-        }
-        return nil
-    }
 
     /// Wrap the in-process engine call: on an EMPTY result over audio that contains voiced human
     /// speech, retry up to `maxEmptyRetriesOnVoicedSpeech` times. Gated on `hasVoicedSpeech` so an
@@ -1045,21 +697,16 @@ public class Transcriber {
         )
     }
 
-    /// `modelOverride` exists for the rescue/shadow paths: under the Parakeet engine,
-    /// `modelID` is a Parakeet id ("parakeet-tdt-0.6b-v2") and resolving it as a ggml
-    /// file can only throw — which is exactly how the 2026-08-20 shadow pass silently
-    /// never fired (a garbled two-word take, conf 0.911, no sidecar, no log).
-    private func transcribeWithCLI(audioURL: URL?, prompt: String? = nil,
-                                   modelOverride: String? = nil, background: Bool = false) throws -> String {
+    /// whisper-cli fallback for the Whisper engine only (`modelID` is a Whisper size here).
+    private func transcribeWithCLI(audioURL: URL?, prompt: String? = nil) throws -> String {
         guard let audioURL else { throw TranscriberError.audioArchiveUnavailable }
         if let cliTranscriptionOverride { return try cliTranscriptionOverride(audioURL) }
         guard let whisperPath = Transcriber.findWhisperBinary() else {
             throw TranscriberError.whisperNotFound
         }
 
-        let cliModel = modelOverride ?? modelID
-        guard let modelPath = Transcriber.findModel(modelSize: cliModel) else {
-            throw TranscriberError.modelNotFound(cliModel)
+        guard let modelPath = Transcriber.findModel(modelSize: modelID) else {
+            throw TranscriberError.modelNotFound(modelID)
         }
 
         var args = [
@@ -1068,7 +715,7 @@ public class Transcriber {
             "-l", language,
             "--no-timestamps",
             "-nt",
-            "-t", "\(background ? min(2, ProcessInfo.processInfo.activeProcessorCount) : ProcessInfo.processInfo.activeProcessorCount)",
+            "-t", "\(ProcessInfo.processInfo.activeProcessorCount)",
         ]
         // Spoken mode: suppress whisper's auto-punctuation so only spoken words produce symbols
         if suppressAutoPunctuation {
@@ -1086,13 +733,11 @@ public class Transcriber {
         let duration = (try? AVAudioFile(forReading: audioURL)).map {
             Double($0.length) / max(1, $0.processingFormat.sampleRate)
         } ?? 60
-        // The background shadow pass must never compete with a dictation (utility); a rescue
-        // the user is waiting on runs at the key-release path's priority. Both used to run at
-        // the Process default.
+        // The user is waiting on this run, so it runs at the key-release path's priority.
         let outputResult = try BoundedProcess.run(
             executable: URL(fileURLWithPath: whisperPath), arguments: args,
-            timeout: Self.cliTimeout(audioDuration: duration, background: background),
-            qualityOfService: Self.cliQualityOfService(background: background))
+            timeout: Self.cliTimeout(audioDuration: duration),
+            qualityOfService: .userInitiated)
         let data = outputResult.stdout
         let stderrData = outputResult.stderr
 
@@ -1115,15 +760,10 @@ public class Transcriber {
         return output
     }
 
-    static func cliQualityOfService(background: Bool) -> QualityOfService {
-        background ? .utility : .userInitiated
-    }
-
-    static func cliTimeout(audioDuration: Double, background: Bool) -> TimeInterval {
-        // Foreground file transcription keeps a duration-aware budget (up to 30 min).
-        // Shadows are disposable diagnostics and must never occupy a worker indefinitely.
+    static func cliTimeout(audioDuration: Double) -> TimeInterval {
+        // A duration-aware budget (up to 30 min).
         let duration = audioDuration.isFinite ? max(0, audioDuration) : 60
-        return min(background ? 120 : 1800, max(30, duration * 2 + 15))
+        return min(1800, max(30, duration * 2 + 15))
     }
 
     public static func findWhisperBinary() -> String? {

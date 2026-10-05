@@ -81,7 +81,7 @@ enum CaptureStaticJudge {
         return levels[Int(Double(levels.count - 1) * 0.1)]
     }
 
-    /// Whole-take judgment from 16 kHz samples (used before a Whisper rescue).
+    /// Whole-take judgment from 16 kHz samples.
     static func isStatic(samples: [Float]) -> Bool {
         isStatic(windows(of: samples), minimumWindows: wholeTakeMinimumWindows)
     }

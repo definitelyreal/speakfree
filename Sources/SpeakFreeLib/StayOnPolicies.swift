@@ -62,8 +62,7 @@ public enum HeadsetNoticePolicy {
 
 /// The outcome-based trigger from the design research: a take of 8 seconds or more,
 /// recorded in a noisy room (quiet tenth louder than -48 dBFS), whose final text
-/// (after any rescue rerun) is under 2 characters per second. The rescue has already
-/// run by the time the final text exists, so "the rescue changed nothing" is implied.
+/// (after the engine's own empty-result retries) is under 2 characters per second.
 public enum LostTakeDetector {
     public static let minSeconds: Double = 8
     public static let noisyFloorDBFS: Double = -48

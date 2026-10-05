@@ -559,10 +559,10 @@ public enum OverlayEmergence {
         return out
     }
 
-    // MARK: - Rescue status line: text + cymatics dots (the maintainer 2026-08-22)
+    // MARK: - Transcribing status line: text + cymatics dots (the maintainer 2026-08-22)
     //
-    // While a whisper rescue runs, the transcribing card carries a centered status
-    // line ("Garbled audio. Trying Whisper…"). The maintainer asked for "little dots
+    // While a take waits (for example on a cold model load), the transcribing card carries
+    // a centered status line ("Preparing speech model…"). The maintainer asked for "little dots
     // emanating from the text, like sand cymatics driven by speech": a few grains
     // that appear on the text line, drift outward above or below it, and settle
     // away. Same vocabulary as the locked entry (lilac ink, easeOutQuint, a 30Hz

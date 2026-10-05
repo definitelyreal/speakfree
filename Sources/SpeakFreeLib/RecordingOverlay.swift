@@ -501,8 +501,8 @@ class RecordingOverlay {
         // DEFECT 2 (2026-08-12): streaming updates must NEVER resize/reposition the
         // emergence window during RECORDING — doing so caused the "jump down to the
         // small pill at the bottom" corruption. Preserved. The 2026-08-21 change is
-        // narrower: during the TRANSCRIBING hold only, a rescue status line ("Rechecking
-        // with whisper…") may replace the held card, centered, spinner-marked.
+        // narrower: during the TRANSCRIBING hold only, a status line ("Preparing speech
+        // model…") may replace the held card, centered, spinner-marked.
         if OverlayContentView.emergenceSuppressesStreamingText(style: style,
                                                                state: view.overlayState) {
             guard view.overlayState == .transcribing else { return }
@@ -826,7 +826,7 @@ class OverlayContentView: NSView {
     private static let maxVisibleLines = 6
     private static let lineHeightEstimate: CGFloat = 18 // ~13pt font with leading
 
-    // Rescue status line layout (transcribing phase only): text centred in the
+    // Status line layout (transcribing phase only): text centred in the
     // card, spinner hung off its left edge, cymatics grains above and below.
     private static let statusSpinnerGap: CGFloat = 10
     /// Spinner (22) + gap (10) + edge (12), mirrored on the right so the text centres.
@@ -1724,10 +1724,10 @@ class OverlayContentView: NSView {
         }
     }
 
-    /// Rescue status line (the maintainer 2026-08-22): the text sits dead centre in the
+    /// Transcribing status line (the maintainer 2026-08-22): the text sits dead centre in the
     /// card; the spinner hangs off its left edge (the pill reserves the same room
     /// on the right, so the text, not the spinner+text group, is what centres);
-    /// while the rescue is still running, cymatics grains drift out from the text
+    /// while the work is still running, cymatics grains drift out from the text
     /// line into the bands above and below it. The failure linger keeps the text
     /// and drops both indicators, so it reads as settled.
     private func drawStatusLine(ctx: CGContext, rect: NSRect, pillPath: CGPath) {

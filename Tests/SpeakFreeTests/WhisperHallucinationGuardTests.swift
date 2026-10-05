@@ -176,42 +176,27 @@ final class WhisperHallucinationGuardTranscriberTests: XCTestCase {
 
     private func run(_ samples: [Float], engine: FixedEngine, whisper: String?,
                      name: String = "recording-2026-10-04-211023-test")
-        async throws -> (text: String, statuses: [Transcriber.SecondOpinionStatus], sidecar: String?) {
+        async throws -> (text: String, statuses: [Transcriber.TakeStatus], sidecar: String?) {
         let url = root.appendingPathComponent("\(name).wav")
         let writer = try WavWriter(url: url)
         try writer.append(samples); writer.close()
         let transcriber = Transcriber(engine: engine, modelID: "synthetic", language: "en")
-        transcriber.whisperBackupAvailableOverride = whisper != nil
         transcriber.cliTranscriptionOverride = { _ in whisper ?? "" }
-        var statuses: [Transcriber.SecondOpinionStatus] = []
-        transcriber.onSecondOpinionStatus = { statuses.append($0) }
+        var statuses: [Transcriber.TakeStatus] = []
+        transcriber.onTakeStatus = { statuses.append($0) }
         let text = try await transcriber.transcribe(audioURL: url, samples: samples)
         let sidecar = try? String(contentsOf: url.deletingPathExtension().appendingPathExtension("whisper.txt"), encoding: .utf8)
         return (text, statuses, sidecar)
     }
 
-    func testRescueOnCabinNoiseTypesNothingAndSaysDidntCatchThat() async throws {
+    /// Parakeet empty on cabin noise: nothing typed, no Whisper run, the plain "missed" line.
+    func testEmptyParakeetTakeOnCabinNoiseRunsNoWhisper() async throws {
         let result = try await run(CabinAudio.rumble(seconds: 4), engine: FixedEngine("parakeet-test", words: ""),
                                    whisper: "- I'm gonna use your space.")
         XCTAssertEqual(result.text, "")
-        XCTAssertEqual(result.statuses.last, .likelyHallucination, "\(result.statuses)")
-        XCTAssertFalse(result.statuses.contains { if case .failed = $0 { return true }; return false })
-        XCTAssertEqual(result.sidecar, "- I'm gonna use your space.", "kept for review, never typed")
-        XCTAssertEqual(Transcriber.SecondOpinionStatus.likelyHallucination.message, "Didn't catch that. Try again.")
-    }
-
-    func testRescueStockPhraseIsRefusedEvenWithAVoice() async throws {
-        let result = try await run(SyntheticAudio.voice(seconds: 3, peak: 0.3), engine: FixedEngine("parakeet-test", words: ""),
-                                   whisper: "*Dramatic music*")
-        XCTAssertEqual(result.text, "")
-        XCTAssertEqual(result.statuses.last, .likelyHallucination)
-    }
-
-    func testRealRescueInALoudRoomPreservesAcceptedText() async throws {
-        let result = try await run(CabinAudio.voiceOverRumble(seconds: 4), engine: FixedEngine("parakeet-test", words: ""),
-                                   whisper: "- Let's ship the build tonight.")
-        XCTAssertEqual(result.text, "- Let's ship the build tonight.")
-        XCTAssertFalse(result.statuses.contains(.likelyHallucination))
+        XCTAssertFalse(result.statuses.contains(.likelyHallucination), "\(result.statuses)")
+        XCTAssertNil(result.sidecar, "no Whisper text was produced to keep")
+        XCTAssertEqual(Transcriber.TakeStatus.likelyHallucination.message, "Didn't catch that. Try again.")
     }
 
     func testParakeetThankYouOnClearSpeechStillTypes() async throws {
@@ -238,72 +223,20 @@ final class WhisperHallucinationGuardTranscriberTests: XCTestCase {
                               "*Please send it tomorrow*", "-Werror is enabled", "- Buy milk",
                               "Translated bypass rules apply."].enumerated() {
             for engineID in ["whisper", "parakeet-test"] {
-                let native = engineID == "whisper"
                 let result = try await run(SyntheticAudio.voice(seconds: 3, peak: 0.3),
-                    engine: FixedEngine(engineID, words: native ? text : ""),
-                    whisper: native ? nil : text, name: "recording-format-\(index)-\(engineID)")
+                    engine: FixedEngine(engineID, words: text),
+                    whisper: nil, name: "recording-format-\(index)-\(engineID)")
                 XCTAssertEqual(result.text, text)
                 XCTAssertFalse(result.statuses.contains(.likelyHallucination))
             }
         }
     }
 
-    private func sparseTake(_ samples: [Float], parakeet: String, whisper: String, device: String)
-        async throws -> (text: String, statuses: [Transcriber.SecondOpinionStatus], sidecar: URL, transcriber: Transcriber) {
-        let url = root.appendingPathComponent("recording-2026-10-04-sparse-\(UUID().uuidString).wav")
-        let writer = try WavWriter(url: url)
-        try writer.append(samples); writer.close()
-        let transcriber = Transcriber(engine: FixedEngine("parakeet-test", words: parakeet), modelID: "synthetic", language: "en")
-        transcriber.whisperBackupAvailableOverride = true
-        transcriber.cliTranscriptionOverride = { _ in whisper }
-        var statuses: [Transcriber.SecondOpinionStatus] = []
-        transcriber.onSecondOpinionStatus = { statuses.append($0) }
-        let text = try await transcriber.transcribe(audioURL: url, samples: samples, inputDevice: device)
-        return (text, statuses, url.deletingPathExtension().appendingPathExtension("whisper.txt"), transcriber)
-    }
-
-    /// Clear audio, Parakeet one word, Whisper an invented outro: the synchronous sparse swap
-    /// is refused and the gate learns "no gain".
-    func testInventedSparseSwapIsRefusedAndDoesNotTrainTheGate() async throws {
-        let device = "test-sparse-\(UUID().uuidString)"
-        let invented = "Thank you for watching. Thank you."
-        let result = try await sparseTake(SyntheticAudio.voice(seconds: 8, peak: 0.3), parakeet: "Okay",
-                                          whisper: invented, device: device)
-        XCTAssertTrue(result.statuses.contains { if case .rechecking = $0 { return true }; return false },
-                      "the synchronous sparse rescue ran: \(result.statuses)")
-        XCTAssertNotEqual(result.text, invented)
-        XCTAssertFalse(result.text.contains("watching"))
-        XCTAssertFalse(result.statuses.contains(.likelyHallucination), "Parakeet had a word, so no miss is reported")
-        XCTAssertEqual(SparseRescueGate.shared.ratio(for: device), SparseRescueGate.initialRatio * SparseRescueGate.step,
-                       "a refused invention counts as no gain")
-        XCTAssertEqual(try? String(contentsOf: result.sidecar, encoding: .utf8), invented)
-    }
-
-    /// Flat cabin noise: the gate skips the synchronous rescue and checks in the background.
-    /// An invented background answer must not count as missed words.
-    func testInventedBackgroundSkipCheckDoesNotLowerTheGate() async throws {
-        let device = "test-skip-\(UUID().uuidString)"
-        let result = try await sparseTake(CabinAudio.rumble(seconds: 8), parakeet: "Okay",
-                                          whisper: "- I'm gonna use your space, do you have somebody to do this?",
-                                          device: device)
-        XCTAssertFalse(result.statuses.contains { if case .rechecking = $0 { return true }; return false })
-        let deadline = Date().addingTimeInterval(10)
-        while !FileManager.default.fileExists(atPath: result.sidecar.path), Date() < deadline {
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        XCTAssertTrue(FileManager.default.fileExists(atPath: result.sidecar.path), "the background check ran")
-        try await Task.sleep(nanoseconds: 300_000_000) // the gate is updated right after the sidecar
-        XCTAssertEqual(SparseRescueGate.shared.ratio(for: device), SparseRescueGate.initialRatio,
-                       "an invented check is not missed words, so the ratio is not lowered")
-        // The background job holds the transcriber weakly, as the app's long-lived one would be.
-        withExtendedLifetime(result.transcriber) {}
-    }
-
     func testBlockedLogLineIsClassifiedForUpdates() {
         let verdict = WhisperHallucinationGuard.assess(
             whisperText: "- Thank you.", noise: WhisperHallucinationGuard.noiseVerdict(CabinAudio.rumble(seconds: 4)),
-            parakeetText: "")
-        let line = "[20:10:23] Transcriber: whisper rescue text not typed, likely invented (\(verdict.reason ?? "?"); "
+            parakeetText: nil)
+        let line = "[20:10:23] Transcriber: whisper engine text not typed, likely invented (\(verdict.reason ?? "?"); "
             + "\(verdict.noise.summary); 12 chars kept in sidecar only)"
         XCTAssertNotEqual(UpdateLogEvent.classify(line), .unsupported, line)
     }

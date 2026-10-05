@@ -49,7 +49,7 @@ public struct TakeLatency: Equatable, Sendable {
     public var finalizeStart: Double?
     /// Recording closed and the too-short/silent gate passed.
     public var gateEnd: Double?
-    /// Engine call started / returned (includes any cold load, retries and rescue).
+    /// Engine call started / returned (includes any cold load and empty-result retries).
     public var inferStart: Double?
     public var inferEnd: Double?
     /// True when the model was not in memory when inference was requested.

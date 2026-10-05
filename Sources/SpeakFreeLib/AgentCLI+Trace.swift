@@ -440,7 +440,7 @@ extension AgentCLI {
 
 extension DictationTrace {
     /// Unsure words that actually occur in `heard`. Guards against scores left over from a
-    /// different pass (a rescue that replaced the engine's text) being shown against it.
+    /// different pass (a whisper-cli fallback that replaced the engine's text) being shown against it.
     public static func unsureWords(_ words: [WordScore], presentIn heard: String) -> [WordScore] {
         let present = Set(DictationMatch.words(heard))
         return words.filter { w in

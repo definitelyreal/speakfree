@@ -1088,10 +1088,6 @@ struct DictationSettingsView: View {
                     VStack(alignment: .leading, spacing: 14) {
                         preBufferRow
 
-                        if viewModel.engine == "parakeet" {
-                            whisperFallbackRow
-                        }
-
                         if viewModel.engine == "whisper" {
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
                             GridRow(alignment: .firstTextBaseline) {
@@ -1619,33 +1615,6 @@ struct DictationSettingsView: View {
     }
 
     // MARK: - Pre-Buffer Row
-
-    /// The maintainer 2026-09-23: "Load Whisper as fallback for errors". Shown checked only when the
-    /// fallback can actually run (model installed, or downloading), so a new user never sees a
-    /// checked box with no backup behind it. Checking it without the model starts the 1.6 GB
-    /// download (progress in the menu); unchecking cancels a download in flight.
-    private var whisperFallbackRow: some View {
-        let app = NSApp.delegate as? AppDelegate
-        _ = viewModel.whisperFallbackDownloadGeneration  // redraw when the download changes state
-        let installed = Transcriber.modelExists(modelSize: WhisperFallback.modelSize)
-        let downloading = app?.isWhisperFallbackDownloading ?? false
-        let binding = Binding<Bool>(
-            get: { (viewModel.whisperFallbackSetting ?? true) && (installed || downloading) },
-            set: { enabled in
-                viewModel.whisperFallbackSetting = enabled
-                viewModel.save()
-                if enabled, !Transcriber.modelExists(modelSize: WhisperFallback.modelSize) {
-                    app?.startWhisperFallbackDownload()
-                } else if !enabled {
-                    app?.cancelWhisperFallbackDownload()
-                }
-            })
-        let detail = "If the speech model misses a dictation, re-check it with Whisper. "
-            + (installed ? "Backup model installed."
-               : downloading ? "Downloading the backup model (progress in the menu)."
-               : "Turning this on downloads a \(WhisperFallback.downloadSizeDescription) backup model.")
-        return checkboxRow("Load Whisper as fallback for errors", selection: binding, detail: detail)
-    }
 
     private var preBufferRow: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {

@@ -444,7 +444,6 @@ public class FileTranscriptionController: NSWindowController {
         let transcriber = Transcriber(engine: engine,
                                       modelID: settings.engine == "parakeet" ? settings.parakeetModel : settings.modelSize,
                                       language: cfg.language)
-        transcriber.whisperFallbackEnabled = WhisperFallback.isEnabled(cfg)
 
         // Switch to progress state
         progressFileLabel.stringValue = "Transcribing \(sourceURL.lastPathComponent)…"

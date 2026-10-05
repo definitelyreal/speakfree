@@ -68,13 +68,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
     var modelLoadMessage: String? { didSet { buildMenu() } }
-    /// Whisper backup (2026-09-23): a clickable offer after a missed take, and its own progress
-    /// line while downloading, so it never collides with the speech-model loading line.
-    var backupOfferHandler: (() -> Void)? { didSet { buildMenu() } }
-    var backupDownloadMessage: String? {
-        didSet { if oldValue != backupDownloadMessage { buildMenu() } }
-    }
-    private var backupOfferTarget: MenuItemTarget?
 
     enum State: Equatable {
         case idle
@@ -272,22 +265,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         if let message = modelLoadMessage {
             let item = NSMenuItem(title: message, action: nil, keyEquivalent: "")
             item.isEnabled = false
-            menu.addItem(item)
-            menu.addItem(NSMenuItem.separator())
-        }
-
-        if let message = backupDownloadMessage {
-            let item = NSMenuItem(title: message, action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
-            menu.addItem(NSMenuItem.separator())
-        } else if let handler = backupOfferHandler {
-            let target = MenuItemTarget(handler: handler)
-            backupOfferTarget = target
-            let item = NSMenuItem(
-                title: "Download Backup Speech Model (\(WhisperFallback.downloadSizeDescription))\u{2026}",
-                action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
-            item.target = target
             menu.addItem(item)
             menu.addItem(NSMenuItem.separator())
         }

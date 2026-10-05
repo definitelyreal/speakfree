@@ -76,13 +76,6 @@ public final class TakeRecorder: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return _engine }
         set { lock.lock(); _engine = newValue; lock.unlock() }
     }
-    /// Model that produced the returned text when it differs from the transcriber's own
-    /// (a whisper rescue of a Parakeet take); nil otherwise.
-    public var model: String? {
-        get { lock.lock(); defer { lock.unlock() }; return _model }
-        set { lock.lock(); _model = newValue; lock.unlock() }
-    }
-    private var _model: String?
     /// Model instance that ran the engine pass ("ane", "cpu-standin", or the engine ID).
     public var inferencePath: String? {
         get { lock.lock(); defer { lock.unlock() }; return _inferencePath }
@@ -96,7 +89,7 @@ public final class TakeRecorder: @unchecked Sendable {
     }
     private var _modelWaitSeconds: Double?
     /// True when the returned text is the in-process engine's own output, so its per-word
-    /// scores describe it. False after a CLI fallback or a rescue that replaced the text.
+    /// scores describe it. False after a whisper-cli fallback replaced the text.
     public var engineTextKept: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _engineTextKept }
         set { lock.lock(); _engineTextKept = newValue; lock.unlock() }

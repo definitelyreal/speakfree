@@ -1,7 +1,11 @@
 // ai-suggestion:unverified · session:718d5e6d-50b3-4f35-9f63-485e474dadf3 · 2026-10-04
 import Foundation
 
-/// Decides whether text from a Whisper rescue or Whisper engine is very likely invented.
+/// Decides whether text from the Whisper engine is very likely invented.
+///
+/// The app calls it only when Whisper is the chosen engine (`parakeetText: nil`). The
+/// Whisper backup behind Parakeet was removed on 2026-10-05; the `parakeetText` branch below
+/// is kept for `perf-harness hallucination-replay`, which re-scores archived backup sidecars.
 ///
 /// On 2026-10-04 (7:54 to 8:10pm PT, an airplane cabin) the empty-take Whisper rescue typed
 /// "*Dramatic music*", "Thank you.", "- Thank you.", "- I'm gonna use your space." and

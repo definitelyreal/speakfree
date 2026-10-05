@@ -51,7 +51,6 @@ public enum ProcessCommand {
             ? (config.parakeetModel ?? "parakeet-tdt-0.6b-v3")
             : config.modelSize
         let transcriber = Transcriber(engine: engine, modelID: modelID, language: config.language)
-        transcriber.whisperFallbackEnabled = WhisperFallback.isEnabled(config)
 
         // Parakeet has no on-disk CLI fallback — it needs in-memory [Float]@16k samples.
         // Whisper keeps its file/CLI path here (samples=nil) so the headless `process` command

@@ -4,7 +4,7 @@
 // returned nothing and the Whisper rescue typed invented sentences. These tests pin the
 // fixes with synthetic audio only (no hardware, no real config, no recordings folder):
 // the format check, the static judge, the in-take switch to the Mac's microphone with its
-// audio replacing the headset stretch, the notice, and the rescue that no longer runs on static.
+// audio replacing the headset stretch, the notice, and the "static" status line.
 import XCTest
 @testable import SpeakFreeLib
 
@@ -767,7 +767,7 @@ final class CaptureStaticFailoverTests: XCTestCase {
     }
 }
 
-final class StaticRescueTests: XCTestCase {
+final class StaticTakeTests: XCTestCase {
     private final class EmptyEngine: TranscriptionEngine {
         let engineID = "parakeet-test"
         var keepModelLoaded = "auto"
@@ -790,7 +790,7 @@ final class StaticRescueTests: XCTestCase {
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("static-rescue-\(UUID())")
         try FileManager.default.createDirectory(at: root.appendingPathComponent("models"), withIntermediateDirectories: true)
-        // A rescue model "on disk", so only the static judgment can stop the rescue.
+        // A Whisper model "on disk": no Whisper run may follow a static take regardless.
         FileManager.default.createFile(atPath: root.appendingPathComponent("models/ggml-large-v3-turbo.bin").path, contents: Data())
         Config.configDirOverride = root
     }
@@ -818,22 +818,20 @@ final class StaticRescueTests: XCTestCase {
         }
     }
 
-    /// One stray word on a long static take must not open the sparse Whisper rescue either.
-    func testStaticTakeGetsNoSparseRescue() async throws {
+    /// Three engine words on a long static take are left to the engine.
+    func testStaticTakeKeepsThreeEngineWords() async throws {
         let samples = SyntheticAudio.staticNoise(seconds: 8, rms: 0.06)
         let url = root.appendingPathComponent("recording-2026-09-25-191813-test.wav")
         let writer = try WavWriter(url: url)
         try writer.append(samples); writer.close()
         let engine = OneWordEngine()
         engine.words = "hello there friend"
-        XCTAssertTrue(Transcriber.sparseRescueEligible(parakeetWordCount: 3, durationSeconds: 8, speechDurationSeconds: 8),
-                      "without the static gate this take would get the sparse rescue")
         let transcriber = Transcriber(engine: engine, modelID: "synthetic", language: "en")
-        var statuses: [Transcriber.SecondOpinionStatus] = []
-        transcriber.onSecondOpinionStatus = { statuses.append($0) }
+        var statuses: [Transcriber.TakeStatus] = []
+        transcriber.onTakeStatus = { statuses.append($0) }
         let text = try await transcriber.transcribe(audioURL: url, samples: samples)
-        XCTAssertFalse(statuses.contains { if case .rechecking = $0 { return true }; return false }, "\(statuses)")
-        XCTAssertEqual(text, "hello there friend", "three words are left to the engine; no Whisper replaces them")
+        XCTAssertEqual(statuses, [])
+        XCTAssertEqual(text, "hello there friend", "three words are left to the engine")
     }
 
     func testOneOrTwoWordsReadOutOfStaticAreDropped() async throws {
@@ -842,37 +840,37 @@ final class StaticRescueTests: XCTestCase {
         let writer = try WavWriter(url: url)
         try writer.append(samples); writer.close()
         let transcriber = Transcriber(engine: OneWordEngine(), modelID: "synthetic", language: "en")
-        var statuses: [Transcriber.SecondOpinionStatus] = []
-        transcriber.onSecondOpinionStatus = { statuses.append($0) }
+        var statuses: [Transcriber.TakeStatus] = []
+        transcriber.onTakeStatus = { statuses.append($0) }
         let text = try await transcriber.transcribe(audioURL: url, samples: samples)
         XCTAssertEqual(text, "")
         XCTAssertEqual(statuses, [.staticNoise])
     }
 
-    func testShortStaticTakeGetsNoWhisperRescue() async throws {
+    func testShortStaticTakeSaysStatic() async throws {
         let samples = SyntheticAudio.staticNoise(seconds: 1.3, rms: 0.06)
         let url = root.appendingPathComponent("recording-2026-09-25-191834-test.wav")
         let writer = try WavWriter(url: url)
         try writer.append(samples); writer.close()
         let transcriber = Transcriber(engine: EmptyEngine(), modelID: "synthetic", language: "en")
-        var statuses: [Transcriber.SecondOpinionStatus] = []
-        transcriber.onSecondOpinionStatus = { statuses.append($0) }
+        var statuses: [Transcriber.TakeStatus] = []
+        transcriber.onTakeStatus = { statuses.append($0) }
         let text = try await transcriber.transcribe(audioURL: url, samples: samples)
         XCTAssertEqual(text, "")
         XCTAssertEqual(statuses, [.staticNoise])
     }
 
-    func testStaticTakeGetsNoWhisperRescueAndSaysSo() async throws {
+    func testEmptyStaticTakeSaysStatic() async throws {
         let samples = SyntheticAudio.staticNoise(seconds: 4, rms: 0.06)
         let url = root.appendingPathComponent("recording-2026-09-25-184507-test.wav")
         let writer = try WavWriter(url: url)
         try writer.append(samples); writer.close()
         let transcriber = Transcriber(engine: EmptyEngine(), modelID: "synthetic", language: "en")
-        var statuses: [Transcriber.SecondOpinionStatus] = []
-        transcriber.onSecondOpinionStatus = { statuses.append($0) }
+        var statuses: [Transcriber.TakeStatus] = []
+        transcriber.onTakeStatus = { statuses.append($0) }
         let text = try await transcriber.transcribe(audioURL: url, samples: samples)
         XCTAssertEqual(text, "")
         XCTAssertEqual(statuses, [.staticNoise])
-        XCTAssertEqual(Transcriber.SecondOpinionStatus.staticNoise.message, "Didn't catch that. The mic sounded like static.")
+        XCTAssertEqual(Transcriber.TakeStatus.staticNoise.message, "Didn't catch that. The mic sounded like static.")
     }
 }
