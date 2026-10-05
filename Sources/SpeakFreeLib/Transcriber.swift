@@ -648,8 +648,6 @@ public class Transcriber {
                     let rescued = try transcribeWithCLI(audioURL: fileForRecognition, prompt: prompt,
                                                         modelOverride: "large-v3-turbo")
                     if !rescued.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        DiagnosticLogger.shared.log(
-                            "Transcriber: whisper rescue recovered \(rescued.count) chars from an empty take")
                         let verdict = WhisperHallucinationGuard.assess(
                             whisperText: rescued, samples: samples ?? [], parakeetText: cleaned)
                         if verdict.block {
@@ -660,6 +658,8 @@ public class Transcriber {
                             secondOpinionAudio = nil
                             onSecondOpinionStatus?(.likelyHallucination)
                         } else {
+                            DiagnosticLogger.shared.log(
+                                "Transcriber: whisper rescue recovered \(rescued.count) chars from an empty take")
                             cleaned = WhisperHallucinationGuard.stripDialogueDash(rescued.replacingOccurrences(
                                 of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression))
                             markReplacedByWhisperCLI(model: "large-v3-turbo")
@@ -683,7 +683,7 @@ public class Transcriber {
                   evidence.durationSeconds <= Self.swapMaxDurationSeconds,
                   sparseGateAllowsRescue(
                       parakeetText: cleaned, evidence: evidence, audioURL: audioURL,
-                      prompt: prompt, inputDevice: inputDevice) {
+                      prompt: prompt, inputDevice: inputDevice, samples: samples ?? []) {
             // SPARSE rescue (revised 2026-08-21): the confidence-triggered active swap
             // was WITHDRAWN same-day — the 23-take active-band adjudication measured it
             // helping 30% and harming 43%, and no veto set separated the two. What the
@@ -703,13 +703,15 @@ public class Transcriber {
                 let wWords = swap.split(separator: " ").count
                 // Zero-word takes always rescue regardless of the ratio (mostly silent holds), so
                 // they must not train it.
+                let swapVerdict = WhisperHallucinationGuard.assess(
+                    whisperText: swap, samples: samples ?? [], parakeetText: cleaned)
+                // An invented swap is no gain: it must not teach the gate to rescue more.
                 if pWords > 0 {
                     SparseRescueGate.shared.recordRescue(
                         device: inputDevice,
-                        gained: Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords))
+                        gained: !swapVerdict.block
+                            && Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords))
                 }
-                let swapVerdict = WhisperHallucinationGuard.assess(
-                    whisperText: swap, samples: samples ?? [], parakeetText: cleaned)
                 if swapVerdict.block {
                     // Parakeet's own words stay; only the invented Whisper swap is refused.
                     Self.logBlockedWhisper(swapVerdict, chars: swap.count, path: "sparse rescue")
@@ -865,7 +867,7 @@ public class Transcriber {
     /// synchronous rescue and are occasionally re-checked with Whisper in the background.
     private func sparseGateAllowsRescue(
         parakeetText: String, evidence: AudioEvidence, audioURL: URL, prompt: String?,
-        inputDevice: String?
+        inputDevice: String?, samples: [Float]
     ) -> Bool {
         let pWords = parakeetText.split(separator: " ").count
         let windowSeconds = Double(Self.audioEvidenceWindowSize) / Self.audioEvidenceSampleRate
@@ -890,7 +892,10 @@ public class Transcriber {
                 let check = try self.transcribeWithCLI(audioURL: audioURL, prompt: prompt,
                                                        modelOverride: "large-v3-turbo", background: true)
                 let wWords = check.split(separator: " ").count
-                let gained = Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords)
+                let invented = WhisperHallucinationGuard.assess(
+                    whisperText: check, samples: samples, parakeetText: parakeetText).block
+                let gained = !invented
+                    && Self.sparseRescueAccepts(parakeetWordCount: pWords, whisperWordCount: wWords)
                 RecordingStore.saveAuxiliaryTranscription(text: check, kind: .whisper, for: audioURL)
                 SparseRescueGate.shared.recordSkipCheck(device: inputDevice, wouldHaveGained: gained)
                 DiagnosticLogger.shared.log(String(

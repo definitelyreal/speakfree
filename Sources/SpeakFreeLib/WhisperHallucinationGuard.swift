@@ -3,7 +3,7 @@ import Foundation
 
 /// Decides whether text from a Whisper rescue or Whisper engine is very likely invented.
 ///
-/// On 2026-10-04 (8:54 to 9:11pm PT, an airplane cabin) the empty-take Whisper rescue typed
+/// On 2026-10-04 (7:54 to 8:10pm PT, an airplane cabin) the empty-take Whisper rescue typed
 /// "*Dramatic music*", "Thank you.", "- Thank you.", "- I'm gonna use your space." and
 /// "- Do you have somebody to do this? - Yes." into Claude. Parakeet had heard nothing in every
 /// one of those takes. These are Whisper's well-known outputs on noise: stock video phrases,
@@ -92,10 +92,12 @@ public enum WhisperHallucinationGuard {
         let stock = isStockPhrase(stripped)
         let dash = hasDialogueDash(whisperText)
         guard let parakeetText else {
-            // Whisper is the chosen engine: no second opinion, so only a stock phrase on audio
-            // that leans toward noise is refused.
+            // Whisper is the chosen engine: no second opinion, so the audio has to carry it.
             if stock && noise.leansNoise {
                 return Verdict(block: true, reason: "stock phrase on noise", noise: noise)
+            }
+            if noise.isStatic || (dash && noise.isNoiseOnly) {
+                return Verdict(block: true, reason: noise.isStatic ? "static" : "subtitle dash on noise", noise: noise)
             }
             return Verdict(block: false, reason: nil, noise: noise)
         }
@@ -120,17 +122,27 @@ public enum WhisperHallucinationGuard {
 
     // MARK: - Text
 
-    private static let sentenceEnd = try! NSRegularExpression(pattern: #"[.!?…]+(?:\s+|$)|\n"#)
-    private static let leadingDash = try! NSRegularExpression(pattern: #"^\s*[-‐‑‒–—]+\s+(?=\S)"#)
+    /// Sentence or clause ends for the stock check: ". ", "! ", ", " and so on, or the end
+    /// ("Amara.org" stays whole; "Thank you, bye." is two stock clauses).
+    private static let sentenceEnd = try! NSRegularExpression(pattern: #"[.!?…,]+(?:\s+|$)|\n"#)
+    private static let leadingDash = try! NSRegularExpression(pattern: #"^\s*[-‐‑‒–—]+\s+(?=[\p{L}"'“‘])"#)
 
-    /// True when the text opens like a subtitle line: a dash, then a space, then words.
+    /// True when the text opens like a subtitle line: a dash, a space, then a word. Not a
+    /// minus sign ("- 5 degrees") and not a dictated list (two or more lines starting "- ").
     public static func hasDialogueDash(_ text: String) -> Bool {
-        leadingDash.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+        guard !isDashedList(text) else { return false }
+        return leadingDash.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }
 
-    /// Removes one leading subtitle dialogue dash ("- Thank you." -> "Thank you."). A dash
-    /// with no space after it ("-5 degrees") is kept.
+    private static func isDashedList(_ text: String) -> Bool {
+        text.components(separatedBy: "\n").filter { leadingDash.firstMatch(
+            in: $0, range: NSRange($0.startIndex..., in: $0)) != nil }.count >= 2
+    }
+
+    /// Removes one leading subtitle dialogue dash ("- Thank you." -> "Thank you."). A minus
+    /// sign ("-5", "- 5 degrees") and a dictated dashed list are kept.
     public static func stripDialogueDash(_ text: String) -> String {
+        guard !isDashedList(text) else { return text }
         let range = NSRange(text.startIndex..., in: text)
         return leadingDash.stringByReplacingMatches(in: text, range: range, withTemplate: "")
     }
@@ -155,7 +167,7 @@ public enum WhisperHallucinationGuard {
     static func isSoundTag(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        let tag = #"\[[^\[\]]*\]|\([^()]*\)|\*[^*]+\*|[♪♫♬♩]+[^♪♫♬♩]*[♪♫♬♩]*"#
+        let tag = #"\[[^\[\]]*\]|\([^()]*\)|\*[^*]+\*|[♪♫♬♩]+(?:[^♪♫♬♩]*[♪♫♬♩]+)?"#
         let range = NSRange(trimmed.startIndex..., in: trimmed)
         guard let regex = try? NSRegularExpression(pattern: tag),
               regex.firstMatch(in: trimmed, range: range) != nil else { return false }
@@ -168,7 +180,6 @@ public enum WhisperHallucinationGuard {
     public static func isStockPhrase(_ text: String) -> Bool {
         let body = stripDialogueDash(text)
         if isSoundTag(body) { return true }
-        // Sentence ends are punctuation followed by a space or the end ("Amara.org" stays whole).
         let marked = sentenceEnd.stringByReplacingMatches(
             in: body, range: NSRange(body.startIndex..., in: body), withTemplate: "\n")
         let sentences = marked.components(separatedBy: "\n")

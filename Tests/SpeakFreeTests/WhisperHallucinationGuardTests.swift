@@ -51,6 +51,17 @@ final class WhisperHallucinationGuardTextTests: XCTestCase {
         XCTAssertEqual(WhisperHallucinationGuard.stripDialogueDash("Plan A - or B"), "Plan A - or B")
         XCTAssertTrue(WhisperHallucinationGuard.hasDialogueDash("- Yes."))
         XCTAssertFalse(WhisperHallucinationGuard.hasDialogueDash("-5 degrees"))
+        XCTAssertEqual(WhisperHallucinationGuard.stripDialogueDash("- 5 degrees"), "- 5 degrees", "a minus sign")
+        XCTAssertEqual(WhisperHallucinationGuard.stripDialogueDash("- buy milk\n- eggs"), "- buy milk\n- eggs", "a list")
+        XCTAssertFalse(WhisperHallucinationGuard.hasDialogueDash("- buy milk\n- eggs"))
+    }
+
+    func testCommaJoinedStockAndMusicNotes() {
+        XCTAssertTrue(WhisperHallucinationGuard.isStockPhrase("Thank you, bye."))
+        XCTAssertTrue(WhisperHallucinationGuard.isStockPhrase("Thank you, thank you."))
+        XCTAssertFalse(WhisperHallucinationGuard.isStockPhrase("Thank you, Sam."))
+        XCTAssertFalse(WhisperHallucinationGuard.isStockPhrase("♪ This is my real sentence"))
+        XCTAssertTrue(WhisperHallucinationGuard.isStockPhrase("♪ Happy birthday ♪"))
     }
 }
 
@@ -103,6 +114,10 @@ final class WhisperHallucinationGuardAudioTests: XCTestCase {
         XCTAssertFalse(block("Thank you.", voice, nil), "real short dictation with clear speech")
         XCTAssertTrue(block("Thank you.", rumble, nil))
         XCTAssertFalse(block("I'm gonna use your space.", rumble, nil), "no stock phrase, no second opinion")
+        XCTAssertTrue(block("- I'm gonna use your space.", rumble, nil), "a subtitle dash on noise")
+        XCTAssertFalse(block("- Send it to Sam.", voice, nil))
+        let hiss = WhisperHallucinationGuard.noiseVerdict(SyntheticAudio.staticNoise(seconds: 4, rms: 0.06))
+        XCTAssertTrue(block("Okay so the plan is good.", hiss, nil), "anything read out of headset static")
         // Nothing to judge.
         XCTAssertFalse(block("", rumble, ""))
     }
@@ -199,6 +214,55 @@ final class WhisperHallucinationGuardTranscriberTests: XCTestCase {
         let dashed = try await run(SyntheticAudio.voice(seconds: 3, peak: 0.3),
                                    engine: FixedEngine("whisper", words: "- Send it to Sam."), whisper: nil, name: "recording-dash")
         XCTAssertEqual(dashed.text, "Send it to Sam.")
+    }
+
+    private func sparseTake(_ samples: [Float], parakeet: String, whisper: String, device: String)
+        async throws -> (text: String, statuses: [Transcriber.SecondOpinionStatus], sidecar: URL) {
+        let url = root.appendingPathComponent("recording-2026-10-04-sparse-\(UUID().uuidString).wav")
+        let writer = try WavWriter(url: url)
+        try writer.append(samples); writer.close()
+        let transcriber = Transcriber(engine: FixedEngine("parakeet-test", words: parakeet), modelID: "synthetic", language: "en")
+        transcriber.whisperBackupAvailableOverride = true
+        transcriber.cliTranscriptionOverride = { _ in whisper }
+        var statuses: [Transcriber.SecondOpinionStatus] = []
+        transcriber.onSecondOpinionStatus = { statuses.append($0) }
+        let text = try await transcriber.transcribe(audioURL: url, samples: samples, inputDevice: device)
+        return (text, statuses, url.deletingPathExtension().appendingPathExtension("whisper.txt"))
+    }
+
+    /// Clear audio, Parakeet one word, Whisper an invented outro: the synchronous sparse swap
+    /// is refused and the gate learns "no gain".
+    func testInventedSparseSwapIsRefusedAndDoesNotTrainTheGate() async throws {
+        let device = "test-sparse-\(UUID().uuidString)"
+        let invented = "Thank you for watching. Thank you."
+        let result = try await sparseTake(SyntheticAudio.voice(seconds: 8, peak: 0.3), parakeet: "Okay",
+                                          whisper: invented, device: device)
+        XCTAssertTrue(result.statuses.contains { if case .rechecking = $0 { return true }; return false },
+                      "the synchronous sparse rescue ran: \(result.statuses)")
+        XCTAssertNotEqual(result.text, invented)
+        XCTAssertFalse(result.text.contains("watching"))
+        XCTAssertFalse(result.statuses.contains(.likelyHallucination), "Parakeet had a word, so no miss is reported")
+        XCTAssertEqual(SparseRescueGate.shared.ratio(for: device), SparseRescueGate.initialRatio * SparseRescueGate.step,
+                       "a refused invention counts as no gain")
+        XCTAssertEqual(try? String(contentsOf: result.sidecar, encoding: .utf8), invented)
+    }
+
+    /// Flat cabin noise: the gate skips the synchronous rescue and checks in the background.
+    /// An invented background answer must not count as missed words.
+    func testInventedBackgroundSkipCheckDoesNotLowerTheGate() async throws {
+        let device = "test-skip-\(UUID().uuidString)"
+        let result = try await sparseTake(CabinAudio.rumble(seconds: 8), parakeet: "Okay",
+                                          whisper: "- I'm gonna use your space, do you have somebody to do this?",
+                                          device: device)
+        XCTAssertFalse(result.statuses.contains { if case .rechecking = $0 { return true }; return false })
+        let deadline = Date().addingTimeInterval(10)
+        while !FileManager.default.fileExists(atPath: result.sidecar.path), Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: result.sidecar.path), "the background check ran")
+        try await Task.sleep(nanoseconds: 100_000_000) // the gate is updated right after the sidecar
+        XCTAssertEqual(SparseRescueGate.shared.ratio(for: device), SparseRescueGate.initialRatio,
+                       "an invented check is not missed words, so the ratio is not lowered")
     }
 
     func testBlockedLogLineIsClassifiedForUpdates() {
