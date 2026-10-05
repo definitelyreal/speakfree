@@ -59,6 +59,61 @@ class TextInserter {
     /// developer's real clipboard (test-host-safety rule, PLAN.md P-1).
     var pasteboard: NSPasteboard = .general
 
+    // History's explicit publication boundary; dictation keeps its existing route/timers.
+    var pasteboardWriter = PasteboardWriter()
+    var layoutVKeyCodeProvider: (() -> CGKeyCode?)?
+    var postPasteShortcut: (() -> Void)?
+    private var deferredInsertionCount = 0
+    var hasDeferredInsertion: Bool { deferredInsertionCount > 0 }
+
+    /// Main has no consumption receipt. History waits until its existing restore
+    /// timer releases the current borrow; an external copy ends that ownership.
+    var ownsCurrentClipboard: Bool { pendingRestore?.writtenChangeCount == pasteboard.changeCount }
+    var isWaitingForClipboardConsumption: Bool { hasDeferredInsertion || ownsCurrentClipboard }
+
+    /// An explicit History copy becomes the clipboard. Preserve a recoverable
+    /// snapshot when possible, and never clear while a dictation still owns it.
+    @discardableResult
+    func replaceClipboardForUser(with items: [NSPasteboardItem]) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !items.isEmpty, !isWaitingForClipboardConsumption else { return false }
+        let before = pasteboard.changeCount
+        let saved = try? PasteboardAccess.snapshot(pasteboard, maximumBytes: Self.maxRestorableClipboardBytes)
+        let result = pasteboardWriter.replace(items, on: pasteboard, expectedGeneration: before)
+        guard result.generation != nil else {
+            if let saved { _ = pasteboardWriter.recover(saved, after: result, on: pasteboard) }
+            return false
+        }
+        pendingBackstop?.cancel()
+        pendingBackstop = nil
+        pendingRestore = nil
+        return true
+    }
+
+    /// Replay the selected clipboard verbatim after History validates its destination.
+    /// This does not enter dictation's text pipeline or remote insertion route.
+    @discardableResult
+    func pasteCurrentClipboard(expectedChangeCount: Int) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard pasteboard.changeCount == expectedChangeCount,
+              !hasDeferredInsertion, !isSecureInputActive(), !isRemoteDesktopFrontmost() else { return false }
+        if let postPasteShortcut { postPasteShortcut(); return true }
+        guard let key = (layoutVKeyCodeProvider ?? { self.vKeyCode() })(),
+              let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else { return false }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        down.setIntegerValueField(.eventSourceUserData, value: HistoryPastePolicy.syntheticPasteMarker)
+        up.setIntegerValueField(.eventSourceUserData, value: HistoryPastePolicy.syntheticPasteMarker)
+        down.post(tap: .cghidEventTap)
+        // Always release the synthetic key, even when main is busy.
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.05) {
+            up.post(tap: .cghidEventTap)
+        }
+        return true
+    }
+
     /// Seam for the focused-element AX lookup (`AXUIElementCopyAttributeValue` on the
     /// system-wide element). That call is a synchronous WindowServer IPC that can block
     /// FOREVER in a session without a window server — it hung the CI unit-tests job for
@@ -307,8 +362,10 @@ class TextInserter {
                     // Use non-blocking delay for focus to settle, then insert.
                     // Re-check secure input inside the closure: the system could enable it
                     // during the 150ms focus-settle window (e.g. user tabs into a password field).
+                    deferredInsertionCount += 1
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                         guard let self = self else { return }
+                        defer { self.deferredInsertionCount -= 1 }
                         if self.isSecureInputActive() {
                             DiagnosticLogger.shared.log("TextInserter: Secure Input became active during focus-settle — concealed clipboard fallback")
                             self.secureInputClipboardFallback(text)
@@ -1286,7 +1343,12 @@ class TextInserter {
     }
 
     private func restorePasteboard(_ pasteboard: NSPasteboard, items: [[(NSPasteboard.PasteboardType, Data)]]) {
-        pasteboard.clearContents()
+        let restoredGeneration = pasteboard.clearContents()
+        defer {
+            if pasteboard.changeCount == restoredGeneration {
+                PasteboardWriteReceipt.post(pasteboard, generation: restoredGeneration)
+            }
+        }
         guard !items.isEmpty else { return }
         let pasteboardItems = items.map { entries -> NSPasteboardItem in
             let item = NSPasteboardItem()
@@ -1315,8 +1377,10 @@ class TextInserter {
             }
             let bundleID = frontmostBundleIDProvider()
             let focusedElement = currentFocusedElement()
+            deferredInsertionCount += 1
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                 guard let self = self else { return }
+                defer { self.deferredInsertionCount -= 1 }
                 let focusUnchanged = focusedElement.map { expected in
                     self.currentFocusedElement().map { CFEqual(expected, $0) } ?? false
                 } ?? true

@@ -29,6 +29,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     // rebuild (which clears `menuItemTargets`) can't invalidate the actions of an open submenu.
     private var recentMenuTargets: [MenuItemTarget] = []
     private var recentMenuDelegate: RecentMenuDelegate?
+    var historyHandler: (() -> Void)?
     private var recentRecordingsSnapshot: [Recording] = []
     private var hasLoadedRecentRecordings = false
     private var recentRefreshInFlight = false
@@ -337,22 +338,17 @@ class StatusBarController: NSObject, NSMenuDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        // Recent Dictations submenu — populated LAZILY (M1). buildMenu() runs on every state flip;
-        // reading a transcript sidecar per recording here opened thousands of files per build on a
-        // large corpus. The submenu's own delegate reads sidecars only when it's actually opened,
-        // and only for the newest N (see populateRecentMenu).
-        let recentParent = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
-        let recentMenu = NSMenu()
-        // Placeholder so the parent shows its submenu-expand arrow before first population; replaced
-        // in menuNeedsUpdate.
-        recentMenu.addItem(NSMenuItem(title: "…", action: nil, keyEquivalent: ""))
-        let delegate = RecentMenuDelegate { [weak self] submenu in
-            self?.populateRecentMenu(submenu)
+        if let historyHandler {
+            let target = MenuItemTarget(handler: historyHandler)
+            menuItemTargets.append(target)
+            let history = NSMenuItem(title: "History…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            history.target = target
+            menu.addItem(history)
+        } else {
+            let recentParent = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
+            recentParent.submenu = makeSavedDictationsMenu()
+            menu.addItem(recentParent)
         }
-        recentMenu.delegate = delegate
-        recentMenuDelegate = delegate
-        recentParent.submenu = recentMenu
-        menu.addItem(recentParent)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -391,6 +387,19 @@ class StatusBarController: NSObject, NSMenuDelegate {
     /// M1: build the "Recent Dictations" submenu on demand (when it opens), reading transcript
     /// sidecars only for the newest 15 recordings — never for the whole corpus, and never on a plain
     /// `buildMenu()`.
+    func showSavedDictationsMenu() {
+        makeSavedDictationsMenu().popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    private func makeSavedDictationsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Saved Dictations")
+        menu.addItem(NSMenuItem(title: "…", action: nil, keyEquivalent: ""))
+        let delegate = RecentMenuDelegate { [weak self] submenu in self?.populateRecentMenu(submenu) }
+        menu.delegate = delegate
+        recentMenuDelegate = delegate
+        return menu
+    }
+
     private func populateRecentMenu(_ menu: NSMenu) {
         let renderStarted = CFAbsoluteTimeGetCurrent()
         defer {

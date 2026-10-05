@@ -17,6 +17,8 @@ class HotkeyManager {
     private var onAbort: (() -> Void)?
     private var onUserInteraction: ((CursorInteraction) -> Void)?
     private var modifierPressed = false
+    private var normalKeyPressed = false
+    private let shortcutRecordingGate: ShortcutRecordingGate
     /// Consecutive swallowed phantom fn-ups (failsafe cap 4; reset on honored release).
     private var phantomUpStreak = 0
     /// When fn was pressed — used to distinguish keyboard shortcuts (key within 300ms) from dictation
@@ -27,9 +29,17 @@ class HotkeyManager {
     /// Track tap creation retries after TCC propagation delay
     private var tapRetryCount = 0
 
-    init(keyCode: UInt16, modifiers: UInt64 = 0) {
+    init(keyCode: UInt16, modifiers: UInt64 = 0,
+         shortcutRecordingGate: ShortcutRecordingGate = .shared) {
         self.keyCode = keyCode
         self.requiredModifiers = modifiers
+        self.shortcutRecordingGate = shortcutRecordingGate
+    }
+
+    /// Synthetic-event tests set callbacks without installing taps or capturing audio.
+    func setKeyCallbacksForTesting(onKeyDown: @escaping () -> Void, onKeyUp: @escaping () -> Void) {
+        self.onKeyDown = onKeyDown
+        self.onKeyUp = onKeyUp
     }
 
     func start(
@@ -65,8 +75,9 @@ class HotkeyManager {
         // deliberate trade against the old behavior (a silently stranded one). At app
         // termination this async block never runs and the recorder is already stopped
         // (applicationWillTerminate), so this exists for teardown races, not quit.
-        if modifierPressed {
+        if modifierPressed || normalKeyPressed {
             modifierPressed = false
+            normalKeyPressed = false
             phantomUpStreak = 0
             DiagnosticLogger.shared.log("HotkeyManager: stopped while pressed — force-ending take")
             let keyUp = onKeyUp
@@ -100,9 +111,10 @@ class HotkeyManager {
     /// path — which is the right way round: a truncated take is recoverable, a stranded one
     /// silently eats a dictation.
     private func reconcilePressedState(_ reason: String) {
-        guard Self.shouldReconcile(modifierPressed: modifierPressed,
+        guard Self.shouldReconcile(modifierPressed: modifierPressed || normalKeyPressed,
                                    physicallyDown: physicallyDownRead(keyCode)) else { return }
         modifierPressed = false
+        normalKeyPressed = false
         phantomUpStreak = 0
         DiagnosticLogger.shared.log(
             "HotkeyManager: release missed during \(reason) — key is physically up, ending take")
@@ -122,7 +134,14 @@ class HotkeyManager {
     /// Test seam for the hardware key-state read that drives `reconcilePressedState`.
     /// Production default asks the HID system state; tests inject an answer so the
     /// outage-recovery paths can be exercised without holding a physical key.
-    var physicallyDownRead: (UInt16) -> Bool = { HotkeyManager.hotkeyIsPhysicallyDown(keyCode: $0) }
+    var physicallyDownRead: (UInt16) -> Bool = { key in
+        if key == KeyCodes.fnKeyCode || HotkeyManager.modifierFlagBit(for: key) != 0 {
+            return HotkeyManager.hotkeyIsPhysicallyDown(keyCode: key)
+        }
+        // Ordinary-key hotkeys now retain press ownership too. Their release can
+        // be missed during the same sleep/session/monitor gaps as a modifier.
+        return CGEventSource.keyState(.hidSystemState, key: CGKeyCode(key))
+    }
 
     /// What `ensureTapHealthy` had to do. `.none` means the listening mechanism was
     /// verified healthy — and, deliberately, that no reconcile runs: while the tap is
@@ -303,7 +322,7 @@ class HotkeyManager {
                     manager.reconcilePressedState("tap disable")
                     return Unmanaged.passUnretained(event)
                 }
-                return manager.handleCGEvent(proxy: proxy, type: type, event: event)
+                return manager.handleCGEvent(type: type, event: event)
             },
             userInfo: selfPtr.toOpaque()
         )
@@ -379,7 +398,9 @@ class HotkeyManager {
         runLoopSource = nil
     }
 
-    private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    func handleCGEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        let capture = shortcutRecordingGate.snapshot
+        if capture.isActive && !modifierPressed { return Unmanaged.passUnretained(event) }
         guard type == .flagsChanged else { return Unmanaged.passUnretained(event) }
         guard event.getIntegerValueField(.keyboardEventKeycode) == Int64(keyCode) else {
             // IMPORTANT: pass through ALL non-fn flagsChanged events unmodified.
@@ -416,6 +437,7 @@ class HotkeyManager {
             modifierPressed = true
             modifierPressedAt = mach_absolute_time()
             DispatchQueue.main.async {
+                guard self.shortcutRecordingGate.permitsDelivery(from: capture) else { return }
                 self.startKeyDownMonitor()
                 self.onKeyDown?()
             }
@@ -761,19 +783,27 @@ class HotkeyManager {
         physicallyDown && phantomUpStreak < 4
     }
 
-    private func handleNSEvent(_ event: NSEvent) {
+    func handleNSEvent(_ event: NSEvent) {
+        let capture = shortcutRecordingGate.snapshot
+        if capture.isActive && (event.type == .keyDown || !modifierPressed && event.type == .flagsChanged) { return }
         if event.type == .flagsChanged {
             handleModifierFlagsChanged(event)
             return
         }
         guard event.keyCode == keyCode else { return }
-        if requiredModifiers != 0 {
-            let currentMods = UInt64(event.modifierFlags.rawValue) & 0x00FF0000
-            guard currentMods & requiredModifiers == requiredModifiers else { return }
-        }
         if event.type == .keyDown {
+            guard !normalKeyPressed else { return }
+            if requiredModifiers != 0 {
+                let currentMods = UInt64(event.modifierFlags.rawValue) & 0x00FF0000
+                guard currentMods & requiredModifiers == requiredModifiers else { return }
+            }
+            normalKeyPressed = true
             onKeyDown?()
         } else if event.type == .keyUp {
+            // A press accepted before shortcut recording still owns its release, even when
+            // Command was released before the letter. Suppressed presses own no release.
+            guard normalKeyPressed else { return }
+            normalKeyPressed = false
             onKeyUp?()
         }
     }

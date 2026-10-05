@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import Foundation
 import Combine
@@ -7,6 +8,10 @@ import Combine
 public class SettingsViewModel: ObservableObject {
 
     // MARK: - Published properties
+
+    /// Presentation state only; navigating Preferences never saves configuration.
+    @Published var selectedSettingsTab = SettingsTab.dictation
+    @Published public var historySettings: HistorySettings
 
     @Published public var hotkeyKeyCode: UInt16
     @Published public var hotkeyModifiers: [String]
@@ -37,6 +42,9 @@ public class SettingsViewModel: ObservableObject {
     /// Called after save() writes the config to disk.
     /// AppDelegate can use this to reload the running configuration.
     public var onSave: (() -> Void)?
+
+    /// Clipboard-only saves reload History without rebuilding dictation or audio state.
+    public var onHistorySave: (() -> Void)?
 
     /// The config this view model was initialized from. toConfig() overlays the
     /// published fields onto this, so config keys the Settings UI doesn't manage
@@ -76,6 +84,7 @@ public class SettingsViewModel: ObservableObject {
         self.localAPIEnabled = c.localAPI?.value ?? false
         self.localAPIPort = c.localAPIPort ?? 5765
         self.saveRecordings = c.saveRecordings?.value ?? false
+        self.historySettings = c.history ?? HistorySettings()
     }
 
     /// Re-read config from disk and refresh baseConfig plus every published field.
@@ -111,6 +120,7 @@ public class SettingsViewModel: ObservableObject {
         self.localAPIEnabled = c.localAPI?.value ?? false
         self.localAPIPort = c.localAPIPort ?? 5765
         self.saveRecordings = c.saveRecordings?.value ?? false
+        self.historySettings = c.history ?? HistorySettings()
     }
 
     // MARK: - Conversion
@@ -147,6 +157,7 @@ public class SettingsViewModel: ObservableObject {
         config.localAPI = FlexBool(localAPIEnabled)
         config.localAPIPort = localAPIPort
         config.saveRecordings = FlexBool(saveRecordings)
+        config.history = historySettings
         return config
     }
 
@@ -158,6 +169,32 @@ public class SettingsViewModel: ObservableObject {
             baseConfig = config
             saveError = nil
             onSave?()
+        } catch {
+            saveError = "Settings could not be saved. Your previous saved settings are still active. \(error.localizedDescription)"
+        }
+    }
+
+    /// Clipboard preferences must not normalize recognition defaults or overwrite a mic
+    /// selection saved elsewhere while this window was open. Decode the current file directly
+    /// so an unrelated Config.load migration is not persisted by a clipboard-only choice.
+    public func saveHistorySettings() {
+        do {
+            var config = baseConfig
+            if FileManager.default.fileExists(atPath: Config.configFile.path) {
+                config = try JSONDecoder().decode(Config.self, from: Data(contentsOf: Config.configFile))
+            }
+            // Disk refreshes also publish historySettings. They are not a user edit and
+            // must not rewrite config.json or reload the app (nil means these defaults).
+            guard (config.history ?? HistorySettings()) != historySettings else {
+                baseConfig = config
+                saveError = nil
+                return
+            }
+            config.history = historySettings
+            try config.save()
+            baseConfig = config
+            saveError = nil
+            onHistorySave?()
         } catch {
             saveError = "Settings could not be saved. Your previous saved settings are still active. \(error.localizedDescription)"
         }

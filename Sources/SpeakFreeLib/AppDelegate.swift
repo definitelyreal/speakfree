@@ -8,6 +8,7 @@ import Sparkle
 
 public class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBar: StatusBarController!
+    var historyCoordinator: HistoryCoordinator?
     var hotkeyManager: HotkeyManager?
     var recorder: AudioRecorder!
     /// Transfers to the finalization task; closing the writer alone does not end file use.
@@ -43,6 +44,50 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Routes an Edit-mode fn-tap through the EditSessionController (Phase 2). nil = fall back to
     /// toggle semantics so keyMode:"edit" still dictates before the controller exists.
     var editHotkeyRouter: (() -> Void)?
+
+    // ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-05
+    private var historyTerminationInFlight = false
+    private var skipHistoryDrainOnce = false
+    private var scheduledRecentInsertions = 0
+
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let historyCoordinator else { return .terminateNow }
+        if historyTerminationInFlight { return .terminateLater }
+        guard !isPressed, postBufferTimer == nil,
+              statusBar?.state != .recording, statusBar?.state != .transcribing,
+              scheduledRecentInsertions == 0, secureInputRetryTimer == nil,
+              inserter?.hasDeferredInsertion != true else {
+            // A deferred SIGTERM may already have paused new recordings. Refusing
+            // this exit must leave the app usable instead of stranding that latch.
+            isTerminating = false
+            NSSound.beep()
+            return .terminateCancel
+        }
+        if skipHistoryDrainOnce { skipHistoryDrainOnce = false; return .terminateNow }
+        historyTerminationInFlight = true
+        isTerminating = true
+        historyCoordinator.prepareForTermination { [weak self, weak sender] result in
+            guard let self, let sender else { return }
+            self.historyTerminationInFlight = false
+            switch result {
+            case .success:
+                sender.reply(toApplicationShouldTerminate: true)
+            case .failure(let error):
+                self.isTerminating = false
+                sender.reply(toApplicationShouldTerminate: false)
+                let alert = NSAlert()
+                alert.messageText = "History could not be saved"
+                alert.informativeText = error.localizedDescription + " Your current history remains available in speakfree."
+                alert.addButton(withTitle: "Keep Open")
+                alert.addButton(withTitle: "Quit Without Saving")
+                if alert.runModal() == .alertSecondButtonReturn {
+                    self.skipHistoryDrainOnce = true
+                    ApplicationTermination.request(sender)
+                }
+            }
+        }
+        return .terminateLater
+    }
 
     // Clean up whisper model before exit to prevent ggml Metal assertion crash.
     // The crash happens in __cxa_finalize_ranges when ggml tries to free Metal
@@ -259,7 +304,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Continue Anyway")
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            NSApplication.shared.terminate(nil)
+            ApplicationTermination.request()
         }
         // If the user clicked "Continue Anyway" the app stays alive in the error state.
     }
@@ -360,7 +405,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         guard proceeded else {
             // Closing initial setup leaves no implicit answer. Quit gracefully so
             // the next launch asks again rather than leaving a non-recording app.
-            DispatchQueue.main.async { NSApp.terminate(nil) }
+            DispatchQueue.main.async { ApplicationTermination.request() }
             return false
         }
         config = Config.load()
@@ -571,6 +616,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             self.statusBar.reprocessHandler = { [weak self] url in
                 self?.reprocess(audioURL: url)
             }
+            self.historyCoordinator = HistoryCoordinator(config: self.config,
+                inserter: { [weak self] in self?.inserter },
+                isBusy: { [weak self] in
+                    guard let self else { return true }
+                    return self.isTerminating || self.isPressed || self.postBufferTimer != nil
+                        || self.scheduledRecentInsertions > 0 || self.secureInputRetryTimer != nil
+                        || self.statusBar?.state == .transcribing || (self.editSessionOpenProbe?() ?? false)
+                })
+            self.historyCoordinator?.showPreferences = { [weak self] in
+                self?.showSettings()
+                self?.settingsViewModel?.selectedSettingsTab = .clipboard
+            }
+            self.historyCoordinator?.showSavedDictations = { [weak self] in self?.statusBar.showSavedDictationsMenu() }
+            self.statusBar.historyHandler = { [weak self] in self?.historyCoordinator?.show() }
             self.statusBar.buildMenu()
         }
 
@@ -799,6 +858,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func reloadConfig() {
         if setupGate.deferReloadIfRunning() { return }
+        let historyConfig = Config.load()
+        if Thread.isMainThread { historyCoordinator?.configure(historyConfig) }
+        else { DispatchQueue.main.async { [weak self] in self?.historyCoordinator?.configure(historyConfig) } }
         // L1: never mutate live dictation state mid-utterance. If fn is held (a dictation is in
         // flight), defer the ENTIRE reload — not just the hotkey rebuild — because it also swaps
         // the transcriber (this utterance would finalize on the wrong engine) and flips
@@ -963,10 +1025,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler { [weak self] in
-            guard let self else { NSApp.terminate(nil); return }
+            guard let self else { ApplicationTermination.request(); return }
             let busy = self.statusBar.state == .recording || self.statusBar.state == .transcribing
             if !busy {
-                NSApp.terminate(nil)
+                ApplicationTermination.request()
                 return
             }
             DiagnosticLogger.shared.log("SIGTERM: dictation in flight — waiting to exit")
@@ -990,7 +1052,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let idleCount = busy ? 0 : consecutiveIdle + 1
         if idleCount >= 20 || Date() > deadline {
             DiagnosticLogger.shared.log("SIGTERM: quiet — exiting now")
-            NSApp.terminate(nil)
+            ApplicationTermination.request()
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -1197,6 +1259,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             settingsViewModel = SettingsViewModel()
             settingsViewModel?.onSave = { [weak self] in
                 self?.reloadConfig()
+            }
+            settingsViewModel?.onHistorySave = { [weak self] in
+                guard let self else { return }
+                let latest = Config.load()
+                self.config?.history = latest.history
+                self.historyCoordinator?.configure(latest)
             }
         }
         SettingsWindowController.show(viewModel: settingsViewModel!)
@@ -2225,6 +2293,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         if keepRecording {
                             self.statusBar.noteFinishedRecording(url: audioURL, text: text)
                         }
+                        self.historyCoordinator?.recordDictation(text, app: metaTargetApp,
+                            archiveID: keepRecording ? audioURL.deletingPathExtension().lastPathComponent : nil)
                         self.presentFinalizedText(
                             text,
                             sampleCount: samples.count,
@@ -2685,8 +2755,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // to the user's app before the AX read / synthetic paste, or the insert
         // targets the dying menu session. Clipboard remains the fallback whenever
         // insertion can't land (no focused element, focus lost, secure input).
+        scheduledRecentInsertions += 1
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let self = self else { return }
+            defer { self.scheduledRecentInsertions -= 1 }
             let copyFallback = {
                 let pasteboard = NSPasteboard.general
                 pasteboard.clearContents()
