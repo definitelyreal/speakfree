@@ -1,3 +1,4 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import Foundation
 import Combine
@@ -49,7 +50,7 @@ public class SettingsViewModel: ObservableObject {
     @Published public var compatibilityReportEnabled: Bool
     /// "This works" confirmations from Report a Problem (read-only here; that window saves them).
     @Published public private(set) var insertionConfirmations: [String: InsertionConfirmation]
-    /// "off", "tags", or "selectors" (Config.dictationTrace; nil on disk = "off").
+    /// DictationTrace.OutputMode raw value (nil on disk = "off").
     @Published public var dictationTrace: String
     @Published public var saveError: String?
 
@@ -105,7 +106,7 @@ public class SettingsViewModel: ObservableObject {
         self.insertionOverrides = c.effectiveInsertionOverrides
         self.compatibilityReportEnabled = c.compatibilityReport?.value ?? false
         self.insertionConfirmations = c.insertionConfirmations?.values ?? [:]
-        self.dictationTrace = TraceGate.encoding(forSetting: c.dictationTrace)?.rawValue ?? "off"
+        self.dictationTrace = DictationTrace.OutputMode.resolve(c.dictationTrace).rawValue
         whisperFallbackObserver = NotificationCenter.default.addObserver(
             forName: WhisperFallback.downloadStateChanged, object: nil, queue: .main
         ) { [weak self] _ in self?.whisperFallbackDownloadGeneration += 1 }
@@ -156,7 +157,7 @@ public class SettingsViewModel: ObservableObject {
         self.insertionOverrides = c.effectiveInsertionOverrides
         self.compatibilityReportEnabled = c.compatibilityReport?.value ?? false
         self.insertionConfirmations = c.insertionConfirmations?.values ?? [:]
-        self.dictationTrace = TraceGate.encoding(forSetting: c.dictationTrace)?.rawValue ?? "off"
+        self.dictationTrace = DictationTrace.OutputMode.resolve(c.dictationTrace).rawValue
     }
 
     /// The edit window's Options saved new Edit Mode settings: take them, so a Settings window
@@ -228,7 +229,7 @@ public class SettingsViewModel: ObservableObject {
         config.insertionOverrides = overrides.isEmpty && unknown.isEmpty
             ? nil : InsertionOverrideMap(overrides, unknown: unknown)
         config.compatibilityReport = FlexBool(compatibilityReportEnabled)
-        config.dictationTrace = TraceGate.encoding(forSetting: dictationTrace)?.rawValue
+        config.dictationTrace = DictationTrace.OutputMode.resolve(dictationTrace).storedValue
         return config
     }
 
@@ -245,10 +246,28 @@ public class SettingsViewModel: ObservableObject {
 
     /// Save the current settings to disk and notify the callback.
     public func save() {
-        let config = toConfig()
+        persist(explicitTraceChoice: nil)
+    }
+
+    private func persist(explicitTraceChoice: DictationTrace.OutputMode?) {
+        var config = toConfig()
+        let current = Config.loadValidWithoutCreating()
+        // A menu/CLI change owns an untouched field. Only a deliberate trace edit may
+        // replace it; selecting the currently displayed option also counts as deliberate.
+        if let explicitTraceChoice {
+            config.dictationTrace = explicitTraceChoice.storedValue
+        } else if dictationTrace == DictationTrace.OutputMode.resolve(baseConfig.dictationTrace).rawValue {
+            config.dictationTrace = current?.dictationTrace
+        }
+        // The general Settings UI never edits the trace allowlists.
+        if let current {
+            config.dictationTraceApps = current.dictationTraceApps
+            config.dictationTraceWebHosts = current.dictationTraceWebHosts
+        }
         do {
             try config.save()
             baseConfig = config
+            dictationTrace = DictationTrace.OutputMode.resolve(config.dictationTrace).rawValue
             saveError = nil
             onSave?()
         } catch {
@@ -265,6 +284,17 @@ public class SettingsViewModel: ObservableObject {
     }
 
     // MARK: - Punctuation modes per engine
+
+    /// A menu change refreshes this control without triggering a broad Settings save.
+    func applyDictationTraceSetting(_ setting: String?) {
+        baseConfig.dictationTrace = setting
+        dictationTrace = DictationTrace.OutputMode.resolve(setting).rawValue
+    }
+
+    func selectDictationTrace(_ setting: String) {
+        dictationTrace = DictationTrace.OutputMode.resolve(setting).rawValue
+        persist(explicitTraceChoice: .resolve(setting))
+    }
 
     /// The punctuation modes the picker offers for a given engine, in display order.
     ///

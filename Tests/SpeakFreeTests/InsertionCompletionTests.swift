@@ -1,3 +1,4 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b/agent:code_elegance_audit · 2026-10-01
 // Named pasteboards, synthetic AX identities, and injected delivery only. No live windows or input.
 import AppKit
@@ -67,6 +68,43 @@ final class InsertionCompletionTests: XCTestCase {
         XCTAssertEqual(legacyFailures, 1)
         XCTAssertEqual(outcomes, [.deliveryFailed])
         XCTAssertEqual(s.pasteboard.string(forType: .string), "original")
+    }
+
+    func testTraceOnlyAndExpandedSecureFallbackCopyFinishedText() {
+        let s = subject()
+        s.isSecureInputActive = { true }
+        let payload = DictationTrace.Payload.make(engine: "whisper", heard: "raw kama",
+                                                  unsure: [.init(word: "kama", score: 0.2)])
+        for mode: DictationTrace.OutputMode in [.tagsOnly, .expanded, .tags] {
+            let output = DictationTrace.output(payload, mode: mode, text: "Finished comma.")
+            var notified: String?
+            s.onSecureInputFallback = { text, _ in notified = text }
+            XCTAssertFalse(s.insert(text: output, recoveryText: "Finished comma.", completion: nil))
+            XCTAssertEqual(s.pasteboard.string(forType: .string), "Finished comma.")
+            XCTAssertEqual(notified, "Finished comma.")
+        }
+    }
+
+    func testDeferredTraceFallbackKeepsItsOwnFinishedTextAfterNewerInsertion() {
+        let s = subject()
+        let target = AXUIElementCreateApplication(999_991)
+        s.refocusElement = { _ in true }
+        var secure = false
+        s.isSecureInputActive = { secure }
+        let payload = DictationTrace.Payload.make(engine: "whisper", heard: "first raw kama", unsure: [])
+        let onlyDot = DictationTrace.output(payload, mode: .tagsOnly, text: "First finished comma.")
+        let complete = expectation(description: "first trace-only fallback")
+        XCTAssertTrue(s.insert(text: onlyDot, refocusing: target, recoveryText: "First finished comma.", completion: {
+            XCTAssertEqual($0, .secureInput)
+            complete.fulfill()
+        }))
+        secure = true
+        XCTAssertFalse(s.insert(text: "Second finished.", recoveryText: "Second finished.", completion: nil))
+        XCTAssertEqual(s.pasteboard.string(forType: .string), "Second finished.")
+
+        wait(for: [complete], timeout: 2)
+
+        XCTAssertEqual(s.pasteboard.string(forType: .string), "First finished comma.")
     }
 
     func testDeferredPublicationFailureCompletesAfterRefocusOwnershipEnds() {

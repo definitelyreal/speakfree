@@ -1,3 +1,4 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 // ai-processed:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 import AppKit
@@ -1564,16 +1565,18 @@ struct DictationSettingsView: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text("Dictation Trace").frame(width: labelWidth, alignment: .leading)
             VStack(alignment: .leading, spacing: 5) {
-                Picker("Dictation Trace", selection: $viewModel.dictationTrace) {
-                    Text("Off").tag("off")
-                    Text("Invisible tags").tag("tags")
-                    Text("Invisible dot selectors").tag("selectors")
+                Picker("Dictation Trace", selection: Binding(
+                    get: { viewModel.dictationTrace }, set: { viewModel.selectDictationTrace($0) })) {
+                    ForEach(DictationTrace.OutputMode.allCases.filter {
+                        !$0.testingOnly || DictationTrace.testingAvailable
+                    }, id: \.rawValue) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .fixedSize()
-                .onChange(of: viewModel.dictationTrace) { _ in viewModel.save() }
-                Text("Experimental: after each dictation into Claude, Codex, VS Code, Cursor, terminals, or Claude and ChatGPT in a browser, adds a dot carrying what the speech engine heard, so an AI can recover mis-heard words. Your raw words go wherever you dictate, including code files, commit messages, and shell commands in those apps; never added in chat or mail apps or password fields.")
+                Text("Off by default. Includes this take’s raw engine words and uncertain words. Expanded text and dot-only are restricted to AI chat apps and approved browser pages; apps that may contain a terminal get finished text instead. Expanded text is the readable baseline. TAG modes may be stripped or unreadable to an AI; selectors are a fragile legacy option. If blocked or copied for recovery, the finished text stays readable. The older Text + TAG mode also reaches listed editors and terminals, including code and shell commands. Password fields and unlisted apps get no trace.")
                     .font(.footnote).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }.frame(maxWidth: .infinity, alignment: .leading)

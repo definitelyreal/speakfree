@@ -1,3 +1,4 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 import Foundation
 
@@ -115,7 +116,8 @@ public struct Config: Codable {
     }
     // Dictation trace (2026-09-24, off by default). "tags" or "selectors" appends an invisible
     // record of what the speech engine heard after each dictation, only in listed apps; nil or
-    // "off" = never. See DictationTrace / TraceGate and docs/DICTATION-TRACE.md.
+    // "off" = never. Testing builds also accept "tags-only" and "expanded" presentation.
+    // See DictationTrace / TraceGate and docs/DICTATION-TRACE.md.
     public var dictationTrace: String?
     /// Bundle ids that get a trace. nil = TraceGate.defaultApps. Listing a chat or mail app
     /// here is the only way it can ever get one.
@@ -341,6 +343,14 @@ public struct Config: Codable {
         }
         migrateLegacyMaxRecordings(&config)
         return (config, true)
+    }
+
+    /// A read-only refresh must distinguish a valid config from fallback defaults.
+    static func loadValidWithoutCreating() -> Config? {
+        guard let data = try? Data(contentsOf: configFile),
+              var config = try? JSONDecoder().decode(Config.self, from: data) else { return nil }
+        migrateLegacyMaxRecordings(&config)
+        return config
     }
 
     public static func load() -> Config {

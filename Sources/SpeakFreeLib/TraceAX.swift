@@ -1,14 +1,32 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · session:feat-dictation-trace · 2026-09-24
 import ApplicationServices
 import Foundation
 
-/// The dictation-trace settings, snapshotted from Config on main before finalize goes async.
+/// The dictation-trace settings, snapshotted before this take's asynchronous inference starts.
 struct TraceSettings {
     let setting: String?
     let apps: [String]?
     let hosts: [String]?
+    let testingAvailable: Bool
 
-    var isOn: Bool { TraceGate.encoding(forSetting: setting) != nil }
+    init(setting: String?, apps: [String]?, hosts: [String]?,
+         testingAvailable: Bool = DictationTrace.testingAvailable) {
+        self.setting = setting
+        self.apps = apps
+        self.hosts = hosts
+        self.testingAvailable = testingAvailable
+    }
+
+    init(config: Config, testingAvailable: Bool = DictationTrace.testingAvailable) {
+        self.init(setting: config.dictationTrace, apps: config.dictationTraceApps,
+                  hosts: config.dictationTraceWebHosts, testingAvailable: testingAvailable)
+    }
+
+    var isOn: Bool {
+        let mode = DictationTrace.OutputMode.resolve(setting)
+        return mode != .off && (!mode.testingOnly || testingAvailable)
+    }
 }
 
 /// A trace ready to append, plus the facts the final gate needs. Built off main after
@@ -19,6 +37,16 @@ struct PendingTrace {
     let targetBundleID: String?
     let focusedFieldIsSecure: Bool
     let webHost: String?
+
+    /// Capability detection cannot establish safety when the frontmost bundle is unreadable
+    /// or no longer matches its process identity. New output experiments fail closed.
+    static func experimentalTerminalRisk(_ profile: TextInserter.FrontmostProfile) -> Bool {
+        guard let bundleID = profile.bundleID, let bundleURL = profile.bundleURL,
+              let info = AppCompatibility.infoDictionary(at: bundleURL),
+              let plistID = info["CFBundleIdentifier"] as? String,
+              plistID.caseInsensitiveCompare(bundleID) == .orderedSame else { return true }
+        return profile.typedLineBreaksUnsafe
+    }
 
     static func prepare(settings: TraceSettings, engine: String, heard: String,
                         unsure: [DictationTrace.WordScore], targetBundleID: String?,
@@ -39,12 +67,20 @@ struct PendingTrace {
                             focusedFieldIsSecure: secure, webHost: host)
     }
 
-    func decide(frontmostBundleID: String?, secureInputActive: Bool) -> TraceGate.Decision {
+    func decide(frontmostBundleID: String?, secureInputActive: Bool,
+                mayHostTerminal: Bool = false) -> TraceGate.Decision {
         TraceGate.decide(.init(
             setting: settings.setting, userApps: settings.apps, userWebHosts: settings.hosts,
             targetBundleID: targetBundleID, frontmostBundleID: frontmostBundleID,
             secureInputActive: secureInputActive, focusedFieldIsSecure: focusedFieldIsSecure,
-            webHost: webHost))
+            webHost: webHost, testingAvailable: settings.testingAvailable,
+            mayHostTerminal: mayHostTerminal))
+    }
+
+    /// Fail closed to the finished text, including dot-only mode when any gate rejects the trace.
+    func insertionText(_ text: String, decision: TraceGate.Decision) -> String {
+        guard case .append(let mode) = decision else { return text }
+        return DictationTrace.output(payload, mode: mode, text: text)
     }
 }
 

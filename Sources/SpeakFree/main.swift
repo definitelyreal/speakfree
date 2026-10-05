@@ -1,3 +1,4 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · session:01a09da8-0424-7b71-a705-10868c5f46e4 · 2026-09-13
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import AppKit
@@ -39,7 +40,7 @@ func printUsage() {
         speakfree match [--days N] [--clipboard]
                                      Find the saved dictations that text came from, with what
                                      the engine heard (only if saving is turned on)
-        speakfree set-trace <off|tags|selectors>
+        speakfree set-trace <off|tags|tags-only|expanded|selectors>
                                      Append an invisible dictation trace in AI apps (off by default)
         speakfree audio-check        Check microphone handover for 12 seconds (saves no audio)
         speakfree compat scan [--tsv]  List installed apps and how dictation reaches each (read-only)
@@ -227,7 +228,7 @@ func cmdStatus() {
     }
     let toggleMode = config.toggleMode?.value ?? false
     print("Toggle:      \(toggleMode ? "on (press to start/stop)" : "off (hold to talk)")")
-    print("Trace:       \(TraceGate.encoding(forSetting: config.dictationTrace)?.rawValue ?? "off")")
+    print("Trace:       \(DictationTrace.OutputMode.resolve(config.dictationTrace).rawValue)")
 }
 
 /// Run an agent command so that stdout carries exactly one JSON object: anything the
@@ -277,9 +278,13 @@ func readAgentInput(forceClipboard: Bool) -> String? {
 }
 
 func cmdSetTrace(_ value: String) {
-    let valid = ["off", "tags", "selectors"]
+    let valid = DictationTrace.OutputMode.allCases.map(\.rawValue)
     guard valid.contains(value) else {
-        print("Usage: speakfree set-trace <off|tags|selectors>")
+        print("Usage: speakfree set-trace <off|tags|tags-only|expanded|selectors>")
+        exit(1)
+    }
+    if ["tags-only", "expanded"].contains(value), !DictationTrace.testingAvailable {
+        print("This trace output is available only in alpha or development builds.")
         exit(1)
     }
     var config = Config.load()
@@ -343,7 +348,7 @@ case "match":
     runAgentCommand { AgentCLI.match(arguments: rest, input: input) }
 case "set-trace":
     guard args.count > 2 else {
-        print("Usage: speakfree set-trace <off|tags|selectors>")
+        print("Usage: speakfree set-trace <off|tags|tags-only|expanded|selectors>")
         exit(1)
     }
     cmdSetTrace(args[2])

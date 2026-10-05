@@ -1,3 +1,4 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · session:feat-dictation-trace · 2026-09-24
 import FluidAudio
 import XCTest
@@ -62,7 +63,7 @@ final class DictationTraceTests: XCTestCase {
         XCTAssertTrue(scalars.dropFirst(2).allSatisfy {
             (0xFE00...0xFE0F).contains($0.value) || (0xE0100...0xE01EF).contains($0.value)
         })
-        // The whole suffix renders as one visible character after the space.
+        // Swift groups these scalars after the anchor. This does not prove rendering invisibility.
         XCTAssertEqual(s.count, 2)
     }
 

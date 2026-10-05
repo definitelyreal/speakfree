@@ -1,3 +1,4 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 // ai-processed:unverified · session:unknown/agent:audio_file_integrity · 2026-10-02
@@ -250,7 +251,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastInsertionTail: String?
 
     /// The remembered cursor tail after an insertion: what was before the cursor plus what
-    /// `TextInserter.insert` actually inserted (it drops a trailing line break in every app).
+    /// the finished dictation, excluding trace decoration (the inserter drops trailing line breaks).
     static func insertionTail(contextBefore: String?, inserted: String) -> String {
         String(((contextBefore ?? "") + AppCompatibility.trimmingTrailingLineBreaks(inserted))
             .suffix(500))
@@ -1756,7 +1757,33 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.reloadConfig()
             }
         }
+        refreshTraceOutputFromDisk()
         SettingsWindowController.show(viewModel: settingsViewModel!)
+    }
+
+    /// Explicit user-open boundary for external writers such as `set-trace`; no menu-rebuild polling.
+    func refreshTraceOutputFromDisk() {
+        let current = Config.loadWithoutCreating().config
+        config?.dictationTrace = current.dictationTrace
+        settingsViewModel?.applyDictationTraceSetting(current.dictationTrace)
+    }
+
+    /// Only this preference changes; a menu click must not rebuild the live recorder or hotkey.
+    func selectTraceOutput(_ mode: DictationTrace.OutputMode) {
+        guard DictationTrace.testingAvailable else { return }
+        var current = Config.load()
+        current.dictationTrace = mode.storedValue
+        do {
+            try current.save()
+            config?.dictationTrace = current.dictationTrace
+            settingsViewModel?.applyDictationTraceSetting(current.dictationTrace)
+            statusBar.buildMenu()
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Dictation trace could not be saved"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
     }
 
     /// Present the recordings notice. Main-only. A dismissal without a
@@ -2173,7 +2200,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if cursorIndex > 0, let before = TextInserter.textBeforeUTF16Offset(fullText, cursorIndex) {
                 // Take last 500 chars to stay within whisper's prompt limits
-                return String(before.suffix(500))
+                return DictationTrace.cursorContext(before)
             }
         }
 
@@ -2809,11 +2836,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             focusCapture.consume(waitingUpTo: 0.5) ?? (nil, nil, nil)
         // No additional wait for retry-only identity. Unknown means manual recovery.
         let retryDestination = retryCapture?.consume(waitingUpTo: 0)
-        // A previous dictation's trace (dot + invisible payload) is not text the user wrote:
-        // strip it so capitalization and spacing see "Hello there." rather than a middle dot.
-        let capturedInputText = capturedRawInputText.map { raw in
-            DictationTrace.mayContainTrace(raw) ? DictationTrace.strip(raw) : raw
-        }
+        // A previous trace is not authored context: remove invisible and validated expanded
+        // payloads so capitalization, spacing, and recognition hints see the finished words.
+        let capturedInputText = capturedRawInputText.map(DictationTrace.cursorContext)
         let capturedScreenText = screenContextText
         screenContextText = nil
         screenCaptureGeneration = UUID()  // invalidate any late-arriving OCR
@@ -2901,6 +2926,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         Task(priority: .userInitiated) { [weak self, activityLease, latency] in
             defer { activityLease?.release() }
             guard let self = self else { return }
+            // One immutable choice before inference starts. Read on the async path so CLI
+            // changes apply to the next take without adding a config read to key release on main.
+            let traceSettings = TraceSettings(config: Config.load())
             var timing = latency
             do {
                 // Build Whisper prompt + run post-processing through the shared
@@ -3044,11 +3072,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         persist()
                     }
                     // Dictation trace: build the payload and read the focused page / field
-                    // off main (AX), then decide for real on main at insertion time. Settings come
-                    // from the config just read from disk, so `speakfree set-trace` applies at once.
-                    let traceSettings = TraceSettings(setting: retentionConfig.dictationTrace,
-                                                      apps: retentionConfig.dictationTraceApps,
-                                                      hosts: retentionConfig.dictationTraceWebHosts)
+                    // off main (AX), then decide for real on main at insertion time. The output
+                    // preference was snapshotted for this take before transcription began.
                     let trace = traceSettings.isOn ? PendingTrace.prepare(
                         settings: traceSettings, engine: takeRecorder.engine ?? metaEngine, heard: primaryRaw,
                         unsure: takeRecorder.unsureWords,
@@ -3186,14 +3211,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             var insertText = plainInsertText
             if let trace {
                 // Final gate on main, at insertion time: same app still frontmost, no Secure Input.
-                switch trace.decide(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-                                    secureInputActive: inserter.isSecureInputActive()) {
-                case .append(let encoding):
+                // Some AI/editor apps ship a terminal pane. Their focused pane is not known,
+                // so neither multiline raw output nor dot-only replacement is safe there.
+                let experimental = DictationTrace.OutputMode.resolve(trace.settings.setting).testingOnly
+                let profile = experimental ? inserter.frontmostProfile() : nil
+                let terminalRisk = profile.map(PendingTrace.experimentalTerminalRisk) ?? false
+                let decision = trace.decide(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                                            secureInputActive: inserter.isSecureInputActive(),
+                                            mayHostTerminal: terminalRisk)
+                switch decision {
+                case .append(let mode):
                     insertText = FinalizePipeline.composeInsertText(
-                        DictationTrace.append(trace.payload, encoding: encoding, to: text),
+                        trace.insertionText(text, decision: decision),
                         prependSpace: prependSpace)
                     DiagnosticLogger.shared.log(
-                        "DictationTrace: appended (\(encoding.rawValue), \(insertText.unicodeScalars.count - plainInsertText.unicodeScalars.count) scalars)")
+                        "DictationTrace: output (\(mode.rawValue), \(insertText.unicodeScalars.count) scalars)")
                 case .skip(let reason):
                     DiagnosticLogger.shared.log("DictationTrace: skipped (\(reason))")
                 }
@@ -3228,6 +3260,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 },
                 handlesRecovery: true,
                 destination: .recorded(targetPID),
+                recoveryText: plainInsertText,
                 completion: { [weak self] outcome in
                     guard let self else { return }
                     // A queued refocus/remote request is not its eventual result. Stamp
@@ -3248,7 +3281,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     // A delayed completion must not overwrite a newer take's cursor
                     // context or its recording/transcribing status.
-                    self.handleConcealedInsertionOutcome(outcome, text: DictationTrace.strip(insertText),
+                    self.handleConcealedInsertionOutcome(outcome, text: plainInsertText,
                         destination: retryDestination, takeToken: takeToken)
                     guard self.takePresentation.owns(takeToken) else { return }
                     if submitted,

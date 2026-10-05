@@ -1,3 +1,4 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · session:01a0a336-fe39-7870-bdab-33c820f98955 · 2026-09-16
 import AppKit
 import Foundation
@@ -139,14 +140,16 @@ class TextInserter {
         let field: AXUIElement?
         let handlesRecovery: Bool
         let requiresKnownPID: Bool
+        let recoveryText: String?
         var deferred = false
         private(set) var outcome: InsertionOutcome?
         private var completion: ((InsertionOutcome) -> Void)?
 
         init(foregroundPID: pid_t?, fieldOwnerPID: pid_t?, field: AXUIElement?, handlesRecovery: Bool,
-             destination: DestinationConstraint,
+             destination: DestinationConstraint, recoveryText: String?,
              completion: ((InsertionOutcome) -> Void)?) {
             self.fieldOwnerPID = fieldOwnerPID
+            self.recoveryText = recoveryText
             switch destination {
             case .current:
                 self.expectedForegroundPID = fieldOwnerPID ?? foregroundPID
@@ -565,12 +568,16 @@ class TextInserter {
     func insert(text original: String, refocusing element: AXUIElement? = nil,
                 onFocusLost: (() -> Void)? = nil, handlesRecovery: Bool = false,
                 destination: DestinationConstraint = .current,
+                recoveryText: String? = nil,
                 completion: ((InsertionOutcome) -> Void)?) -> Bool {
         let foregroundPID = frontmostPIDProvider()
         let fieldOwnerPID = element.flatMap { elementPIDProvider($0) }
         let attempt = InsertionAttempt(foregroundPID: foregroundPID, fieldOwnerPID: fieldOwnerPID,
                                        field: element, handlesRecovery: handlesRecovery,
-                                       destination: destination, completion: completion)
+                                       destination: destination,
+                                       recoveryText: recoveryText.map {
+                                           Self.withoutTrace(AppCompatibility.trimmingTrailingLineBreaks($0))
+                                       }, completion: completion)
         let previous = activeInsertionAttempt
         activeInsertionAttempt = attempt
         defer { activeInsertionAttempt = previous }
@@ -787,7 +794,7 @@ class TextInserter {
         // Edit handles this call's recovery in its own draft. Leave AppDelegate's
         // normal-dictation callback installed for its next call, without auto-retrying Edit.
         guard activeInsertionAttempt?.handlesRecovery != true else { return }
-        onSecureInputFallback?(text, reason)
+        onSecureInputFallback?(readableRecoveryText(text), reason)
     }
 
     private static func queryFocusedElement() -> AXUIElement? {
@@ -971,7 +978,7 @@ class TextInserter {
                                        lateFor profile: FrontmostProfile? = nil,
                                        attempt: InsertionAttempt? = nil) {
         // The dialog shows and copies the dictation for pasting anywhere: no trace.
-        let text = Self.withoutTrace(tracedText)
+        let text = readableRecoveryText(tracedText, attempt: attempt)
         if let profile {
             recordDirect(.deliveryFailed, multiLine: AppCompatibility.hasLineBreak(text), profile: profile)
         } else {
@@ -2000,7 +2007,7 @@ class TextInserter {
         let before = pasteboard.changeCount
         let saved = pendingRestore?.writtenChangeCount == before ? pendingRestore?.savedItems
             : try? captureClipboardSnapshot(pasteboard, Self.maxRestorableClipboardBytes)
-        let publication = Self.writeTransientString(Self.withoutTrace(text), to: pasteboard,
+        let publication = Self.writeTransientString(readableRecoveryText(text), to: pasteboard,
             writer: pasteboardWriter, expectedGeneration: before)
         guard let written = publication.generation else {
             let recovery: String
@@ -2023,6 +2030,12 @@ class TextInserter {
     /// `text` with any dictation trace removed (cheap no-op for ordinary text).
     static func withoutTrace(_ text: String) -> String {
         DictationTrace.mayContainTrace(text) ? DictationTrace.strip(text) : text
+    }
+
+    /// Dot-only output cannot reconstruct the finished dictation by stripping.
+    /// The attempt carries its own original text through deferred focus and remote-paste work.
+    private func readableRecoveryText(_ text: String, attempt: InsertionAttempt? = nil) -> String {
+        (attempt ?? activeInsertionAttempt)?.recoveryText ?? Self.withoutTrace(text)
     }
 
     /// How long dictated text may sit on the clipboard after a Secure-Input fallback before it

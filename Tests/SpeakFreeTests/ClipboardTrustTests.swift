@@ -1,3 +1,4 @@
+// Scratch config guard: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · Claude · 2026-09-25 · feat/fast-clipboard
 //
 // Clipboard trust (table + canary) and the Accessibility outcome check. Every test uses a
@@ -428,8 +429,14 @@ final class ClipboardTrustTests: XCTestCase {
     }
 
     func test_sharedStore_underTest_neverResolvesTheRealConfigDir() {
-        if Config.configDirOverride == nil {
+        if Config.isResolvingRealDirUnderTest {
             XCTAssertNil(ClipboardTrustStore.defaultFileURL())
+        } else {
+            // Both the in-process override and SPEAKFREE_CONFIG_DIR explicitly route
+            // tests to scratch storage. An environment override must not be mistaken
+            // for a lookup of the developer's real configuration.
+            XCTAssertEqual(ClipboardTrustStore.defaultFileURL(),
+                           Config.configDir.appendingPathComponent("clipboard-trust.json"))
         }
     }
 

@@ -1,3 +1,4 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · session:6a1b0646-1bc6-4f76-9662-5e5a8f92c97c · 2026-08-11
 import AppKit
 
@@ -121,6 +122,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     // Called before the menu is displayed — rebuild items so state changes are reflected
     func menuNeedsUpdate(_ menu: NSMenu) {
+        (NSApplication.shared.delegate as? AppDelegate)?.refreshTraceOutputFromDisk()
         rebuildMenuItems(menu)
     }
 
@@ -252,6 +254,15 @@ class StatusBarController: NSObject, NSMenuDelegate {
         settingsItem.target = settingsTarget
         settingsItem.keyEquivalentModifierMask = .command
         menu.addItem(settingsItem)
+
+        if let delegate = NSApplication.shared.delegate as? AppDelegate,
+           let traceMenu = TraceOutputMenu.make(
+            selected: .resolve(delegate.config?.dictationTrace),
+            testingAvailable: DictationTrace.testingAvailable,
+            select: { [weak delegate] in delegate?.selectTraceOutput($0) }) {
+            menu.addItem(traceMenu.item)
+            menuItemTargets.append(contentsOf: traceMenu.targets)
+        }
 
         menu.addItem(NSMenuItem.separator())
 

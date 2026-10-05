@@ -1,3 +1,4 @@
+<!-- ai-suggestion:unverified | session:unknown | date:2026-10-04 | asof:2026-10-04 -->
 # Dictation trace: let an AI see what the speech engine heard
 
 When you dictate a prompt to an AI assistant, the assistant only sees speakfree's finished
@@ -23,14 +24,55 @@ and is not included.
 
 ## 1. The dictation trace
 
-Off by default. Turn it on in **Settings, Advanced, Dictation Trace**, or from Terminal:
+Off by default. Alpha and development builds have a compact **Dictation Trace (Testing)**
+menu below Settings, with four choices:
+
+| Choice | What is inserted after the same target and privacy checks |
+|---|---|
+| Off | Finished dictation only |
+| Text + · trace (TAG) | Finished dictation, then a dot carrying this take's payload |
+| · trace only (TAG) | The dot and payload, omitting the finished dictation |
+| Expanded text + raw trace (recommended) | Finished dictation, then the same payload as readable JSON |
+
+Expanded text is the readable baseline for comparison. The TAG modes remain experiments:
+text fields or model providers may strip them, and surviving characters do not establish
+that an AI can read them. One visible dot contains many Unicode scalars, not a compressed
+single-character summary. It carries the raw words themselves and the available uncertain
+words from this take, subject to the existing caps below; it is not an ID or archive pointer.
+
+**The two new modes are limited to recognized AI chat apps and approved browser pages.**
+Terminals and editors are excluded even if named in a custom app list. If an AI app is
+classified as containing a terminal pane, or its bundle identity cannot be read and matched,
+these modes are blocked there too: speakfree
+cannot establish which pane has focus. A blocked experiment inserts the finished text.
+This keeps added multiline raw text from executing shell input, and keeps dot-only from
+replacing a command. The older Text + TAG and selectors modes retain their existing targets
+and the editor/terminal limitations below.
+
+Each take snapshots the selected mode and app/host lists before transcription starts. A
+change while that transcription runs applies to later takes. If any gate blocks dot-only,
+the finished text is inserted normally. Copy/recovery paths retain the original readable
+finished text in every mode. Saved history and corpus sidecars remain the ordinary finished
+and raw dictation, without this output decoration. Choosing Off reverses the experiment.
+The two new modes are also blocked at runtime outside alpha/development builds.
+Opening the status menu or Settings refreshes the trace selection from disk. An unrelated
+Settings save preserves a later CLI mode or allowlist change; only an intentional trace
+selection replaces that mode.
+If the config cannot be read or parsed, an unrelated save keeps the last loaded app/host
+lists and turns trace off rather than re-enabling a stale selection.
+For later dictations, each exact expanded header plus valid one-line trace JSON is removed
+from cursor context, preserving surrounding finished and user text. Capitalization and recognition hints use the finished words;
+malformed or lookalike blocks remain ordinary text. The remembered context also uses the
+original finished words, including in dot-only mode.
+
+The matching control is in **Settings, Advanced, Dictation Trace**. From Terminal:
 
 ```bash
-speakfree set-trace tags        # or: selectors, off
+speakfree set-trace tags        # or: off; alpha/dev also supports tags-only and expanded
 ```
 
-After each dictation into an app on the list, speakfree types one space, one visible middle
-dot, and an invisible payload:
+In Text + TAG mode, after each dictation into an app on the list, speakfree types one space,
+one visible middle dot, and the encoded payload:
 
 ```
 Ship the Kama fix tonight. ·<invisible>
@@ -44,15 +86,18 @@ The payload is a small JSON object:
 
 Two invisible encodings:
 
-- **tags** (Unicode TAG characters, U+E0020 to U+E007E): one invisible character per
+- **tags** (Unicode TAG characters, U+E0020 to U+E007E): one encoded character per
   character of the JSON. Non-ASCII text is written as `\u` escapes. The idea is that a model
-  that receives these characters can read the JSON directly, with no decoding step. Not yet
-  verified: an app, or the model provider, may strip TAG characters, since they are a known
+  that receives these characters may recover the JSON. This has not been established for
+  the destination app and AI model: an app, or the model provider, may strip TAG characters, since they are a known
   way to hide text. The survival test below checks the app; sending the test sentence and
   asking the model what follows the dot checks the rest.
-- **selectors** (variation selectors U+FE00 to U+FE0F and U+E0100 to U+E01EF): one per byte,
-  attached to the dot so the whole trace is a single visible character. Some apps keep these
-  where they strip TAG characters, but a model needs `speakfree trace decode` to read them.
+- **selectors**, a legacy Settings/CLI option (variation selectors U+FE00 to U+FE0F and
+  U+E0100 to U+E01EF): one per byte, following the dot. This is fragile: repeated selectors
+  do not form a normal variation sequence, and visible rendering is permitted for misplaced
+  selectors. A Swift grapheme count is not proof of invisibility. The behavior is described
+  in [Unicode 18.0, section 3.6.2](https://unicode.org/versions/Unicode18.0.0/core-spec/chapter-3/#G30602).
+  `speakfree trace decode` recovers preserved payloads; selectors are not a recommended mode.
 
 Which one survives depends on the app. Run the two-minute survival test (below) to find out.
 

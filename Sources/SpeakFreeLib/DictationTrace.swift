@@ -1,3 +1,4 @@
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
 // ai-suggestion:unverified · session:feat-dictation-trace · 2026-09-24
 import Foundation
 
@@ -14,11 +15,11 @@ import Foundation
 /// encodings:
 ///
 /// - `.tags`: Unicode TAG characters U+E0020 to U+E007E, one per ASCII character. The payload
-///   is ASCII-only JSON (non-ASCII escaped as `\uXXXX`), so a model such as Claude that sees
-///   the raw characters can read it directly, no decoding step.
+///   is ASCII-only JSON (non-ASCII escaped as `\uXXXX`). Preservation and direct model reading
+///   are experimental; readable expanded output provides a baseline.
 /// - `.selectors`: variation selectors, one per UTF-8 byte (bytes 0-15 map to U+FE00 to U+FE0F,
-///   bytes 16-255 to U+E0100 to U+E01EF), attached to the anchor dot. Denser for non-ASCII and
-///   often survives where TAG characters are stripped, but needs `speakfree trace decode`.
+///   bytes 16-255 to U+E0100 to U+E01EF), following the anchor dot. Legacy and fragile:
+///   repeated selectors may render visibly; preserved bytes need `speakfree trace decode`.
 ///
 /// The payload is one JSON object:
 /// `{"speakfree_trace":1,"engine":"whisper","heard":"raw engine text","unsure":["word 0.41"]}`.
@@ -27,6 +28,41 @@ import Foundation
 /// only encodes, finds, decodes, and strips.
 public enum DictationTrace {
 
+    /// Presentation of the existing per-take payload; no archive lookup or new wire format.
+    public enum OutputMode: String, CaseIterable, Sendable {
+        case off
+        case tags
+        case tagsOnly = "tags-only"
+        case expanded
+        case selectors
+
+        public static func resolve(_ setting: String?) -> OutputMode {
+            setting.flatMap { OutputMode(rawValue: $0.lowercased()) } ?? .off
+        }
+
+        var testingOnly: Bool { self == .tagsOnly || self == .expanded }
+        var storedValue: String? { self == .off ? nil : rawValue }
+        var title: String {
+            switch self {
+            case .off: return "Off"
+            case .tags: return "Text + · trace (TAG)"
+            case .tagsOnly: return "· trace only (TAG)"
+            case .expanded: return "Expanded text + raw trace (recommended)"
+            case .selectors: return "Text + selectors (legacy; fragile)"
+            }
+        }
+    }
+
+    /// Local bundles have no channel stamp; released bundles always declare their channel.
+    static func testingAvailable(buildChannel: String?, devMode: Bool) -> Bool {
+        devMode || buildChannel == nil || buildChannel == "dev" || buildChannel == "alpha"
+    }
+
+    public static var testingAvailable: Bool {
+        testingAvailable(buildChannel: Bundle.main.object(forInfoDictionaryKey: "SFBuildChannel") as? String,
+                         devMode: DevMode.isActive)
+    }
+
     public enum Encoding: String, CaseIterable, Codable, Sendable {
         case tags
         case selectors
@@ -34,6 +70,7 @@ public enum DictationTrace {
 
     /// The visible anchor. A middle dot reads as a faint separator, not clutter.
     public static let anchor: Character = "\u{00B7}"
+    static let expandedHeader = "\n\nDictation trace (raw engine words and confidence):\n"
 
     /// Longest raw text carried. A longer dictation is truncated (and marked) so a trace can
     /// never balloon a keystroke-typed insertion; `speakfree match` still recovers the full take.
@@ -192,6 +229,20 @@ public enum DictationTrace {
         return body + suffix(payload, encoding: encoding) + tail
     }
 
+    /// Called only after the target/privacy gate accepts this take. Empty payloads always retain text.
+    static func output(_ payload: Payload, mode: OutputMode, text: String) -> String {
+        guard !payload.heard.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return text }
+        switch mode {
+        case .off: return text
+        case .tags: return append(payload, encoding: .tags, to: text)
+        case .selectors: return append(payload, encoding: .selectors, to: text)
+        case .tagsOnly:
+            return String(anchor) + invisible(payload, encoding: .tags)
+        case .expanded:
+            return text + expandedHeader + json(payload, asciiOnly: false)
+        }
+    }
+
     // MARK: - Find, decode, strip
 
     public struct Found: Equatable {
@@ -257,8 +308,59 @@ public enum DictationTrace {
         return results
     }
 
-    /// `text` with every speakfree trace (and its anchor and leading space) removed.
+    /// Remove only an exact trailing expanded header and a valid trace payload. A header
+    /// lookalike, ordinary JSON, or text written after the JSON must remain user context.
+    static func stripExpandedSuffix(_ text: String) -> String {
+        guard let header = text.range(of: expandedHeader, options: .backwards),
+              parse(json: String(text[header.upperBound...])) != nil else { return text }
+        let trailingWhitespace = text.reversed().prefix { $0.isWhitespace }.reversed()
+        return String(text[..<header.lowerBound]) + String(trailingWhitespace)
+    }
+
+    /// Context may contain several earlier takes. Remove only complete one-line payloads
+    /// after our exact header, keeping every character of the surrounding authored text.
+    static func stripExpandedContextBlocks(_ text: String) -> String {
+        var cursor = text.startIndex
+        var result = ""
+        while let header = text.range(of: expandedHeader, range: cursor..<text.endIndex) {
+            result += text[cursor..<header.lowerBound]
+            if let end = expandedPayloadEnd(in: text[header.upperBound...]),
+               parse(json: String(text[header.upperBound..<end])) != nil {
+                cursor = end
+            } else {
+                result += text[header]
+                cursor = header.upperBound
+            }
+        }
+        return result + text[cursor...]
+    }
+
+    /// Find the object's end without confusing braces or escaped quotes inside raw words.
+    private static func expandedPayloadEnd(in text: Substring) -> String.Index? {
+        guard text.first == "{" else { return nil }
+        var depth = 0, inString = false, escaped = false
+        for index in text.indices {
+            let character = text[index]
+            if character.isNewline { return nil }
+            if inString {
+                if escaped { escaped = false }
+                else if character == "\\" { escaped = true }
+                else if character == "\"" { inString = false }
+            } else if character == "\"" {
+                inString = true
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 { return text.index(after: index) }
+            }
+        }
+        return nil
+    }
+
+    /// `text` with invisible traces and a complete trailing expanded trace removed.
     public static func strip(_ text: String) -> String {
+        let text = stripExpandedSuffix(text)
         let found = find(in: text)
         guard !found.isEmpty else { return text }
         var scalars = Array(text.unicodeScalars)
@@ -270,8 +372,15 @@ public enum DictationTrace {
 
     /// Cheap check used on hot paths: does `text` contain anything that could be a trace?
     public static func mayContainTrace(_ text: String) -> Bool {
-        text.unicodeScalars.contains { tagByte($0) != nil || ($0.value >= 0xE0100 && $0.value <= 0xE01EF) }
+        text.contains(expandedHeader)
+            || text.unicodeScalars.contains { tagByte($0) != nil || ($0.value >= 0xE0100 && $0.value <= 0xE01EF) }
             || text.unicodeScalars.lazy.filter { (0xFE00...0xFE0F).contains($0.value) }.count >= minimumRunLength
+    }
+
+    /// Clean before bounding: otherwise a long payload loses the header needed to recognize it.
+    static func cursorContext(_ text: String) -> String {
+        guard mayContainTrace(text) else { return String(text.suffix(500)) }
+        return String(strip(stripExpandedContextBlocks(text)).suffix(500))
     }
 }
 
@@ -280,7 +389,7 @@ public enum DictationTrace {
 /// Decides whether a trace is appended for one dictation. Pure so every rule is unit-tested.
 ///
 /// Rules, all of which must pass:
-/// 1. The feature is on (`dictationTrace` is "tags" or "selectors"; nil or "off" = off).
+/// 1. A trace output mode is on; experimental modes require an alpha/development build.
 /// 2. Secure Input is not active and the focused field is not a password field.
 /// 3. The app the dictation started in and the app frontmost at insertion are the same, and
 ///    that app is in the trace app list (the user's list, or `defaultApps`).
@@ -289,6 +398,12 @@ public enum DictationTrace {
 /// 5. A browser is allowed only when the focused page's host is in the web host list
 ///    (`defaultWebHosts`: Claude and ChatGPT/Codex). An unknown URL means no trace.
 public enum TraceGate {
+
+    /// New output experiments are restricted to AI chat apps and host-checked browsers.
+    /// An app-list override must not enable them in a shell or an editor's unknown pane.
+    static let testingChatApps: Set<String> = [
+        "com.anthropic.claudefordesktop", "com.openai.codex", "com.openai.chat",
+    ]
 
     /// Default target apps: AI assistants, code editors, terminals (where Claude Code and
     /// Codex run), and browsers (host-restricted, see `defaultWebHosts`).
@@ -330,7 +445,7 @@ public enum TraceGate {
     ]
 
     public enum Decision: Equatable {
-        case append(DictationTrace.Encoding)
+        case append(DictationTrace.OutputMode)
         case skip(String)
     }
 
@@ -344,10 +459,14 @@ public enum TraceGate {
         public var focusedFieldIsSecure: Bool
         /// Host of the focused web page, when the app is a browser and AX could read it.
         public var webHost: String?
+        public var testingAvailable: Bool
+        public var mayHostTerminal: Bool
 
         public init(setting: String?, userApps: [String]? = nil, userWebHosts: [String]? = nil,
                     targetBundleID: String?, frontmostBundleID: String?,
-                    secureInputActive: Bool, focusedFieldIsSecure: Bool, webHost: String? = nil) {
+                    secureInputActive: Bool, focusedFieldIsSecure: Bool, webHost: String? = nil,
+                    testingAvailable: Bool = DictationTrace.testingAvailable,
+                    mayHostTerminal: Bool = false) {
             self.setting = setting
             self.userApps = userApps
             self.userWebHosts = userWebHosts
@@ -356,6 +475,8 @@ public enum TraceGate {
             self.secureInputActive = secureInputActive
             self.focusedFieldIsSecure = focusedFieldIsSecure
             self.webHost = webHost
+            self.testingAvailable = testingAvailable
+            self.mayHostTerminal = mayHostTerminal
         }
     }
 
@@ -385,16 +506,24 @@ public enum TraceGate {
     }
 
     public static func decide(_ input: Input) -> Decision {
-        guard let encoding = encoding(forSetting: input.setting) else { return .skip("off") }
+        let mode = DictationTrace.OutputMode.resolve(input.setting)
+        guard mode != .off else { return .skip("off") }
+        guard !mode.testingOnly || input.testingAvailable else { return .skip("testing build required") }
         if input.secureInputActive { return .skip("secure input") }
         if input.focusedFieldIsSecure { return .skip("password field") }
         guard let target = input.targetBundleID, !target.isEmpty else { return .skip("unknown app") }
         guard let front = input.frontmostBundleID,
               front.caseInsensitiveCompare(target) == .orderedSame else { return .skip("app changed") }
         guard isListed(target, userApps: input.userApps) else { return .skip("app not in list") }
+        if mode.testingOnly {
+            guard !input.mayHostTerminal else { return .skip("app may contain a terminal") }
+            guard testingChatApps.contains(target.lowercased()) || needsWebHost(target) else {
+                return .skip("testing output requires an AI chat app or approved browser page")
+            }
+        }
         if needsWebHost(target), !hostAllowed(input.webHost, userWebHosts: input.userWebHosts) {
             return .skip(input.webHost == nil ? "browser page unknown" : "browser page not in list")
         }
-        return .append(encoding)
+        return .append(mode)
     }
 }
