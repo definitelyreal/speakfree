@@ -231,13 +231,16 @@ public class RecordingStore {
         saveTextSidecar(text: text, extension: "txt", for: audioURL)
     }
 
-    enum AuxiliaryTranscript: String { case parakeet, whisper }
+    /// `.whisper.txt` holds Whisper-engine text the hallucination guard refused. (`.parakeet.txt`
+    /// was written only by the removed Whisper backup; old archives may still hold it, and the
+    /// sidecar suffix lists keep cleaning it up.)
+    enum AuxiliaryTranscript: String { case whisper }
 
     static func saveAuxiliaryTranscription(text: String, kind: AuxiliaryTranscript, for audioURL: URL) {
         saveTextSidecar(text: text, extension: "\(kind.rawValue).txt", for: audioURL)
     }
 
-    /// Also protects standalone recovery/shadow publications after their caller returns.
+    /// Also protects standalone recovery publications after their caller returns.
     /// Missing or already-claimed audio must not resurrect an orphaned transcript.
     private static func saveTextSidecar(text: String, extension suffix: String, for audioURL: URL) {
         guard let activityLease = try? RecordingActivity.shared.acquireReading(audioURL) else { return }

@@ -13,8 +13,8 @@ import Foundation
 /// one of those takes. These are Whisper's well-known outputs on noise: stock video phrases,
 /// sound descriptions in brackets or asterisks, and subtitle dialogue dashes.
 ///
-/// Three kinds of evidence are combined. In rescue mode, outputs composed entirely of stock
-/// phrases are refused unless Parakeet agrees, even on voiced audio. This deliberately trades
+/// Three kinds of evidence are combined. With a Parakeet transcript (replay only), outputs
+/// composed entirely of stock phrases are refused unless Parakeet agrees, even on voiced audio. This deliberately trades
 /// missed short replies for fewer invented inserts; audio-only thresholds remain heuristic:
 /// 1. The words: the whole output is a stock phrase or a sound tag (`isStockPhrase`), or starts
 ///    with a subtitle dialogue dash.

@@ -176,17 +176,18 @@ final class WhisperHallucinationGuardTranscriberTests: XCTestCase {
 
     private func run(_ samples: [Float], engine: FixedEngine, whisper: String?,
                      name: String = "recording-2026-10-04-211023-test")
-        async throws -> (text: String, statuses: [Transcriber.TakeStatus], sidecar: String?) {
+        async throws -> (text: String, statuses: [Transcriber.TakeStatus], sidecar: String?, cliCalls: Int) {
         let url = root.appendingPathComponent("\(name).wav")
         let writer = try WavWriter(url: url)
         try writer.append(samples); writer.close()
         let transcriber = Transcriber(engine: engine, modelID: "synthetic", language: "en")
-        transcriber.cliTranscriptionOverride = { _ in whisper ?? "" }
+        var cliCalls = 0
+        transcriber.cliTranscriptionOverride = { _ in cliCalls += 1; return whisper ?? "" }
         var statuses: [Transcriber.TakeStatus] = []
         transcriber.onTakeStatus = { statuses.append($0) }
         let text = try await transcriber.transcribe(audioURL: url, samples: samples)
         let sidecar = try? String(contentsOf: url.deletingPathExtension().appendingPathExtension("whisper.txt"), encoding: .utf8)
-        return (text, statuses, sidecar)
+        return (text, statuses, sidecar, cliCalls)
     }
 
     /// Parakeet empty on cabin noise: nothing typed, no Whisper run, the plain "missed" line.
@@ -195,6 +196,8 @@ final class WhisperHallucinationGuardTranscriberTests: XCTestCase {
                                    whisper: "- I'm gonna use your space.")
         XCTAssertEqual(result.text, "")
         XCTAssertFalse(result.statuses.contains(.likelyHallucination), "\(result.statuses)")
+        XCTAssertEqual(result.cliCalls, 0, "no Whisper run on a Parakeet take")
+        XCTAssertEqual(result.statuses, [.missed])
         XCTAssertNil(result.sidecar, "no Whisper text was produced to keep")
         XCTAssertEqual(Transcriber.TakeStatus.likelyHallucination.message, "Didn't catch that. Try again.")
     }
