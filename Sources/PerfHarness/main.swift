@@ -137,6 +137,10 @@ case "postbuffer-replay":
     // Speed loop W1 (2026-09-22): replay the post-release wait over archived takes.
     exit(PostBufferReplay.run(args: Array(args.dropFirst())))
 
+case "hallucination-replay":
+    // 2026-10-04: replay WhisperHallucinationGuard over archived takes. Private output.
+    exit(HallucinationReplay.run(args: Array(args.dropFirst())))
+
 case "run":
     let iters = max(5, Int(value(for: "--iterations", in: args) ?? "5") ?? 5)
     let engineList = value(for: "--engines", in: args, default: "whisper")!

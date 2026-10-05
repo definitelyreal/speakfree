@@ -1158,7 +1158,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 switch status {
                 case .rechecking:
                     self.recordingOverlay.updateStreamingText(status.message)
-                case .failed, .staticNoise, .archiveUnavailable:
+                case .failed, .staticNoise, .archiveUnavailable, .likelyHallucination:
                     self.recordingOverlay.lingerWithMessageThenHide(status.message)
                 case .missed:
                     self.offerWhisperFallbackDownloadIfNeeded()
