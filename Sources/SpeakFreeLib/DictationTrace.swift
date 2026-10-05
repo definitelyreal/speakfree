@@ -1,4 +1,4 @@
-// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-04
+// Trace output experiment: ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:feat-dictation-trace · 2026-09-24
 import Foundation
 
@@ -317,9 +317,10 @@ public enum DictationTrace {
         return String(text[..<header.lowerBound]) + String(trailingWhitespace)
     }
 
-    /// Context may contain several earlier takes. Remove only complete one-line payloads
+    /// Context may contain several earlier takes. Remove only complete compact payloads
     /// after our exact header, keeping every character of the surrounding authored text.
-    static func stripExpandedContextBlocks(_ text: String) -> String {
+    /// A marked but incomplete payload is ambiguous and must not become recognition hints.
+    static func stripExpandedContextBlocks(_ text: String) -> String? {
         var cursor = text.startIndex
         var result = ""
         while let header = text.range(of: expandedHeader, range: cursor..<text.endIndex) {
@@ -328,6 +329,10 @@ public enum DictationTrace {
                parse(json: String(text[header.upperBound..<end])) != nil {
                 cursor = end
             } else {
+                let candidateLine = String(String.UnicodeScalarView(text[header.upperBound...].unicodeScalars.prefix {
+                    $0 != "\n" && $0 != "\r"
+                }))
+                if candidateLine.contains("\"speakfree_trace\"") { return nil }
                 result += text[header]
                 cursor = header.upperBound
             }
@@ -337,22 +342,25 @@ public enum DictationTrace {
 
     /// Find the object's end without confusing braces or escaped quotes inside raw words.
     private static func expandedPayloadEnd(in text: Substring) -> String.Index? {
-        guard text.first == "{" else { return nil }
+        let scalars = text.unicodeScalars
+        guard scalars.first == "{" else { return nil }
         var depth = 0, inString = false, escaped = false
-        for index in text.indices {
-            let character = text[index]
-            if character.isNewline { return nil }
+        for index in scalars.indices {
+            let scalar = scalars[index]
+            // JSON allows literal U+2028/U+2029 in strings. Only ASCII control scalars
+            // are invalid in this compact output, and parsing below validates the object.
+            if scalar.value < 0x20 { return nil }
             if inString {
                 if escaped { escaped = false }
-                else if character == "\\" { escaped = true }
-                else if character == "\"" { inString = false }
-            } else if character == "\"" {
+                else if scalar == "\\" { escaped = true }
+                else if scalar == "\"" { inString = false }
+            } else if scalar == "\"" {
                 inString = true
-            } else if character == "{" {
+            } else if scalar == "{" {
                 depth += 1
-            } else if character == "}" {
+            } else if scalar == "}" {
                 depth -= 1
-                if depth == 0 { return text.index(after: index) }
+                if depth == 0 { return scalars.index(after: index) }
             }
         }
         return nil
@@ -372,15 +380,32 @@ public enum DictationTrace {
 
     /// Cheap check used on hot paths: does `text` contain anything that could be a trace?
     public static func mayContainTrace(_ text: String) -> Bool {
-        text.contains(expandedHeader)
-            || text.unicodeScalars.contains { tagByte($0) != nil || ($0.value >= 0xE0100 && $0.value <= 0xE01EF) }
+        text.contains(expandedHeader) || mayContainInvisibleTrace(text)
+    }
+
+    private static func mayContainInvisibleTrace(_ text: String) -> Bool {
+        text.unicodeScalars.contains { tagByte($0) != nil || ($0.value >= 0xE0100 && $0.value <= 0xE01EF) }
             || text.unicodeScalars.lazy.filter { (0xFE00...0xFE0F).contains($0.value) }.count >= minimumRunLength
     }
 
-    /// Clean before bounding: otherwise a long payload loses the header needed to recognize it.
+    static let maxRawContextScalars = 16_384
+    static let maxContextScalars = 500
+
+    /// Bound work before searching or parsing. Scalars prevent a huge selector grapheme from
+    /// defeating the bound. A possibly cut trace yields no hints rather than raw JSON fragments.
     static func cursorContext(_ text: String) -> String {
-        guard mayContainTrace(text) else { return String(text.suffix(500)) }
-        return String(strip(stripExpandedContextBlocks(text)).suffix(500))
+        let scalars = Array(text.unicodeScalars.suffix(maxRawContextScalars + 1))
+        let clipped = scalars.count > maxRawContextScalars
+        let window = String(String.UnicodeScalarView(scalars.suffix(maxRawContextScalars)))
+        let hasTrace = mayContainTrace(window)
+        if clipped && (hasTrace || window.contains("\"") || window.contains("{") || window.contains("}")) {
+            return ""
+        }
+        guard hasTrace else { return String(String.UnicodeScalarView(window.unicodeScalars.suffix(maxContextScalars))) }
+        guard let expandedCleaned = stripExpandedContextBlocks(window) else { return "" }
+        let cleaned = strip(expandedCleaned)
+        guard !mayContainInvisibleTrace(cleaned) else { return "" }
+        return String(String.UnicodeScalarView(cleaned.unicodeScalars.suffix(maxContextScalars)))
     }
 }
 

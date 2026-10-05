@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:unknown · 2026-10-04
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 import AppKit
 import XCTest
 @testable import SpeakFreeLib
@@ -126,6 +126,53 @@ final class TraceOutputTests: XCTestCase {
         XCTAssertEqual(T.cursorContext(malformed), malformed)
     }
 
+    func testUnicodeLineSeparatorsInRawWordsAreRemovedAcrossContinuedAndRepeatedTakes() {
+        let raw = T.Payload(engine: "whisper", heard: "Misrecognizedword\u{2028}line\u{2029}paragraph } \\\"",
+                            unsure: [.init(word: "uncertain\u{2028}word", score: 0.2)])
+        var field = T.output(raw, mode: .expanded, text: finished)
+        XCTAssertTrue(field.unicodeScalars.contains("\u{2028}"), "Exercise literal JSON scalars, not escaped substitutes")
+        XCTAssertEqual(T.cursorContext(field + " User continuation."), finished + " User continuation.")
+        field += T.output(raw, mode: .expanded, text: " Next clean sentence.")
+        let context = T.cursorContext(field)
+        XCTAssertEqual(context, finished + " Next clean sentence.")
+        XCTAssertFalse(TextPipeline.isMidSentence(contextBefore: context))
+        let hints = TextPipeline.assemblePromptHints(input: .init(
+            raw: "Another sentence.", punctuationMode: .off, cursorContextText: context)) ?? ""
+        XCTAssertFalse(hints.contains("Misrecognizedword"))
+        XCTAssertFalse(hints.contains("paragraph"))
+        XCTAssertFalse(hints.contains("uncertain"))
+    }
+
+    func testOrdinaryHugeContextReturnsOnlyABoundedScalarTail() {
+        let ordinary = String(repeating: "ordinary text ", count: 100_000) + "Final sentence."
+        XCTAssertEqual(T.cursorContext(ordinary), String(ordinary.suffix(T.maxContextScalars)))
+        let oneGrapheme = "a" + String(repeating: "\u{0301}", count: T.maxRawContextScalars * 2)
+        XCTAssertEqual(oneGrapheme.count, 1)
+        XCTAssertEqual(T.cursorContext(oneGrapheme).unicodeScalars.count, T.maxContextScalars)
+    }
+
+    func testRawWindowClippingFailsClosedForHugeAndPartialTracePayloads() {
+        let raw = T.Payload(engine: "whisper", heard: String(repeating: "misrecognized ", count: T.maxRawContextScalars))
+        let huge = T.output(raw, mode: .expanded, text: finished)
+        XCTAssertEqual(T.cursorContext(huge), "")
+        XCTAssertEqual(T.cursorContext(huge + " User continuation."), "")
+        let partial = finished + T.expandedHeader + "{\"speakfree_trace\":1,\"engine\":\"whisper\",\"heard\":\"raw fragment"
+        XCTAssertEqual(T.cursorContext(partial), "")
+        let truncatedHeader = String(repeating: "ordinary ", count: T.maxRawContextScalars)
+            + String(T.expandedHeader.dropFirst(8)) + T.json(payload, asciiOnly: false)
+        XCTAssertEqual(T.cursorContext(truncatedHeader), "")
+        let selectors = "·" + String(repeating: "\u{E0100}", count: T.maxRawContextScalars * 2)
+        XCTAssertLessThan(selectors.count, 10)
+        XCTAssertEqual(T.cursorContext(selectors), "")
+        XCTAssertEqual(T.cursorContext("·" + String(repeating: "\u{E0100}", count: 30)), "")
+    }
+
+    func testUnrelatedHeaderBeforeAValidTraceRemainsContext() {
+        let unrelated = T.expandedHeader + "ordinary user note"
+        let field = unrelated + T.output(payload, mode: .expanded, text: " Finished sentence.")
+        XCTAssertEqual(T.cursorContext(field), unrelated + " Finished sentence.")
+    }
+
     func testTestingMenuHasFourReversibleChoicesAndIsHiddenInRelease() throws {
         var selected: T.OutputMode?
         XCTAssertNil(TraceOutputMenu.make(selected: .off, testingAvailable: false) { selected = $0 })
@@ -134,6 +181,8 @@ final class TraceOutputTests: XCTestCase {
         XCTAssertEqual(items.prefix(4).map(\.title), TraceOutputMenu.options.map(\.title))
         XCTAssertEqual(items.prefix(4).map(\.state), [.on, .off, .off, .off])
         XCTAssertTrue(items.contains { !$0.isEnabled && $0.title.contains("editors/terminals") })
+        XCTAssertTrue(items.contains { !$0.isEnabled && $0.title.contains("in a browser") })
+        XCTAssertTrue(items.contains { !$0.isEnabled && $0.title.contains("terminal panes") })
         for (target, expected) in zip(built.targets, TraceOutputMenu.options) {
             target.invoke()
             XCTAssertEqual(selected, expected)

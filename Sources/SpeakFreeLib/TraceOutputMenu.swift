@@ -1,4 +1,4 @@
-// ai-suggestion:unverified · session:unknown · 2026-10-04
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 import AppKit
 
 /// Small, revocable test control. The existing Settings picker retains the legacy encoding.
@@ -21,6 +21,12 @@ enum TraceOutputMenu {
             submenu.addItem(item)
         }
         submenu.addItem(.separator())
+        let destination = NSMenuItem(title: "Try new modes in ChatGPT or Claude/ChatGPT in a browser", action: nil, keyEquivalent: "")
+        destination.isEnabled = false
+        submenu.addItem(destination)
+        let blocked = NSMenuItem(title: "Apps with terminal panes (Claude/Codex) use finished text", action: nil, keyEquivalent: "")
+        blocked.isEnabled = false
+        submenu.addItem(blocked)
         let scope = NSMenuItem(title: "Text + TAG also adds hidden text in editors/terminals", action: nil, keyEquivalent: "")
         scope.isEnabled = false
         submenu.addItem(scope)

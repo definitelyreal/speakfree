@@ -1,4 +1,4 @@
-<!-- ai-suggestion:unverified | session:unknown | date:2026-10-04 | asof:2026-10-04 -->
+<!-- ai-suggestion:unverified | session:unknown | date:2026-10-05 | asof:2026-10-05 -->
 # Dictation trace: let an AI see what the speech engine heard
 
 When you dictate a prompt to an AI assistant, the assistant only sees speakfree's finished
@@ -49,6 +49,14 @@ This keeps added multiline raw text from executing shell input, and keeps dot-on
 replacing a command. The older Text + TAG and selectors modes retain their existing targets
 and the editor/terminal limitations below.
 
+**First trial: use the ChatGPT app (`com.openai.chat`) or a normal browser tab at
+`claude.ai` or `chatgpt.com`.** The local read-only compatibility scan on October 5, 2026
+reported `node-pty` in both installed Claude (`com.anthropic.claudefordesktop`) and Codex
+(`com.openai.codex`) bundles. The new modes therefore fall back to finished text in those
+desktop apps. Keep that terminal safeguard in place; do the comparison in an approved
+browser page instead. The scan is capability evidence, not proof of TAG survival or model
+readability. Its local receipt is `build/trace-output-tests/compat-scan.tsv`.
+
 Each take snapshots the selected mode and app/host lists before transcription starts. A
 change while that transcription runs applies to later takes. If any gate blocks dot-only,
 the finished text is inserted normally. Copy/recovery paths retain the original readable
@@ -60,10 +68,13 @@ Settings save preserves a later CLI mode or allowlist change; only an intentiona
 selection replaces that mode.
 If the config cannot be read or parsed, an unrelated save keeps the last loaded app/host
 lists and turns trace off rather than re-enabling a stale selection.
-For later dictations, each exact expanded header plus valid one-line trace JSON is removed
+For later dictations, each exact expanded header plus valid compact trace JSON is removed
 from cursor context, preserving surrounding finished and user text. Capitalization and recognition hints use the finished words;
-malformed or lookalike blocks remain ordinary text. The remembered context also uses the
-original finished words, including in dot-only mode.
+lookalike blocks remain ordinary text. Cleanup inspects at most 16,384 Unicode scalars and
+keeps at most 500 cleaned scalars; a clipped or incomplete possible trace yields no context
+rather than raw payload hints. Legal Unicode line/paragraph separators inside JSON strings
+are handled as payload. The remembered context uses the original finished words, including
+in dot-only mode. These bounds affect context only, never visible output or recovery text.
 
 The matching control is in **Settings, Advanced, Dictation Trace**. From Terminal:
 
@@ -232,3 +243,12 @@ does, but into Terminal and iTerm it may type with simulated key presses, so a t
 result is a guide rather than proof. Copying back shows what the text box kept, not what
 reached the model. The test sentences are ordinary clipboard entries, so a clipboard-history
 app may record them (they contain only the synthetic test sentence).
+
+## Experiment validation (October 5, 2026)
+
+The full suite passed 2,676 tests (35 optional skips). After the final bounded-context and
+Unicode-separator corrections, the affected suite passed 306 tests with zero failures;
+strict lint and diff checks passed. Astra → local Opus 5.5 → Astra source review ended with
+no remaining material source findings after corrections. The experiment remains off by
+default and separate from the alpha release branch. No candidate was installed, no live
+prompt was sent, and app transport/model comprehension have not been demonstrated.
