@@ -900,7 +900,7 @@ public class Transcriber {
                 SparseRescueGate.shared.recordSkipCheck(device: inputDevice, wouldHaveGained: gained)
                 DiagnosticLogger.shared.log(String(
                     format: "Transcriber: sparse-skip check %@ (%d vs %d words); gate ratio now %.2f",
-                    gained ? "MISSED WORDS" : "confirmed skip", wWords, pWords,
+                    gained ? "MISSED WORDS" : (invented ? "refused as invented" : "confirmed skip"), wWords, pWords,
                     SparseRescueGate.shared.ratio(for: inputDevice)))
             } catch {
                 DiagnosticLogger.shared.log(

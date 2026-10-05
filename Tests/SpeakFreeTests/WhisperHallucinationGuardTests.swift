@@ -117,7 +117,8 @@ final class WhisperHallucinationGuardAudioTests: XCTestCase {
         XCTAssertTrue(block("- I'm gonna use your space.", rumble, nil), "a subtitle dash on noise")
         XCTAssertFalse(block("- Send it to Sam.", voice, nil))
         let hiss = WhisperHallucinationGuard.noiseVerdict(SyntheticAudio.staticNoise(seconds: 4, rms: 0.06))
-        XCTAssertTrue(block("Okay so the plan is good.", hiss, nil), "anything read out of headset static")
+        XCTAssertTrue(block("Okay so.", hiss, nil), "a word or two read out of headset static")
+        XCTAssertFalse(block("Okay so the plan is good.", hiss, nil), "longer text keeps the Parakeet-path bar")
         // Nothing to judge.
         XCTAssertFalse(block("", rumble, ""))
     }
@@ -217,7 +218,7 @@ final class WhisperHallucinationGuardTranscriberTests: XCTestCase {
     }
 
     private func sparseTake(_ samples: [Float], parakeet: String, whisper: String, device: String)
-        async throws -> (text: String, statuses: [Transcriber.SecondOpinionStatus], sidecar: URL) {
+        async throws -> (text: String, statuses: [Transcriber.SecondOpinionStatus], sidecar: URL, transcriber: Transcriber) {
         let url = root.appendingPathComponent("recording-2026-10-04-sparse-\(UUID().uuidString).wav")
         let writer = try WavWriter(url: url)
         try writer.append(samples); writer.close()
@@ -227,7 +228,7 @@ final class WhisperHallucinationGuardTranscriberTests: XCTestCase {
         var statuses: [Transcriber.SecondOpinionStatus] = []
         transcriber.onSecondOpinionStatus = { statuses.append($0) }
         let text = try await transcriber.transcribe(audioURL: url, samples: samples, inputDevice: device)
-        return (text, statuses, url.deletingPathExtension().appendingPathExtension("whisper.txt"))
+        return (text, statuses, url.deletingPathExtension().appendingPathExtension("whisper.txt"), transcriber)
     }
 
     /// Clear audio, Parakeet one word, Whisper an invented outro: the synchronous sparse swap
@@ -260,9 +261,11 @@ final class WhisperHallucinationGuardTranscriberTests: XCTestCase {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.sidecar.path), "the background check ran")
-        try await Task.sleep(nanoseconds: 100_000_000) // the gate is updated right after the sidecar
+        try await Task.sleep(nanoseconds: 300_000_000) // the gate is updated right after the sidecar
         XCTAssertEqual(SparseRescueGate.shared.ratio(for: device), SparseRescueGate.initialRatio,
                        "an invented check is not missed words, so the ratio is not lowered")
+        // The background job holds the transcriber weakly, as the app's long-lived one would be.
+        withExtendedLifetime(result.transcriber) {}
     }
 
     func testBlockedLogLineIsClassifiedForUpdates() {

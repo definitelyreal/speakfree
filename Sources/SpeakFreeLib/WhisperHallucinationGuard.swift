@@ -96,8 +96,12 @@ public enum WhisperHallucinationGuard {
             if stock && noise.leansNoise {
                 return Verdict(block: true, reason: "stock phrase on noise", noise: noise)
             }
-            if noise.isStatic || (dash && noise.isNoiseOnly) {
-                return Verdict(block: true, reason: noise.isStatic ? "static" : "subtitle dash on noise", noise: noise)
+            // Static: the same two-word bar Parakeet takes get (Transcriber drops <= 2 words).
+            if noise.isStatic && normalized(stripped).split(separator: " ").count <= 2 {
+                return Verdict(block: true, reason: "a word or two read out of static", noise: noise)
+            }
+            if dash && noise.isNoiseOnly {
+                return Verdict(block: true, reason: "subtitle dash on noise", noise: noise)
             }
             return Verdict(block: false, reason: nil, noise: noise)
         }
