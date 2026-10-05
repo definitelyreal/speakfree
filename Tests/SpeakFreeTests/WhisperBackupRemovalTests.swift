@@ -89,6 +89,31 @@ final class WhisperBackupRemovalTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: sidecar(url).path), "no .whisper.txt sidecar")
     }
 
+    /// Soft speech: voiced (so Parakeet retries) but below the sustained-energy bar. An empty
+    /// result still says "Didn't catch that." instead of disappearing silently.
+    func testEmptyParakeetTakeOnSoftVoicedSpeechSaysDidntCatchThat() async throws {
+        let candidates = stride(from: Float(0.02), through: 0.12, by: 0.005).map {
+            SyntheticAudio.voice(seconds: 3, peak: $0)
+        }
+        let soft = try XCTUnwrap(candidates.first {
+            let e = Transcriber.audioEvidence(in: $0)
+            return e.hasVoicedSpeech && !e.hasSustainedSpeechEnergy
+        }, "need a voiced take below the sustained-energy bar")
+        XCTAssertFalse(CaptureStaticJudge.isStatic(samples: soft))
+        let url = try writeTake(soft, name: "soft")
+        let engine = CountingEngine("parakeet", text: "")
+        let transcriber = Transcriber(engine: engine, modelID: "parakeet-tdt-0.6b-v2", language: "en")
+        var whisperCalls = 0
+        transcriber.cliTranscriptionOverride = { _ in whisperCalls += 1; return "words" }
+        var statuses: [Transcriber.TakeStatus] = []
+        transcriber.onTakeStatus = { statuses.append($0) }
+        let text = try await transcriber.transcribe(audioURL: url, samples: soft)
+        XCTAssertEqual(text, "")
+        XCTAssertEqual(statuses, [.missed])
+        XCTAssertEqual(whisperCalls, 0)
+        XCTAssertEqual(engine.calls, 1 + Transcriber.maxEmptyRetriesOnVoicedSpeech)
+    }
+
     /// The archive state no longer matters to an empty Parakeet take: there is no file-based
     /// backup to block, so a damaged archive reads as an ordinary miss.
     func testEmptyParakeetTakeWithUnusableArchiveIsAnOrdinaryMiss() async throws {

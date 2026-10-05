@@ -570,12 +570,15 @@ public class Transcriber {
             cleaned = ""
             onTakeStatus?(.staticNoise)
         } else if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           evidence.hasSustainedSpeechEnergy {
-            DiagnosticLogger.shared.log(String(
-                format: "Transcriber: speech-energy-present but model-empty "
-                    + "(%.2fs, peak-window-rms %.3f, speech-windows %d)",
-                evidence.durationSeconds, evidence.peakWindowRMS, evidence.speechWindowCount))
-            // Parakeet (after its own empty-result retries) heard nothing on real speech. There
+           evidence.hasSustainedSpeechEnergy || evidence.hasVoicedSpeech {
+            if evidence.hasSustainedSpeechEnergy {
+                DiagnosticLogger.shared.log(String(
+                    format: "Transcriber: speech-energy-present but model-empty "
+                        + "(%.2fs, peak-window-rms %.3f, speech-windows %d)",
+                    evidence.durationSeconds, evidence.peakWindowRMS, evidence.speechWindowCount))
+            }
+            // Parakeet (after its own empty-result retries, which voiced speech triggers) heard
+            // nothing on real speech, loud or soft. There
             // is no second engine behind it (the Whisper backup was removed 2026-10-05: across
             // 22,179 archived takes it typed text 16 times, 13 of them invented, and it cost
             // 2 to 4 s per run), so the take is reported as missed.
