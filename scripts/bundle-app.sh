@@ -17,6 +17,7 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_DIR/Contents
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cp "$REPO_DIR/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+cp "$REPO_DIR/Resources/THIRD-PARTY-NOTICES.txt" "$APP_DIR/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 
 # Bundle Sparkle.framework (required at runtime — binary links against it)
 mkdir -p "$APP_DIR/Contents/Frameworks"

@@ -61,6 +61,17 @@ final class WhisperHallucinationGuardTextTests: XCTestCase {
         XCTAssertTrue(WhisperHallucinationGuard.isStockPhrase("\u{2212} Thank you"))
     }
 
+    func testFormattingDoesNotTurnOrdinarySpeechIntoASoundTag() {
+        let voice = WhisperHallucinationGuard.NoiseVerdict(
+            isStatic: false, floorRMS: 0.001, speechBandRange: 3, seconds: 3)
+        for text in ["(Please send the revised contract tomorrow.)", "*Please send it tomorrow*",
+                     "[Sam needs the file]", "[Music] [Sam needs the file]", "Translated bypass rules apply."] {
+            XCTAssertFalse(WhisperHallucinationGuard.isStockPhrase(text), text)
+            XCTAssertFalse(WhisperHallucinationGuard.assess(
+                whisperText: text, noise: voice, parakeetText: "").block, text)
+        }
+    }
+
     func testCommaJoinedStockAndMusicNotes() {
         XCTAssertTrue(WhisperHallucinationGuard.isStockPhrase("Thank you, bye."))
         XCTAssertTrue(WhisperHallucinationGuard.isStockPhrase("Thank you, thank you."))
@@ -196,10 +207,10 @@ final class WhisperHallucinationGuardTranscriberTests: XCTestCase {
         XCTAssertEqual(result.statuses.last, .likelyHallucination)
     }
 
-    func testRealRescueInALoudRoomStillTypesWithoutTheDash() async throws {
+    func testRealRescueInALoudRoomPreservesAcceptedText() async throws {
         let result = try await run(CabinAudio.voiceOverRumble(seconds: 4), engine: FixedEngine("parakeet-test", words: ""),
                                    whisper: "- Let's ship the build tonight.")
-        XCTAssertEqual(result.text, "Let's ship the build tonight.")
+        XCTAssertEqual(result.text, "- Let's ship the build tonight.")
         XCTAssertFalse(result.statuses.contains(.likelyHallucination))
     }
 
@@ -219,7 +230,22 @@ final class WhisperHallucinationGuardTranscriberTests: XCTestCase {
         XCTAssertEqual(cabin.statuses, [.likelyHallucination])
         let dashed = try await run(SyntheticAudio.voice(seconds: 3, peak: 0.3),
                                    engine: FixedEngine("whisper", words: "- Send it to Sam."), whisper: nil, name: "recording-dash")
-        XCTAssertEqual(dashed.text, "Send it to Sam.")
+        XCTAssertEqual(dashed.text, "- Send it to Sam.")
+    }
+
+    func testAcceptedWrappersAndCommandFlagsSurviveTheWholeTranscriber() async throws {
+        for (index, text) in ["(Please send the revised contract tomorrow.)", "[Sam needs the file]",
+                              "*Please send it tomorrow*", "-Werror is enabled", "- Buy milk",
+                              "Translated bypass rules apply."].enumerated() {
+            for engineID in ["whisper", "parakeet-test"] {
+                let native = engineID == "whisper"
+                let result = try await run(SyntheticAudio.voice(seconds: 3, peak: 0.3),
+                    engine: FixedEngine(engineID, words: native ? text : ""),
+                    whisper: native ? nil : text, name: "recording-format-\(index)-\(engineID)")
+                XCTAssertEqual(result.text, text)
+                XCTAssertFalse(result.statuses.contains(.likelyHallucination))
+            }
+        }
     }
 
     private func sparseTake(_ samples: [Float], parakeet: String, whisper: String, device: String)

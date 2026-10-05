@@ -466,6 +466,9 @@ public class Transcriber {
         return energyEvidence && evidence.hasVoicedSpeech
     }
 
+    private static let captionCreditPattern = try! NSRegularExpression(
+        pattern: #"(?<![\p{L}\p{N}])(?:subtitles by|translated by|transcribed by|captioned by|captions by)(?![\p{L}\p{N}])"#)
+
     private func isHallucination(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.count < 2 { return true }
@@ -489,19 +492,22 @@ public class Transcriber {
         // hallucinations. "please subscribe" is deliberately NOT listed: it collides with real
         // dictation. Match phrase forms that don't appear in ordinary sentences.
         let substringHallucinations = [
-            "amara.org", "amara. org", "subtitles by", "translated by",
-            "transcribed by", "captioned by", "captions by",
+            "amara.org", "amara. org",
             "like and subscribe", "subscribe to my channel", "don't forget to subscribe",
         ]
         for pattern in substringHallucinations {
             if lower.contains(pattern) { return true }
         }
-
-        // Bracketed/parenthesized content like [Music], (applause), etc.
-        if (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")) ||
-           (trimmed.hasPrefix("(") && trimmed.hasSuffix(")")) {
+        // Attribution phrases must end on a word boundary: "translated bypass" is ordinary
+        // text, not "translated by" followed by a credit. Keep this final gate consistent
+        // with the Whisper guard so accepted backup text can actually reach insertion.
+        if Self.captionCreditPattern.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil {
             return true
         }
+
+        // Formatting alone is not a sound caption. Share the guard's bounded label list
+        // so a genuine wrapped sentence survives the final filter as well as the rescue.
+        if WhisperHallucinationGuard.isSoundTag(trimmed) { return true }
 
         return false
     }
@@ -590,8 +596,8 @@ public class Transcriber {
         // Strip non-speech characters whisper sometimes outputs (bullets, arrows, etc.)
         var cleaned = result.replacingOccurrences(of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
         if engine.engineID == "whisper", !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // Whisper is the chosen engine: no Parakeet opinion, so only a stock phrase on
-            // noise-leaning audio is refused.
+            // Whisper is the chosen engine: without a Parakeet opinion, refusals require
+            // audio evidence as well as a stock phrase, short static output, or subtitle dash.
             let verdict = WhisperHallucinationGuard.assess(
                 whisperText: cleaned, samples: samples ?? [], parakeetText: nil)
             if verdict.block {
@@ -599,8 +605,6 @@ public class Transcriber {
                 RecordingStore.saveAuxiliaryTranscription(text: cleaned, kind: .whisper, for: audioURL)
                 cleaned = ""
                 onSecondOpinionStatus?(.likelyHallucination)
-            } else {
-                cleaned = WhisperHallucinationGuard.stripDialogueDash(cleaned)
             }
         }
 
@@ -660,8 +664,8 @@ public class Transcriber {
                         } else {
                             DiagnosticLogger.shared.log(
                                 "Transcriber: whisper rescue recovered \(rescued.count) chars from an empty take")
-                            cleaned = WhisperHallucinationGuard.stripDialogueDash(rescued.replacingOccurrences(
-                                of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression))
+                            cleaned = rescued.replacingOccurrences(
+                                of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
                             markReplacedByWhisperCLI(model: "large-v3-turbo")
                         }
                     }
@@ -728,8 +732,8 @@ public class Transcriber {
                     DiagnosticLogger.shared.log(String(
                         format: "Transcriber: SPARSE whisper rescue (%.2f) — %d words replace %d over %.1fs",
                         conf, wWords, pWords, duration))
-                    cleaned = WhisperHallucinationGuard.stripDialogueDash(swap.replacingOccurrences(
-                        of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression))
+                    cleaned = swap.replacingOccurrences(
+                        of: "[•◦▪▸►▻→←↑↓★☆♦♥♠♣]", with: "", options: .regularExpression)
                     markReplacedByWhisperCLI(model: "large-v3-turbo")
                 } else {
                     DiagnosticLogger.shared.log(String(

@@ -47,7 +47,8 @@ class AlphaPackagingTests(unittest.TestCase):
             self.skipTest("Packaging uses macOS PlistBuddy")
         WORK.mkdir(parents=True, exist_ok=True)
         self.repo = Path(tempfile.mkdtemp(prefix="case-", dir=WORK))
-        for relative in ("scripts/build.sh", "scripts/check-version.sh", "Resources/Info.plist"):
+        for relative in ("scripts/build.sh", "scripts/check-version.sh", "Resources/Info.plist",
+                         "Resources/THIRD-PARTY-NOTICES.txt"):
             target = self.repo / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, target)

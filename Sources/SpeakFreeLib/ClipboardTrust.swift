@@ -26,8 +26,8 @@ enum ClipboardReaderCompliance: String, Codable, Equatable {
     /// A clipboard history tool whose behavior with the markers is not verified.
     case unknown = "unknown"
     /// Apple Continuity (Universal Clipboard, iPhone Mirroring, Universal Control): ignores the
-    /// nspasteboard.org markers but never reads an item written `.currentHostOnly` ("this Mac
-    /// only"). Trusted only while every dictation write is host-only
+    /// nspasteboard.org markers but is expected to skip `.currentHostOnly` ("this Mac only")
+    /// writes. Connected-device behavior still needs qualification. Trusted only for host-only
     /// (`TextInserter.localDictationWritesAreHostOnly`); otherwise it counts as an eager syncer.
     case respectsHostOnly = "respects this-Mac-only"
 }

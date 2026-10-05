@@ -430,8 +430,12 @@ final class ClipboardTrustTests: XCTestCase {
     }
 
     func test_sharedStore_underTest_neverResolvesTheRealConfigDir() {
-        if Config.configDirOverride == nil {
+        if Config.isResolvingRealDirUnderTest {
             XCTAssertNil(ClipboardTrustStore.defaultFileURL())
+        } else {
+            // The runner may provide SPEAKFREE_CONFIG_DIR instead of the in-process seam.
+            XCTAssertEqual(ClipboardTrustStore.defaultFileURL(),
+                           Config.configDir.appendingPathComponent("clipboard-trust.json"))
         }
     }
 

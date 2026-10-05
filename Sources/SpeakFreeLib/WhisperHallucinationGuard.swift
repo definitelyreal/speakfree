@@ -9,8 +9,9 @@ import Foundation
 /// one of those takes. These are Whisper's well-known outputs on noise: stock video phrases,
 /// sound descriptions in brackets or asterisks, and subtitle dialogue dashes.
 ///
-/// Three kinds of evidence are combined, so a real short dictation with clear speech still
-/// inserts:
+/// Three kinds of evidence are combined. In rescue mode, outputs composed entirely of stock
+/// phrases are refused unless Parakeet agrees, even on voiced audio. This deliberately trades
+/// missed short replies for fewer invented inserts; audio-only thresholds remain heuristic:
 /// 1. The words: the whole output is a stock phrase or a sound tag (`isStockPhrase`), or starts
 ///    with a subtitle dialogue dash.
 /// 2. Parakeet: it returned nothing (or one word) on the same take, or something different.
@@ -169,15 +170,29 @@ public enum WhisperHallucinationGuard {
         return out.trimmingCharacters(in: .whitespaces)
     }
 
-    /// The whole output is a sound description: every piece is wrapped in [], (), ** or music
-    /// notes, or is music notes alone ("*Dramatic music*", "[Music] [Applause]", "♪♪").
+    private static let soundLabels: Set<String> = [
+        "music", "dramatic music", "upbeat music", "background music", "outro music",
+        "applause", "laughter", "laughing", "clapping", "silence", "noise", "background noise",
+        "blank audio", "inaudible", "no speech", "click", "clicking", "sigh", "sighs", "sighing",
+        "clears throat", "bell rings", "bells chiming", "birds chirp", "siren blares", "fans roar",
+    ]
+
+    /// Only recognized sound labels inside [], (), or ** count as sound tags. Wrapping an
+    /// ordinary sentence is formatting, not evidence of hallucination. Music-note notation
+    /// retains the existing caption rule.
     static func isSoundTag(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         let tag = #"\[[^\[\]]*\]|\([^()]*\)|\*[^*]+\*|[♪♫♬♩]+(?:[^♪♫♬♩]*[♪♫♬♩]+)?"#
         let range = NSRange(trimmed.startIndex..., in: trimmed)
-        guard let regex = try? NSRegularExpression(pattern: tag),
-              regex.firstMatch(in: trimmed, range: range) != nil else { return false }
+        guard let regex = try? NSRegularExpression(pattern: tag) else { return false }
+        let matches = regex.matches(in: trimmed, range: range)
+        guard !matches.isEmpty, matches.allSatisfy({ match in
+            guard let r = Range(match.range, in: trimmed) else { return false }
+            let piece = String(trimmed[r])
+            if let first = piece.first, "♪♫♬♩".contains(first) { return true }
+            return soundLabels.contains(normalized(String(piece.dropFirst().dropLast())))
+        }) else { return false }
         let rest = regex.stringByReplacingMatches(in: trimmed, range: range, withTemplate: "")
         return normalized(rest).isEmpty
     }
@@ -194,7 +209,9 @@ public enum WhisperHallucinationGuard {
             .filter { !$0.isEmpty }
         guard !sentences.isEmpty else { return false }
         return sentences.allSatisfy { sentence in
-            stockPhrases.contains(sentence) || creditPrefixes.contains { sentence.hasPrefix($0) }
+            stockPhrases.contains(sentence) || creditPrefixes.contains {
+                sentence == $0 || sentence.hasPrefix($0 + " ")
+            }
         }
     }
 
