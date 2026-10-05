@@ -129,7 +129,10 @@ public enum WhisperHallucinationGuard {
     /// Sentence or clause ends for the stock check: ". ", "! ", ", " and so on, or the end
     /// ("Amara.org" stays whole; "Thank you, bye." is two stock clauses).
     private static let sentenceEnd = try! NSRegularExpression(pattern: #"[.!?…,]+(?:\s+|$)|\n"#)
-    private static let leadingDash = try! NSRegularExpression(pattern: #"^\s*[-‐‑‒–—]+\s+(?=[\p{L}"'“‘])"#)
+    /// A dash (hyphen, the U+2010 to U+2015 dashes, or the U+2212 minus sign), then either a
+    /// space and a word, or straight into a capital letter or quote ("-Do you", "—I'm").
+    private static let leadingDash = try! NSRegularExpression(
+        pattern: #"^\s*[-\x{2010}-\x{2015}\x{2212}]+(?:\s+(?=[\p{L}"'\x{201C}\x{2018}])|(?=[\p{Lu}"'\x{201C}\x{2018}]))"#)
 
     /// True when the text opens like a subtitle line: a dash, a space, then a word. Not a
     /// minus sign ("- 5 degrees") and not a dictated list (two or more lines starting "- ").

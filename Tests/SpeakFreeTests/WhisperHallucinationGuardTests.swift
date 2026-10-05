@@ -54,6 +54,11 @@ final class WhisperHallucinationGuardTextTests: XCTestCase {
         XCTAssertEqual(WhisperHallucinationGuard.stripDialogueDash("- 5 degrees"), "- 5 degrees", "a minus sign")
         XCTAssertEqual(WhisperHallucinationGuard.stripDialogueDash("- buy milk\n- eggs"), "- buy milk\n- eggs", "a list")
         XCTAssertFalse(WhisperHallucinationGuard.hasDialogueDash("- buy milk\n- eggs"))
+        XCTAssertEqual(WhisperHallucinationGuard.stripDialogueDash("-Do you have it?"), "Do you have it?")
+        XCTAssertEqual(WhisperHallucinationGuard.stripDialogueDash("\u{2014}I'm gonna use your space."), "I'm gonna use your space.")
+        XCTAssertEqual(WhisperHallucinationGuard.stripDialogueDash("\u{2212} Thank you"), "Thank you")
+        XCTAssertEqual(WhisperHallucinationGuard.stripDialogueDash("-ish, I think"), "-ish, I think", "lowercase after a bare dash")
+        XCTAssertTrue(WhisperHallucinationGuard.isStockPhrase("\u{2212} Thank you"))
     }
 
     func testCommaJoinedStockAndMusicNotes() {
