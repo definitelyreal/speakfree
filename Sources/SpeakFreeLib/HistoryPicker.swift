@@ -67,12 +67,25 @@ final class HistoryPickerModel: ObservableObject {
     enum KeyboardFocus: Hashable { case search, filter(Filter), row, plainText }
     enum PasteBehavior { case ready, pasting, copyOnly }
     @Published var pasteBehavior: PasteBehavior = .ready
-    @Published var keyboardFocus: KeyboardFocus? = .search
+    @Published var keyboardFocus: KeyboardFocus? = .search {
+        didSet {
+            if keyboardFocus == .plainText { prefersPlainText = true }
+            else if keyboardFocus != .row { prefersPlainText = false }
+        }
+    }
+    // Vertical navigation remembers the chosen action across rows without Aa.
+    // Those rows still activate normally; Left, pointer movement, or leaving the
+    // list ends the preference so plain-text paste never becomes a hidden mode.
+    private var prefersPlainText = false
     @Published var entries: [HistoryEntry] = []
     @Published var query = ""
     @Published var filter: Filter = .all {
         didSet {
-            if oldValue != filter { preferences?.set(filter.rawValue, forKey: Self.filterPreferenceKey) }
+            if oldValue != filter {
+                preferences?.set(filter.rawValue, forKey: Self.filterPreferenceKey)
+                prefersPlainText = false
+                if keyboardFocus == .plainText { keyboardFocus = .row }
+            }
         }
     }
     @Published var selectedID: UUID?
@@ -163,8 +176,9 @@ final class HistoryPickerModel: ObservableObject {
             selectedID = visible.first?.id
             selectionScrollRevision &+= 1
         }
-        if keyboardFocus == .plainText && visible.first(where: { $0.id == selectedID })?.canPastePlainText != true {
-            keyboardFocus = .row
+        if rowNavigationFocused {
+            keyboardFocus = prefersPlainText && visible.first(where: { $0.id == selectedID })?.canPastePlainText == true
+                ? .plainText : .row
         }
     }
     func select(_ id: UUID) {
@@ -176,6 +190,7 @@ final class HistoryPickerModel: ObservableObject {
         guard location != lastPointerLocation else { return }
         lastPointerLocation = location
         select(id)
+        prefersPlainText = false
         keyboardFocus = .row
     }
     func move(_ delta: Int) {
@@ -190,7 +205,9 @@ final class HistoryPickerModel: ObservableObject {
         let rows = visible
         guard !rows.isEmpty else { return }
         let current = rows.firstIndex { $0.id == selectedID } ?? 0
-        selectedID = rows[min(max(current + delta, 0), rows.count - 1)].id
+        let next = rows[min(max(current + delta, 0), rows.count - 1)]
+        selectedID = next.id
+        keyboardFocus = prefersPlainText && next.canPastePlainText ? .plainText : .row
         selectionScrollRevision &+= 1
     }
     func page(_ direction: Int) {
@@ -222,7 +239,9 @@ final class HistoryPickerModel: ObservableObject {
             keyboardFocus = .search
             // Reassert native focus even if logical focus was already search.
             focusSearchEditor?()
-        case .focusRow: keyboardFocus = .row
+        case .focusRow:
+            prefersPlainText = false
+            keyboardFocus = .row
         case .focusPlainText:
             if visible.first(where: { $0.id == selectedID })?.canPastePlainText == true {
                 keyboardFocus = .plainText
@@ -375,7 +394,9 @@ struct HistoryPickerView: View {
     }
 
     private func row(_ entry: HistoryEntry) -> some View {
-        HStack(spacing: 0) {
+        let selected = model.selectedID == entry.id
+        let plainTextSelected = selected && model.keyboardFocus == .plainText && entry.canPastePlainText
+        return HStack(spacing: 0) {
           Button { model.activate(id: entry.id) } label: {
             HStack(spacing: 8) {
                 if entry.containsImage {
@@ -405,18 +426,17 @@ struct HistoryPickerView: View {
             Button { model.activate(id: entry.id, plainText: true) } label: {
                 Image(systemName: "textformat")
                     .font(.system(size: 11, weight: .medium)).frame(width: 24, height: 24)
-                    .foregroundStyle(entry.canPastePlainText ? Color.primary : Color.secondary.opacity(0.4))
-                    .background(entry.canPastePlainText ? Color.primary.opacity(0.08) : .clear, in: Circle())
-                    .overlay(Circle().strokeBorder(
-                        model.selectedID == entry.id && model.keyboardFocus == .plainText ? Color.accentColor : .clear,
-                        lineWidth: 2))
+                    .foregroundStyle(plainTextSelected ? Color.white
+                        : entry.canPastePlainText ? Color.primary : Color.secondary.opacity(0.4))
+                    .background(plainTextSelected ? Color.accentColor
+                        : entry.canPastePlainText ? Color.primary.opacity(0.08) : .clear, in: Circle())
             }.buttonStyle(.plain).disabled(!entry.canPastePlainText)
                 .accessibilityLabel("\(model.actionVerb) as Plain Text")
                 .help(entry.canPastePlainText ? "\(model.actionVerb) as Plain Text (→ then ↩)" : "No convertible rich text in this item")
                 .padding(.trailing, 8)
           }
         }
-        .background(model.selectedID == entry.id ? Color.accentColor.opacity(0.16) : .clear,
+        .background(selected ? (plainTextSelected ? Color.primary.opacity(0.12) : Color.accentColor.opacity(0.16)) : .clear,
                     in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .onContinuousHover { phase in
