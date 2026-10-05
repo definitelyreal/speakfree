@@ -232,6 +232,9 @@ final class ClipboardCanary {
             current.readAt = self.env.uptime()
         }
         run = current
+        // A read served before `onRead` was set (none is expected: AppKit calls the provider on
+        // main, and this runs in one main-thread turn) still counts. Errs toward "read".
+        if provider.provideCount > 0 { current.readAt = env.uptime() }
         env.store.update { $0.lastAttemptAt = env.now() }
 
         // The user's own Cmd+V during the run puts their clipboard back first (tap thread).

@@ -161,6 +161,20 @@ final class ContinuityFastRestoreTests: XCTestCase {
         return event
     }
 
+    /// Runs the paste-watch tap's real callback body on a background thread (the tap thread's
+    /// situation) and checks the event is delivered unchanged.
+    private func tapCallbackOnTapThread(_ gate: UserPasteRestoreGate, _ event: CGEvent) {
+        var passed: CGEvent?
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            passed = HotkeyManager.pasteWatchTapEvent(type: .keyDown, event: event, gate: gate, tap: nil)?
+                .takeUnretainedValue()
+            done.signal()
+        }
+        XCTAssertEqual(done.wait(timeout: .now() + 2), .success, "the tap callback must not wait for main")
+        XCTAssertTrue(passed === event, "the keystroke is always delivered, unchanged")
+    }
+
     /// Hands the event to the gate from a background thread (the tap thread's situation).
     private func deliverOnTapThread(_ gate: UserPasteRestoreGate, _ event: CGEvent) -> UserPasteRestoreGate.Outcome? {
         var outcome: UserPasteRestoreGate.Outcome?
@@ -202,11 +216,12 @@ final class ContinuityFastRestoreTests: XCTestCase {
 
         inserter.pasteViaClipboard("dictated words")
         XCTAssertTrue(gate.isWatching)
-        // Cmd+Shift+V is a different shortcut and is left alone.
-        XCTAssertEqual(deliverOnTapThread(gate, try syntheticUserCmdV(flags: [.maskCommand, .maskShift])), .notPaste)
-        guard case .restored = deliverOnTapThread(gate, try syntheticUserCmdV()) else {
-            return XCTFail("expected the tap to restore his clipboard")
-        }
+        // Cmd+Shift+V is a different shortcut and is left alone, through the tap's callback.
+        tapCallbackOnTapThread(gate, try syntheticUserCmdV(flags: [.maskCommand, .maskShift]))
+        XCTAssertEqual(pb.string(forType: .string), "dictated words")
+        XCTAssertTrue(gate.isWatching)
+        // His Cmd+V through the same callback the live tap runs restores before it returns.
+        tapCallbackOnTapThread(gate, try syntheticUserCmdV())
         XCTAssertEqual(pb.string(forType: .string), "HIS COPY")
 
         RunLoop.main.run(until: Date().addingTimeInterval(1.4))  // past both timers
@@ -215,6 +230,73 @@ final class ContinuityFastRestoreTests: XCTestCase {
         let line = sink.records.first?.userPasteLogLine ?? ""
         XCTAssertTrue(line.hasPrefix("Clipboard restore: trigger=user-paste route=electron"), line)
         XCTAssertEqual(UpdateLogEvent.classify("[00:00:00] " + line), .unrelated, line)
+        XCTAssertEqual(pb.string(forType: .string), "HIS COPY")
+    }
+
+    /// iPhone Mirroring as the paste TARGET keeps the remote route: an eager, not host-only write,
+    /// no lazy receipt, the Cmd+V gate never armed, and only the backstop restores.
+    func test_iPhoneMirroringAsTarget_staysOnTheRemoteRoute() throws {
+        let gate = UserPasteRestoreGate()
+        let pb = makePasteboard()
+        setUserClipboard(pb, "HIS COPY")
+        let sink = Sink()
+        // Backstop longer than the remote route's fixed 0.4 s paste delay, as in production.
+        let inserter = makeInserter(pasteboard: pb, gate: gate, sink: sink, running: fieldRunning, backstop: 0.7)
+        inserter.frontmostBundleIDProvider = { "com.apple.ScreenContinuity" }
+        inserter.executeAppleScript = { _ in nil }
+        var clears: [Bool] = []
+        var writer = PasteboardWriter()
+        let realClear = writer.clear
+        writer.clear = { pb, hostOnly in clears.append(hostOnly); return realClear(pb, hostOnly) }
+        inserter.pasteboardWriter = writer
+
+        inserter.pasteViaClipboard("dictated words")
+        XCTAssertEqual(clears.first, false, "the remote route's write is not host-only")
+        XCTAssertFalse(gate.isWatching, "the remote route never arms the Cmd+V gate")
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        XCTAssertEqual(sink.records.map(\.route), [.remote])
+        XCTAssertEqual(sink.records.map(\.trigger), ["backstop"])
+        XCTAssertEqual(sink.records.first?.earlyOffReason, "route")
+        XCTAssertEqual(sink.records.first?.lazy, false)
+    }
+
+    /// The canary's override must see a read even if one were served while it was still
+    /// publishing (before its read handler was attached). Simulated with a writer that reads
+    /// the scratch board right after writing.
+    func test_canaryReadDuringPublication_stillCountsAsRead() throws {
+        let pb = makePasteboard()
+        setUserClipboard(pb, "HIS COPY")
+        let store = ClipboardTrustStore(fileURL: nil)
+        var env = ClipboardCanary.Environment(pasteboard: pb, store: store)
+        var uptime: TimeInterval = 1000
+        env.now = { Date(timeIntervalSince1970: 1_800_000_000) }
+        env.uptime = { uptime }
+        env.secondsSinceUserInput = { uptime }
+        env.runningBundleIDs = { self.fieldRunning }
+        env.isBusy = { false }
+        env.holdOverride = 0.2
+        env.pasteGate = nil
+        env.isScreenLocked = { true }
+        env.inputPollInterval = 0.02
+        env.writeGate = { $0() }
+        env.quietClipboardInterval = 0
+        var writer = PasteboardWriter()
+        writer.write = { pb, items in
+            let ok = pb.writeObjects(items)
+            _ = pb.string(forType: .string)  // a reader that wins the race with the handler
+            return ok
+        }
+        env.pasteboardWriter = writer
+        let canary = ClipboardCanary(environment: env)
+        let exp = expectation(description: "canary finished")
+        var result: ClipboardCanaryResult?
+        canary.onFinish = { result = $0; exp.fulfill() }
+        canary.startIfDue(mode: .lock)
+        uptime += 1
+        wait(for: [exp], timeout: 3)
+        XCTAssertEqual(result?.outcome, .read)
+        XCTAssertEqual(store.state.verdict, .untrusted)
+        XCTAssertEqual(store.currentUntrustedReason(runningBundleIDs: fieldRunning), "canary-read")
         XCTAssertEqual(pb.string(forType: .string), "HIS COPY")
     }
 
