@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b/agent:clipboard_core · 2026-10-01
 import AppKit
 import XCTest
@@ -242,13 +243,13 @@ final class HistoryInterfaceTests: XCTestCase {
         XCTAssertEqual(HistoryPickerModel.Filter.allCases, [.dictation, .clipboard, .all])
         XCTAssertNil(HistoryPickerKeyAction.action(keyCode: 126, modifiers: .option))
         XCTAssertNil(HistoryPickerKeyAction.action(keyCode: 125, modifiers: [.command, .shift]))
-        XCTAssertEqual(HistoryPickerKeyAction.action(keyCode: 48, modifiers: []), .cycleFilter(1))
-        XCTAssertEqual(HistoryPickerKeyAction.action(keyCode: 48, modifiers: .shift), .cycleFilter(-1))
+        XCTAssertEqual(HistoryPickerKeyAction.action(keyCode: 48, modifiers: []), .cycleFocus(1))
+        XCTAssertEqual(HistoryPickerKeyAction.action(keyCode: 48, modifiers: .shift), .cycleFocus(-1))
         XCTAssertEqual(HistoryPickerKeyAction.action(keyCode: 3, modifiers: .command), .focusSearch)
         XCTAssertNil(HistoryPickerKeyAction.action(keyCode: 8, modifiers: .command), "Command-C still copies search text")
     }
 
-    func testTabCyclesAllSourcesInBothDirectionsWithoutClearingSearch() {
+    func testFilterArrowNavigationCyclesAllSourcesWithoutClearingSearch() {
         let model = pickerModel()
         let dictation = entry("shared dictation")
         let clipboard = entry("shared copy", source: .clipboard)

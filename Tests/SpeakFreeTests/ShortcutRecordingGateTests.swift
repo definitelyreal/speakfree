@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-01
 import AppKit
 import Carbon
@@ -75,6 +76,7 @@ final class ShortcutRecordingGateTests: XCTestCase {
         }, unregister: { _ in unregistrations += 1 }, installEventHandler: false)
         shortcut.onAvailabilityChanged = { error in XCTAssertNil(error) }
         var settings = HistorySettings()
+        settings.includeClipboard = true
         settings.dictationShortcut = .unassigned // This existing test isolates Clipboard's registration lifecycle.
         let dictation = HotkeyConfig(keyCode: 63, modifiers: [])
         XCTAssertNil(shortcut.configure(settings, dictation: dictation))
@@ -98,6 +100,7 @@ final class ShortcutRecordingGateTests: XCTestCase {
         }, unregister: { _ in }, installEventHandler: false)
         shortcut.onAvailabilityChanged = { messages.append($0) }
         var settings = HistorySettings()
+        settings.includeClipboard = true
         settings.dictationShortcut = .unassigned // This existing test isolates Clipboard's registration lifecycle.
         let dictation = HotkeyConfig(keyCode: 63, modifiers: [])
         XCTAssertNil(shortcut.configure(settings, dictation: dictation))

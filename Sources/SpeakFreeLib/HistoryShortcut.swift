@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:unknown/agent:audio_file_integrity · 2026-10-03
 import Carbon
 import Foundation
@@ -14,6 +15,7 @@ final class HistoryShortcut {
     private(set) var availabilityErrors: [Action: String] = [:]
     private let register: Register
     private let unregister: (EventHotKeyRef) -> Void
+    private let systemShortcuts: () -> ShortcutConflictHints.SystemSnapshot
     private let recordingGate: ShortcutRecordingGate
     private var recordingObserver: NSObjectProtocol?
     private var latestSettings: HistorySettings?
@@ -22,8 +24,13 @@ final class HistoryShortcut {
     init(recordingGate: ShortcutRecordingGate = .shared,
          register: @escaping Register = HistoryShortcut.registerGlobally,
          unregister: @escaping (EventHotKeyRef) -> Void = { _ = UnregisterEventHotKey($0) },
+         systemShortcuts: (() -> ShortcutConflictHints.SystemSnapshot)? = nil,
          installEventHandler: Bool = true) {
         self.recordingGate = recordingGate; self.register = register; self.unregister = unregister
+        // An inert test environment must not query the host's actual shortcut settings.
+        if let systemShortcuts { self.systemShortcuts = systemShortcuts }
+        else if installEventHandler { self.systemShortcuts = { ShortcutConflictHints.systemSnapshot() } }
+        else { self.systemShortcuts = { .available([]) } }
         recordingObserver = recordingGate.notificationCenter.addObserver(
             forName: ShortcutRecordingGate.changed, object: nil, queue: .main
         ) { [weak self] note in
@@ -58,11 +65,17 @@ final class HistoryShortcut {
             for action in Action.allCases { remove(action) }
             return nil
         }
+        let clipboardEnabled = settings.policy.captureClipboard
+        let system = systemShortcuts()
         // Preserve unchanged valid registrations: a failed edit to one action must not
         // release another action's working shortcut to a competing application.
         for action in Action.allCases {
+            // Keep the configured chord for later, but release its global reservation
+            // whenever clipboard capture is disabled.
+            if action == .clipboard && !clipboardEnabled { remove(action); continue }
             let desired = settings.shortcut(for: action)
             if !desired.isAssigned || desired.validationError != nil || desired.conflictsWithDictation(dictation)
+                || system.conflict(for: desired) != nil
                 || registrations[action].map({ !$0.shortcut.matches(desired) }) == true { remove(action) }
         }
         // Existing registrations win conflicts. On migration, Clipboard's legacy custom
@@ -70,9 +83,11 @@ final class HistoryShortcut {
         let priority: [Action] = [.clipboard, .dictation, .all]
         let order = priority.filter { registrations[$0] != nil } + priority.filter { registrations[$0] == nil }
         for action in order {
+            guard action != .clipboard || clipboardEnabled else { continue }
             let desired = settings.shortcut(for: action)
             guard desired.isAssigned else { continue }
             if let error = desired.validationError { availabilityErrors[action] = error; continue }
+            if let error = system.conflict(for: desired) { availabilityErrors[action] = error; continue }
             if desired.conflictsWithDictation(dictation) {
                 availabilityErrors[action] = "\(desired.label) conflicts with your dictation key. Choose a different shortcut."
                 continue
@@ -82,11 +97,11 @@ final class HistoryShortcut {
                 continue
             }
             if registrations[action] != nil { continue }
-            let (status, key) = register(action, desired.keyCode, Self.carbonFlags(desired.modifiers))
+            let (status, key) = register(action, desired.keyCode, ShortcutConflictHints.carbonFlags(desired.modifiers))
             if status == noErr, let key { registrations[action] = .init(shortcut: desired, key: key) }
             else {
                 if let key { unregister(key) }
-                availabilityErrors[action] = "\(desired.label) is unavailable. Choose another shortcut or disable it in the other app."
+                availabilityErrors[action] = ShortcutConflictHints.registrationFailure(status, shortcut: desired)
             }
         }
         let errors = Action.allCases.compactMap { action in availabilityErrors[action].map { "\(action.title): \($0)" } }
@@ -95,15 +110,6 @@ final class HistoryShortcut {
 
     private func remove(_ action: Action) {
         if let registration = registrations.removeValue(forKey: action) { unregister(registration.key) }
-    }
-    private static func carbonFlags(_ modifiers: [String]) -> UInt32 {
-        let values = HistorySettings.normalizedModifiers(modifiers)
-        var flags: UInt32 = 0
-        if values.contains("cmd") { flags |= UInt32(cmdKey) }
-        if values.contains("shift") { flags |= UInt32(shiftKey) }
-        if values.contains("option") { flags |= UInt32(optionKey) }
-        if values.contains("ctrl") { flags |= UInt32(controlKey) }
-        return flags
     }
     private static func registerGlobally(_ action: Action, _ code: UInt16, _ flags: UInt32) -> (OSStatus, EventHotKeyRef?) {
         var key: EventHotKeyRef?

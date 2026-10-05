@@ -16,6 +16,15 @@ sf_verify_staged_app() {
     "$staged_app/Contents/MacOS/speakfree" --help >/dev/null || return 1
 }
 
+sf_quit_clipy() {
+    local staged_app="$1" receipt result=0
+    receipt="$("$staged_app/Contents/MacOS/speakfree" quit-clipy --timeout 30)" || result=$?
+    if [ "$result" -ne 0 ] || [ "$receipt" != SPEAKFREE_CLIPY_STOPPED ]; then
+        echo "FATAL: Clipy did not quit normally; refusing to stop or replace speakfree" >&2
+        return 1
+    fi
+}
+
 sf_prepare_update() {
     local staged_app="$1" receipt status=0
     # Deployment targets the ordinary production app/config. A test/custom override
@@ -77,16 +86,19 @@ sf_move_old_app_to_trash() {
 
 sf_install_staged_app() {
     local staged_app="$1" label="$2"
+    [ -z "${SPEAKFREE_CONFIG_DIR:-}" ] || { echo "FATAL: unset SPEAKFREE_CONFIG_DIR before deployment" >&2; return 1; }
     sf_verify_staged_app "$staged_app" || return 1
     sf_read_target_pids || return 1
     if [ -n "$SF_TARGET_PIDS" ]; then
         echo "== $label: waiting for quiet and the visible/audible update warning =="
         sf_prepare_update "$staged_app" || return 1
-        # Invoke immediately after the positive receipt. An older app can still accept
-        # a new Fn press between the final observation and SIGTERM; this is not atomic.
+        # Do not quit Clipy if the user cancels the warning. A normal Clipy quit is
+        # bounded; SpeakFree still drains any new dictation before honoring SIGTERM.
+        sf_quit_clipy "$staged_app" || return 1
         sf_stop_gracefully || return 1
     else
         echo "== $label: app already stopped; no stop warning needed =="
+        sf_quit_clipy "$staged_app" || return 1
         # Never signal an app that appeared after choosing the no-warning branch.
         # Re-query immediately before replacing files and abort if anything changed.
         sf_read_target_pids || return 1

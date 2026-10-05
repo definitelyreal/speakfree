@@ -49,21 +49,60 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var historyTerminationInFlight = false
     private var skipHistoryDrainOnce = false
     private var scheduledRecentInsertions = 0
+    private var archiveRemovalObserver: NSObjectProtocol?
+    private var terminationConfirmationInFlight = false
+    private var authorizedTermination: TerminationIntent = .interactive
+
+    enum TerminationIntent {
+        case interactive, confirmedByUser, signalDrain
+
+        func requiresConfirmation(isBusy: Bool) -> Bool {
+            isBusy && self == .interactive
+        }
+    }
+
+    private var terminationIsBusy: Bool {
+        isPressed || postBufferTimer != nil
+            || statusBar?.state == .recording || statusBar?.state == .transcribing
+            || scheduledRecentInsertions > 0 || secureInputRetryTimer != nil
+            || inserter?.hasDeferredInsertion == true || (editSessionOpenProbe?() ?? false)
+    }
+
+    /// Modal loops must start from the run loop, never a main-dispatch callback:
+    /// their completion can depend on other work queued on the main queue.
+    static func scheduleTerminationUI(_ body: @escaping () -> Void) {
+        let runLoop = CFRunLoopGetMain()
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue, body)
+        CFRunLoopWakeUp(runLoop)
+    }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let historyCoordinator else { return .terminateNow }
         if historyTerminationInFlight { return .terminateLater }
-        guard !isPressed, postBufferTimer == nil,
-              statusBar?.state != .recording, statusBar?.state != .transcribing,
-              scheduledRecentInsertions == 0, secureInputRetryTimer == nil,
-              inserter?.hasDeferredInsertion != true else {
-            // A deferred SIGTERM may already have paused new recordings. Refusing
-            // this exit must leave the app usable instead of stranding that latch.
-            isTerminating = false
-            NSSound.beep()
+        if terminationConfirmationInFlight { return .terminateCancel }
+        let intent = authorizedTermination
+        authorizedTermination = .interactive
+        if intent.requiresConfirmation(isBusy: terminationIsBusy) {
+            terminationConfirmationInFlight = true
+            Self.scheduleTerminationUI { [weak self, weak sender] in
+                guard let self, let sender else { return }
+                let alert = NSAlert()
+                alert.messageText = "Quit before dictation finishes?"
+                alert.informativeText = "An unfinished recording will be closed for recovery. Pending transcription or text insertion may not finish."
+                alert.addButton(withTitle: "Keep Open")
+                alert.addButton(withTitle: "Quit Now")
+                let confirmed = alert.runModal() == .alertSecondButtonReturn
+                self.terminationConfirmationInFlight = false
+                if confirmed {
+                    self.authorizedTermination = .confirmedByUser
+                    ApplicationTermination.request(sender)
+                } else {
+                    self.skipHistoryDrainOnce = false
+                }
+            }
             return .terminateCancel
         }
         if skipHistoryDrainOnce { skipHistoryDrainOnce = false; return .terminateNow }
+        guard let historyCoordinator else { return .terminateNow }
         historyTerminationInFlight = true
         isTerminating = true
         historyCoordinator.prepareForTermination { [weak self, weak sender] result in
@@ -75,18 +114,26 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             case .failure(let error):
                 self.isTerminating = false
                 sender.reply(toApplicationShouldTerminate: false)
-                let alert = NSAlert()
-                alert.messageText = "History could not be saved"
-                alert.informativeText = error.localizedDescription + " Your current history remains available in speakfree."
-                alert.addButton(withTitle: "Keep Open")
-                alert.addButton(withTitle: "Quit Without Saving")
-                if alert.runModal() == .alertSecondButtonReturn {
-                    self.skipHistoryDrainOnce = true
-                    ApplicationTermination.request(sender)
+                Self.scheduleTerminationUI { [weak self, weak sender] in
+                    guard let self, let sender else { return }
+                    let alert = NSAlert()
+                    alert.messageText = "History could not be saved"
+                    alert.informativeText = error.localizedDescription + " Your current history remains available in speakfree."
+                    alert.addButton(withTitle: "Keep Open")
+                    alert.addButton(withTitle: "Quit Without Saving")
+                    if alert.runModal() == .alertSecondButtonReturn {
+                        self.skipHistoryDrainOnce = true
+                        // New dictation since the failed drain still needs confirmation.
+                        ApplicationTermination.request(sender)
+                    }
                 }
             }
         }
         return .terminateLater
+    }
+
+    deinit {
+        if let archiveRemovalObserver { NotificationCenter.default.removeObserver(archiveRemovalObserver) }
     }
 
     // Clean up whisper model before exit to prevent ggml Metal assertion crash.
@@ -215,6 +262,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         statusBar = StatusBarController()
         recorder = AudioRecorder()
         inserter = TextInserter()
+        configureUninsertedDictationRecovery()
         installGracefulTermination()
 
         // Device catalog cache: the ONLY CoreAudio the main thread ever sees. Refreshes
@@ -616,20 +664,24 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             self.statusBar.reprocessHandler = { [weak self] url in
                 self?.reprocess(audioURL: url)
             }
-            self.historyCoordinator = HistoryCoordinator(config: self.config,
-                inserter: { [weak self] in self?.inserter },
-                isBusy: { [weak self] in
-                    guard let self else { return true }
-                    return self.isTerminating || self.isPressed || self.postBufferTimer != nil
-                        || self.scheduledRecentInsertions > 0 || self.secureInputRetryTimer != nil
-                        || self.statusBar?.state == .transcribing || (self.editSessionOpenProbe?() ?? false)
-                })
+            self.configureHistoryCoordinator()
             self.historyCoordinator?.showPreferences = { [weak self] in
                 self?.showSettings()
                 self?.settingsViewModel?.selectedSettingsTab = .clipboard
             }
             self.historyCoordinator?.showSavedDictations = { [weak self] in self?.statusBar.showSavedDictationsMenu() }
             self.statusBar.historyHandler = { [weak self] in self?.historyCoordinator?.show() }
+            self.historyCoordinator?.showCopyFeedback = { [weak self] message in
+                guard let self, !self.terminationIsBusy else { return }
+                self.statusBar.state = .copiedToClipboard
+                self.statusBar.buildMenu()
+                self.showHistoryNotice(message)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                    guard let self, self.statusBar.state == .copiedToClipboard else { return }
+                    self.statusBar.state = .idle
+                    self.statusBar.buildMenu()
+                }
+            }
             self.statusBar.buildMenu()
         }
 
@@ -1018,6 +1070,61 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Graceful termination (2026-07-14)
 
+    /// Delivery trouble never opens the large automatic text dialog. Preserve a
+    /// session-only copy in the menu even when the optional History feature is off.
+    private func configureUninsertedDictationRecovery() {
+        inserter.onRemoteInsertionFailure = { [weak self] text, _ in
+            guard let self else { return }
+            self.statusBar.retainUninsertedDictation(text)
+            self.showHistoryNotice("Couldn’t insert. Your dictation is in Recent Dictations.")
+        }
+        statusBar.copyUninsertedDictation = { [weak self] entry in
+            guard let self else { return }
+            self.inserter.prepareClipboardForUser { [weak self] result in
+                guard let self else { return }
+                let item = NSPasteboardItem()
+                item.setString(entry.text, forType: .string)
+                guard case .success(let prepared) = result,
+                      self.inserter.replaceClipboardForUser(with: [item], prepared: prepared) != nil else {
+                    self.showHistoryNotice("Couldn’t copy. Your dictation is still in Recent Dictations.")
+                    return
+                }
+                self.statusBar.didCopyUninsertedDictation(id: entry.id)
+                self.showHistoryNotice("Copied. Press ⌘V where you want it.")
+            }
+        }
+    }
+
+    private func showHistoryNotice(_ message: String) {
+        guard !isPressed, statusBar.state != .recording else { return }
+        recordingOverlay.show(state: .transcribing)
+        recordingOverlay.lingerWithMessageThenHide(message, duration: 4)
+    }
+
+    /// Repeated setup attempts must retain memory-only history and one set of observers.
+    func configureHistoryCoordinator(factory: (() -> HistoryCoordinator)? = nil) {
+        if historyCoordinator == nil {
+            historyCoordinator = factory?() ?? HistoryCoordinator(config: config,
+                inserter: { [weak self] in self?.inserter },
+                isBusy: { [weak self] in
+                    guard let self else { return true }
+                    return self.isTerminating || self.terminationIsBusy
+                })
+        } else {
+            historyCoordinator?.configure(config)
+        }
+        if archiveRemovalObserver == nil {
+            archiveRemovalObserver = NotificationCenter.default.addObserver(
+                forName: RecordingStore.archivesRemoved, object: nil, queue: .main
+            ) { [weak self] notification in
+                guard let directory = notification.object as? URL,
+                      directory == RecordingStore.recordingsDir.standardizedFileURL,
+                      let ids = notification.userInfo?["archiveIDs"] as? [String] else { return }
+                for id in ids { self?.historyCoordinator?.removeArchivedDictation(id: id) }
+            }
+        }
+    }
+
     /// SIGTERM (pkill, reinstall scripts, logout) waits for an in-flight dictation to
     /// finish — and for 10 s of quiet after it — before exiting, instead of cutting the
     /// user off mid-sentence. SIGKILL is unaffected (nothing can be).
@@ -1026,8 +1133,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler { [weak self] in
             guard let self else { ApplicationTermination.request(); return }
-            let busy = self.statusBar.state == .recording || self.statusBar.state == .transcribing
+            let busy = self.terminationIsBusy
             if !busy {
+                self.isTerminating = true
+                self.authorizedTermination = .signalDrain
                 ApplicationTermination.request()
                 return
             }
@@ -1048,10 +1157,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// Poll every 0.5 s; require 10 s of continuous idle (no recording/transcribing)
     /// before terminating. Hard deadline so a stuck state can't make the app unkillable.
     private func terminateAfterQuiet(consecutiveIdle: Int, deadline: Date) {
-        let busy = statusBar.state == .recording || statusBar.state == .transcribing
+        let busy = terminationIsBusy
         let idleCount = busy ? 0 : consecutiveIdle + 1
         if idleCount >= 20 || Date() > deadline {
-            DiagnosticLogger.shared.log("SIGTERM: quiet — exiting now")
+            DiagnosticLogger.shared.log(Date() > deadline
+                ? "SIGTERM: drain deadline reached — graceful exit with recording recovery"
+                : "SIGTERM: quiet — exiting now")
+            authorizedTermination = .signalDrain
             ApplicationTermination.request()
             return
         }
@@ -2056,12 +2168,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             let isCaptureFailure: Bool
             if case .captureFailed = failure {
                 isCaptureFailure = true
-                try? FileManager.default.removeItem(at: audioURL)
+                if (try? FileManager.default.removeItem(at: audioURL)) != nil {
+                    RecordingStore.notifyArchivesRemoved(ids: [RecordingActivity.stem(for: audioURL)],
+                                                        directory: audioURL.deletingLastPathComponent())
+                }
             } else {
                 isCaptureFailure = false
             }
             if !DevMode.effectiveSaveRecordings(config) {
-                try? FileManager.default.removeItem(at: audioURL)
+                if (try? FileManager.default.removeItem(at: audioURL)) != nil {
+                    RecordingStore.notifyArchivesRemoved(ids: [RecordingActivity.stem(for: audioURL)],
+                                                        directory: audioURL.deletingLastPathComponent())
+                }
             }
             if isCaptureFailure {
                 statusBar.state = .captureFailed
@@ -2315,7 +2433,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 let maxRecordings = (DevMode.isActive || !keepRecording || retentionConfig.preserveAllRecordings?.value == true)
                     ? 0 : Config.effectiveMaxRecordings(retentionConfig.maxRecordings)
                 if !keepRecording {
-                    try? FileManager.default.removeItem(at: audioURL)
+                    if (try? FileManager.default.removeItem(at: audioURL)) != nil {
+                    RecordingStore.notifyArchivesRemoved(ids: [RecordingActivity.stem(for: audioURL)],
+                                                        directory: audioURL.deletingLastPathComponent())
+                }
                 }
                 if maxRecordings > 0 {
                     RecordingStore.prune(maxCount: maxRecordings)
@@ -2699,7 +2820,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         return
                     }
                     let pasteboard = NSPasteboard.general
-                    pasteboard.clearContents()
+                    pasteboard.prepareForNewContents(with: .currentHostOnly)
                     pasteboard.setString(trimmed, forType: .string)
                     self.lastTranscription = trimmed
                     DiagnosticLogger.shared.log(
@@ -2761,7 +2882,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             defer { self.scheduledRecentInsertions -= 1 }
             let copyFallback = {
                 let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
+                pasteboard.prepareForNewContents(with: .currentHostOnly)
                 pasteboard.setString(text, forType: .string)
                 self.statusBar.state = .copiedToClipboard
                 self.statusBar.buildMenu()

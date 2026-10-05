@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-02
 import AppKit
 import XCTest
@@ -96,7 +97,7 @@ final class HistoryPlainTextTests: XCTestCase {
         model.resetForPresentation()
         XCTAssertEqual(model.keyboardFocus, .search)
         let right = model.keyAction(keyCode: 124, modifiers: [])
-        XCTAssertEqual(right, .focusPlainText)
+        XCTAssertEqual(right, .nextRowAction)
         if let right { model.handle(right) }
         XCTAssertEqual(model.keyboardFocus, .plainText)
         var choices: [HistoryEntry] = []
@@ -113,8 +114,8 @@ final class HistoryPlainTextTests: XCTestCase {
         model.entries = [entry([.init(type: "public.utf8-plain-text", data: Data("Plain".utf8))])]
         model.resetForPresentation()
         model.handle(model.keyAction(keyCode: 124, modifiers: [])!)
-        XCTAssertEqual(model.keyboardFocus, .search, "A plain-only first item has no action to focus")
-        model.handle(.move(0)); model.handle(.focusPlainText)
+        XCTAssertEqual(model.keyboardFocus, .trash, "A plain-only first item goes directly to Trash")
+        model.handle(.focusRow); model.handle(.focusPlainText)
         XCTAssertEqual(model.keyboardFocus, .row)
         model.choose = { _, _ in XCTFail("Disabled action must not choose") }
         model.activate(id: model.entries[0].id, plainText: true)
@@ -130,10 +131,10 @@ final class HistoryPlainTextTests: XCTestCase {
         model.keyboardFocus = .filter(.all)
         XCTAssertEqual(model.keyAction(keyCode: 124, modifiers: []), .cycleFilter(1))
         model.resetForPresentation()
-        XCTAssertEqual(model.keyAction(keyCode: 124, modifiers: []), .focusPlainText)
+        XCTAssertEqual(model.keyAction(keyCode: 124, modifiers: []), .nextRowAction)
         XCTAssertNil(model.keyAction(keyCode: 124, modifiers: .shift))
         model.handle(.focusPlainText)
-        XCTAssertEqual(model.keyAction(keyCode: 123, modifiers: []), .focusRow)
+        XCTAssertEqual(model.keyAction(keyCode: 123, modifiers: []), .previousRowAction)
     }
     func testRepeatedActivationIsBlockedWhilePastingAndCopiesAfterFailureUntilReopened() {
         let model = HistoryPickerModel()

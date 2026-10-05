@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:unknown/agent:audio_file_integrity · 2026-10-03
 import AppKit
 import Carbon
@@ -11,8 +12,123 @@ final class HistoryActionShortcutTests: XCTestCase {
     private func key(_ action: HistorySettings.Action) -> EventHotKeyRef { OpaquePointer(bitPattern: Int(action.carbonID))! }
     private func allAssigned() -> HistorySettings {
         var settings = HistorySettings()
+        settings.includeClipboard = true
         settings.allShortcut = .init(keyCode: 9, modifiers: ["ctrl", "shift"])
         return settings
+    }
+
+    func testSystemKeyComparisonIgnoresNonChordModifierBits() {
+        let snapshot = ShortcutConflictHints.systemSnapshot(entries: [[
+            kHISymbolicHotKeyEnabled as String: true,
+            kHISymbolicHotKeyCode as String: NSNumber(value: 123),
+            kHISymbolicHotKeyModifiers as String: NSNumber(value: UInt32(controlKey) | 0x800000),
+        ]])
+        XCTAssertNotNil(snapshot.conflict(for: .init(keyCode: 123, modifiers: ["ctrl"])))
+    }
+
+    func testConflictDeduplicationKeepsDistinctAndStaleRegistrationFailures() {
+        XCTAssertEqual(ShortcutConflictHints.distinctErrors(["new attempt", "system conflict", "system conflict", nil]),
+                       ["new attempt", "system conflict"])
+        XCTAssertEqual(ShortcutConflictHints.remainingRegistrationError("Dictations: system\nAll: failed",
+                       inlineErrors: ["Dictations: system"]), "All: failed")
+        XCTAssertEqual(ShortcutConflictHints.remainingRegistrationError("Dictations: stale system",
+                       inlineErrors: ["Dictations: new system"]), "Dictations: stale system")
+        XCTAssertNil(ShortcutConflictHints.remainingRegistrationError("Dictations: system",
+                     inlineErrors: ["Dictations: system"]))
+    }
+
+    func testSystemSnapshotUsesOnlyEnabledValidKeysAndExactModifiers() {
+        let enabled = kHISymbolicHotKeyEnabled as String
+        let code = kHISymbolicHotKeyCode as String
+        let modifiers = kHISymbolicHotKeyModifiers as String
+        let snapshot = ShortcutConflictHints.systemSnapshot(entries: [
+            [enabled: true, code: NSNumber(value: 9), modifiers: NSNumber(value: cmdKey | shiftKey)],
+            [enabled: false, code: NSNumber(value: 9), modifiers: NSNumber(value: optionKey | shiftKey)],
+            [enabled: true, code: NSNumber(value: -1), modifiers: NSNumber(value: controlKey)],
+            [enabled: true, code: NSNumber(value: 8)],
+        ])
+        XCTAssertNotNil(snapshot.conflict(for: .init(keyCode: 9, modifiers: ["shift", "command"])))
+        XCTAssertNil(snapshot.conflict(for: .init(keyCode: 9, modifiers: ["shift", "option"])))
+        XCTAssertNil(snapshot.conflict(for: .init(keyCode: 9, modifiers: ["cmd", "shift", "ctrl"])))
+        XCTAssertNil(snapshot.conflict(for: .init(keyCode: 8, modifiers: ["cmd", "shift"])))
+        XCTAssertNil(snapshot.conflict(for: .unassigned))
+        XCTAssertNil(ShortcutConflictHints.SystemSnapshot.unavailable.conflict(for: .init(keyCode: 9, modifiers: ["cmd", "shift"])))
+        XCTAssertNotEqual(snapshot, .unavailable)
+    }
+
+    func testNewSystemConflictReleasesOnlyItsRegistrationAndPreservesConfiguredKeys() {
+        var system: ShortcutConflictHints.SystemSnapshot = .available([])
+        var reads = 0, registered: [HistorySettings.Action] = [], removed: [EventHotKeyRef] = []
+        let shortcut = HistoryShortcut(register: { action, _, _ in
+            registered.append(action); return (noErr, self.key(action))
+        }, unregister: { removed.append($0) }, systemShortcuts: { reads += 1; return system }, installEventHandler: false)
+        let settings = allAssigned()
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        system = .available([.init(keyCode: 9, modifiers: UInt32(optionKey | shiftKey))])
+        XCTAssertNotNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(removed, [key(.dictation)])
+        XCTAssertEqual(registered, [.clipboard, .dictation, .all])
+        XCTAssertTrue(shortcut.availabilityErrors[.dictation]?.contains("macOS keyboard shortcut") == true)
+        XCTAssertNil(shortcut.availabilityErrors[.clipboard])
+        XCTAssertNil(shortcut.availabilityErrors[.all])
+        var pressed: [HistorySettings.Action] = []
+        shortcut.onPress = { pressed.append($0) }
+        [1, 2, 3, 1, 2, 3].forEach { shortcut.receive(actionID: $0) }
+        XCTAssertEqual(pressed, [.clipboard, .all, .clipboard, .all])
+        XCTAssertEqual(reads, 2, "Dispatch must not query system shortcuts for each key event")
+        XCTAssertEqual(settings.dictationShortcut, HistorySettings.Action.dictation.defaultShortcut)
+        system = .available([])
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(registered, [.clipboard, .dictation, .all, .dictation])
+        XCTAssertEqual(reads, 3)
+    }
+
+    func testInactiveClipboardAndUnknownSystemSnapshotDoNotInventConflicts() {
+        var system: ShortcutConflictHints.SystemSnapshot = .available([
+            .init(keyCode: 9, modifiers: UInt32(cmdKey | shiftKey))
+        ])
+        var registered: [HistorySettings.Action] = []
+        let shortcut = HistoryShortcut(register: { action, _, _ in
+            registered.append(action); return (noErr, self.key(action))
+        }, unregister: { _ in }, systemShortcuts: { system }, installEventHandler: false)
+        var settings = HistorySettings()
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(registered, [.dictation])
+        settings.includeClipboard = true
+        XCTAssertNotNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(registered, [.dictation])
+        system = .unavailable
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation), "An unavailable query does not establish a conflict")
+        XCTAssertEqual(registered, [.dictation, .clipboard])
+        XCTAssertEqual(settings.shortcut(for: .clipboard), HistorySettings.Action.clipboard.defaultShortcut)
+    }
+
+    func testRegistrationErrorsDoNotInventAnOwnerForOtherAPIFailures() {
+        let settings = allAssigned()
+        for status in [OSStatus(eventHotKeyExistsErr), OSStatus(eventInternalErr), OSStatus(paramErr), noErr] {
+            let shortcut = HistoryShortcut(register: { _, _, _ in (status, nil) },
+                unregister: { _ in XCTFail("No reference was returned") }, installEventHandler: false)
+            XCTAssertNotNil(shortcut.configure(settings, dictation: dictation))
+            let message = shortcut.availabilityErrors[.clipboard] ?? ""
+            if status == OSStatus(eventHotKeyExistsErr) { XCTAssertTrue(message.contains("already registered elsewhere")) }
+            else {
+                XCTAssertTrue(message.contains("Couldn’t register"))
+                XCTAssertFalse(message.contains("other app"))
+                XCTAssertFalse(message.contains("elsewhere"))
+            }
+        }
+    }
+
+    func testInlineLabelsAndUsageHintsDoNotClaimOtherShortcutsAreFree() {
+        XCTAssertEqual(ShortcutConflictHints.fieldLabel(.unassigned, recording: false), "No shortcut")
+        XCTAssertEqual(ShortcutConflictHints.fieldLabel(.unassigned, recording: true), "Press shortcut…")
+        XCTAssertEqual(ShortcutConflictHints.fieldLabel(.init(keyCode: 9, modifiers: ["cmd", "shift"]), recording: false), "⇧⌘V")
+        let hint = ShortcutConflictHints.commonUsage(.init(keyCode: 9, modifiers: ["shift", "command"]))
+        XCTAssertTrue(hint?.contains("Chrome") == true)
+        XCTAssertTrue(hint?.contains("Markdown Preview in VS Code") == true)
+        XCTAssertNil(ShortcutConflictHints.commonUsage(.init(keyCode: 9, modifiers: ["option", "shift"])))
+        XCTAssertNil(ShortcutConflictHints.commonUsage(.init(keyCode: 8, modifiers: ["cmd", "shift"])))
+        XCTAssertNil(ShortcutConflictHints.commonUsage(.unassigned))
     }
 
     func testDefaultsAreSeparateAndAllIsUnassignedWithoutEnablingClipboard() throws {
@@ -108,20 +224,115 @@ final class HistoryActionShortcutTests: XCTestCase {
         XCTAssertEqual(HistorySettings.Shortcut(keyCode: 125, modifiers: ["command", "alt", "control", "shift"]).label, "⌃⌥⇧⌘↓")
     }
 
-    func testEachCarbonIDDispatchesItsActionAndClipboardWorksWhenCaptureIsDisabled() {
+    func testEachCarbonIDDispatchesItsActionWhenClipboardCaptureIsEnabled() {
         var calls: [(HistorySettings.Action, UInt16, UInt32)] = [], pressed: [HistorySettings.Action] = []
         let shortcut = HistoryShortcut(register: { action, code, flags in
             calls.append((action, code, flags)); return (noErr, self.key(action))
         }, unregister: { _ in }, installEventHandler: false)
         shortcut.onPress = { pressed.append($0) }
         let settings = allAssigned()
-        XCTAssertFalse(settings.includeClipboard)
+        XCTAssertTrue(settings.includeClipboard)
         XCTAssertNil(shortcut.configure(settings, dictation: dictation))
         XCTAssertEqual(calls.count, 3)
         XCTAssertEqual(calls.first(where: { $0.0 == .dictation })?.2, UInt32(optionKey | shiftKey))
         XCTAssertEqual(calls.first(where: { $0.0 == .clipboard })?.2, UInt32(cmdKey | shiftKey))
         for id: UInt32 in [1, 2, 3, 999] { shortcut.receive(actionID: id) }
         XCTAssertEqual(pressed, [.dictation, .clipboard, .all])
+    }
+
+    func testClipboardCaptureOffDoesNotRegisterOrDispatchClipboard() {
+        for retention in [HistorySettings.Retention.session, .week] {
+            var registered: [HistorySettings.Action] = [], pressed: [HistorySettings.Action] = []
+            let shortcut = HistoryShortcut(register: { action, _, _ in
+                registered.append(action); return (noErr, self.key(action))
+            }, unregister: { _ in }, installEventHandler: false)
+            shortcut.onPress = { pressed.append($0) }
+            var settings = allAssigned()
+            settings.retention = retention
+            settings.includeClipboard = false
+            XCTAssertFalse(settings.policy.captureClipboard)
+            XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+            XCTAssertEqual(registered, [.dictation, .all])
+            [1, 2, 3].forEach { shortcut.receive(actionID: $0) }
+            XCTAssertEqual(pressed, [.dictation, .all])
+            XCTAssertEqual(settings.shortcut(for: .clipboard), HistorySettings.Action.clipboard.defaultShortcut)
+        }
+    }
+
+    func testDisablingClipboardReleasesOnlyItsShortcutAndReenablingRestoresCustomKey() {
+        var registered: [(HistorySettings.Action, UInt16, UInt32)] = [], removed: [EventHotKeyRef] = []
+        var pressed: [HistorySettings.Action] = []
+        let shortcut = HistoryShortcut(register: { action, code, flags in
+            registered.append((action, code, flags)); return (noErr, self.key(action))
+        }, unregister: { removed.append($0) }, installEventHandler: false)
+        shortcut.onPress = { pressed.append($0) }
+        var settings = allAssigned()
+        let custom = HistorySettings.Shortcut(keyCode: 8, modifiers: ["ctrl", "option"])
+        settings.setShortcut(custom, for: .clipboard)
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(registered.count, 3)
+        settings.includeClipboard = false
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(removed, [key(.clipboard)])
+        XCTAssertEqual(registered.count, 3, "unchanged Dictations and All retain their registrations")
+        [1, 2, 3].forEach { shortcut.receive(actionID: $0) }
+        XCTAssertEqual(pressed, [.dictation, .all])
+        XCTAssertEqual(settings.shortcut(for: .clipboard), custom)
+        settings.includeClipboard = true
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(registered.count, 4)
+        XCTAssertEqual(registered.last?.0, .clipboard)
+        XCTAssertEqual(registered.last?.1, custom.keyCode)
+        XCTAssertEqual(registered.last?.2, UInt32(controlKey | optionKey))
+        XCTAssertEqual(removed, [key(.clipboard)])
+        pressed.removeAll()
+        [1, 2, 3].forEach { shortcut.receive(actionID: $0) }
+        XCTAssertEqual(pressed, [.dictation, .clipboard, .all])
+    }
+
+    func testRetentionOffReleasesEveryShortcutEvenWhenIncludeClipboardRemainsTrue() {
+        var registered: [HistorySettings.Action] = [], removed: [EventHotKeyRef] = []
+        let shortcut = HistoryShortcut(register: { action, _, _ in
+            registered.append(action); return (noErr, self.key(action))
+        }, unregister: { removed.append($0) }, installEventHandler: false)
+        var settings = allAssigned()
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(registered.count, 3)
+        settings.retention = .off
+        XCTAssertTrue(settings.includeClipboard)
+        XCTAssertFalse(settings.policy.captureClipboard)
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(Set(removed), Set(HistorySettings.Action.allCases.map(key)))
+        shortcut.onPress = { _ in XCTFail("History Off must not dispatch any shortcut") }
+        [1, 2, 3].forEach { shortcut.receive(actionID: $0) }
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(registered.count, 3)
+        XCTAssertEqual(removed.count, 3)
+        settings.retention = .session
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertEqual(registered.count, 6)
+    }
+
+    func testEnablingClipboardHonorsExistingActionConflictPriority() {
+        var registered: [HistorySettings.Action] = [], removed: [EventHotKeyRef] = []
+        let shortcut = HistoryShortcut(register: { action, _, _ in
+            registered.append(action); return (noErr, self.key(action))
+        }, unregister: { removed.append($0) }, installEventHandler: false)
+        var settings = allAssigned()
+        settings.includeClipboard = false
+        settings.setShortcut(settings.dictationShortcut, for: .clipboard)
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation), "an inactive binding creates no availability error")
+        XCTAssertEqual(registered, [.dictation, .all])
+        settings.includeClipboard = true
+        XCTAssertNotNil(shortcut.configure(settings, dictation: dictation))
+        XCTAssertNotNil(shortcut.availabilityErrors[.clipboard])
+        XCTAssertNil(shortcut.availabilityErrors[.dictation])
+        XCTAssertEqual(registered, [.dictation, .all], "existing registrations keep priority on re-enable")
+        XCTAssertTrue(removed.isEmpty)
+        settings.includeClipboard = false
+        XCTAssertNil(shortcut.configure(settings, dictation: dictation), "disabling clears the inactive binding's error")
+        XCTAssertTrue(removed.isEmpty)
     }
 
     func testDuplicateConfigPreservesLegacyClipboardAndUnrelatedAllRegistration() {
@@ -145,10 +356,11 @@ final class HistoryActionShortcutTests: XCTestCase {
             return action == .all && rejectAll ? (OSStatus(eventHotKeyExistsErr), nil) : (noErr, self.key(action))
         }, unregister: { removed.append($0) }, installEventHandler: false)
         var settings = HistorySettings()
+        settings.includeClipboard = true
         XCTAssertNil(shortcut.configure(settings, dictation: dictation))
         XCTAssertEqual(registered.count, 2)
         settings.allShortcut = .init(keyCode: 8, modifiers: ["ctrl"]); rejectAll = true
-        XCTAssertTrue(shortcut.configure(settings, dictation: dictation)?.contains("All: ⌃C is unavailable") == true)
+        XCTAssertTrue(shortcut.configure(settings, dictation: dictation)?.contains("All: ⌃C is already registered elsewhere") == true)
         XCTAssertEqual(registered, [.clipboard, .dictation, .all])
         XCTAssertTrue(removed.isEmpty)
         var pressed: [HistorySettings.Action] = []; shortcut.onPress = { pressed.append($0) }
@@ -200,7 +412,8 @@ final class HistoryActionShortcutTests: XCTestCase {
         let release = try XCTUnwrap(NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [],
             timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 9))
         manager.handleNSEvent(release)
-        let settings = HistorySettings()
+        var settings = HistorySettings()
+        settings.includeClipboard = true
         XCTAssertNotNil(settings.validationError(for: candidate, action: .clipboard, dictation: primary))
         var registrations: [HistorySettings.Action] = []
         let shortcut = HistoryShortcut(register: { action, _, _ in
@@ -259,6 +472,7 @@ final class HistoryActionShortcutTests: XCTestCase {
             registrations.append(action); return (noErr, self.key(action))
         }, unregister: { _ in removals += 1 }, installEventHandler: false)
         var settings = HistorySettings()
+        settings.includeClipboard = true
         XCTAssertNil(shortcut.configure(settings, dictation: dictation))
         let fnLayerCodes: [UInt16] = [115, 116, 117, 119, 121,
                                      122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113]
@@ -278,6 +492,7 @@ final class HistoryActionShortcutTests: XCTestCase {
     func testFnLayerCollisionStillRequiresPrimaryModifiers() {
         let primary = HotkeyConfig(keyCode: 63, modifiers: ["control"])
         var settings = HistorySettings(), registered: [HistorySettings.Action] = []
+        settings.includeClipboard = true
         let shortcut = HistoryShortcut(register: { action, _, _ in
             registered.append(action); return (noErr, self.key(action))
         }, unregister: { _ in }, installEventHandler: false)

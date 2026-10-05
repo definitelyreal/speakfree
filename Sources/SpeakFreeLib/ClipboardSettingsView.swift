@@ -83,6 +83,7 @@ struct ClipboardSettingsView: View {
     @State private var recordingAction: HistorySettings.Action?
     @State private var clearConfirmation = false
     @State private var registrationError: String?
+    @State private var systemShortcuts: ShortcutConflictHints.SystemSnapshot = .available([])
 
     var body: some View {
         ZStack {
@@ -119,12 +120,21 @@ struct ClipboardSettingsView: View {
                                         viewModel.historySettings.validationError(for: shortcut, action: action,
                                             dictation: HotkeyConfig(keyCode: viewModel.hotkeyKeyCode,
                                                                    modifiers: viewModel.hotkeyModifiers))
+                                            ?? systemShortcuts.conflict(for: shortcut)
                                     }, onChange: { shortcut in
                                         viewModel.historySettings.setShortcut(shortcut, for: action)
-                                    })
+                                    }, onRecordingBegan: refreshSystemShortcuts,
+                                    systemConflict: systemShortcuts.conflict(for: viewModel.historySettings.shortcut(for: action)))
                                     .disabled(viewModel.historySettings.retention == .off)
                             }
-                            if let error = registrationError { Text(error).font(.callout).foregroundStyle(.red) }
+                            Text("The Clipboard shortcut is active when history is on and “Include items copied in other apps” is checked. Its key stays saved when either is off.")
+                                .font(.callout).foregroundStyle(.secondary)
+                            Text(systemShortcuts == .unavailable
+                                ? "macOS shortcut checking is unavailable. Other apps may use these shortcuts too."
+                                : "Other apps may use these shortcuts too.")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let error = remainingRegistrationError { Text(error).font(.callout).foregroundStyle(.red) }
                         }
                     }
                     Text("Off stops new entries. Until quit keeps history in memory and removes its saved copy from disk. Choosing an item in History makes it your current clipboard.")
@@ -142,7 +152,7 @@ struct ClipboardSettingsView: View {
                             (NSApp.delegate as? AppDelegate)?.historyCoordinator?.importRecentDictations()
                         }
                     }.disabled(viewModel.historySettings.retention == .off)
-                    Text("History stays on this Mac. Known concealed and temporary clipboard items are skipped; applications do not always identify sensitive content. Clearing history does not delete your separately saved recordings or transcripts.")
+                    Text("History skips copies offered by other devices. Items speakfree puts on the clipboard stay on this Mac. Known concealed and temporary items are skipped; applications do not always identify sensitive content. Clearing history does not delete your separately saved recordings or transcripts.")
                         .font(.callout).foregroundStyle(.secondary)
                     if let error = viewModel.saveError { Text(error).foregroundStyle(.red) }
                     Divider()
@@ -157,7 +167,7 @@ struct ClipboardSettingsView: View {
             .scrollContentBackground(.hidden)
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear { updateRegistrationError() }
+        .onAppear { refreshSystemShortcuts(); updateRegistrationError() }
         .onReceive(NotificationCenter.default.publisher(for: HistoryCoordinator.shortcutStatusChanged)) { _ in updateRegistrationError() }
         .onChange(of: viewModel.historySettings) { settings in
             if settings.retention == .off { recordingAction = nil }
@@ -171,9 +181,22 @@ struct ClipboardSettingsView: View {
         } message: { Text("This removes text and rich clipboard items from speakfree's history. Recordings and transcript archives are kept.") }
     }
 
+    private var remainingRegistrationError: String? {
+        let inline = HistorySettings.Action.allCases.compactMap { action in
+            systemShortcuts.conflict(for: viewModel.historySettings.shortcut(for: action))
+                .map { "\(action.title): \($0)" }
+        }
+        return ShortcutConflictHints.remainingRegistrationError(registrationError, inlineErrors: inline)
+    }
+
     private func updateRegistrationError() {
         guard !isReview else { return }
         registrationError = (NSApp.delegate as? AppDelegate)?.historyCoordinator?.shortcutError
+    }
+
+    private func refreshSystemShortcuts() {
+        guard !isReview else { return }
+        systemShortcuts = ShortcutConflictHints.systemSnapshot()
     }
 
 }

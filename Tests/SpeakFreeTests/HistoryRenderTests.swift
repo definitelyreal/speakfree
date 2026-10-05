@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b/agent:clipboard_core · 2026-10-01
 // Opt-in artifact generator. Synthetic inputs only: no live clipboard, config, or recordings.
 import AppKit
@@ -54,6 +55,25 @@ final class HistoryRenderTests: XCTestCase {
             model.handle(.focusPlainText)
             try render(HistoryPickerView(model: model), size: model.preferredSize,
                        appearance: appearance, to: output.appendingPathComponent("history-plain-text-focus-\(name)_AI_.png"))
+            model.handle(.nextRowAction)
+            try render(HistoryPickerView(model: model), size: model.preferredSize,
+                       appearance: appearance, to: output.appendingPathComponent("history-trash-focus-\(name)_AI_.png"))
+            model.clickBulkDelete()
+            try render(HistoryPickerView(model: model), size: model.preferredSize,
+                       appearance: appearance, to: output.appendingPathComponent("history-delete-all-\(name)_AI_.png"), asserting: {
+                           XCTAssertEqual(model.keyboardFocus, .bulkDelete)
+                           XCTAssertEqual(model.bulkDeletePrompt, "Delete 4 Items?")
+                       })
+            model.query = "Design"
+            model.searchChanged()
+            model.clickBulkDelete()
+            try render(HistoryPickerView(model: model), size: model.preferredSize,
+                       appearance: appearance, to: output.appendingPathComponent("history-delete-matches-\(name)_AI_.png"), asserting: {
+                           XCTAssertEqual(model.keyboardFocus, .bulkDelete)
+                           XCTAssertEqual(model.bulkDeletePrompt, "Delete 3 matches?")
+                       })
+            model.query = ""
+            model.searchChanged()
             model.handle(.cycleFilter(1))
             try render(HistoryPickerView(model: model), size: model.preferredSize,
                        appearance: appearance, to: output.appendingPathComponent("history-filter-focus-\(name)_AI_.png"))
@@ -83,15 +103,17 @@ final class HistoryRenderTests: XCTestCase {
                        appearance: appearance, to: output.appendingPathComponent("settings-tabs-\(name)_AI_.png"))
         }
         try """
-        <!-- ai-suggestion:unverified | session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b/agent:clipboard_core | date:2026-10-01 -->
+        <!-- ai-suggestion:unverified | session:unknown | date:2026-10-05 -->
         Rendered from synthetic HistoryRenderTests fixtures only; no user clipboard, recordings, or config content.
         All *_AI_.png renders in this directory: ai-suggestion:unverified.
-        Includes light/dark History, keyboard filter focus, disabled Clipboard, short and narrow
-        layouts, and the synthetic Preferences fixtures. No live user input is replayed.
+        Includes light/dark History, keyboard filter/Aa/Trash focus, bulk deletion confirmation,
+        search match confirmation, disabled Clipboard, short and narrow layouts, and the
+        synthetic Preferences fixtures. No live user input is replayed.
         """.write(to: output.appendingPathComponent("PROVENANCE.md"), atomically: true, encoding: .utf8)
     }
 
-    private func render<V: View>(_ view: V, size: NSSize, appearance: NSAppearance.Name, to url: URL) throws {
+    private func render<V: View>(_ view: V, size: NSSize, appearance: NSAppearance.Name, to url: URL,
+                                 asserting assertRenderedState: (() -> Void)? = nil) throws {
         let scheme: ColorScheme = appearance == .darkAqua ? .dark : .light
         let host = NSHostingView(rootView: view.environment(\.colorScheme, scheme))
         host.appearance = NSAppearance(named: appearance)
@@ -101,7 +123,11 @@ final class HistoryRenderTests: XCTestCase {
         window.contentView = host
         window.layoutIfNeeded()
         host.layoutSubtreeIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        // The confirmation capsule animates for 0.16 s. Capture its completed
+        // layout/color transition, then assert logical state before hiding the view.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.35))
+        host.layoutSubtreeIfNeeded()
+        assertRenderedState?()
         host.display()
         let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
         host.effectiveAppearance.performAsCurrentDrawingAppearance {

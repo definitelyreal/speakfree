@@ -61,6 +61,7 @@ class TextInserter {
 
     // History's explicit publication boundary; dictation keeps its existing route/timers.
     var pasteboardWriter = PasteboardWriter()
+    var clipboardPreparation = PasteboardPreparation.shared
     var layoutVKeyCodeProvider: (() -> CGKeyCode?)?
     var postPasteShortcut: (() -> Void)?
     private var deferredInsertionCount = 0
@@ -71,23 +72,38 @@ class TextInserter {
     var ownsCurrentClipboard: Bool { pendingRestore?.writtenChangeCount == pasteboard.changeCount }
     var isWaitingForClipboardConsumption: Bool { hasDeferredInsertion || ownsCurrentClipboard }
 
-    /// An explicit History copy becomes the clipboard. Preserve a recoverable
-    /// snapshot when possible, and never clear while a dictation still owns it.
+    /// Provider reads happen off-main under a single bounded preparation slot.
     @discardableResult
-    func replaceClipboardForUser(with items: [NSPasteboardItem]) -> Bool {
+    func prepareClipboardForUser(completion: @escaping (Result<PasteboardPreparation.Prepared, Error>) -> Void)
+        -> PasteboardPreparation.Request? {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard !items.isEmpty, !isWaitingForClipboardConsumption else { return false }
-        let before = pasteboard.changeCount
-        let saved = try? PasteboardAccess.snapshot(pasteboard, maximumBytes: Self.maxRestorableClipboardBytes)
-        let result = pasteboardWriter.replace(items, on: pasteboard, expectedGeneration: before)
+        guard !isWaitingForClipboardConsumption else {
+            completion(.failure(PasteboardPreparation.Failure.busy))
+            return nil
+        }
+        return clipboardPreparation.prepare(pasteboard, maximumBytes: Self.maxExplicitReplacementBytes,
+                                            completion: completion)
+    }
+
+    /// Publication consumes the already-materialized chosen item. Reading the previous
+    /// clipboard for rollback is best-effort; a new dictation borrow or user copy wins.
+    @discardableResult
+    func replaceClipboardForUser(with items: [NSPasteboardItem], prepared: PasteboardPreparation.Prepared) -> Int? {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !items.isEmpty, prepared.isValid, !isWaitingForClipboardConsumption,
+              !isSecureInputActive(), prepared.pasteboardName == pasteboard.name,
+              prepared.generation == pasteboard.changeCount else { return nil }
+        let result = pasteboardWriter.replace(items, on: pasteboard, expectedGeneration: prepared.generation, hostOnly: true)
         guard result.generation != nil else {
-            if let saved { _ = pasteboardWriter.recover(saved, after: result, on: pasteboard) }
-            return false
+            if let snapshot = prepared.snapshot {
+                _ = pasteboardWriter.recover(snapshot, after: result, on: pasteboard, hostOnly: true)
+            }
+            return nil
         }
         pendingBackstop?.cancel()
         pendingBackstop = nil
         pendingRestore = nil
-        return true
+        return result.generation
     }
 
     /// Replay the selected clipboard verbatim after History validates its destination.
@@ -855,6 +871,9 @@ class TextInserter {
     /// events, the exact path that intermittently dropped the user's insertion. Keep a
     /// finite cap, but allow ordinary images to be saved and restored around Cmd+V.
     static let maxRestorableClipboardBytes = 16 * 1_024 * 1_024
+    // Explicit replacement can encounter a 32 MiB History item plus ownership
+    // markers. Keep this bound separate from automatic dictation preservation.
+    static let maxExplicitReplacementBytes = 64 * 1_024 * 1_024
 
     /// Normal apps consume a synthetic Cmd+V synchronously with the key event. Keep a short
     /// settle beat for Electron/contenteditable event loops, then return the user's prior
@@ -1142,7 +1161,16 @@ class TextInserter {
         let reuse = TextInserter.shouldReusePendingSnapshot(
             pendingWrittenChangeCount: pendingRestore?.writtenChangeCount,
             currentChangeCount: pasteboard.changeCount)
-        let savedItems = reuse ? pendingRestore!.savedItems : savePasteboard(pasteboard)
+        guard let savedItems = reuse ? pendingRestore!.savedItems : savePasteboard(pasteboard) else {
+            // A remote offer cannot be snapshotted without starting a transfer.
+            // Preserve the offer itself and use the existing non-clipboard route.
+            if route == .remote {
+                remoteInsertionFailed(text, message: "Your clipboard contains an item from another device. SpeakFree left it unchanged. You can copy this dictation when you are ready.")
+            } else {
+                _ = typeViaKeyEvents(text)
+            }
+            return
+        }
         let clipboardByteSize = savedItems.reduce(0) { total, item in
             total + item.reduce(0) { $0 + $1.1.count }
         }
@@ -1160,7 +1188,7 @@ class TextInserter {
         }
 
         // Write the dictated text (transient/concealed-marked) and snapshot changeCount AFTER the
-        // write. A `clearContents()` + `writeObjects()` sequence advances `changeCount` by exactly
+        // write. A local-only preparation + `writeObjects()` sequence advances `changeCount` by exactly
         // ONE generation, so the restore guard compares against THIS returned value (equality).
         let writtenChangeCount = TextInserter.writeTransientString(text, to: pasteboard)
 
@@ -1237,7 +1265,7 @@ class TextInserter {
     /// the text to be available to paste); the concealment + auto-clear are the protection.
     func secureInputClipboardFallback(_ text: String) {
         let pasteboard = self.pasteboard
-        pasteboard.clearContents()
+        pasteboard.prepareForNewContents(with: .currentHostOnly)
 
         let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
         let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
@@ -1251,7 +1279,7 @@ class TextInserter {
         DispatchQueue.main.asyncAfter(deadline: .now() + secureInputClipboardClearDelay) {
             // Only clear if our concealed write is still the live clipboard content.
             if pasteboard.changeCount == writtenChangeCount {
-                pasteboard.clearContents()
+                pasteboard.prepareForNewContents(with: .currentHostOnly)
                 DiagnosticLogger.shared.log("TextInserter: auto-cleared concealed Secure-Input clipboard text")
             }
         }
@@ -1294,7 +1322,7 @@ class TextInserter {
         return frontmostMatchesTarget ? .insert : .wait
     }
 
-    /// Write `text` to `pasteboard` exactly as `pasteViaClipboard` does (clearContents +
+    /// Write `text` to `pasteboard` exactly as `pasteViaClipboard` does (local-only preparation +
     /// transient/concealed-marked writeObjects) and return the `changeCount` AFTER the write.
     ///
     /// Extracted so the changeCount contract that drives clipboard restore is unit-testable on a
@@ -1303,7 +1331,7 @@ class TextInserter {
     /// restore guard must compare against THIS returned value (equality), never `before + 2`.
     @discardableResult
     static func writeTransientString(_ text: String, to pasteboard: NSPasteboard) -> Int {
-        pasteboard.clearContents()
+        pasteboard.prepareForNewContents(with: .currentHostOnly)
         let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
         let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
         let item = NSPasteboardItem()
@@ -1325,15 +1353,20 @@ class TextInserter {
     /// private save/restore so tests can exercise the real save→overwrite→restore cycle on a named
     /// pasteboard without reaching `NSPasteboard.general`.
     func savePasteboardForTest(_ pasteboard: NSPasteboard) -> [[(NSPasteboard.PasteboardType, Data)]] {
-        savePasteboard(pasteboard)
+        savePasteboard(pasteboard) ?? []
     }
 
     func restorePasteboardForTest(_ pasteboard: NSPasteboard, items: [[(NSPasteboard.PasteboardType, Data)]]) {
         restorePasteboard(pasteboard, items: items)
     }
 
-    private func savePasteboard(_ pasteboard: NSPasteboard) -> [[(NSPasteboard.PasteboardType, Data)]] {
+    private func savePasteboard(_ pasteboard: NSPasteboard) -> [[(NSPasteboard.PasteboardType, Data)]]? {
+        // A remote offer is a promise to fetch another device's clipboard. Do not
+        // materialize it merely to preserve a dictation's temporary clipboard borrow.
+        // nil means borrowing is forbidden, not an empty clipboard to restore.
+        guard !(pasteboard.types ?? []).contains(PasteboardAccess.remoteClipboardType) else { return nil }
         guard let items = pasteboard.pasteboardItems else { return [] }
+        guard !items.contains(where: { $0.types.contains(PasteboardAccess.remoteClipboardType) }) else { return nil }
         return items.map { item in
             item.types.compactMap { type in
                 guard let data = item.data(forType: type) else { return nil }
@@ -1343,7 +1376,7 @@ class TextInserter {
     }
 
     private func restorePasteboard(_ pasteboard: NSPasteboard, items: [[(NSPasteboard.PasteboardType, Data)]]) {
-        let restoredGeneration = pasteboard.clearContents()
+        let restoredGeneration = pasteboard.prepareForNewContents(with: .currentHostOnly)
         defer {
             if pasteboard.changeCount == restoredGeneration {
                 PasteboardWriteReceipt.post(pasteboard, generation: restoredGeneration)

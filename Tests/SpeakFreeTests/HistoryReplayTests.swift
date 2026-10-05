@@ -41,6 +41,7 @@ final class HistoryReplayTests: XCTestCase {
         var pastes = 0
         var trace: [String] = []
         var diagnoses: [String] = []
+        var feedback: [String] = []
         var captures: [(HistoryCoordinator.Destination) -> Void] = []
         var validations: [(HistoryPastePolicy.Observation) -> Void] = []
         var scheduled: [() -> Void] = []
@@ -52,6 +53,7 @@ final class HistoryReplayTests: XCTestCase {
             board.setString("Original synthetic clipboard", forType: .string)
             store.addDictation("Synthetic history item", sourceAppBundleID: nil, linkedArchiveID: nil)
             inserter.pasteboard = board
+            inserter.clipboardPreparation = PasteboardPreparation(executeRead: { $0() })
             inserter.frontmostBundleIDProvider = { [weak self] in self?.frontmost?.bundleID }
             inserter.frontmostPIDProvider = { [weak self] in self?.frontmost?.pid }
             inserter.focusedElementProvider = { nil }
@@ -76,6 +78,7 @@ final class HistoryReplayTests: XCTestCase {
             subject = HistoryCoordinator(config: .defaultConfig, inserter: { [weak self] in self?.inserter },
                 isBusy: { [weak self] in self?.busy ?? true }, environment: env, store: store, pasteboard: board)
             subject.model.pointerLocation = { .zero }
+            subject.showCopyFeedback = { [weak self] in self?.feedback.append($0) }
         }
 
         func finishCapture(field: Bool = false, window: Bool = true, index: Int = 0) {
@@ -138,7 +141,9 @@ final class HistoryReplayTests: XCTestCase {
             h.finishValidation(field: field)
             XCTAssertEqual(h.pastes, field == true ? 1 : 0)
             if field != true {
-                XCTAssertEqual(h.subject.model.pasteBehavior, .copyOnly)
+                XCTAssertFalse(h.subject.isPresented)
+                XCTAssertEqual(h.feedback.count, 1)
+                XCTAssertEqual(h.presented, 1)
                 XCTAssertTrue(h.diagnoses.contains("refused fieldChangedOrUnknown"))
             }
         }
@@ -149,7 +154,8 @@ final class HistoryReplayTests: XCTestCase {
             let h = harness()
             h.open(); h.startReplay(); h.finishValidation(window: window)
             XCTAssertEqual(h.pastes, 0)
-            XCTAssertEqual(h.subject.model.pasteBehavior, .copyOnly)
+            XCTAssertFalse(h.subject.isPresented)
+            XCTAssertEqual(h.feedback.count, 1)
         }
     }
 
@@ -167,7 +173,9 @@ final class HistoryReplayTests: XCTestCase {
         h.subject.model.activate()
         XCTAssertEqual(h.pastes, 0)
         XCTAssertEqual(h.activations, 0)
-        XCTAssertEqual(h.subject.model.pasteBehavior, .copyOnly)
+        XCTAssertFalse(h.subject.isPresented)
+        XCTAssertEqual(h.presented, 1)
+        XCTAssertEqual(h.feedback.count, 1)
         XCTAssertEqual(h.board.string(forType: .string), "Synthetic history item")
     }
 
@@ -179,7 +187,9 @@ final class HistoryReplayTests: XCTestCase {
             h.subject.model.activate()
             XCTAssertEqual(h.activations, 0, bundle)
             XCTAssertEqual(h.pastes, 0, bundle)
-            XCTAssertEqual(h.subject.model.pasteBehavior, .copyOnly, bundle)
+            XCTAssertFalse(h.subject.isPresented, bundle)
+            XCTAssertEqual(h.presented, 1, bundle)
+            XCTAssertEqual(h.feedback.count, 1, bundle)
         }
     }
 
@@ -330,7 +340,7 @@ final class HistoryReplayTests: XCTestCase {
         XCTAssertEqual(h.pastes, 1)
     }
 
-    func testRefusedReplayNextSelectionOnlyCopiesWithoutTryingOldTargetAgain() {
+    func testRefusedReplayCopiesOnceAndLeavesDestinationAvailableForManualPaste() {
         let h = harness()
         h.open(field: true); h.startReplay(); h.finishValidation(field: false)
         h.subject.model.activate()
@@ -350,9 +360,10 @@ final class HistoryReplayTests: XCTestCase {
         let h = harness()
         h.open()
         h.inserter.pasteboardWriter.clear = { pb, _ in pb.changeCount }
-        h.subject.model.activate()
+        h.startReplay()
+        h.finishValidation()
         XCTAssertEqual(h.pastes, 0)
-        XCTAssertEqual(h.activations, 0)
+        XCTAssertEqual(h.activations, 1)
         XCTAssertTrue(h.subject.isPresented)
         XCTAssertEqual(h.board.string(forType: .string), "Original synthetic clipboard")
     }
@@ -378,6 +389,20 @@ final class HistoryReplayTests: XCTestCase {
             h.finishCapture()
             XCTAssertEqual(h.subject.model.filter, filter)
         }
+    }
+
+    func testClosingPickerCancelsBulkDeleteConfirmation() {
+        let h = Harness()
+        h.open()
+        h.subject.model.clickBulkDelete()
+        XCTAssertNotNil(h.subject.model.armedDeletion)
+        h.subject.close()
+        XCTAssertNil(h.subject.model.armedDeletion)
+        XCTAssertEqual(h.store.entries.count, 1)
+        h.open()
+        h.subject.model.clickBulkDelete()
+        XCTAssertNotNil(h.subject.model.armedDeletion)
+        XCTAssertEqual(h.store.entries.count, 1)
     }
 
     func testDifferentShortcutSwitchesVisiblePickerSameShortcutCloses() {
@@ -439,9 +464,9 @@ final class HistoryReplayTests: XCTestCase {
         let h = harness()
         h.open(); h.startReplay()
         var reads = 0
-        h.inserter.isSecureInputActive = { reads += 1; return reads > 1 }
+        h.inserter.isSecureInputActive = { reads += 1; return reads > 2 }
         h.finishValidation()
-        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(reads, 3)
         XCTAssertEqual(h.pastes, 0)
         XCTAssertTrue(h.diagnoses.contains("refused shortcut_not_submitted"))
     }
@@ -463,6 +488,72 @@ final class HistoryReplayTests: XCTestCase {
         XCTAssertEqual(h.subject.model.filter, .dictation)
         XCTAssertEqual(h.presented, 1)
         XCTAssertTrue(h.captures.isEmpty)
+    }
+
+    func testPreparationLateReplyCannotPublishAfterCancelInputAppChangeBusyOrNewCopy() {
+        for boundary in ["close", "input", "app", "busy", "clipboard"] {
+            let h = harness()
+            let worker = DispatchQueue(label: "test.history.preparation.\(boundary)")
+            let release = DispatchSemaphore(value: 0)
+            let entered = expectation(description: "snapshot reader entered")
+            h.inserter.clipboardPreparation = PasteboardPreparation(executeRead: { worker.async(execute: $0) },
+                scheduleTimeout: { _ in }, read: { board, limit, cancelled in
+                    XCTAssertFalse(Thread.isMainThread)
+                    entered.fulfill()
+                    release.wait()
+                    return try PasteboardAccess.snapshot(board, maximumBytes: limit, cancelled: cancelled)
+                })
+            h.open()
+            let originalGeneration = h.board.changeCount
+            h.subject.model.activate()
+            wait(for: [entered], timeout: 2)
+            XCTAssertFalse(h.subject.isPresented)
+            XCTAssertEqual(h.board.changeCount, originalGeneration, "Preparation never clears the board")
+            switch boundary {
+            case "close": h.subject.close()
+            case "input": h.input()
+            case "app": h.frontmost = .init(pid: 999_994, bundleID: "example.other")
+            case "busy": h.busy = true
+            default:
+                h.board.clearContents()
+                h.board.setString("new external copy", forType: .string)
+            }
+            let protectedGeneration = h.board.changeCount
+            release.signal()
+            let drained = expectation(description: "late response delivered")
+            worker.async { DispatchQueue.main.async { drained.fulfill() } }
+            wait(for: [drained], timeout: 2)
+            XCTAssertEqual(h.board.changeCount, protectedGeneration, boundary)
+            XCTAssertEqual(h.board.string(forType: .string),
+                boundary == "clipboard" ? "new external copy" : "Original synthetic clipboard", boundary)
+            XCTAssertEqual(h.pastes, 0)
+            XCTAssertTrue(h.validations.isEmpty)
+            XCTAssertTrue(h.scheduled.isEmpty)
+        }
+    }
+
+    func testPreparationTimeoutStillValidatesDestinationAndLateReadCannotPasteTwice() throws {
+        let h = harness()
+        var readWork: (() -> Void)?
+        var timeout: DispatchWorkItem?
+        h.inserter.clipboardPreparation = PasteboardPreparation(executeRead: { readWork = $0 },
+                                                               scheduleTimeout: { timeout = $0 })
+        h.open()
+        let generation = h.board.changeCount
+        h.subject.model.activate()
+        try XCTUnwrap(timeout).perform()
+        XCTAssertFalse(h.subject.isPresented)
+        XCTAssertEqual(h.scheduled.count, 1)
+        XCTAssertEqual(h.board.changeCount, generation, "A timeout alone never publishes before destination validation")
+        readWork?()
+        XCTAssertEqual(h.board.changeCount, generation)
+        XCTAssertEqual(h.pastes, 0)
+        XCTAssertEqual(h.scheduled.count, 1, "The late read must not schedule a second replay")
+        h.scheduled.removeFirst()()
+        h.finishValidation()
+        XCTAssertEqual(h.pastes, 1)
+        XCTAssertEqual(h.board.string(forType: .string), "Synthetic history item")
+        XCTAssertTrue(h.scheduled.isEmpty)
     }
 
 }

@@ -348,6 +348,7 @@ enum RecordingRemoval {
         let fm = FileManager.default
         let removal = activity ?? RecordingActivity.shared.beginRemoval(in: directory)
         defer { if activity == nil { removal.finish() } }
+        var removedArchiveIDs = Set<String>()
         var retainedGroups = Set<RecordingActivity.Group>()
         func elapsed() -> Double { ProcessInfo.processInfo.systemUptime - started }
         func finish(_ removed: Int, _ failed: Int, removedRecordings: Int = 0,
@@ -361,6 +362,7 @@ enum RecordingRemoval {
                 let path = URL(fileURLWithPath: group.directory).appendingPathComponent(name).path
                 if fm.fileExists(atPath: path) { retainedGroups.insert(group) }
             }
+            RecordingStore.notifyArchivesRemoved(ids: removedArchiveIDs, directory: directory)
             let seconds = elapsed()
             DiagnosticLogger.shared.log("Recordings removal: mode=trash removed=\(removed) failed=\(failed) retainedRecordings=\(retainedGroups.count) enumerationFailed=\(enumeration) recoveryRequired=\(recovery != nil) elapsedSeconds=\(String(format: "%.3f", seconds))")
             return Result(removedFiles: removed, removedRecordings: removedRecordings,
@@ -457,6 +459,7 @@ enum RecordingRemoval {
                 guard url.pathExtension == "wav", !url.lastPathComponent.hasSuffix(".bt.wav") else { return }
                 stems.insert(RecordingActivity.stem(for: url))
             }.count
+            removedArchiveIDs = Set(moved.map { RecordingActivity.stem(for: $0) })
             return finish(moved.count, failed, removedRecordings: removedRecordings,
                           trashed: destination)
         } catch {
@@ -498,6 +501,11 @@ enum RecordingRemoval {
                     lastUpdate = seconds
                 }
             }
+            // A partial rollback still removed these archive artifacts from the
+            // live archive. Their cached History text must not survive the removal.
+            removedArchiveIDs = Set(moved.filter {
+                !fm.fileExists(atPath: $0.path)
+            }.map { RecordingActivity.stem(for: $0) })
             let cleaned = stranded == 0 && removeEmptyStaging()
             let recovery = !cleaned && fm.fileExists(atPath: staging.path) ? staging : nil
             return finish(0, targets.count, recovery: recovery)

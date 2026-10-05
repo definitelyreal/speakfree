@@ -11,6 +11,7 @@ final class HistoryCoordinator {
     let model: HistoryPickerModel
     var showSavedDictations: (() -> Void)?
     var showPreferences: (() -> Void)?
+    var showCopyFeedback: ((String) -> Void)?
     private var presentationAnchor: NSPoint?
     private let monitor: ClipboardHistoryMonitor
     private let shortcut: HistoryShortcut
@@ -29,6 +30,8 @@ final class HistoryCoordinator {
     private var operation: UInt64 = 0
     private var contentEpoch: UInt64 = 0
     private var captureReady = false
+    private var clipboardPreparation: PasteboardPreparation.Request?
+    private var publicationApplication: Application?
     static let shortcutStatusChanged = Notification.Name("SpeakFreeHistoryShortcutStatusChanged")
     private(set) var shortcutError: String?
     private var isReplaying: Bool { model.pasteBehavior == .pasting }
@@ -97,6 +100,11 @@ final class HistoryCoordinator {
             self.contentEpoch &+= 1
             self.store.remove(id: id)
         }
+        model.removeMany = { [weak self] ids in
+            guard let self, !ids.isEmpty else { return }
+            self.contentEpoch &+= 1
+            self.store.remove(ids: ids)
+        }
         model.close = { [weak self] in self?.close() }
         model.resize = { [weak self] in self?.positionPanel() }
         model.focusSearchEditor = { [weak self] in self?.panel?.focusSearchEditor() }
@@ -160,6 +168,11 @@ final class HistoryCoordinator {
         store.addDictation(text, sourceAppBundleID: app, linkedArchiveID: archiveID)
     }
 
+    func removeArchivedDictation(id: String) {
+        contentEpoch &+= 1
+        store.removeLinkedArchive(id: id)
+    }
+
     func importRecentDictations() {
         guard store.policy.captureDictations else {
             model.status = "Turn on history before importing saved dictations."
@@ -200,20 +213,27 @@ final class HistoryCoordinator {
         isPreparingForTermination = true
         setPaused("termination", true)
         var finished = false
+        var timeout: Timer?
         let finish: (Result<Void, Error>) -> Void = { [weak self] result in
             guard !finished else { return }
             finished = true
+            timeout?.invalidate()
+            timeout = nil
             if case .failure = result {
                 self?.isPreparingForTermination = false
                 self?.setPaused("termination", false)
             }
             completion(result)
         }
-        store.flushPendingPersistence(completion: finish)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+        // A terminateLater loop entered by an external main-dispatch caller cannot
+        // service another main-queue callback. Its escape must use the run loop too.
+        let timer = Timer(timeInterval: 10, repeats: false) { _ in
             finish(.failure(NSError(domain: "SpeakFreeHistory", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "Saving history took too long. speakfree stayed open to keep your session available."])))
         }
+        timeout = timer
+        RunLoop.main.add(timer, forMode: .common)
+        store.flushPendingPersistence(completion: finish)
     }
 
     private func refresh() {
@@ -299,6 +319,7 @@ final class HistoryCoordinator {
     }
 
     private func hidePanel() {
+        model.cancelBulkDeletion()
         isPresented = false
         if let hide = environment.hide { hide() }
         else { panel?.orderOut(nil) }
@@ -310,6 +331,9 @@ final class HistoryCoordinator {
         defer { isClosing = false }
         model.pasteBehavior = .ready
         operation &+= 1
+        clipboardPreparation?.cancel()
+        clipboardPreparation = nil
+        publicationApplication = nil
         isCapturing = false
         openingApplication = nil
         target = nil
@@ -325,6 +349,7 @@ final class HistoryCoordinator {
                                  backing: .buffered, defer: false)
         panel.onResignKey = { [weak self] in
             guard let self, !self.isReplaying else { return }
+            self.environment.diagnose("closed reason=key_window_resigned")
             self.close()
         }
         panel.onClose = { [weak self] in self?.close() }
@@ -364,7 +389,17 @@ final class HistoryCoordinator {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window === self.panel else { return event }
             guard let action = self.model.keyAction(keyCode: event.keyCode, modifiers: event.modifierFlags) else { return event }
+            let began = self.environment.uptime()
             self.model.handle(action)
+            if event.keyCode == 48 {
+                // No query or clipboard content: time the next main-queue callback so
+                // a reported Tab stall can be separated from an ordinary focus close.
+                self.environment.schedule(0) { [weak self] in
+                    guard let self else { return }
+                    let elapsed = (self.environment.uptime() - began) * 1_000
+                    self.environment.diagnose("navigation key=tab callback_ms=\(String(format: "%.1f", elapsed))")
+                }
+            }
             return nil
         }
     }
@@ -373,72 +408,132 @@ final class HistoryCoordinator {
         guard isPresented, !isReplaying, !isBusy(), let inserter = inserter(),
               !inserter.hasDeferredInsertion else { return }
         guard copyOnly || captureReady else { model.status = "Finding the previous window…"; return }
-        // This is an explicit clipboard selection, not a temporary dictation borrow.
-        guard inserter.replaceClipboardForUser(with: entry.makePasteboardItems(includeHistoryMarker: true)) else {
-            model.status = inserter.isWaitingForClipboardConsumption
-                ? "The previous dictation is still finishing. Try again after it appears; your selection is kept."
-                : "Could not copy this item. It remains in History."
+        guard !inserter.isWaitingForClipboardConsumption else {
+            model.status = "The previous dictation is still finishing. Try again after it appears; your selection is kept."
             return
         }
-        let writtenCount = inserter.pasteboard.changeCount
-        guard !copyOnly else { close(); return }
-        guard let destination = target, environment.isRunning(destination.app.pid),
-              destination.window != nil else {
-            environment.diagnose("copy_only missing_app_or_window")
-            model.pasteBehavior = .copyOnly
-            model.status = "Copied. Press ⌘V in the app where you want it."
-            return
-        }
-        if HistoryPastePolicy.terminalBundleIDs.contains(destination.app.bundleID ?? "")
-            || TextInserter.isRemoteDesktop(bundleID: destination.app.bundleID) {
-            model.pasteBehavior = .copyOnly
-            model.status = "Copied. Paste in the terminal or remote app when you are ready."
-            return
-        }
+        let destination = target
+        let application = environment.frontmost()
+        publicationApplication = application
         model.pasteBehavior = .pasting
         hiddenOperationBeganAt = environment.uptime()
         installHiddenInputMonitors()
         hidePanel()
         let generation = operation
+        let request = inserter.prepareClipboardForUser { [weak self] result in
+            guard let self, self.operation == generation, self.isReplaying else { return }
+            guard self.publicationContextIsCurrent(application), !self.isBusy(),
+                  !inserter.isWaitingForClipboardConsumption else {
+                self.cancelHiddenOperation(reason: "preparation_destination_changed_or_busy")
+                return
+            }
+            switch result {
+            case .failure:
+                self.retainCopy("Could not prepare the clipboard. Nothing was copied; your item remains in History.")
+            case .success(let prepared):
+                if copyOnly {
+                    self.publish(entry, prepared: prepared, inserter: inserter, application: application,
+                                 generation: generation, paste: false, copyMessage: nil)
+                    return
+                }
+                guard let destination, self.environment.isRunning(destination.app.pid), destination.window != nil else {
+                    self.environment.diagnose("copy_only missing_app_or_window")
+                    self.publish(entry, prepared: prepared, inserter: inserter, application: application,
+                                 generation: generation, paste: false, copyMessage: "Copied. Press ⌘V in the app where you want it.")
+                    return
+                }
+                if HistoryPastePolicy.terminalBundleIDs.contains(destination.app.bundleID ?? "")
+                    || TextInserter.isRemoteDesktop(bundleID: destination.app.bundleID) {
+                    self.publish(entry, prepared: prepared, inserter: inserter, application: application,
+                                 generation: generation, paste: false,
+                                 copyMessage: "Copied. Paste in the terminal or remote app when you are ready.")
+                    return
+                }
+                guard destination.app.pid == application?.pid else {
+                    self.cancelHiddenOperation(reason: "app_not_frontmost")
+                    return
+                }
+                self.validateAndPublish(entry, prepared: prepared, inserter: inserter,
+                                        destination: destination, generation: generation)
+            }
+        }
+        // Test executors may complete synchronously. Do not retain a finished request
+        // after close/retainCopy has already invalidated this operation.
+        if operation == generation, isReplaying { clipboardPreparation = request }
+        else { request?.cancel() }
+    }
+
+    private func publicationContextIsCurrent(_ application: Application?) -> Bool {
+        let frontmost = environment.frontmost()
+        return frontmost?.pid == application?.pid && frontmost?.bundleID == application?.bundleID
+            && (application.map { environment.isRunning($0.pid) } ?? true)
+    }
+
+    private func validateAndPublish(_ entry: HistoryEntry, prepared: PasteboardPreparation.Prepared,
+                                    inserter: TextInserter, destination: Destination, generation: UInt64) {
         environment.activate(destination.app.pid)
         waitForTarget(destination, until: Date().addingTimeInterval(1.0), generation: generation) { [weak self] active in
-            guard let self, self.operation == generation else { return }
-            guard active, self.environment.frontmost()?.pid == destination.app.pid else {
+            guard let self, self.operation == generation, self.isReplaying else { return }
+            guard active, self.publicationContextIsCurrent(destination.app) else {
                 self.cancelHiddenOperation(reason: "app_not_frontmost")
                 return
             }
             self.environment.validate(destination) { [weak self] observation in
                 guard let self, self.operation == generation, self.isReplaying else { return }
-                let refusal = HistoryPastePolicy.finalRefusal(operationMatches: self.operation == generation,
-                        frontmostMatches: self.environment.frontmost()?.pid == destination.app.pid
-                            && self.environment.isRunning(destination.app.pid),
-                        busy: self.isBusy() || inserter.hasDeferredInsertion,
-                        secureInput: inserter.isSecureInputActive(),
-                        clipboardMatches: inserter.pasteboard.changeCount == writtenCount)
-                    ?? HistoryPastePolicy.refusal(capturedWindow: destination.window != nil,
-                        capturedField: destination.field != nil, observation: observation)
-                if let refusal {
-                    if refusal == .appChanged || refusal == .cancelled || refusal == .busy {
-                        self.cancelHiddenOperation(reason: refusal.rawValue)
-                        return
-                    }
-                    self.environment.diagnose("refused " + refusal.rawValue)
-                    self.retainCopy(refusal == .secureInput
-                        ? "Secure Input is on. Copy this item, then paste where you want it."
-                        : "The clipboard or destination changed. Choose Copy, then paste where you want it.")
-                    return
-                }
-                // No scheduling or AX reads after this gate. The inserter checks the
-                // clipboard generation and Secure Input once more before posting ⌘V.
-                guard inserter.pasteCurrentClipboard(expectedChangeCount: writtenCount) else {
-                    self.environment.diagnose("refused shortcut_not_submitted")
-                    self.retainCopy("Could not paste. Your item is still in History.")
-                    return
-                }
-                self.environment.diagnose("shortcut_submitted field_captured=\(destination.field != nil)")
-                self.close()
+                let destinationRefusal = HistoryPastePolicy.refusal(capturedWindow: destination.window != nil,
+                    capturedField: destination.field != nil, observation: observation)
+                if let destinationRefusal { self.environment.diagnose("refused " + destinationRefusal.rawValue) }
+                // An explicitly chosen item may still be copied in the same app when
+                // AX cannot authorize automatic paste. Cancellation/busy/new copies
+                // are checked again below and never authorize clipboard replacement.
+                self.publish(entry, prepared: prepared, inserter: inserter, application: destination.app,
+                             generation: generation, paste: destinationRefusal == nil,
+                             copyMessage: destinationRefusal == nil ? nil : "Copied. The destination could not be confirmed; press ⌘V where you want it.")
             }
         }
+    }
+
+    private func publish(_ entry: HistoryEntry, prepared: PasteboardPreparation.Prepared,
+                         inserter: TextInserter, application: Application?, generation: UInt64,
+                         paste: Bool, copyMessage: String?) {
+        guard operation == generation, isReplaying else { return }
+        let refusal = HistoryPastePolicy.finalRefusal(operationMatches: prepared.isValid,
+            frontmostMatches: publicationContextIsCurrent(application),
+            busy: isBusy() || inserter.isWaitingForClipboardConsumption,
+            secureInput: inserter.isSecureInputActive(),
+            clipboardMatches: inserter.pasteboard.changeCount == prepared.generation)
+        if let refusal {
+            if refusal == .appChanged || refusal == .cancelled || refusal == .busy {
+                cancelHiddenOperation(reason: refusal.rawValue)
+            } else {
+                environment.diagnose("refused " + refusal.rawValue)
+                retainCopy(refusal == .secureInput
+                    ? "Secure Input is on. Copy this item, then paste where you want it."
+                    : "The clipboard or destination changed. Choose Copy, then paste where you want it.")
+            }
+            return
+        }
+        // No provider reads or scheduling after the final operation/destination gate.
+        guard let written = inserter.replaceClipboardForUser(with: entry.makePasteboardItems(includeHistoryMarker: true), prepared: prepared) else {
+            retainCopy("Could not copy this item. It remains in History.")
+            return
+        }
+        if let copyMessage { finishCopy(copyMessage); return }
+        guard paste else { close(); return }
+        guard inserter.pasteCurrentClipboard(expectedChangeCount: written) else {
+            environment.diagnose("refused shortcut_not_submitted")
+            finishCopy("Copied. Press ⌘V in the app where you want it.")
+            return
+        }
+        environment.diagnose("shortcut_submitted")
+        close()
+    }
+
+    private func finishCopy(_ message: String) {
+        // Publication succeeded. Leave the destination focused so the instructed
+        // Command-V cannot land in History's search field.
+        close()
+        showCopyFeedback?(message)
     }
 
     private func retainCopy(_ message: String) {
@@ -446,6 +541,9 @@ final class HistoryCoordinator {
         // clicks must copy, not hide/reopen while retrying the same stale field.
         model.pasteBehavior = .copyOnly
         operation &+= 1
+        clipboardPreparation?.cancel()
+        clipboardPreparation = nil
+        publicationApplication = nil
         target = nil
         removeHiddenInputMonitors()
         model.status = message
@@ -494,7 +592,7 @@ final class HistoryCoordinator {
     /// Activation notifications latch cancellation even if the app later comes back.
     func applicationDidActivate(pid: pid_t?) {
         guard isCapturing || isReplaying else { return }
-        let expectedPID = isCapturing ? openingApplication?.pid : target?.app.pid
+        let expectedPID = isCapturing ? openingApplication?.pid : publicationApplication?.pid
         guard let pid, pid == expectedPID else {
             cancelHiddenOperation(reason: "external_app_activation")
             return

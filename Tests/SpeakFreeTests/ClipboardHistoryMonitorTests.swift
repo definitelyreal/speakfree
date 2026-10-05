@@ -22,6 +22,7 @@ final class ClipboardHistoryMonitorTests: XCTestCase {
         let monitor = ClipboardHistoryMonitor(pasteboard: board, store: store)
         monitor.sourceAppBundleID = { "example.editor" }
         monitor.accessIsDenied = { false }
+        monitor.accessNeedsApproval = { false }
         monitor.secureInputIsActive = { false }
         monitor.setEnabled(true)
         return monitor
@@ -36,6 +37,163 @@ final class ClipboardHistoryMonitorTests: XCTestCase {
         let finished = expectation(description: "clipboard reader finished")
         monitor.flushForTesting { finished.fulfill() }
         wait(for: [finished], timeout: 4)
+    }
+
+    func testAskPermissionPausesBeforeMetadataAndPayloadAndResumesAfterAllow() {
+        let board = scratchBoard()
+        let store = HistoryStore(policy: .init(captureClipboard: true))
+        let monitor = makeMonitor(board, store: store)
+        var asking = true
+        var reads = 0
+        monitor.accessNeedsApproval = { XCTAssertFalse(Thread.isMainThread); return asking }
+        monitor.readRootTypes = { reads += 1; return board.types ?? [] }
+        for text in ["first synthetic copy", "second synthetic copy"] {
+            copy(text, to: board)
+            monitor.pollNow()
+            flush(monitor)
+        }
+        XCTAssertEqual(reads, 0)
+        XCTAssertTrue(store.entries.isEmpty)
+        XCTAssertTrue(monitor.status?.contains("paused") == true)
+        asking = false
+        copy("allowed synthetic copy", to: board)
+        monitor.pollNow()
+        flush(monitor)
+        XCTAssertEqual(store.entries.compactMap(\.plainText), ["allowed synthetic copy"])
+        XCTAssertNil(monitor.status)
+    }
+
+    func testMetadataAndAccessQueriesRunOffMainWhileStatusAndStoreMergeOnMain() {
+        let board = scratchBoard()
+        let store = HistoryStore(policy: .init(captureClipboard: true))
+        let monitor = makeMonitor(board, store: store)
+        var denied = true
+        var metadata: [String] = []
+        var statuses = 0
+        var merges = 0
+        monitor.accessIsDenied = { XCTAssertFalse(Thread.isMainThread); return denied }
+        monitor.readRootTypes = {
+            XCTAssertFalse(Thread.isMainThread); metadata.append("root")
+            return board.types ?? []
+        }
+        monitor.readItems = {
+            XCTAssertFalse(Thread.isMainThread); metadata.append("items")
+            return board.pasteboardItems
+        }
+        monitor.readItemTypes = {
+            XCTAssertFalse(Thread.isMainThread); metadata.append("types")
+            return $0.types
+        }
+        monitor.makeEntry = { items, source in
+            XCTAssertFalse(Thread.isMainThread); metadata.append("summary")
+            XCTAssertEqual(source, "example.editor")
+            return HistoryEntry(source: .clipboard, sourceAppBundleID: source, items: items)
+        }
+        monitor.onStatusChange = { _ in XCTAssertTrue(Thread.isMainThread); statuses += 1 }
+        store.onChange = { XCTAssertTrue(Thread.isMainThread); merges += 1 }
+        copy("denied fixture", to: board)
+        monitor.pollNow()
+        flush(monitor)
+        XCTAssertNotNil(monitor.status)
+        XCTAssertTrue(metadata.isEmpty)
+        XCTAssertEqual(statuses, 1)
+        XCTAssertEqual(merges, 0)
+        denied = false
+        copy("allowed fixture", to: board)
+        monitor.pollNow()
+        flush(monitor)
+        XCTAssertEqual(metadata, ["root", "items", "types", "summary"])
+        XCTAssertNil(monitor.status)
+        XCTAssertEqual(statuses, 2)
+        XCTAssertEqual(merges, 1)
+        XCTAssertEqual(store.entries.first?.plainText, "allowed fixture")
+    }
+
+    func testSummaryConversionKeepsMainResponsiveAndRejectsInvalidatedResult() {
+        for boundary in ["suspend", "new-copy"] {
+            let board = scratchBoard()
+            let store = HistoryStore(policy: .init(captureClipboard: true))
+            let monitor = makeMonitor(board, store: store)
+            let entered = expectation(description: "summary conversion started")
+            let release = DispatchSemaphore(value: 0)
+            var summaries = 0
+            monitor.makeEntry = { items, source in
+                XCTAssertFalse(Thread.isMainThread)
+                summaries += 1
+                if summaries == 1, !Thread.isMainThread {
+                    entered.fulfill()
+                    XCTAssertEqual(release.wait(timeout: .now() + 8), .success)
+                }
+                return HistoryEntry(source: .clipboard, sourceAppBundleID: source, items: items)
+            }
+            copy("summary fixture", to: board)
+            monitor.pollNow()
+            wait(for: [entered], timeout: 2)
+            let responsive = expectation(description: "main works during summary conversion")
+            DispatchQueue.main.async { responsive.fulfill() }
+            wait(for: [responsive], timeout: 1)
+            if boundary == "suspend" { monitor.suspend(); monitor.resume() }
+            copy("latest copy", to: board)
+            for _ in 0..<5 { monitor.pollNow() }
+            release.signal()
+            flush(monitor)
+            XCTAssertTrue(store.entries.isEmpty)
+            XCTAssertEqual(summaries, 1, "A blocked parser retains the sole reader slot")
+            monitor.pollNow()
+            flush(monitor)
+            XCTAssertEqual(summaries, 2)
+            XCTAssertEqual(store.entries.compactMap(\.plainText), ["latest copy"])
+            XCTAssertEqual(store.entries.first?.sourceAppBundleID, "example.editor")
+        }
+    }
+
+    func testBlockedMetadataKeepsMainResponsiveAndDoesNotQueueAnotherReader() {
+        for stage in ["root", "items", "types"] {
+          for boundary in ["invalidate", "new-copy"] {
+            let board = scratchBoard()
+            let store = HistoryStore(policy: .init(captureClipboard: true))
+            let monitor = makeMonitor(board, store: store)
+            let provider = Promise(), item = NSPasteboardItem()
+            item.setDataProvider(provider, forTypes: [.string])
+            board.clearContents()
+            XCTAssertTrue(board.writeObjects([item]))
+            let entered = expectation(description: "\(stage) metadata blocked")
+            let release = DispatchSemaphore(value: 0)
+            var calls = 0
+            let blockOnce = {
+                XCTAssertFalse(Thread.isMainThread)
+                guard !Thread.isMainThread else { return }
+                calls += 1
+                if calls == 1 {
+                    entered.fulfill()
+                    XCTAssertEqual(release.wait(timeout: .now() + 8), .success)
+                }
+            }
+            monitor.readRootTypes = { if stage == "root" { blockOnce() }; return board.types ?? [] }
+            monitor.readItems = { if stage == "items" { blockOnce() }; return board.pasteboardItems }
+            monitor.readItemTypes = { if stage == "types" { blockOnce() }; return $0.types }
+            monitor.pollNow()
+            wait(for: [entered], timeout: 2)
+            let responsive = expectation(description: "main works during metadata IPC")
+            DispatchQueue.main.async { responsive.fulfill() }
+            wait(for: [responsive], timeout: 1)
+            if boundary == "invalidate" { monitor.suspend(); monitor.resume() }
+            for index in 0..<5 {
+                copy("new local copy \(index)", to: board)
+                monitor.pollNow()
+            }
+            release.signal()
+            flush(monitor)
+            XCTAssertEqual(calls, 1, "Even an invalidated blocked read owns the sole reader slot")
+            XCTAssertTrue(store.entries.isEmpty)
+            XCTAssertEqual(provider.readCount, 0, "Stale metadata must not authorize any payload read")
+            // The newest generation is admitted only after the old worker has returned.
+            monitor.pollNow()
+            flush(monitor)
+            XCTAssertEqual(calls, 2)
+            XCTAssertEqual(store.entries.compactMap(\.plainText), ["new local copy 4"])
+          }
+        }
     }
 
     func testStartupAndResumeDoNotHarvestPriorClipboard() {
@@ -121,6 +279,59 @@ final class ClipboardHistoryMonitorTests: XCTestCase {
         monitor.pollNow()
         flush(monitor)
         XCTAssertEqual(provider.readCount, 0)
+        XCTAssertTrue(store.entries.isEmpty)
+    }
+
+    func testRemoteRootMarkerSkipsItemEnumerationAndProviderThenAllowsNextLocalCopy() {
+        let board = scratchBoard()
+        let store = HistoryStore(policy: .init(captureClipboard: true))
+        let monitor = makeMonitor(board, store: store)
+        let provider = Promise()
+        let item = NSPasteboardItem()
+        item.setDataProvider(provider, forTypes: [.string])
+        board.clearContents()
+        XCTAssertTrue(board.writeObjects([item]))
+        board.addTypes([PasteboardAccess.remoteClipboardType], owner: nil)
+        XCTAssertTrue(board.types?.contains(PasteboardAccess.remoteClipboardType) == true)
+        var itemEnumerations = 0
+        monitor.readItems = {
+            itemEnumerations += 1
+            return board.pasteboardItems
+        }
+
+        monitor.pollNow()
+        flush(monitor)
+        XCTAssertEqual(itemEnumerations, 0, "Root remote offers must stop before item enumeration")
+        XCTAssertEqual(provider.readCount, 0)
+        XCTAssertTrue(store.entries.isEmpty)
+
+        copy("new local copy", to: board)
+        monitor.pollNow()
+        flush(monitor)
+        XCTAssertEqual(itemEnumerations, 1)
+        XCTAssertEqual(provider.readCount, 0)
+        XCTAssertEqual(store.entries.compactMap(\.plainText), ["new local copy"])
+    }
+
+    func testRemoteMarkerOnLaterItemSkipsEveryLazyPayloadEvenWithoutRootMarker() {
+        let board = scratchBoard()
+        let store = HistoryStore(policy: .init(captureClipboard: true))
+        let monitor = makeMonitor(board, store: store)
+        let provider = Promise()
+        let first = NSPasteboardItem()
+        first.setDataProvider(provider, forTypes: [.string])
+        let second = NSPasteboardItem()
+        second.setDataProvider(provider, forTypes: [.string])
+        XCTAssertTrue(second.setData(Data(), forType: PasteboardAccess.remoteClipboardType))
+        board.clearContents()
+        XCTAssertTrue(board.writeObjects([first, second]))
+        // Explicitly exercise the item-only fallback, independently of whether this
+        // OS aggregates all item types into the pasteboard's root list.
+        monitor.readRootTypes = { [.string] }
+
+        monitor.pollNow()
+        flush(monitor)
+        XCTAssertEqual(provider.readCount, 0, "A later remote marker must veto earlier promises too")
         XCTAssertTrue(store.entries.isEmpty)
     }
 

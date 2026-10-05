@@ -41,6 +41,9 @@ final class HistoryStore {
     private var removedWhileLoading = Set<UUID>()
     private var archivesRemovedWhileLoading = Set<String>()
     private var persistenceBlocked = false
+    // A failed load may hide entries targeted by a removal. Keep that unresolved
+    // intent distinct from an unreadable archive that this session never changed.
+    private var unappliedArchiveRemovals = false
     private var pendingSave: DispatchWorkItem?
     private var diskOperation: UInt64 = 0
     private var lastPersistenceResult: Result<Void, Error> = .success(())
@@ -74,12 +77,14 @@ final class HistoryStore {
             loadGeneration &+= 1
             isLoading = false
             persistenceBlocked = false
+            unappliedArchiveRemovals = false
             schedulePersistence(immediate: true)
         }
         else if wasPersistent && !policy.persistent {
             loadGeneration &+= 1
             isLoading = false
             persistenceBlocked = false
+            unappliedArchiveRemovals = false
             schedulePersistence(immediate: true)
         } else if previousIDs != entries.map(\.id) { schedulePersistence() }
     }
@@ -99,7 +104,16 @@ final class HistoryStore {
     func addClipboard(items: [HistoryPasteboardItem], sourceAppBundleID: String? = nil) -> HistoryEntry? {
         precondition(Thread.isMainThread)
         guard policy.captureClipboard else { return nil }
-        return add(.init(createdAt: now(), source: .clipboard, sourceAppBundleID: sourceAppBundleID, items: items))
+        return addClipboard(.init(createdAt: now(), source: .clipboard, sourceAppBundleID: sourceAppBundleID, items: items))
+    }
+
+    /// The reader may precompute previews and rich-text conversion off-main. Storage
+    /// still revalidates source, current policy, age, and size on the main thread.
+    @discardableResult
+    func addClipboard(_ entry: HistoryEntry) -> HistoryEntry? {
+        precondition(Thread.isMainThread)
+        guard policy.captureClipboard, entry.source == .clipboard else { return nil }
+        return add(entry)
     }
 
     /// An explicit, bounded archive import. Historical dates/IDs are preserved, and an
@@ -134,15 +148,25 @@ final class HistoryStore {
     }
 
     func remove(id: UUID) {
+        remove(ids: [id])
+    }
+
+    /// A confirmed selection is an exact set, never a predicate re-evaluated after
+    /// new copies arrive. Publish and persist the batch once to keep deletion responsive.
+    func remove(ids: [UUID]) {
         precondition(Thread.isMainThread)
-        if isLoading { removedWhileLoading.insert(id) }
-        entries.removeAll { $0.id == id }
+        let selected = Set(ids)
+        guard !selected.isEmpty else { return }
+        if isLoading || persistenceBlocked { unappliedArchiveRemovals = true }
+        if isLoading { removedWhileLoading.formUnion(selected) }
+        entries.removeAll { selected.contains($0.id) }
         changed()
         schedulePersistence(immediate: true)
     }
 
     func removeLinkedArchive(id: String) {
         precondition(Thread.isMainThread)
+        if isLoading || persistenceBlocked { unappliedArchiveRemovals = true }
         if isLoading { archivesRemovedWhileLoading.insert(id) }
         entries.removeAll { $0.linkedArchiveID == id }
         changed()
@@ -157,6 +181,7 @@ final class HistoryStore {
         loadGeneration &+= 1
         isLoading = false
         persistenceBlocked = false
+        unappliedArchiveRemovals = false
         lastError = nil
         changed()
         schedulePersistence(immediate: true)
@@ -181,13 +206,17 @@ final class HistoryStore {
     func flushPendingPersistence(completion: @escaping (Result<Void, Error>) -> Void) {
         precondition(Thread.isMainThread)
         ioQueue.async { [self] in
-            DispatchQueue.main.async {
+            Self.deliverOnMainRunLoop {
                 if self.isLoading {
                     self.flushPendingPersistence(completion: completion)
                     return
                 }
                 guard !self.persistenceBlocked else {
-                    completion(.failure(PersistenceError.unreadableArchive))
+                    // Merely failing to read a pre-existing archive creates no new
+                    // save obligation. Preserve it and its visible error, but allow
+                    // quit unless session text or a deletion would otherwise be lost.
+                    completion(self.entries.isEmpty && !self.unappliedArchiveRemovals
+                        ? .success(()) : .failure(PersistenceError.unreadableArchive))
                     return
                 }
                 // Do not rewrite a clean archive merely because the app is quitting.
@@ -196,7 +225,7 @@ final class HistoryStore {
                 if self.pendingSave != nil || failedPreviously { self.schedulePersistence(immediate: true) }
                 let operation = self.diskOperation
                 self.ioQueue.async {
-                    DispatchQueue.main.async {
+                    Self.deliverOnMainRunLoop {
                         if self.diskOperation != operation {
                             self.flushPendingPersistence(completion: completion)
                         } else { completion(self.lastPersistenceResult) }
@@ -208,6 +237,15 @@ final class HistoryStore {
 
     func flushForTesting(completion: @escaping () -> Void) {
         flushPendingPersistence { _ in completion() }
+    }
+
+    /// AppKit can pump a termination loop from inside a main-dispatch callback.
+    /// That loop cannot re-enter the main dispatch queue. Load, write and barrier
+    /// deliveries must all use the run loop so external quit callers also drain.
+    private static func deliverOnMainRunLoop(_ body: @escaping () -> Void) {
+        let runLoop = CFRunLoopGetMain()
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue, body)
+        CFRunLoopWakeUp(runLoop)
     }
 
     private func add(_ entry: HistoryEntry) -> HistoryEntry? {
@@ -296,7 +334,7 @@ final class HistoryStore {
                     result = .success(archive.entries)
                 }
             } catch { result = .failure(error) }
-            DispatchQueue.main.async {
+            Self.deliverOnMainRunLoop {
                 guard let self, self.loadGeneration == generation, self.policy.persistent else { return }
                 self.isLoading = false
                 switch result {
@@ -308,6 +346,7 @@ final class HistoryStore {
                     }
                     self.prune()
                     self.persistenceBlocked = false
+                    self.unappliedArchiveRemovals = false
                     self.lastPersistenceResult = .success(())
                     self.changed()
                     if hadSessionEntries || self.entries.map(\.id) != loaded.map(\.id) {
@@ -349,7 +388,7 @@ final class HistoryStore {
                 }
                 result = .success(())
             } catch { result = .failure(error) }
-            DispatchQueue.main.async {
+            Self.deliverOnMainRunLoop {
                 guard let self, self.diskOperation == operation else { return }
                 self.pendingSave = nil
                 self.lastPersistenceResult = result

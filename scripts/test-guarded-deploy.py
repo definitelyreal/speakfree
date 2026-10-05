@@ -93,6 +93,11 @@ class GuardedDeployTests(unittest.TestCase):
             executable.parent.mkdir(parents=True)
             executable.write_text("""#!/bin/bash
 if [ "$1" = --help ]; then exit 0; fi
+if [ "$1" = quit-clipy ]; then
+    printf 'clipy\\n' >> "$TRACE"
+    printf '%s\\n' "${CLIPY_OUTPUT-SPEAKFREE_CLIPY_STOPPED}"
+    exit "${CLIPY_STATUS:-0}"
+fi
 [ "$1" = prepare-update ] && [ "$2" = --timeout ] && [ "$3" = 600 ] || exit 64
 printf 'guard\\n' >> "$TRACE"
 printf '%s\\n' "${GUARD_OUTPUT-SPEAKFREE_UPDATE_READY}"
@@ -105,7 +110,8 @@ exit "${GUARD_STATUS:-0}"
             trace.touch()
             env = {key: value for key, value in os.environ.items()
                    if key not in ("SPEAKFREE_CONFIG_DIR", "M3_ONLY")}
-            env.update(SCRIPTS=str(SCRIPTS), TEST_ROOT=str(root), TRACE=str(trace))
+            env.update(SCRIPTS=str(SCRIPTS), TEST_ROOT=str(root), TRACE=str(trace),
+                       SPEAKFREE_STUDIO_HOST="fixture-studio", SPEAKFREE_RIG_HOST="fixture-rig")
             env.update({key: str(value) for key, value in overrides.items()})
             result = subprocess.run(["/bin/bash", "-c", harness], env=env,
                                     capture_output=True, text=True, timeout=10)
@@ -122,10 +128,17 @@ exit "${GUARD_STATUS:-0}"
         self.assertNotIn("launch", events)
         self.assertTrue(files["original_installed"])
 
+    def test_clipy_refusal_aborts_before_stop(self):
+        for options in ({"CLIPY_STATUS": 2}, {"CLIPY_OUTPUT": "invalid"}):
+            result, events, files = self.run_flow(**options)
+            self.assert_no_interruption(result, events, files)
+            self.assertIn("guard", events)
+            self.assertIn("clipy", events)
+
     def test_positive_receipt_precedes_only_graceful_signal_and_trash_before_copy(self):
         result, events, files = self.run_flow()
         self.assertEqual(result.returncode, 0, result.stderr)
-        expected = ["guard", "signal:-TERM 4242", "trash", "copy", "launch"]
+        expected = ["guard", "clipy", "signal:-TERM 4242", "trash", "copy", "launch"]
         self.assertEqual([e for e in events if e in expected], expected)
         self.assertEqual([e for e in events if e.startswith("signal:")], ["signal:-TERM 4242"])
         self.assertTrue(files["original_in_fake_trash"])
@@ -134,7 +147,9 @@ exit "${GUARD_STATUS:-0}"
     def test_cancel_timeout_unknown_and_usage_fail_closed_even_with_ready_text(self):
         for status in (1, 2, 3, 4, 64):
             with self.subTest(status=status):
-                self.assert_no_interruption(*self.run_flow(GUARD_STATUS=status))
+                result, events, files = self.run_flow(GUARD_STATUS=status)
+                self.assert_no_interruption(result, events, files)
+                self.assertNotIn("clipy", events, "Cancelled updates leave Clipy running")
 
     def test_zero_exit_without_exact_receipt_does_not_stop(self):
         for output in ("", "usage: unsupported command", "SPEAKFREE_UPDATE_READY extra",
@@ -204,12 +219,12 @@ exit "${GUARD_STATUS:-0}"
     def test_default_fleet_stages_all_hosts_before_any_install(self):
         result, events, _ = self.run_flow(FLEET_HARNESS)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(events, ["initialize", "build", "stage:movie@STUDIO_TAILSCALE_HOST", "stage:ark",
-                                  "install:local", "install:movie@STUDIO_TAILSCALE_HOST", "install:ark", "cleanup"])
+        self.assertEqual(events, ["initialize", "build", "stage:fixture-studio", "stage:fixture-rig",
+                                  "install:local", "install:fixture-studio", "install:fixture-rig", "cleanup"])
 
     def test_build_or_remote_staging_failure_never_interrupts_any_host(self):
-        for options in ({"BUILD_STATUS": 1}, {"FAIL_STAGE": "movie@STUDIO_TAILSCALE_HOST"},
-                        {"FAIL_STAGE": "ark"}):
+        for options in ({"BUILD_STATUS": 1}, {"FAIL_STAGE": "fixture-studio"},
+                        {"FAIL_STAGE": "fixture-rig"}):
             with self.subTest(options=options):
                 result, events, _ = self.run_flow(FLEET_HARNESS, **options)
                 self.assertNotEqual(result.returncode, 0)
@@ -221,9 +236,9 @@ exit "${GUARD_STATUS:-0}"
         self.assertEqual([e for e in events if e.startswith("install:")], ["install:local"])
 
     def test_remote_abort_stops_fleet_sequence_and_does_not_claim_cleanup(self):
-        result, events, _ = self.run_flow(FLEET_HARNESS, FAIL_INSTALL="movie@STUDIO_TAILSCALE_HOST")
+        result, events, _ = self.run_flow(FLEET_HARNESS, FAIL_INSTALL="fixture-studio")
         self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("install:ark", events)
+        self.assertNotIn("install:fixture-rig", events)
         self.assertNotIn("cleanup", events)
 
     def test_all_stage_transfer_and_install_commands_bound_ssh_transport(self):

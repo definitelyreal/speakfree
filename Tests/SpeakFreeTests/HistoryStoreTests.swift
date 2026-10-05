@@ -41,6 +41,19 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.filtered(source: .dictation, query: "SAME").count, 1)
     }
 
+    func testPreparedClipboardStillRequiresCurrentCapturePolicyAndCorrectSource() {
+        let items = [HistoryPasteboardItem(representations: [
+            .init(type: "public.utf8-plain-text", data: Data("synthetic".utf8))])]
+        let prepared = HistoryEntry(source: .clipboard, items: items)
+        let store = HistoryStore(policy: .init(captureClipboard: true))
+        store.configure(.init(captureClipboard: false))
+        XCTAssertNil(store.addClipboard(prepared))
+        store.configure(.init(captureClipboard: true))
+        XCTAssertNil(store.addClipboard(HistoryEntry(source: .dictation, items: items)))
+        XCTAssertEqual(store.addClipboard(prepared), prepared)
+        XCTAssertEqual(store.entries, [prepared])
+    }
+
     func testRichMultiItemPersistenceRetainsBytesTypesOrderAndPrivateFileMode() throws {
         let url = try scratchURL()
         let policy = HistoryStore.Policy(captureClipboard: true, persistent: true)
@@ -150,6 +163,42 @@ final class HistoryStoreTests: XCTestCase {
         loading.addDictation("independent")
         loading.removeLinkedArchive(id: "new-archive")
         XCTAssertEqual(loading.entries.compactMap(\.plainText), ["independent"])
+    }
+
+    func testBatchRemovalDeletesOnlyConfirmedIDsAndPublishesOnce() throws {
+        let url = try scratchURL()
+        let policy = HistoryStore.Policy(persistent: true)
+        let store = HistoryStore(fileURL: url, policy: policy)
+        flush(store)
+        let first = try XCTUnwrap(store.addDictation("first match", linkedArchiveID: "saved-recording-one"))
+        let second = try XCTUnwrap(store.addDictation("second match"))
+        let later = try XCTUnwrap(store.addDictation("later match"))
+        var notifications = 0
+        store.onChange = { notifications += 1 }
+        store.remove(ids: [first.id, second.id, first.id])
+        XCTAssertEqual(notifications, 1)
+        XCTAssertEqual(store.entries.map(\.id), [later.id])
+        flush(store)
+        let restored = HistoryStore(fileURL: url, policy: policy)
+        flush(restored)
+        XCTAssertEqual(restored.entries.map(\.id), [later.id])
+    }
+
+    func testBatchRemovalDuringLoadCannotResurrectConfirmedIDs() throws {
+        let url = try scratchURL()
+        let policy = HistoryStore.Policy(persistent: true)
+        let original = HistoryStore(fileURL: url, policy: policy)
+        flush(original)
+        let removed = try XCTUnwrap(original.addDictation("remove"))
+        let retained = try XCTUnwrap(original.addDictation("retain"))
+        flush(original)
+        let loading = HistoryStore(fileURL: url, policy: policy)
+        loading.remove(ids: [removed.id])
+        flush(loading)
+        XCTAssertEqual(loading.entries.map(\.id), [retained.id])
+        let restarted = HistoryStore(fileURL: url, policy: policy)
+        flush(restarted)
+        XCTAssertEqual(restarted.entries.map(\.id), [retained.id])
     }
 
     func testUnreadableHistoryShowsErrorAndIsNotOverwrittenUntilExplicitClear() throws {
@@ -277,9 +326,10 @@ final class HistoryStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: corruptURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("invalid archive".utf8).write(to: corruptURL)
         let corrupt = HistoryStore(fileURL: corruptURL, policy: .init(persistent: true))
+        corrupt.addDictation("new text must survive the unreadable archive")
         let failedLoad = expectation(description: "load error returned")
         corrupt.flushPendingPersistence { result in
-            if case .success = result { XCTFail("Corrupt storage cannot acknowledge a successful termination flush") }
+            if case .success = result { XCTFail("Unsaved session text still requires an explicit quit decision") }
             failedLoad.fulfill()
         }
         wait(for: [failedLoad], timeout: 4)
@@ -293,5 +343,87 @@ final class HistoryStoreTests: XCTestCase {
             failedWrite.fulfill()
         }
         wait(for: [failedWrite], timeout: 4)
+    }
+
+    func testUnreadableUntouchedArchiveDoesNotBlockQuitOrChangeItsBytes() throws {
+        let url = try scratchURL()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let bytes = Data("unsupported future archive fixture".utf8)
+        try bytes.write(to: url)
+        let store = HistoryStore(fileURL: url, policy: .init(persistent: true))
+        for _ in 0..<2 {
+            let completed = expectation(description: "unchanged unreadable archive permits quit")
+            store.flushPendingPersistence { result in
+                if case .failure(let error) = result { XCTFail("Nothing new needs saving: \(error)") }
+                completed.fulfill()
+            }
+            wait(for: [completed], timeout: 4)
+            XCTAssertNotNil(store.lastError, "The loading problem must remain visible")
+            XCTAssertTrue(store.entries.isEmpty)
+            XCTAssertEqual(try Data(contentsOf: url), bytes, "Quit must not reset unknown saved data")
+        }
+    }
+
+    func testUnreadableArchiveCannotAcknowledgeUnappliedDeletionEvenWithNoSessionText() throws {
+        for duringLoad in [true, false] {
+            let url = try scratchURL()
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let bytes = Data("unsupported archive with unknown entries".utf8)
+            try bytes.write(to: url)
+            let store = HistoryStore(fileURL: url, policy: .init(persistent: true))
+            if !duringLoad { flush(store) }
+            store.removeLinkedArchive(id: "recording-synthetic-deleted")
+            let failed = expectation(description: "unapplied deletion remains a quit blocker")
+            store.flushPendingPersistence { result in
+                if case .success = result { XCTFail("An unreadable archive may still contain the removed recording's text") }
+                failed.fulfill()
+            }
+            wait(for: [failed], timeout: 4)
+            XCTAssertTrue(store.entries.isEmpty)
+            XCTAssertEqual(try Data(contentsOf: url), bytes)
+            store.clear()
+            let cleared = expectation(description: "explicit clearing resolves the deletion")
+            store.flushPendingPersistence { result in
+                if case .failure(let error) = result { XCTFail("Explicit clear should resolve the archive: \(error)") }
+                cleared.fulfill()
+            }
+            wait(for: [cleared], timeout: 4)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        }
+    }
+
+    func testQuitDrainCompletesInsideMainDispatchNestedRunLoop() throws {
+        for persistent in [true, false] {
+            let url = try scratchURL()
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !persistent { try Data("old saved copy".utf8).write(to: url) }
+            let completed = expectation(description: "nested termination loop drains load/write/delete")
+            DispatchQueue.main.async {
+                let store = HistoryStore(fileURL: url, policy: .init(persistent: persistent))
+                if persistent { store.addDictation("new synthetic text before quit") }
+                var result: Result<Void, Error>?
+                store.flushPendingPersistence { result = $0 }
+                // Match an external terminate() called from main-dispatch work:
+                // nested run-loop sources may run, but main dispatch cannot re-enter.
+                let deadline = Date().addingTimeInterval(2)
+                while result == nil && Date() < deadline {
+                    _ = RunLoop.current.run(mode: .default, before: deadline)
+                }
+                guard let result else {
+                    XCTFail("Quit completion depended on re-entering the main dispatch queue")
+                    completed.fulfill()
+                    return
+                }
+                if case .failure(let error) = result { XCTFail("Unexpected quit failure: \(error)") }
+                XCTAssertEqual(FileManager.default.fileExists(atPath: url.path), persistent)
+                completed.fulfill()
+            }
+            wait(for: [completed], timeout: 4)
+            if persistent {
+                let restarted = HistoryStore(fileURL: url, policy: .init(persistent: true))
+                flush(restarted)
+                XCTAssertEqual(restarted.entries.compactMap(\.plainText), ["new synthetic text before quit"])
+            }
+        }
     }
 }

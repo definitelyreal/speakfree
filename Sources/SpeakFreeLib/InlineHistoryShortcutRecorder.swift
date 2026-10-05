@@ -9,6 +9,8 @@ struct InlineHistoryShortcutRecorder: View {
     @Binding var recordingAction: HistorySettings.Action?
     let validate: (HistorySettings.Shortcut) -> String?
     let onChange: (HistorySettings.Shortcut) -> Void
+    var onRecordingBegan: () -> Void = {}
+    var systemConflict: String?
     @StateObject private var holder = HistoryKeyMonitorHolder()
     @State private var rejection: String?
     private var isRecording: Bool { recordingAction == action }
@@ -16,28 +18,34 @@ struct InlineHistoryShortcutRecorder: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
-                Text(action.title)
-                Spacer()
-                Button {
-                    rejection = nil
-                    recordingAction = isRecording ? nil : action
-                } label: {
-                    Text(isRecording ? "Type shortcut…" : shortcut.label)
-                        .foregroundStyle(isRecording || shortcut.isAssigned ? .primary : .secondary)
-                        .frame(width: 132, height: 28)
-                        .background(.background, in: RoundedRectangle(cornerRadius: 5))
-                        .overlay(RoundedRectangle(cornerRadius: 5)
-                            .strokeBorder(isRecording ? Color.accentColor : Color.secondary.opacity(0.45), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(action.title) shortcut")
-                .accessibilityValue(isRecording ? "Recording shortcut" : shortcut.label)
-                .help(isRecording ? "Escape cancels. Tab moves to the next control." : "Record \(action.title) shortcut")
-                Button { apply(.unassigned) } label: { Image(systemName: "xmark.circle.fill") }
+                HStack(spacing: 0) {
+                    Button {
+                        rejection = nil
+                        recordingAction = isRecording ? nil : action
+                    } label: {
+                        Text(ShortcutConflictHints.fieldLabel(shortcut, recording: isRecording))
+                            .foregroundStyle(isRecording || shortcut.isAssigned ? .primary : .secondary)
+                            .frame(maxWidth: .infinity, minHeight: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(action.title) shortcut")
+                    .accessibilityValue(ShortcutConflictHints.fieldLabel(shortcut, recording: isRecording))
+                    .help(isRecording ? "Escape cancels. Tab moves to the next control." : "Record \(action.title) shortcut")
+                    Button { apply(.unassigned) } label: {
+                        Image(systemName: "xmark.circle.fill").frame(width: 24, height: 28)
+                    }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
                     .disabled(!shortcut.isAssigned)
                     .accessibilityLabel("Clear \(action.title) shortcut")
                     .help("Clear shortcut")
+                }
+                .frame(width: 156, height: 28)
+                .background(.background, in: RoundedRectangle(cornerRadius: 5))
+                .overlay(RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(isRecording ? Color.accentColor : Color.secondary.opacity(0.45), lineWidth: 1))
+                Text(action.title)
+                Spacer()
                 if action.defaultShortcut.isAssigned && !shortcut.matches(action.defaultShortcut) {
                     Button { apply(action.defaultShortcut) } label: { Image(systemName: "arrow.uturn.backward") }
                         .buttonStyle(.plain).foregroundStyle(.secondary)
@@ -45,10 +53,18 @@ struct InlineHistoryShortcutRecorder: View {
                         .help("Reset to \(action.defaultShortcut.label)")
                 }
             }
-            if let rejection { Text(rejection).font(.callout).foregroundStyle(.red) }
+            if let hint = ShortcutConflictHints.commonUsage(shortcut) {
+                Text(hint).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(ShortcutConflictHints.distinctErrors([rejection, systemConflict]), id: \.self) { error in
+                Text(error).font(.caption).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .onChange(of: isRecording) { recording in
             if recording {
+                onRecordingBegan()
                 holder.install(onCapture: { code, modifiers in
                     // Modifier presses alone leave this chord recorder ready for the main key.
                     if modifiers.isEmpty && [54, 55, 56, 58, 59, 60, 61, 62, 63].contains(code) { return }

@@ -19,6 +19,19 @@ public class RecordingStore {
         Config.configDir.appendingPathComponent("recordings")
     }
 
+    // ai-suggestion:unverified · session:unknown · 2026-10-05
+    static let archivesRemoved = Notification.Name("SpeakFreeArchivesRemoved")
+
+    /// Publish only identities, never transcript contents. Always enqueue delivery:
+    /// callers can hold archive locks and History must mutate only on main.
+    static func notifyArchivesRemoved(ids: Set<String>, directory: URL) {
+        guard !ids.isEmpty else { return }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: archivesRemoved, object: directory.standardizedFileURL,
+                                            userInfo: ["archiveIDs": ids.sorted()])
+        }
+    }
+
     static let filePrefix = "recording-"
     static let fileExtension = "wav"
 
@@ -408,12 +421,18 @@ public class RecordingStore {
         }
     }
 
-    private static func directoryEntryNames(atPath path: String) -> [String]? {
+    static func directoryEntryNames(atPath path: String) -> [String]? {
         guard let directory = opendir(path) else { return nil }
         defer { closedir(directory) }
 
         var names: [String] = []
-        while let entry = readdir(directory) {
+        while true {
+            errno = 0
+            guard let entry = readdir(directory) else {
+                // Update observation must never accept a partial directory listing
+                // as evidence of quiet after an enumeration error.
+                return errno == 0 ? names : nil
+            }
             let name = withUnsafePointer(to: entry.pointee.d_name) { pointer in
                 pointer.withMemoryRebound(
                     to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1
@@ -423,7 +442,6 @@ public class RecordingStore {
                 names.append(name)
             }
         }
-        return names
     }
 
     public static func prune(maxCount: Int) {
@@ -435,11 +453,14 @@ public class RecordingStore {
         let recordings = listRecordings()
         guard recordings.count > maxCount else { return }
 
+        var removedIDs = Set<String>()
+        defer { notifyArchivesRemoved(ids: removedIDs, directory: recordingsDir) }
         let toRemove = recordings.suffix(from: maxCount)
         for recording in toRemove {
             guard removal.claim(recording.url) else { continue }
             do {
                 try FileManager.default.removeItem(at: recording.url)
+                removedIDs.insert(RecordingActivity.stem(for: recording.url))
                 try? FileManager.default.removeItem(at: sidecarURL(for: recording.url))
                 try? FileManager.default.removeItem(at: rawSidecarURL(for: recording.url))
                 try? FileManager.default.removeItem(at: metaSidecarURL(for: recording.url))
@@ -548,7 +569,9 @@ public class RecordingStore {
             // so a recording that vanished mid-finalize is never counted).
             bumpCachedCount(by: 1)
         } else {
-            try? FileManager.default.removeItem(at: audioURL)
+            if (try? FileManager.default.removeItem(at: audioURL)) != nil {
+                notifyArchivesRemoved(ids: [RecordingActivity.stem(for: audioURL)], directory: audioURL.deletingLastPathComponent())
+            }
         }
     }
 
@@ -615,6 +638,8 @@ public class RecordingStore {
         // human-managed `recording-archive/` folder or a `recording-notes.pdf` survives. Never
         // touches the crash sentinel (it lives in configDir, not recordingsDir).
         let fm = FileManager.default
+        var removedIDs = Set<String>()
+        defer { notifyArchivesRemoved(ids: removedIDs, directory: recordingsDir) }
         var removed = 0
         var failed = 0
         do {
@@ -628,6 +653,7 @@ public class RecordingStore {
                 guard fm.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else { continue }
                 do {
                     try fm.removeItem(at: url)
+                    removedIDs.insert(RecordingActivity.stem(for: url))
                     removed += 1
                 } catch {
                     failed += 1

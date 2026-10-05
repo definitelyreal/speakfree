@@ -13,16 +13,46 @@ struct UpdateQuietPolicy {
     let timeout: TimeInterval
     private(set) var quietSince: TimeInterval?
     private(set) var warningSince: TimeInterval?
+    private(set) var updateRequested = false
+    private var idleObservedAt: TimeInterval?
+
+    init(startedAt: TimeInterval, timeout: TimeInterval) {
+        self.startedAt = startedAt
+        self.timeout = timeout
+    }
+
+    /// Manual intent acknowledges an already visible/audible warning. It never
+    /// bypasses the 30-second quiet rule or the next fresh activity check.
+    func canRequestUpdate(now: TimeInterval) -> Bool {
+        guard !updateRequested, now - startedAt < timeout,
+              let quietSince, now - quietSince >= 30, warningSince != nil, let idleObservedAt,
+              idleObservedAt <= now, now - idleObservedAt <= 2 else { return false }
+        return true
+    }
+
+    @discardableResult
+    mutating func requestUpdate(now: TimeInterval, warningVisible: Bool, toneStarted: Bool) -> Bool {
+        guard warningVisible, toneStarted, canRequestUpdate(now: now) else { return false }
+        updateRequested = true
+        return true
+    }
 
     mutating func observe(now: TimeInterval, active: Bool, changed: Bool,
                           observedAt: TimeInterval? = nil) -> Decision {
-        guard now - startedAt < timeout else { return .timedOut }
+        guard now - startedAt < timeout else {
+            updateRequested = false
+            idleObservedAt = nil
+            return .timedOut
+        }
         let stale = observedAt.map { !$0.isFinite || $0 > now || now - $0 > 2 } ?? false
         if active || changed || stale {
             quietSince = nil
             warningSince = nil
+            updateRequested = false
+            idleObservedAt = nil
             return .waiting(30)
         }
+        idleObservedAt = observedAt ?? now
         if quietSince == nil { quietSince = now }
         let quietRemaining = 30 - (now - quietSince!)
         if quietRemaining > 0 { return .waiting(Int(ceil(quietRemaining))) }
@@ -30,6 +60,7 @@ struct UpdateQuietPolicy {
             warningSince = now
             return .warning(5, playTone: true)
         }
+        if updateRequested { return .ready }
         let warningRemaining = 5 - (now - warningSince!)
         if warningRemaining > 0 { return .warning(Int(ceil(warningRemaining)), playTone: false) }
         return .ready
@@ -51,11 +82,35 @@ enum UpdateLogEvent {
             "AudioRecorder: recording ", "Recording ", "Finalize:", "Transcription ",
             "Streaming:", "WATCHDOG:", "Gate override:", "Insertion boundary:",
             "SecureInputRetry:", "HotkeyManager:", "SIGTERM:", "Recovery:",
-            "Capture: WAV write failed:", "Parakeet model not downloaded", "Transcriber configured:"
+            "Capture: WAV write failed:", "Parakeet model not downloaded", "Transcriber configured:",
+            // Installed alpha diagnostics around takes/recovery. They restart quiet,
+            // but never establish a capture-start or capture-stop boundary.
+            "Reprocess:", "WhisperEngine:", "RecordingStore:", "Recordings removal:",
+            "Terminate:", "Capture: restarting streams", "Dictation Mode:", "T2.3:",
+            "Overlay:", "AudioRecorder: kept ", "Latency: ", "Capture switch:", "History paste:",
+            "Report a Problem:", "DictationTrace:"
         ]
         if activityPrefixes.contains(where: message.hasPrefix) { return .activity }
         // Periodic health checks describe subsystem health, not a dictation boundary.
         if message.hasPrefix("Health check:") { return .unrelated }
+        // Match the emitted binding formats, including device UIDs that contain
+        // "recording" or "dictation". An unfamiliar binding/status format still
+        // falls through to the existing unknown-activity refusal below.
+        let bindingPrefix = #"^Capture binding \[[^\]\r\n]+\]: requested id=[0-9]+ uid=.+; "#
+        let bindingDetails = #"(?:current-device unreadable \(status=-?[0-9]+, bytes=[0-9]+\); routing unqualified|current id=[0-9]+ uid=.+; (?:current-device ID matches|different current-device ID; aggregate membership/input routing unqualified))$"#
+        if message.range(of: bindingPrefix + bindingDetails, options: .regularExpression) != nil {
+            return .unrelated
+        }
+        let unrelatedFormats = [
+            #"^Capture route: (?:Pre-listening off|Pre-listening: .+|Starting pre-listening…|Microphone connecting — audio not ready yet|Microphone unavailable — no valid audio; retry when starting dictation|Selected microphone disconnected — using .+|Using .+ · .+ sounded like static|Using .+ · pre-listening protected by .+|Using .+ · backup microphone unavailable|Using .+ while .+ connects…)$"#,
+            #"^RecordingsNotice: resolved \((?:keep|delete|not-applicable)\)$"#,
+            #"^Stay on notice: (?:.+ connected\. Still using .+\.|Hard to hear you here, so speakfree switched to .+\. Your last dictation may be incomplete\.|Hard to hear you here\. Switch to .+\? Music on .+ will sound like a phone call\.|Hard to hear you here\. Your last dictation may be incomplete\. A headset or a closer mic will help\.|Stay on .+ ended\.|.+ sounded like static\. Switched to .+\.|.+ wasn't ready\. Using .+\.)$"#,
+            #"^Clipboard restore: trigger=user-paste (?:skipped reason=[a-z-]+|restored=(?:true|false) superseded|route=[a-z]+ read=(?:none|[0-9]+ms) pasteToRestore=[0-9]+ms restored=(?:true|false))$"#,
+            #"^Clipboard trust: canary (?:skipped, clipboard changed while being copied|skipped, snapshot failed reason=[a-z_-]+|mode=[a-zA-Z-]+ outcome=[a-zA-Z-]+ readAfter=(?:none|[0-9]+ms) restored=(?:true|false) readers=.+)$"#,
+        ]
+        if unrelatedFormats.contains(where: { message.range(of: $0, options: .regularExpression) != nil }) {
+            return .unrelated
+        }
         // Legacy 3143a81 StatusBarController emits these menu/cache timing records.
         // They describe a read-only UI refresh, not capture or a recovery attempt.
         // Match the complete known numeric formats; unfamiliar history events stay unknown.
@@ -262,7 +317,10 @@ final class LegacyUpdateActivityObserver {
         let directoryBefore = try stamp(recordingDir, directory: true)
         _ = try stamp(logDir, directory: true)
         if listingStamp != directoryBefore {
-            recordingNames = Array(try FileManager.default.contentsOfDirectory(atPath: recordingDir.path)
+            guard let names = RecordingStore.directoryEntryNames(atPath: recordingDir.path) else {
+                throw Failure.unavailable
+            }
+            recordingNames = Array(names
                 .filter { $0.hasPrefix("recording-") }.sorted(by: >).prefix(Self.recentFileLimit))
             listingStamp = directoryBefore
             recordingListingCount += 1
@@ -362,6 +420,8 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
     private var panel: NSPanel?
     private var label: NSTextField?
     private var sound: NSSound?
+    private var warningToneStarted = false
+    private var updateNowButton: NSButton?
     private(set) var result: Int32?
 
     init(directory: URL, timeout: TimeInterval) {
@@ -370,6 +430,9 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
     }
 
     private func consoleAvailable() -> Bool {
+        let display = CGMainDisplayID()
+        guard display != kCGNullDirectDisplay, CGDisplayIsActive(display) != 0,
+              CGDisplayIsAsleep(display) == 0 else { return false }
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
               (session[kCGSessionOnConsoleKey as String] as? NSNumber)?.boolValue == true,
               (session[kCGSessionLoginDoneKey as String] as? NSNumber)?.boolValue == true,
@@ -387,13 +450,20 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
         panel.delegate = self
-        let label = NSTextField(wrappingLabelWithString: "Waiting for dictation to finish, then 30 seconds of quiet. You can keep dictating or cancel this update.")
+        let label = NSTextField(wrappingLabelWithString: "Waiting for dictation to finish, then 30 seconds of quiet. Update now becomes available when the warning starts. You can keep dictating or cancel.")
         label.frame = NSRect(x: 24, y: 63, width: 382, height: 76)
         panel.contentView?.addSubview(label)
         let cancel = NSButton(title: "Cancel update", target: self, action: #selector(cancelUpdate))
-        cancel.frame = NSRect(x: 265, y: 19, width: 141, height: 32)
+        cancel.frame = NSRect(x: 24, y: 19, width: 141, height: 32)
         cancel.keyEquivalent = "\u{1b}"
         panel.contentView?.addSubview(cancel)
+        let updateNow = NSButton(title: "Update now", target: self, action: #selector(requestUpdateNow))
+        updateNow.frame = NSRect(x: 265, y: 19, width: 141, height: 32)
+        updateNow.keyEquivalent = "\r"
+        updateNow.isEnabled = false
+        updateNow.toolTip = "Available after 30 seconds of quiet and the warning tone. Acknowledge the warning to update after a fresh activity check."
+        panel.contentView?.addSubview(updateNow)
+        updateNowButton = updateNow
         self.panel = panel
         self.label = label
         panel.center()
@@ -407,10 +477,12 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
     private func tick() {
         guard result == nil else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        updateNowButton?.isEnabled = !scanning && warningToneStarted && policy.canRequestUpdate(now: now)
         guard now - policy.startedAt < policy.timeout else { finish(3, message: "Update canceled: quiet-period timeout."); return }
         guard consoleAvailable(), panel?.isVisible == true else { finish(4, message: "Update blocked: warning is not visible."); return }
         guard !scanning, now - lastScanAt >= 1 else { return }
         scanning = true
+        updateNowButton?.isEnabled = false
         lastScanAt = now
         worker.async { [weak self] in
             guard let self else { return }
@@ -430,24 +502,30 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
     }
 
     private func apply(_ snapshot: UpdateActivitySnapshot, observedAt: TimeInterval) {
+        defer { updateNowButton?.isEnabled = result == nil && warningToneStarted && policy.canRequestUpdate(now: ProcessInfo.processInfo.systemUptime) }
         guard consoleAvailable(), panel?.isVisible == true else { finish(4, message: "Update blocked: warning is not visible."); return }
         switch policy.observe(now: ProcessInfo.processInfo.systemUptime, active: snapshot.active,
                               changed: snapshot.changed, observedAt: observedAt) {
         case .waiting(let seconds):
+            warningToneStarted = false
             sound?.stop()
             label?.stringValue = snapshot.active
                 ? "Dictation is active. The update will wait. You can keep dictating or cancel."
-                : "Waiting for \(seconds) more seconds of quiet before the update warning. You can keep dictating or cancel."
+                : "Waiting for \(seconds) more seconds of quiet. Update now becomes available after that wait. You can keep dictating or cancel."
         case .warning(let seconds, let playTone):
-            label?.stringValue = "SpeakFree will pause for an update in \(seconds) seconds. Start dictating to postpone, or cancel below."
+            label?.stringValue = "SpeakFree will pause for an update in \(seconds) seconds. Choose Update now to acknowledge this warning, start dictating to postpone, or cancel."
             if playTone {
                 guard let sound = NSSound(named: NSSound.Name("Glass")), sound.play() else {
                     finish(4, message: "Update blocked: warning tone could not start."); return
                 }
+                warningToneStarted = true
                 self.sound = sound
                 panel?.orderFrontRegardless()
             }
         case .ready:
+            guard warningToneStarted else {
+                finish(4, message: "Update blocked: warning tone was not played."); return
+            }
             // This receipt is only an external observation, not a lock on the old app.
             finish(0, message: "SPEAKFREE_UPDATE_READY")
         case .timedOut:
@@ -456,6 +534,16 @@ private final class UpdatePreparationController: NSObject, NSApplicationDelegate
     }
 
     @objc private func cancelUpdate() { finish(2, message: "Update canceled by user.") }
+    @objc private func requestUpdateNow() {
+        guard result == nil, !scanning,
+              policy.requestUpdate(now: ProcessInfo.processInfo.systemUptime,
+                  warningVisible: consoleAvailable() && panel?.isVisible == true,
+                  toneStarted: warningToneStarted) else { return }
+        updateNowButton?.isEnabled = false
+        label?.stringValue = "Warning acknowledged. Checking that dictation is still idle before updating. You can cancel below."
+        lastScanAt = -.infinity
+        tick()
+    }
     func windowShouldClose(_ sender: NSWindow) -> Bool { cancelUpdate(); return true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         cancelUpdate()
