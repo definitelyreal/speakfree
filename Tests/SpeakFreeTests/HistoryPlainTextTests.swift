@@ -4,6 +4,44 @@ import XCTest
 @testable import SpeakFreeLib
 
 final class HistoryPlainTextTests: XCTestCase {
+    func testExplicitRowClickReplacesAaFocusBeforeCopyFallback() {
+        let model = HistoryPickerModel()
+        let original = rich
+        let plain = entry([.init(type: "public.utf8-plain-text", data: Data("Plain".utf8))])
+        model.entries = [original, plain]
+        model.resetForPresentation()
+        model.handle(.focusPlainText)
+        var choices: [HistoryEntry] = []
+        model.choose = { value, _ in
+            choices.append(value)
+            model.pasteBehavior = .copyOnly
+        }
+        // A click can arrive without hover first. A failed paste keeps the picker open.
+        model.activate(id: plain.id)
+        XCTAssertEqual(model.keyboardFocus, .row)
+        model.activate()
+        XCTAssertEqual(choices, [plain, plain], "Return must still copy the selected plain row")
+        model.move(-1)
+        XCTAssertEqual(model.keyboardFocus, .row, "Explicit original-format choice ends Aa intent")
+    }
+
+    func testHistoryRefreshKeepsAaIntentButNeverSelectsADisabledAction() {
+        let model = HistoryPickerModel()
+        let original = rich
+        let next = rich
+        let plain = entry([.init(type: "public.utf8-plain-text", data: Data("Plain".utf8))])
+        model.entries = [original, plain, next]
+        model.resetForPresentation()
+        model.handle(.focusPlainText)
+        model.entries = [plain, next]
+        model.reconcileSelection()
+        XCTAssertEqual(model.selectedID, plain.id)
+        XCTAssertEqual(model.keyboardFocus, .row)
+        model.move(1)
+        XCTAssertEqual(model.selectedID, next.id)
+        XCTAssertEqual(model.keyboardFocus, .plainText)
+    }
+
     func testTypingAfterArrowOrHoverReturnsCaretControlToSearch() {
         let model = HistoryPickerModel()
         model.entries = [rich]

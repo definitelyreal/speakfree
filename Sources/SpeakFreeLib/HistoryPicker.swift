@@ -225,8 +225,12 @@ final class HistoryPickerModel: ObservableObject {
         select(id)
         if plainText {
             guard let variant = entry.plainTextVariant() else { return }
+            keyboardFocus = .plainText
             choose?(variant, copyOnly || pasteBehavior == .copyOnly)
-        } else { choose?(entry, copyOnly || pasteBehavior == .copyOnly) }
+        } else {
+            handle(.focusRow)
+            choose?(entry, copyOnly || pasteBehavior == .copyOnly)
+        }
     }
     func handle(_ action: HistoryPickerKeyAction) {
         switch action {
@@ -428,7 +432,7 @@ struct HistoryPickerView: View {
                     .font(.system(size: 11, weight: .medium)).frame(width: 24, height: 24)
                     .foregroundStyle(plainTextSelected ? Color.white
                         : entry.canPastePlainText ? Color.primary : Color.secondary.opacity(0.4))
-                    .background(plainTextSelected ? Color.accentColor
+                    .background(plainTextSelected ? Color.blue
                         : entry.canPastePlainText ? Color.primary.opacity(0.08) : .clear, in: Circle())
             }.buttonStyle(.plain).disabled(!entry.canPastePlainText)
                 .accessibilityLabel("\(model.actionVerb) as Plain Text")
