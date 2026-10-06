@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-05
 // ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 import Foundation
@@ -71,8 +72,8 @@ public struct Config: Codable {
     // Explicit new-user saving choice completed; nil remains backward compatible.
     public var recordingsSetupCompleted: Bool?
 
-    // Preferred dictation microphone UID. nil selects Automatic: a connected Bluetooth
-    // input when available, otherwise the coordinator's base microphone. The built-in
+    // Preferred dictation microphone UID. nil selects Automatic: the coordinator's
+    // base microphone (built-in, then wired, then another available input). The built-in
     // microphone supplies continuous pre-listening when available. A missing pinned
     // device falls back to the base without erasing the pin. See coordinator.routes.
     public var inputDeviceUID: String?

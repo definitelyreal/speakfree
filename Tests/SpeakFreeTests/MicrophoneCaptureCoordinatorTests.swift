@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-05
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
 import XCTest
@@ -18,10 +19,10 @@ final class MicrophoneCaptureCoordinatorTests: XCTestCase {
     private let builtIn = AudioInputDevice(id: 1, uid: "built-in", name: "Built-in", isBuiltIn: true, isBluetooth: false, nominalSampleRate: 48_000, inputChannels: 1)
     private let airPods = AudioInputDevice(id: 2, uid: "airpods", name: "AirPods", isBuiltIn: false, isBluetooth: true, nominalSampleRate: 24_000, inputChannels: 1)
 
-    func testPrelistenUsesBuiltInAndAirPodsStartOnlyForDictation() {
+    func testExplicitAirPodsSelectionUsesBuiltInPrerollAndStartsAirPodsForDictation() {
         var sessions: [ScriptedCapture] = []
         let router = MicrophoneCaptureCoordinator(factory: { let s = ScriptedCapture(); sessions.append(s); return s }, samples: { _, _ in }, status: { _ in }, refresh: {})
-        router.configure(devices: [builtIn, airPods], systemDefault: airPods, pin: nil, prelisten: true)
+        router.configure(devices: [builtIn, airPods], systemDefault: airPods, pin: airPods.uid, prelisten: true)
         router.start(); router.queue.sync {}
         XCTAssertEqual(sessions.map { $0.device?.uid }, [builtIn.uid])
         router.queue.sync { router.setRecording(true) }
@@ -33,7 +34,7 @@ final class MicrophoneCaptureCoordinatorTests: XCTestCase {
         var sessions: [ScriptedCapture] = []
         var received: [Float] = []
         let router = MicrophoneCaptureCoordinator(factory: { let s = ScriptedCapture(); sessions.append(s); return s }, samples: { received += $0; _ = $1 }, status: { _ in }, refresh: {})
-        router.configure(devices: [builtIn, airPods], systemDefault: airPods, pin: nil, prelisten: true)
+        router.configure(devices: [builtIn, airPods], systemDefault: airPods, pin: airPods.uid, prelisten: true)
         router.start(); router.queue.sync { router.setRecording(true) }
         // AirPods never finish starting. Built-in capture and control still progress.
         sessions[0].deliver?(CapturePacket(start: 0, samples: [1, 2, 3]))
@@ -46,6 +47,57 @@ final class MicrophoneCaptureCoordinatorTests: XCTestCase {
         router.queue.sync {}
         XCTAssertEqual(received, [1, 2, 3])
         router.stop(); router.queue.sync {}
+    }
+
+    func testAutomaticUsesMacMicrophoneEvenWhenAirPodsAreSystemDefault() {
+        let routes = MicrophoneCaptureCoordinator.routes(
+            devices: [airPods, builtIn], systemDefault: airPods, pin: nil)
+        XCTAssertEqual(routes.base, builtIn)
+        XCTAssertEqual(routes.preferred, builtIn)
+    }
+
+    func testConnectingAirPodsDoesNotOpenTheirInputInAutomaticMode() {
+        var sessions: [ScriptedCapture] = []
+        let router = MicrophoneCaptureCoordinator(
+            factory: { let s = ScriptedCapture(); sessions.append(s); return s },
+            samples: { _, _ in }, status: { _ in }, refresh: {})
+        router.configure(devices: [builtIn], systemDefault: builtIn, pin: nil, prelisten: true)
+        router.start(); router.queue.sync { router.setRecording(true) }
+        router.configure(devices: [airPods, builtIn], systemDefault: airPods, pin: nil, prelisten: true)
+        router.queue.sync {}
+        XCTAssertEqual(sessions.map { $0.device?.uid }, [builtIn.uid])
+        XCTAssertFalse(sessions[0].stopped)
+        router.queue.sync { router.setRecording(false); router.setRecording(true) }
+        XCTAssertEqual(sessions.count, 1)
+        router.stop(); router.queue.sync {}
+    }
+
+    func testAutomaticFallsBackToWiredInputBeforeConnectedAirPods() {
+        let wired = AudioInputDevice(id: 3, uid: "usb", name: "USB microphone",
+            isBuiltIn: false, isBluetooth: false, nominalSampleRate: 48_000, inputChannels: 1)
+        let routes = MicrophoneCaptureCoordinator.routes(
+            devices: [airPods, wired], systemDefault: airPods, pin: nil)
+        XCTAssertEqual(routes.base, wired)
+        XCTAssertEqual(routes.preferred, wired)
+    }
+
+    func testAirPodsMenuIsOffForAutomaticAndOnAfterExplicitSelection() {
+        XCTAssertFalse(AppDelegate.dictationModeActive(
+            devices: [airPods, builtIn], systemDefault: airPods, pin: nil))
+        // The menu takes its enable branch on the first click and pins this UID.
+        XCTAssertTrue(AppDelegate.dictationModeActive(
+            devices: [airPods, builtIn], systemDefault: airPods, pin: airPods.uid))
+        XCTAssertFalse(AppDelegate.dictationModeActive(
+            devices: [airPods, builtIn], systemDefault: airPods, pin: builtIn.uid))
+        XCTAssertFalse(AppDelegate.dictationModeActive(
+            devices: [builtIn], systemDefault: builtIn, pin: airPods.uid))
+    }
+
+    func testAirPodsMenuStaysOnWhenTheyAreTheOnlyInput() {
+        XCTAssertTrue(AppDelegate.dictationModeActive(
+            devices: [airPods], systemDefault: airPods, pin: nil))
+        XCTAssertFalse(AppDelegate.dictationModeActive(
+            devices: [], systemDefault: nil, pin: nil))
     }
 
     func testExplicitBuiltInPinWinsOverConnectedAirPods() {
@@ -76,7 +128,7 @@ final class MicrophoneCaptureCoordinatorTests: XCTestCase {
         var sessions: [ScriptedCapture] = []
         var received: [Float] = []
         let router = MicrophoneCaptureCoordinator(factory: { let s = ScriptedCapture(); sessions.append(s); return s }, samples: { received += $0; _ = $1 }, status: { _ in }, refresh: {})
-        router.configure(devices: [builtIn, airPods], systemDefault: airPods, pin: nil, prelisten: true)
+        router.configure(devices: [builtIn, airPods], systemDefault: airPods, pin: airPods.uid, prelisten: true)
         router.start(); router.queue.sync { router.setRecording(true) }
         for i in 0..<10 {
             sessions[0].deliver?(CapturePacket(start: Double(i) / 10, samples: Array(repeating: 0.25, count: 1600)))
@@ -111,7 +163,7 @@ final class MicrophoneCaptureCoordinatorTests: XCTestCase {
         var time = 0.0
         var sessions: [ScriptedCapture] = []
         let router = MicrophoneCaptureCoordinator(factory: { let s = ScriptedCapture(); sessions.append(s); return s }, samples: { _, _ in }, status: { _ in }, refresh: {}, now: { time })
-        router.configure(devices: [builtIn, airPods], systemDefault: airPods, pin: nil, prelisten: true)
+        router.configure(devices: [builtIn, airPods], systemDefault: airPods, pin: airPods.uid, prelisten: true)
         router.start(); router.queue.sync { router.setRecording(true); router.setRecording(false) }
         XCTAssertFalse(sessions[1].stopped)
         router.queue.sync { time = 31 }

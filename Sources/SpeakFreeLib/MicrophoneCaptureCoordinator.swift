@@ -1,4 +1,5 @@
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-09
+// ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-05
 import Foundation
 
 /// Control state and sample delivery are serial; hardware workers never run here.
@@ -59,7 +60,9 @@ final class MicrophoneCaptureCoordinator {
             ?? devices.first
         let preferred: AudioInputDevice?
         if let pin { preferred = devices.first { $0.uid == pin } ?? base }
-        else { preferred = devices.first { $0.isBluetooth } ?? base }
+        // Connecting headphones must not silently move dictation onto their mic.
+        // Bluetooth remains available as an explicit selection, or the only input.
+        else { preferred = base }
         return (base, preferred)
     }
 

@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:01a0f5ce-3321-7bd1-9738-1f28ad96ef6b · 2026-10-05
 // ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import AppKit
@@ -363,12 +364,12 @@ struct DictationSettingsView: View {
 
     private var micBuiltInUID: String? { AudioDeviceCatalog.cachedBuiltInInput?.uid }
 
-    private var micDefaultLabel: String { "Automatic (AirPods for dictation)" }
+    private var micDefaultLabel: String { "Automatic (prefer Mac microphone)" }
 
     private func refreshMicState() {
         micDevices = AudioDeviceCatalog.cachedInputDevices
         let pinned = (NSApplication.shared.delegate as? AppDelegate)?.currentInputDeviceUID()
-        // Keep an explicit built-in choice distinct from automatic AirPods routing.
+        // Preserve an explicit device choice separately from automatic routing.
         micSelection = pinned ?? ""
     }
 
@@ -685,7 +686,7 @@ struct DictationSettingsView: View {
                                         delegate.selectInputDevice(uid: uid)
                                     }
                                     Text(micSelection.isEmpty
-                                         ? "Uses connected AirPods for dictation; pre-listening uses a built-in or wired mic.\nAirPods rest after 30 seconds idle when another mic is available."
+                                         ? "Uses a built-in or wired microphone when available. Select a Bluetooth headset above to use its microphone."
                                          : "Uses your selected microphone for dictation. If disconnected, a built-in or wired mic is used.")
                                         .font(.footnote)
                                         .foregroundColor(.secondary)
@@ -1232,7 +1233,7 @@ struct DictationSettingsView: View {
             Toggle("Pre-listening", isOn: $viewModel.preBuffer)
                 .labelsHidden()
                 .toggleStyle(.checkbox)
-            Text("Keeps the previous half-second of audio. The built-in microphone protects the beginning of your thought while AirPods connect.")
+            Text("Keeps the previous half-second of audio so the beginning of your thought is included.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

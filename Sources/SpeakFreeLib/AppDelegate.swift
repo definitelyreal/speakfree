@@ -1201,10 +1201,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         AudioDeviceCatalog.cachedInputDevices.first { $0.isBluetooth }
     }
 
-    /// Whether the current pin IS the connected Bluetooth mic (menu checkmark state).
+    /// Whether routing selects the Bluetooth mic represented by the menu item.
     public func dictationModeActive() -> Bool {
-        guard let bt = connectedBluetoothInput() else { return false }
-        return config?.inputDeviceUID == nil || config?.inputDeviceUID == bt.uid
+        Self.dictationModeActive(devices: AudioDeviceCatalog.cachedInputDevices,
+            systemDefault: AudioDeviceCatalog.cachedDefaultInput, pin: config?.inputDeviceUID)
+    }
+
+    static func dictationModeActive(devices: [AudioInputDevice],
+                                    systemDefault: AudioInputDevice?, pin: String?) -> Bool {
+        guard let bt = devices.first(where: { $0.isBluetooth }) else { return false }
+        return MicrophoneCaptureCoordinator.routes(
+            devices: devices, systemDefault: systemDefault, pin: pin).preferred?.uid == bt.uid
     }
 
     /// Toggle: ON pins the Bluetooth mic (remembering the previous pin for restore);
