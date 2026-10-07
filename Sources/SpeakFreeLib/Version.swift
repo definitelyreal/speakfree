@@ -2,7 +2,7 @@
 import Foundation
 
 public enum SpeakFree {
-    public static let version = "1.7.2"
+    public static let version = "1.7.3"
 
     /// Menu-bar title reflecting the build variant and mode, so an experimental/test build is
     /// never mistaken for the dogfood release. (2026-07-02: two builds ran at once, fought the
