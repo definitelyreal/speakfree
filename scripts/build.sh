@@ -89,6 +89,7 @@ PACKAGE_DIR=$(mktemp -d "$REPO_DIR/build/release-package.XXXXXX")
 APP="$PACKAGE_DIR/speakfree.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp Resources/THIRD-PARTY-NOTICES.txt "$APP/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 # Always regenerate Info.plist from the tracked Resources/Info.plist so the bundle
 # template (speakfree.app, which is gitignored) never drifts out of sync with the
 # canonical plist. This ensures Sparkle keys, entitlements descriptions, and other

@@ -24,11 +24,30 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var animationFrames: [NSImage] = []
     private var downloadProgress: String?
     private var copiedFeedback = false
+    struct UninsertedDictation {
+        let id = UUID()
+        let text: String
+    }
+    private(set) var uninsertedDictations: [UninsertedDictation] = []
+    var copyUninsertedDictation: ((UninsertedDictation) -> Void)?
+
+    /// Session-only recovery remains available even with recording/history storage off.
+    func retainUninsertedDictation(_ text: String) {
+        guard !text.isEmpty else { return }
+        uninsertedDictations.insert(UninsertedDictation(text: text), at: 0)
+        buildMenu()
+    }
+
+    func didCopyUninsertedDictation(id: UUID) {
+        uninsertedDictations.removeAll { $0.id == id }
+        buildMenu()
+    }
     private var menuItemTargets: [MenuItemTarget] = []
     // M1: the recent-submenu's targets are retained separately from the main menu's so a top-level
     // rebuild (which clears `menuItemTargets`) can't invalidate the actions of an open submenu.
     private var recentMenuTargets: [MenuItemTarget] = []
     private var recentMenuDelegate: RecentMenuDelegate?
+    var historyHandler: (() -> Void)?
     private var recentRecordingsSnapshot: [Recording] = []
     private var hasLoadedRecentRecordings = false
     private var recentRefreshInFlight = false
@@ -113,7 +132,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         guard let delegate = NSApplication.shared.delegate as? AppDelegate,
               let text = delegate.lastTranscription else { return }
         let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
+        pasteboard.prepareForNewContents(with: .currentHostOnly)
         pasteboard.setString(text, forType: .string)
         copiedFeedback = true
         buildMenu()
@@ -337,21 +356,16 @@ class StatusBarController: NSObject, NSMenuDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        // Recent Dictations submenu — populated LAZILY (M1). buildMenu() runs on every state flip;
-        // reading a transcript sidecar per recording here opened thousands of files per build on a
-        // large corpus. The submenu's own delegate reads sidecars only when it's actually opened,
-        // and only for the newest N (see populateRecentMenu).
-        let recentParent = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
-        let recentMenu = NSMenu()
-        // Placeholder so the parent shows its submenu-expand arrow before first population; replaced
-        // in menuNeedsUpdate.
-        recentMenu.addItem(NSMenuItem(title: "…", action: nil, keyEquivalent: ""))
-        let delegate = RecentMenuDelegate { [weak self] submenu in
-            self?.populateRecentMenu(submenu)
+        if let historyHandler {
+            let target = MenuItemTarget(handler: historyHandler)
+            menuItemTargets.append(target)
+            let history = NSMenuItem(title: "History…", action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            history.target = target
+            menu.addItem(history)
         }
-        recentMenu.delegate = delegate
-        recentMenuDelegate = delegate
-        recentParent.submenu = recentMenu
+        // Keep the familiar direct submenu alongside the searchable History picker.
+        let recentParent = NSMenuItem(title: "Recent Dictations", action: nil, keyEquivalent: "")
+        recentParent.submenu = makeSavedDictationsMenu()
         menu.addItem(recentParent)
 
         menu.addItem(NSMenuItem.separator())
@@ -391,6 +405,19 @@ class StatusBarController: NSObject, NSMenuDelegate {
     /// M1: build the "Recent Dictations" submenu on demand (when it opens), reading transcript
     /// sidecars only for the newest 15 recordings — never for the whole corpus, and never on a plain
     /// `buildMenu()`.
+    func showSavedDictationsMenu() {
+        makeSavedDictationsMenu().popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    private func makeSavedDictationsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Saved Dictations")
+        menu.addItem(NSMenuItem(title: "…", action: nil, keyEquivalent: ""))
+        let delegate = RecentMenuDelegate { [weak self] submenu in self?.populateRecentMenu(submenu) }
+        menu.delegate = delegate
+        recentMenuDelegate = delegate
+        return menu
+    }
+
     private func populateRecentMenu(_ menu: NSMenu) {
         let renderStarted = CFAbsoluteTimeGetCurrent()
         defer {
@@ -400,6 +427,22 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
         recentMenuTargets = []
         menu.removeAllItems()
+
+        if !uninsertedDictations.isEmpty {
+            let heading = NSMenuItem(title: "Not inserted · kept until quit", action: nil, keyEquivalent: "")
+            heading.isEnabled = false
+            menu.addItem(heading)
+            for entry in uninsertedDictations {
+                let preview = entry.text.prefix(50).replacingOccurrences(of: "\n", with: " ")
+                let target = MenuItemTarget { [weak self] in self?.copyUninsertedDictation?(entry) }
+                recentMenuTargets.append(target)
+                let item = NSMenuItem(title: "Copy: \(preview)\(entry.text.count > 50 ? "…" : "")",
+                                      action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+                item.target = target
+                menu.addItem(item)
+            }
+            menu.addItem(NSMenuItem.separator())
+        }
 
         // Crash recovery at top if pending. The entry SURVIVES the click (codex review
         // #7): it clears only when recovery succeeds (AppDelegate calls

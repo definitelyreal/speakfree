@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-processed:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-13
 import Foundation
 
@@ -53,6 +54,9 @@ public struct Config: Codable {
     // Experimental local API hardening. The server is loopback-only regardless of these.
     public var localAPIAllowBrowser: FlexBool?  // nil = false — gate any CORS (Access-Control-*) headers
     public var localAPIToken: String?           // nil = no auth — when set, require "Authorization: Bearer <token>"
+
+    /// Optional for existing configurations; HistorySettings defines clipboard defaults.
+    public var history: HistorySettings?
 
     // Recordings privacy (Michael, 2026-07-14): persisting dictation audio + transcript
     // sidecars is OPT-IN. nil/false = nothing persists — the wav is deleted once the

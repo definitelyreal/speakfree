@@ -7,7 +7,24 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REMOTES=("movie@STUDIO_TAILSCALE_HOST" "ark")
+# Remote Mac addresses live outside the repo: scripts/fleet.local.env (untracked) or the environment.
+FLEET_LOCAL_ENV="$REPO_DIR/scripts/fleet.local.env"
+if { [ -z "${SPEAKFREE_STUDIO_HOST:-}" ] || [ -z "${SPEAKFREE_RIG_HOST:-}" ]; } && [ -f "$FLEET_LOCAL_ENV" ]; then
+    # This optional machine-local file is intentionally outside the repository.
+    # shellcheck source=/dev/null
+    . "$FLEET_LOCAL_ENV"
+fi
+if [ "${M3_ONLY:-0}" != 1 ]; then
+    for sf_host_var in SPEAKFREE_STUDIO_HOST SPEAKFREE_RIG_HOST; do
+        if [ -z "${!sf_host_var:-}" ]; then
+            echo "FATAL: $sf_host_var is not set. Put $sf_host_var=user@host in scripts/fleet.local.env, or run with M3_ONLY=1." >&2
+            exit 2
+        fi
+    done
+fi
+REMOTES=()
+if [ -n "${SPEAKFREE_STUDIO_HOST:-}" ]; then REMOTES+=("$SPEAKFREE_STUDIO_HOST"); fi
+if [ -n "${SPEAKFREE_RIG_HOST:-}" ]; then REMOTES+=("$SPEAKFREE_RIG_HOST"); fi
 # Bound connection establishment and detect an unresponsive transport.
 SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3)
 REMOTE_STAGES=()
@@ -20,7 +37,7 @@ sf_initialize_stage() {
 sf_build_and_vendor() {
     local app="$SF_STAGE_ROOT/speakfree-fleet.app" dylib real_dylib b s orig final dev_id
     echo "== build and vendor =="
-    xcrun swift build -c release || return 1
+    xcrun swift build -c release -j 2 || return 1
     bash scripts/bundle-app.sh .build/release/speakfree "$app" dev || return 1
     for dylib in scripts/vendor/dylibs/*.dylib; do cp "$dylib" "$app/Contents/Frameworks/" || return 1; done
     for real_dylib in "$app/Contents/Frameworks"/*.dylib; do

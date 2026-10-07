@@ -17,6 +17,70 @@ import AppKit
 
 final class ClipboardRestoreTests: XCTestCase {
 
+    func test_remoteOfferSnapshotDoesNotRequestPayloads() {
+        final class Provider: NSObject, NSPasteboardItemDataProvider {
+            var reads = 0
+            func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem,
+                            provideDataForType type: NSPasteboard.PasteboardType) {
+                reads += 1
+                item.setString("remote synthetic content", forType: type)
+            }
+        }
+        let board = makeScratchPasteboard()
+        defer { board.releaseGlobally() }
+        let provider = Provider()
+        let first = NSPasteboardItem()
+        first.setDataProvider(provider, forTypes: [.string])
+        let remote = NSPasteboardItem()
+        remote.setDataProvider(provider, forTypes: [.string])
+        remote.setData(Data(), forType: PasteboardAccess.remoteClipboardType)
+        board.clearContents()
+        XCTAssertTrue(board.writeObjects([first, remote]))
+        let generation = board.changeCount
+        XCTAssertTrue(TextInserter().savePasteboardForTest(board).isEmpty)
+        XCTAssertEqual(provider.reads, 0)
+        XCTAssertEqual(board.changeCount, generation)
+    }
+
+    @MainActor
+    func testRemoteOfferIsPreservedDuringLocalDictationWithoutFetchingOrBorrowing() {
+        let board = makeScratchPasteboard()
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        board.setData(Data(), forType: PasteboardAccess.remoteClipboardType)
+        let generation = board.changeCount
+        let inserter = TextInserter()
+        inserter.pasteboard = board
+        inserter.frontmostBundleIDProvider = { "com.anthropic.claudefordesktop" }
+        inserter.isSecureInputActive = { false }
+        var typed: [String] = []
+        inserter.performUnicodeInsertion = { typed.append($0); return true }
+        inserter.pasteViaClipboard("Synthetic dictation")
+        XCTAssertEqual(typed, ["Synthetic dictation"])
+        XCTAssertEqual(board.changeCount, generation)
+        XCTAssertFalse(inserter.ownsCurrentClipboard)
+        XCTAssertTrue(board.types?.contains(PasteboardAccess.remoteClipboardType) == true)
+    }
+
+    @MainActor
+    func testRemoteOfferInRemoteDesktopRetainsRecoveryWithoutTouchingClipboard() {
+        let board = makeScratchPasteboard()
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        board.setData(Data(), forType: PasteboardAccess.remoteClipboardType)
+        let generation = board.changeCount
+        let inserter = TextInserter()
+        inserter.pasteboard = board
+        inserter.frontmostBundleIDProvider = { "com.microsoft.rdc.macos" }
+        var recovered: [String] = []
+        inserter.onRemoteInsertionFailure = { text, _ in recovered.append(text) }
+        inserter.executeAppleScript = { _ in XCTFail("Remote keystrokes must not run"); return nil }
+        inserter.pasteViaClipboard("Synthetic dictation")
+        XCTAssertEqual(recovered, ["Synthetic dictation"])
+        XCTAssertEqual(board.changeCount, generation)
+        XCTAssertFalse(inserter.ownsCurrentClipboard)
+    }
+
     func test_localRestoreFinishesBeforeFollowUpPasteAtHalfSecond() {
         XCTAssertLessThan(TextInserter.localClipboardRestoreDelay, 0.5)
         XCTAssertGreaterThanOrEqual(TextInserter.localClipboardRestoreDelay, 0.2,

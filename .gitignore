@@ -25,3 +25,6 @@ docs/superpowers/
 .agents/
 # Shadow-whisper sidecars the test suite writes next to audio fixtures.
 Tests/SpeakFreeTests/AudioFixtures/*.whisper.txt
+
+# Machine-local deployment targets.
+scripts/fleet.local.env

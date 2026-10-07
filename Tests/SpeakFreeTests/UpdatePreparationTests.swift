@@ -44,6 +44,84 @@ final class UpdatePreparationTests: XCTestCase {
         }
     }
 
+    func testUpdateNowRequiresFullQuietVisibleWarningAndSuccessfulTone() {
+        var policy = UpdateQuietPolicy(startedAt: 0, timeout: 600)
+        _ = policy.observe(now: 0, active: false, changed: false)
+        _ = policy.observe(now: 29.99, active: false, changed: false)
+        XCTAssertFalse(policy.canRequestUpdate(now: 29.99))
+        XCTAssertFalse(policy.requestUpdate(now: 29.99, warningVisible: true, toneStarted: true))
+        XCTAssertEqual(policy.observe(now: 30, active: false, changed: false), .warning(5, playTone: true))
+        XCTAssertTrue(policy.canRequestUpdate(now: 30))
+        XCTAssertFalse(policy.requestUpdate(now: 30, warningVisible: false, toneStarted: true))
+        XCTAssertFalse(policy.requestUpdate(now: 30, warningVisible: true, toneStarted: false))
+        XCTAssertTrue(policy.requestUpdate(now: 30, warningVisible: true, toneStarted: true))
+        XCTAssertFalse(policy.canRequestUpdate(now: 30), "A queued acknowledgement cannot be sent twice")
+        XCTAssertEqual(policy.observe(now: 30.1, active: false, changed: false, observedAt: 30.1), .ready,
+                       "Acknowledging the warning skips only its remaining automatic countdown")
+    }
+
+    func testActivityOrStaleEvidenceRevokesManualAcknowledgementAndRestartsFullQuiet() {
+        for reason in ["active", "changed", "stale", "future"] {
+            var policy = UpdateQuietPolicy(startedAt: 0, timeout: 600)
+            _ = policy.observe(now: 0, active: false, changed: false)
+            _ = policy.observe(now: 30, active: false, changed: false)
+            XCTAssertTrue(policy.requestUpdate(now: 30, warningVisible: true, toneStarted: true))
+            let observedAt: TimeInterval = reason == "stale" ? 27 : reason == "future" ? 32 : 31
+            XCTAssertEqual(policy.observe(now: 31, active: reason == "active", changed: reason == "changed",
+                                           observedAt: observedAt), .waiting(30), reason)
+            XCTAssertFalse(policy.updateRequested)
+            XCTAssertFalse(policy.canRequestUpdate(now: 31))
+            XCTAssertNil(policy.warningSince)
+            XCTAssertEqual(policy.observe(now: 32, active: false, changed: false, observedAt: 32), .waiting(30))
+            XCTAssertEqual(policy.observe(now: 61.99, active: false, changed: false, observedAt: 61.99), .waiting(1))
+            XCTAssertEqual(policy.observe(now: 62, active: false, changed: false, observedAt: 62), .warning(5, playTone: true))
+        }
+    }
+
+    func testUpdateNowCannotUseAnOldIdleReadingOrSurviveTimeout() {
+        var policy = UpdateQuietPolicy(startedAt: 0, timeout: 60)
+        _ = policy.observe(now: 0, active: false, changed: false)
+        _ = policy.observe(now: 30, active: false, changed: false)
+        XCTAssertFalse(policy.requestUpdate(now: 32.1, warningVisible: true, toneStarted: true))
+        XCTAssertFalse(policy.requestUpdate(now: 29, warningVisible: true, toneStarted: true))
+        XCTAssertTrue(policy.requestUpdate(now: 31, warningVisible: true, toneStarted: true))
+        XCTAssertEqual(policy.observe(now: 60, active: false, changed: false, observedAt: 60), .timedOut)
+        XCTAssertFalse(policy.updateRequested)
+    }
+
+    func testInstalledAlphaBindingAndStatusFormatsDoNotHideOrInventCapture() throws {
+        let unrelated = [
+            "Capture binding [synthetic, recheck]: requested id=42 uid=dictation-recording-input; current id=42 uid=dictation-recording-input; current-device ID matches",
+            "Capture binding [synthetic, start]: requested id=42 uid=dictation-device; current-device unreadable (status=-1, bytes=0); routing unqualified",
+            "Capture binding [synthetic, recheck]: requested id=42 uid=recording-device; current id=99 uid=aggregate; different current-device ID; aggregate membership/input routing unqualified",
+            "Capture route: Pre-listening: Synthetic microphone · dictation: Synthetic headset",
+            "Capture route: Microphone unavailable — no valid audio; retry when starting dictation",
+            "Stay on notice: Hard to hear you here. Your last dictation may be incomplete. A headset or a closer mic will help.",
+        ]
+        for line in unrelated { XCTAssertEqual(UpdateLogEvent.classify("[12:03:00] " + line), .unrelated, line) }
+        for line in ["Reprocess: inserted 42 chars from recent dictation",
+                     "WhisperEngine: streaming transcribe 40020 samples",
+                     "Terminate: closed in-flight recording", "History paste: cancelled reason=external-input"] {
+            XCTAssertEqual(UpdateLogEvent.classify("[12:03:00] " + line), .activity, line)
+        }
+        for line in ["Capture binding [future]: recording started", "Capture route: new dictation protocol",
+                     "Stay on notice: new recording protocol", "Clipboard trust: new dictation protocol"] {
+            XCTAssertEqual(UpdateLogEvent.classify("[12:03:00] " + line), .unsupported, line)
+        }
+        try withFixture { root, log in
+            let observer = makeObserver(root)
+            _ = try observer.snapshot()
+            try append(unrelated.map { "[12:03:00] " + $0 + "\n" }.joined(), to: log)
+            let idle = try observer.snapshot()
+            XCTAssertFalse(idle.active)
+            XCTAssertFalse(idle.changed, "Known status messages must not indefinitely reset quiet")
+            try append("[12:04:00] AudioRecorder: recording started, pre-roll 100 samples\n", to: log)
+            XCTAssertTrue(try observer.snapshot().active)
+            try append(unrelated.map { "[12:05:00] " + $0 + "\n" }.joined(), to: log)
+            XCTAssertTrue(try observer.snapshot().active, "Status lines cannot clear an actual capture boundary")
+        }
+    }
+
     func testParserSeparatesHealthFromFailedCaptureAndRejectsUnknownCaptureFormat() {
         XCTAssertEqual(UpdateLogEvent.classify("[12:34:56] Health check: all OK"), .unrelated)
         XCTAssertEqual(UpdateLogEvent.classify("[12:34:56] Capture route: base healthy"), .unrelated)
@@ -293,6 +371,7 @@ final class UpdatePreparationTests: XCTestCase {
         XCTAssertEqual(UpdatePreparation.run(arguments: ["--timeout", "0"]), 64)
         XCTAssertEqual(UpdatePreparation.run(arguments: ["--timeout", "nan"]), 64)
         XCTAssertEqual(UpdatePreparation.run(arguments: ["--force"]), 64)
+        XCTAssertEqual(UpdatePreparation.run(arguments: ["--quiet"]), 64)
     }
 
     private let fixtureProcess = LiveUpdateProcess(pid: 42, startedSeconds: 1, startedMicroseconds: 0)

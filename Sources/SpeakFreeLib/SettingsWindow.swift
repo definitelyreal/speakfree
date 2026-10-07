@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:01a081f3-bd8e-71d1-a126-f9fcd04b00f8 · 2026-09-08
 import AppKit
 import SwiftUI
@@ -74,12 +75,12 @@ class SettingsWindowController: NSWindowController {
         let screenHeight = NSScreen.main?.visibleFrame.height ?? 900
         let windowHeight = min(screenHeight * 0.8, 900)
 
-        hostingController.preferredContentSize = NSSize(width: SettingsLayout.windowWidth, height: windowHeight)
+        hostingController.preferredContentSize = NSSize(width: SettingsSidebarLayout.windowWidth, height: windowHeight)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "speakfree Settings"
         window.styleMask = [.titled, .closable, .resizable]
-        window.setContentSize(NSSize(width: SettingsLayout.windowWidth, height: windowHeight))
-        window.minSize = NSSize(width: 800, height: 500)
+        window.setContentSize(NSSize(width: SettingsSidebarLayout.windowWidth, height: windowHeight))
+        window.minSize = NSSize(width: SettingsSidebarLayout.minimumWindowWidth, height: 500)
         window.maxSize = NSSize(width: 1200, height: screenHeight)
         window.center()
         window.isReleasedWhenClosed = false
@@ -154,74 +155,6 @@ private func availableModels(language: String) -> [ModelInfo] {
     }
 }
 
-// MARK: - Key Recorder Monitor
-
-/// Holds the NSEvent monitor reference so it can be cleaned up reliably.
-private class KeyMonitorHolder: ObservableObject {
-    var monitor: Any?
-
-    /// Which `modifierFlags` bit a modifier-only keyCode raises, so a `.flagsChanged` event can be
-    /// told apart as a PRESS (bit now set) from a RELEASE (bit now clear). Left/right variants of
-    /// one modifier share a bit; the keyCode is what distinguishes them, and it is the keyCode we
-    /// record.
-    private static let modifierFlagForKeyCode: [UInt16: NSEvent.ModifierFlags] = [
-        54: .command, 55: .command,      // right / left ⌘
-        56: .shift, 60: .shift,          // left / right ⇧
-        58: .option, 61: .option,        // left / right ⌥
-        59: .control, 62: .control,      // left / right ⌃
-        63: .function,                   // fn
-    ]
-
-    func install(onCapture: @escaping (UInt16, [String]) -> Void, onCancel: @escaping () -> Void) {
-        // `.flagsChanged` as well as `.keyDown` (2026-08-05). A bare modifier never produces a
-        // keyDown, so listening only for keyDown made Shift and Right Control selectable from the
-        // config file and CLI but IMPOSSIBLE to pick in Settings — two of the nine supported
-        // hotkeys, unreachable through the only UI most people have. `HotkeyValidator.validate`
-        // already returns `.allowed` for a lone modifier, so the monitor was the whole gap.
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
-            if event.type == .flagsChanged {
-                guard let flag = Self.modifierFlagForKeyCode[event.keyCode] else { return nil }
-                // Capture on press only. Without this the release event immediately re-fires and
-                // the recorder would resolve twice for one physical tap.
-                guard event.modifierFlags.contains(flag) else { return nil }
-                // A modifier pressed while ANOTHER modifier is already held is a chord in
-                // progress, not a lone-modifier choice — let it settle rather than capturing ⌘
-                // the instant the user starts pressing ⌘⇧.
-                let others = Self.modifierFlagForKeyCode
-                    .filter { $0.key != event.keyCode && $0.value != flag }
-                    .values
-                if others.contains(where: { event.modifierFlags.contains($0) }) { return nil }
-                onCapture(event.keyCode, [])
-                return nil
-            }
-
-            if event.keyCode == 53 { // Escape
-                onCancel()
-                return nil
-            }
-
-            var mods: [String] = []
-            let flags = event.modifierFlags
-            if flags.contains(.command) { mods.append("cmd") }
-            if flags.contains(.shift) { mods.append("shift") }
-            if flags.contains(.option) { mods.append("option") }
-            if flags.contains(.control) { mods.append("ctrl") }
-
-            onCapture(event.keyCode, mods)
-            return nil
-        }
-    }
-
-    func remove() {
-        if let m = monitor {
-            NSEvent.removeMonitor(m)
-            monitor = nil
-        }
-    }
-
-    deinit { remove() }
-}
-
 // MARK: - Hotkey Validation
 
 private enum HotkeyValidation {
@@ -258,7 +191,7 @@ private struct KeyRecorderOverlay: View {
     var onCapture: (_ keyCode: UInt16, _ modifiers: [String]) -> Void
     var onCancel: () -> Void
 
-    @StateObject private var holder = KeyMonitorHolder()
+    @StateObject private var holder = HistoryKeyMonitorHolder()
     @State private var rejectionMessage: String?
 
     var body: some View {
@@ -392,7 +325,7 @@ private class InlineDownloadManager: NSObject, ObservableObject {
 
 // MARK: - Settings View
 
-struct SettingsView: View {
+struct DictationSettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     /// Rendering fixtures never touch login items, mic routing, or the user's corpus.
     var isReview = false
@@ -479,7 +412,8 @@ struct SettingsView: View {
     }
 
     /// Consistent label width across ALL Grid sections.
-    private let labelWidth = SettingsLayout.labelWidth
+    /// The sidebar leaves less room for the form than the former single-pane window.
+    private let labelWidth: CGFloat = 180
 
     /// Sorted language list for the picker
     private var sortedLanguages: [WhisperLanguage] {
@@ -611,10 +545,44 @@ struct SettingsView: View {
         )
     }
 
+    private var hotkeyPicker: some View {
+        Picker("Hotkey", selection: $hotkeyPickerSelection) {
+            if isCustomHotkey {
+                Text(hotkeyDisplay).tag(viewModel.hotkeyKeyCode)
+                Divider()
+            }
+            ForEach(standardHotkeyOptions) { option in
+                Text(option.label).tag(option.keyCode)
+            }
+            Divider()
+            Text("Other\u{2026}").tag(otherHotkeyTag)
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+    }
+
+    private var hotkeyBehaviorPicker: some View {
+        Picker("Hotkey behavior", selection: $viewModel.keyMode) {
+            Text("Hold").tag(KeyMode.hold)
+            Text("Toggle").tag(KeyMode.toggle)
+            // Phase 1 has no edit window yet. Preserve existing
+            // configs honestly without advertising a missing feature.
+            if viewModel.keyMode == .edit {
+                Text("Toggle (Edit unavailable)").tag(KeyMode.edit)
+            }
+        }
+        .pickerStyle(.segmented)
+        .controlSize(.regular)
+        .labelsHidden()
+        .frame(width: viewModel.keyMode == .edit ? 260 : 150)
+    }
+
     var body: some View {
         ZStack {
             ScrollView {
-                VStack(spacing: 24) {
+                VStack(alignment: .leading, spacing: 24) {
+                Text("Dictation")
+                    .font(.title2.weight(.semibold))
                 if let error = viewModel.saveError {
                     Text(error).foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
@@ -625,13 +593,15 @@ struct SettingsView: View {
                 // distance uses a stated 2 cm/keystroke assumption. Clicking the stats
                 // flips the distance between miles and kilometers.
                 VStack(spacing: 6) {
-                    Text("Total: \(UsageStats.shared.totalDictations.formatted()) dictations, "
+                    Text(isReview ? "Total: 1,200 dictations, 48,000 words, 5h 20m" :
+                         "Total: \(UsageStats.shared.totalDictations.formatted()) dictations, "
                          + "\(UsageStats.shared.totalWords.formatted()) words, "
                          + "\(UsageStats.formatDaysHoursMinutes(UsageStats.shared.totalAudioSeconds))")
                         .font(.callout)
                         .fontWeight(.semibold)
                         .foregroundColor(.primary)
-                    Text("You would have typed: \(UsageStats.shared.keystrokesDescription) keystrokes, "
+                    Text(isReview ? "You would have typed: 240,000 keystrokes, 3.0 miles, and 13h" :
+                         "You would have typed: \(UsageStats.shared.keystrokesDescription) keystrokes, "
                          + (statsMetricUnits ? UsageStats.shared.handTravelMetricDescription
                                              : UsageStats.shared.handTravelImperialDescription)
                          + ", and \(UsageStats.formatDaysHours(UsageStats.shared.estimatedTypingTime))")
@@ -671,34 +641,15 @@ struct SettingsView: View {
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
                             GridRow(alignment: .firstTextBaseline) {
                                 Text("Hotkey").frame(width: labelWidth, alignment: .leading).gridColumnAlignment(.leading)
-                                HStack(spacing: 8) {
-                                    Picker("Hotkey", selection: $hotkeyPickerSelection) {
-                                        if isCustomHotkey {
-                                            Text(hotkeyDisplay).tag(viewModel.hotkeyKeyCode)
-                                            Divider()
-                                        }
-                                        ForEach(standardHotkeyOptions) { option in
-                                            Text(option.label).tag(option.keyCode)
-                                        }
-                                        Divider()
-                                        Text("Other\u{2026}").tag(otherHotkeyTag)
+                                ViewThatFits(in: .horizontal) {
+                                    HStack(spacing: 8) {
+                                        hotkeyPicker
+                                        hotkeyBehaviorPicker
                                     }
-                                    .pickerStyle(.menu)
-                                    .labelsHidden()
-
-                                    Picker("Hotkey behavior", selection: $viewModel.keyMode) {
-                                        Text("Hold").tag(KeyMode.hold)
-                                        Text("Toggle").tag(KeyMode.toggle)
-                                        // Phase 1 has no edit window yet. Preserve existing
-                                        // configs honestly without advertising a missing feature.
-                                        if viewModel.keyMode == .edit {
-                                            Text("Toggle (Edit unavailable)").tag(KeyMode.edit)
-                                        }
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        hotkeyPicker
+                                        hotkeyBehaviorPicker
                                     }
-                                    .pickerStyle(.segmented)
-                                    .controlSize(.regular)
-                                    .labelsHidden()
-                                    .frame(width: viewModel.keyMode == .edit ? 260 : 150)
                                 }
                             }
 
@@ -725,8 +676,13 @@ struct SettingsView: View {
                                     .labelsHidden()
                                     .frame(maxWidth: 360, alignment: .leading)
                                     .onChange(of: micSelection) { newValue in
-                                        (NSApplication.shared.delegate as? AppDelegate)?
-                                            .selectInputDevice(uid: newValue.isEmpty ? nil : newValue)
+                                        guard !isReview,
+                                              let delegate = NSApplication.shared.delegate as? AppDelegate else { return }
+                                        let uid = newValue.isEmpty ? nil : newValue
+                                        // Re-entering this pane synchronizes the picker from the
+                                        // existing pin; only a changed choice should apply it again.
+                                        guard uid != delegate.currentInputDeviceUID() else { return }
+                                        delegate.selectInputDevice(uid: uid)
                                     }
                                     Text(micSelection.isEmpty
                                          ? "Uses connected AirPods for dictation; pre-listening uses a built-in or wired mic.\nAirPods rest after 30 seconds idle when another mic is available."
@@ -803,7 +759,7 @@ struct SettingsView: View {
                 GroupBox("Transcription") {
                     VStack(alignment: .leading, spacing: 10) {
                         // Parakeet engine picker
-                        EnginePickerView(viewModel: viewModel)
+                        EnginePickerView(viewModel: viewModel, labelWidth: labelWidth)
 
                         modelStatusBanner
 

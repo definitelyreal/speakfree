@@ -15,6 +15,7 @@ func printUsage() {
 
     USAGE:
         speakfree start              Start the dictation daemon
+        speakfree quit-clipy         Ask Clipy to quit normally before deployment
         speakfree prepare-update     Wait for quiet and warn before an external update
         speakfree process <wav>      Transcribe a wav file; prints JSON {raw, processed, styled}
         speakfree set-hotkey <key>   Set the push-to-talk hotkey
@@ -55,6 +56,9 @@ func cmdStart() {
     // Main RunLoop timer polls the flag every 0.25s and terminates via NSApp.terminate.
     let sigintTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
         if sigintReceived != 0 {
+            // Consume this request before showing a cancellable quit confirmation.
+            // Choosing Keep Open must not replay the same signal every timer tick.
+            sigintReceived = 0
             print("\nStopping speakfree...")
             NSApp.terminate(nil)
         }
@@ -215,6 +219,8 @@ let args = CommandLine.arguments
 let command = args.count > 1 ? args[1] : nil
 
 switch command {
+case "quit-clipy":
+    exit(DeploymentClipyQuit.run(arguments: Array(args.dropFirst(2))))
 case "prepare-update":
     exit(UpdatePreparation.run(arguments: Array(args.dropFirst(2))))
 case "start":

@@ -1,3 +1,4 @@
+// ai-suggestion:unverified · session:unknown · 2026-10-05
 // ai-suggestion:unverified · session:01a0a4bf-8ebb-7b73-8929-dad5ed263731 · 2026-09-15
 import SwiftUI
 
@@ -21,6 +22,7 @@ private struct ParakeetDownloadAttempt {
 /// and a download banner driven by `ParakeetModelManager`.
 struct EnginePickerView: View {
     @ObservedObject var viewModel: SettingsViewModel
+    var labelWidth: CGFloat = SettingsLayout.labelWidth
 
     @State private var downloads: [String: ParakeetDownloadAttempt] = [:]
     /// Re-checked after downloads / model switches to drive the banner.
@@ -39,7 +41,7 @@ struct EnginePickerView: View {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
                 GridRow(alignment: .firstTextBaseline) {
                     Text("Engine")
-                        .frame(width: SettingsLayout.labelWidth, alignment: .leading)
+                        .frame(width: labelWidth, alignment: .leading)
                         .gridColumnAlignment(.leading)
                     Picker("Transcription engine", selection: $viewModel.engine) {
                         ForEach(EngineCatalog.engines, id: \.id) { engine in
@@ -56,7 +58,7 @@ struct EnginePickerView: View {
                 if viewModel.engine == "parakeet" {
                     GridRow(alignment: .firstTextBaseline) {
                         Text("Parakeet Model")
-                            .frame(width: SettingsLayout.labelWidth, alignment: .leading)
+                            .frame(width: labelWidth, alignment: .leading)
                         VStack(alignment: .leading, spacing: 5) {
                             Picker("Parakeet model", selection: $viewModel.parakeetModel) {
                                 ForEach(EngineCatalog.parakeetModels, id: \.id) { model in
