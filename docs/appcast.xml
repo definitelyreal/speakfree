@@ -6,16 +6,16 @@
     <description>Updates for speakfree</description>
     <language>en</language>
     <item>
-      <title>speakfree v1.7.2</title>
-      <pubDate>Thu, 17 Sep 2026 17:58:40 +0000</pubDate>
-      <sparkle:version>1.7.2</sparkle:version>
-      <sparkle:shortVersionString>1.7.2</sparkle:shortVersionString>
+      <title>speakfree v1.7.3</title>
+      <pubDate>Wed, 07 Oct 2026 02:19:52 +0000</pubDate>
+      <sparkle:version>1.7.3</sparkle:version>
+      <sparkle:shortVersionString>1.7.3</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <enclosure
-        url="https://github.com/definitelyreal/speakfree/releases/download/v1.7.2/speakfree-1.7.2.dmg"
+        url="https://github.com/definitelyreal/speakfree/releases/download/v1.7.3/speakfree-1.7.3.dmg"
         type="application/octet-stream"
-        sparkle:edSignature="fhqKDM9+N1m3/7H9Bqv+tJ/u7+ZvIxPbW1LIs6UApa10NPt71Nj6VfnmwNCqm8otqvbXDnrOWTh6cPWYvsNECQ=="
-        length="7811867" />
+        sparkle:edSignature="c97bhq5GiUfqUsJrEuWYoH/dpu0tS4FQHQwAjKGS+B8VGT4vHCXR9j7PmHROzjo+kMyYkbVzdh127ED9wx0mBg=="
+        length="7811615" />
     </item>
   </channel>
 </rss>
