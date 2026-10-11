@@ -946,6 +946,17 @@ struct SettingsView: View {
                                     .frame(width: labelWidth, alignment: .leading)
                                 vocabularyStatusRow
                             }
+
+                            GridRow(alignment: .firstTextBaseline) {
+                                Text("Replacements")
+                                    .frame(width: labelWidth, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Button("Manage Replacements\u{2026}") { ReplacementsWindowController.show() }
+                                    Text("Write your own text whenever a word, name or term is heard wrong.")
+                                        .font(.footnote)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 

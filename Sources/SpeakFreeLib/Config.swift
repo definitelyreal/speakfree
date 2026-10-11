@@ -203,6 +203,7 @@ public struct Config: Codable {
     // load-bearing for the suite's isolation. Guarded by a lock: load() has off-main callers.
     private static let fileCacheLock = NSLock()
     private static var overridesCache: [String: (stamp: FileStamp, value: [String: String])] = [:]
+    private static var replacementsCache: [String: (stamp: FileStamp, value: Replacements)] = [:]
     private static var vocabularyCache: [String: (stamp: FileStamp, value: String?)] = [:]
 
     private struct FileStamp: Equatable {
@@ -248,6 +249,46 @@ public struct Config: Codable {
             fileCacheLock.unlock()
         }
         return out
+    }
+
+    /// The overrides prepared for matching, rebuilt only when the file changes.
+    public static func loadReplacements() -> Replacements {
+        let url = overridesFile
+        let stamp = fileStamp(url)
+        if let stamp {
+            fileCacheLock.lock()
+            let cached = replacementsCache[url.path]
+            fileCacheLock.unlock()
+            if let cached, cached.stamp == stamp { return cached.value }
+        }
+        let prepared = Replacements(loadOverrides())
+        if let stamp {
+            fileCacheLock.lock()
+            replacementsCache[url.path] = (stamp, prepared)
+            fileCacheLock.unlock()
+        }
+        return prepared
+    }
+
+    /// Write the overrides file. An empty set removes it.
+    public static func saveOverrides(_ overrides: [String: String]) throws {
+        let url = overridesFile
+        if overrides.isEmpty {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        } else {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(overrides).write(to: url, options: .atomic)
+        }
+        // A rewrite inside the same second can keep the old stamp; drop the caches outright.
+        fileCacheLock.lock()
+        overridesCache[url.path] = nil
+        replacementsCache[url.path] = nil
+        fileCacheLock.unlock()
     }
 
     /// Load custom vocabulary words from ~/.config/speakfree/vocabulary.txt

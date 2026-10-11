@@ -37,6 +37,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var inFlightTake: DictationTake?
     /// The most recently cancelled dictation. In memory only; each cancel replaces it.
     private var lastDiscardedTranscription: String?
+    /// The Replacements window is recording a word; dictation must not start over it.
+    var replacementCaptureActive = false
+    /// True when nothing else is using the microphone or the transcriber.
+    var canCaptureReplacement: Bool {
+        !isPressed && postBufferTimer == nil && !replacementCaptureActive && transcriber != nil
+    }
     /// Cancelled after the key came up but before the take reached transcription.
     private var cancelUpcomingTake = false
     /// The recover shortcut was pressed while the cancelled take was still transcribing.
@@ -1689,7 +1695,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func handleRecordingStart() {
-        guard !isPressed else { return }
+        guard !isPressed, !replacementCaptureActive else { return }
         cancelUpcomingTake = false
         if let timer = postBufferTimer {
             // Capture is still running during the post-buffer. Continue this take without
@@ -2263,7 +2269,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // ProcessCommand) now reads. Do not reintroduce a site-local `??` default.
         let mode = config.effectivePunctuationMode
         let glossary = Config.loadVocabulary()
-        let overrides = Config.loadOverrides()
+        let replacements = Config.loadReplacements()
         let capturedStyleMode = recordingStyleMode
         // Provenance snapshot for the .meta.json sidecar — engine/model from the ACTIVE
         // transcriber (not config, which can disagree after a model fallback).
@@ -2338,7 +2344,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         screenContextText: capturedScreenText,
                         styleMode: capturedStyleMode,
                         glossaryWords: glossary,
-                        overrides: overrides,
+                        replacements: replacements,
                         audioDurationSeconds: Double(sampleCount) / 16000.0
                     )
                 }

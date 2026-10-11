@@ -376,6 +376,13 @@ class StatusBarController: NSObject, NSMenuDelegate {
         transcribeItem.keyEquivalentModifierMask = .command
         menu.addItem(transcribeItem)
 
+        let replacementTarget = MenuItemTarget { ReplacementsWindowController.show() }
+        menuItemTargets.append(replacementTarget)
+        let replacementItem = NSMenuItem(title: "Add Replacement\u{2026}",
+                                         action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+        replacementItem.target = replacementTarget
+        menu.addItem(replacementItem)
+
         menu.addItem(NSMenuItem.separator())
 
         // Check for Updates — wired to Sparkle's updater
