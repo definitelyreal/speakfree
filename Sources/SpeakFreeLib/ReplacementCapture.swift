@@ -10,6 +10,8 @@ protocol ReplacementCapturing: AnyObject {
     func stop()
     /// Stop listening and report nothing.
     func cancel()
+    /// How loud the microphone is right now, while listening.
+    var level: CGFloat? { get }
 }
 
 enum ReplacementCaptureFailure: Error, Equatable {
@@ -68,6 +70,11 @@ final class ReplacementCapture: ReplacementCapturing {
         timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             self?.tick()
         }
+    }
+
+    var level: CGFloat? {
+        guard timer != nil, let recorder = app?.recorder else { return nil }
+        return CGFloat(recorder.currentRMS)
     }
 
     func stop() {

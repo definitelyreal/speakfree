@@ -6,6 +6,7 @@ private final class FakeCapture: ReplacementCapturing {
     var completion: ((Result<[String], ReplacementCaptureFailure>) -> Void)?
     var stopped = false
     var cancelled = false
+    var level: CGFloat?
 
     func start(onProgress: @escaping (Int) -> Void,
                completion: @escaping (Result<[String], ReplacementCaptureFailure>) -> Void) {
@@ -103,6 +104,27 @@ final class ReplacementsModelTests: XCTestCase {
         capture.completion?(.failure(.nothingHeard))
         XCTAssertEqual(model.captureState, .message(ReplacementCaptureFailure.nothingHeard.message))
         XCTAssertEqual(model.triggers, [])
+    }
+
+    func testTheWaveformReadsTheMicrophoneLevel() {
+        let capture = FakeCapture()
+        let model = model(capture: capture)
+        XCTAssertNil(model.level)
+        capture.level = 0.25
+        XCTAssertEqual(model.level, 0.25)
+    }
+
+    func testTheWaveformScrollsNewSoundInFromTheRight() {
+        let meter = CaptureMeter()
+        XCTAssertEqual(Set(meter.heights), [TargetAppPill.dashHeight])
+        // Room noise first, so the gate knows what quiet is; then a word.
+        for _ in 0..<20 { meter.advance(rms: 0.002) }
+        XCTAssertEqual(Set(meter.heights), [TargetAppPill.dashHeight])
+        for _ in 0..<6 { meter.advance(rms: 0.3) }
+        XCTAssertGreaterThan(meter.heights.last!, TargetAppPill.dashHeight)
+        XCTAssertEqual(meter.heights.first!, TargetAppPill.dashHeight)
+        meter.reset()
+        XCTAssertEqual(Set(meter.heights), [TargetAppPill.dashHeight])
     }
 
     func testClosingTheWindowStopsListening() {

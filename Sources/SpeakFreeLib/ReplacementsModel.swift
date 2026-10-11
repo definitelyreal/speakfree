@@ -34,6 +34,9 @@ final class ReplacementsModel: ObservableObject {
 
     var canRecord: Bool { capture != nil && captureState != .working }
 
+    /// Microphone loudness for the waveform; nil when not listening.
+    var level: CGFloat? { capture?.level }
+
     var isListening: Bool {
         if case .listening = captureState { return true }
         return false
