@@ -21,6 +21,23 @@ first dictation.
 Pinning means the build no longer cares what brew is doing, and we keep a
 provably-working set of binaries until a newer compatible pair lands.
 
+## How the build finds them
+
+`Package.swift` links and loads these binaries through `scripts/vendor/lib`, so a
+fresh clone builds with no Homebrew install:
+
+- `lib/libwhisper.tbd` — a text link stub generated from `libwhisper.1.8.3.dylib`
+  with `xcrun tapi stubify`, with its install name changed to
+  `@rpath/libwhisper.1.dylib`. The dylib itself still carries Homebrew's absolute
+  install name; linking against the stub records the `@rpath` name instead, so the
+  pinned binary stays byte-for-byte as captured.
+- `lib/*.dylib` — soname symlinks (`libwhisper.1.dylib`, `libggml*.0.dylib`) into
+  this directory. Debug builds carry an rpath to `lib/`, so `swift run`,
+  `swift test` and Xcode load the pinned set straight from the checkout. Release
+  binaries carry only `@executable_path/../Frameworks`.
+
+Regenerate the stub and the symlinks whenever the pinned versions change.
+
 ## How these were captured
 
 Extracted from the GitHub release v1.2.10 DMG (April 22, 2026) — at that point

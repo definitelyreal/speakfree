@@ -31,7 +31,7 @@
 
 The speakfree icon appears in your menu bar when it's running.
 
-> **Requires macOS 14 or later on Apple Silicon (M1 or newer).** Intel Macs are not supported — the default Parakeet engine runs on the Neural Engine, and the build links Apple-Silicon Homebrew paths. Older releases ran on macOS 13, but this version moves the minimum up to 14. If you're on macOS 13, the last release that supports you is the previous one — you won't receive updates past it.
+> **Requires macOS 14 or later on Apple Silicon (M1 or newer).** Intel Macs are not supported — the default Parakeet engine runs on the Neural Engine, and the bundled whisper.cpp libraries are arm64 only. Older releases ran on macOS 13, but this version moves the minimum up to 14. If you're on macOS 13, the last release that supports you is the previous one — you won't receive updates past it.
 
 ## Usage
 
@@ -110,12 +110,25 @@ speakfree runs entirely on your Mac.
 
 ## Build from source
 
-Apple Silicon only — `Package.swift` links whisper-cpp from the Apple-Silicon Homebrew prefix (`/opt/homebrew`), so Intel Macs cannot build this project.
+Apple Silicon only — the pinned whisper.cpp libraries in `scripts/vendor` are arm64, so Intel Macs cannot build this project. No Homebrew packages are needed.
+
+### In Xcode
 
 ```bash
 git clone https://github.com/definitelyreal/speakfree.git
 cd speakfree
-brew install whisper-cpp
+open speakfree.xcodeproj
+```
+
+Pick the **speakfree** scheme and press Run. Tests run with ⌘U.
+
+A fresh clone signs ad-hoc, so macOS asks for Microphone and Accessibility again after each rebuild. To sign with your own team, use your own bundle ID, or archive for notarized distribution, copy `Xcode/Local.xcconfig.example` to `Xcode/Local.xcconfig` (git-ignored) and edit it.
+
+### From the command line
+
+```bash
+git clone https://github.com/definitelyreal/speakfree.git
+cd speakfree
 swift build -c release
 bash scripts/bundle-app.sh .build/release/speakfree speakfree.app dev
 open speakfree.app

@@ -1,0 +1,20 @@
+// Build settings for the speakfree app target in speakfree.xcodeproj.
+//
+// Do not put personal values here. Copy Local.xcconfig.example to Local.xcconfig
+// (git-ignored) and set your own team and bundle ID there.
+
+// Ad-hoc signing, so a fresh clone builds and runs with no Apple account.
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+// Off by default: an ad-hoc signature has no team, so the hardened runtime's
+// library validation would refuse the embedded whisper libraries and Sparkle.
+ENABLE_HARDENED_RUNTIME = NO
+
+SPEAKFREE_BUNDLE_ID = com.definitelyreal.speakfree
+
+// Xcode builds leave Sparkle's update feed out, like scripts/bundle-app.sh, so a
+// development build never replaces itself with the published release.
+SPEAKFREE_ENABLE_UPDATES = NO
+
+#include? "Local.xcconfig"
