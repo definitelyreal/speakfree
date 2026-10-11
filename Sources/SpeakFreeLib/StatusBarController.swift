@@ -35,6 +35,9 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var recentRefreshPending = false
 
     var reprocessHandler: ((URL) -> Void)?
+    /// The most recently cancelled dictation, if one is being held for recovery.
+    var discardedDictationProvider: (() -> String?)?
+    var recoverDiscardedHandler: (() -> Void)?
     private var crashRecoveryURL: URL?
     private var crashRecoveryHandler: ((URL) -> Void)?
 
@@ -128,7 +131,14 @@ class StatusBarController: NSObject, NSMenuDelegate {
         buildMenu()
     }
 
-    private static func relativeTime(from date: Date) -> String {
+    /// One row of the Recent Dictations menu: an age and the first 50 characters.
+    static func recentRowTitle(age: String, text: String?) -> String {
+        guard let text, !text.isEmpty else { return "\(age) — (no transcript)" }
+        let short = text.prefix(50).replacingOccurrences(of: "\n", with: " ")
+        return "\(age) — \(text.count > 50 ? "\(short)…" : String(short))"
+    }
+
+    static func relativeTime(from date: Date) -> String {
         let seconds = Int(Date().timeIntervalSince(date))
         if seconds < 60 { return "now" }
         if seconds < 3600 { return "\(seconds / 60)m" }
@@ -430,8 +440,24 @@ class StatusBarController: NSObject, NSMenuDelegate {
         // Refresh for the next open without delaying this one.
         requestRecentRecordingsRefresh()
 
+        // The most recently cancelled dictation gets a section of its own, below the
+        // recordings. It lives in memory only, so it has no recording behind it and no
+        // age; clicking inserts it.
+        let discarded = discardedDictationProvider?()
+        let addDiscardedSection = { [weak self] in
+            guard let self, let discarded else { return }
+            let target = MenuItemTarget { [weak self] in self?.recoverDiscardedHandler?() }
+            self.recentMenuTargets.append(target)
+            let item = NSMenuItem(
+                title: StatusBarController.recentRowTitle(age: "Last cancelled", text: discarded),
+                action: #selector(MenuItemTarget.invoke), keyEquivalent: "")
+            item.target = target
+            menu.addItem(item)
+        }
+
         if recordings.isEmpty {
-            if crashRecoveryURL == nil {
+            addDiscardedSection()
+            if crashRecoveryURL == nil && discarded == nil {
                 let emptyItem = NSMenuItem(title: "No recordings yet", action: nil, keyEquivalent: "")
                 emptyItem.isEnabled = false
                 menu.addItem(emptyItem)
@@ -440,15 +466,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
 
         for (index, recording) in recordings.enumerated() {
-            let age = StatusBarController.relativeTime(from: recording.date)
-            let preview: String
-            if let t = recording.text, !t.isEmpty {
-                let short = t.prefix(50).replacingOccurrences(of: "\n", with: " ")
-                preview = t.count > 50 ? "\(short)…" : String(short)
-            } else {
-                preview = "(no transcript)"
-            }
-            let label = "\(age) — \(preview)"
+            let label = StatusBarController.recentRowTitle(
+                age: StatusBarController.relativeTime(from: recording.date), text: recording.text)
             let target = MenuItemTarget { [weak self] in
                 self?.reprocessHandler?(recording.url)
             }
@@ -460,6 +479,11 @@ class StatusBarController: NSObject, NSMenuDelegate {
             if index == 0 && recordings.count > 1 {
                 menu.addItem(NSMenuItem.separator())
             }
+        }
+
+        if discarded != nil {
+            menu.addItem(NSMenuItem.separator())
+            addDiscardedSection()
         }
 
         // Cheap affordance: reach the full corpus in Finder rather than materializing thousands of

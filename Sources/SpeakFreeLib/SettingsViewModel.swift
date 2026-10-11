@@ -11,6 +11,7 @@ public class SettingsViewModel: ObservableObject {
     @Published public var hotkeyKeyCode: UInt16
     @Published public var hotkeyModifiers: [String]
     @Published public var pasteLastHotkey: HotkeyConfig?
+    @Published public var recoverDiscardedHotkey: HotkeyConfig?
     /// Legacy Hold/Toggle boolean, kept for back-compat readers and the round-trip tests. The
     /// three-way `keyMode` below is the authoritative field the picker binds to; `toConfig` derives
     /// `toggleMode` from it for downgrade safety.
@@ -58,6 +59,7 @@ public class SettingsViewModel: ObservableObject {
         self.hotkeyKeyCode = c.hotkey.keyCode
         self.hotkeyModifiers = c.hotkey.modifiers
         self.pasteLastHotkey = c.pasteLastHotkey
+        self.recoverDiscardedHotkey = c.recoverDiscardedHotkey
         self.toggleMode = c.toggleMode?.value ?? false
         self.keyMode = c.effectiveKeyMode
         self.modelSize = c.modelSize
@@ -97,6 +99,7 @@ public class SettingsViewModel: ObservableObject {
         self.hotkeyKeyCode = c.hotkey.keyCode
         self.hotkeyModifiers = c.hotkey.modifiers
         self.pasteLastHotkey = c.pasteLastHotkey
+        self.recoverDiscardedHotkey = c.recoverDiscardedHotkey
         self.toggleMode = c.toggleMode?.value ?? false
         self.keyMode = c.effectiveKeyMode
         self.modelSize = c.modelSize
@@ -133,6 +136,7 @@ public class SettingsViewModel: ObservableObject {
         var config = baseConfig
         config.hotkey = HotkeyConfig(keyCode: hotkeyKeyCode, modifiers: hotkeyModifiers)
         config.pasteLastHotkey = pasteLastHotkey
+        config.recoverDiscardedHotkey = recoverDiscardedHotkey
         config.modelSize = modelSize
         config.language = language
         config.spokenPunctuation = punctuationMode

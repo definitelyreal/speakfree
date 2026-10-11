@@ -398,6 +398,7 @@ struct SettingsView: View {
     var isReview = false
     @State private var isRecordingHotkey = false
     @State private var isRecordingPasteHotkey = false
+    @State private var isRecordingRecoverHotkey = false
     @State private var isHoveringGitHub = false
     @State private var pendingModelDownload: String? = nil
     @StateObject private var downloadManager = InlineDownloadManager()
@@ -731,6 +732,25 @@ struct SettingsView: View {
                             }
 
                             GridRow(alignment: .firstTextBaseline) {
+                                Text("Recover cancelled")
+                                HStack(spacing: 8) {
+                                    if let shortcut = viewModel.recoverDiscardedHotkey {
+                                        Text(KeyCodes.describe(keyCode: shortcut.keyCode,
+                                                               modifiers: shortcut.modifiers))
+                                        Button("Change\u{2026}") { isRecordingRecoverHotkey = true }
+                                        Button("Clear") {
+                                            viewModel.recoverDiscardedHotkey = nil
+                                            viewModel.save()
+                                        }
+                                    } else {
+                                        Text("No shortcut").foregroundColor(.secondary)
+                                        Button("Set Shortcut\u{2026}") { isRecordingRecoverHotkey = true }
+                                    }
+                                }
+                                .help("Inserts the dictation you most recently cancelled. Only the latest one is kept, in memory, until you cancel another or quit. Needs a key plus ⌘, ⌃ or ⌥.")
+                            }
+
+                            GridRow(alignment: .firstTextBaseline) {
                                 Text("Microphone")
                                 VStack(alignment: .leading, spacing: 2) {
                                     Picker("Microphone", selection: $micSelection) {
@@ -1055,6 +1075,19 @@ struct SettingsView: View {
                         isRecordingPasteHotkey = false
                     },
                     onCancel: { isRecordingPasteHotkey = false }
+                )
+            }
+
+            if isRecordingRecoverHotkey {
+                KeyRecorderOverlay(
+                    onCapture: { keyCode, modifiers in
+                        let candidate = HotkeyConfig(keyCode: keyCode, modifiers: modifiers)
+                        guard PasteLastDictation.isUsable(candidate) else { return }
+                        viewModel.recoverDiscardedHotkey = candidate
+                        viewModel.save()
+                        isRecordingRecoverHotkey = false
+                    },
+                    onCancel: { isRecordingRecoverHotkey = false }
                 )
             }
 

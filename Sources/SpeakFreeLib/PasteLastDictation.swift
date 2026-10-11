@@ -2,10 +2,16 @@ import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 
-/// An optional global shortcut that inserts the most recent dictation again, wherever the
-/// cursor is. The text goes in through the normal insertion path, so it is never left on
-/// the clipboard. There is no shortcut until the user chooses one in Settings.
+/// An optional global shortcut that inserts a remembered dictation, wherever the cursor
+/// is: the most recent one, or the most recently cancelled one. The text goes in through
+/// the normal insertion path, so it is never left on the clipboard. There is no shortcut
+/// until the user chooses one in Settings.
 final class PasteLastDictation {
+    enum Kind: UInt32 {
+        case pasteLast = 1
+        case recoverDiscarded = 2
+    }
+
     struct Registration: Equatable {
         let keyCode: UInt32
         let carbonModifiers: UInt32
@@ -14,8 +20,20 @@ final class PasteLastDictation {
     /// Called on the main queue when the shortcut is pressed.
     var onTrigger: (() -> Void)?
 
+    private let kind: Kind
     private var hotKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
+
+    init(kind: Kind = .pasteLast) {
+        self.kind = kind
+    }
+
+    var hotKeyID: UInt32 { kind.rawValue }
+
+    /// Every instance sees every registered shortcut's press; each answers only its own.
+    func answers(hotKeyID: UInt32) -> Bool {
+        hotKeyID == self.hotKeyID
+    }
 
     private static let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 58, 59, 60, 61, 62, 63]
 
@@ -58,14 +76,21 @@ final class PasteLastDictation {
         if handler == nil {
             var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                      eventKind: UInt32(kEventHotKeyPressed))
-            InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
+            InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
                 guard let userData else { return noErr }
                 let me = Unmanaged<PasteLastDictation>.fromOpaque(userData).takeUnretainedValue()
+                var pressed = EventHotKeyID()
+                let status = GetEventParameter(
+                    event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                    nil, MemoryLayout<EventHotKeyID>.size, nil, &pressed)
+                guard status == noErr, me.answers(hotKeyID: pressed.id) else {
+                    return OSStatus(eventNotHandledErr)
+                }
                 DispatchQueue.main.async { me.onTrigger?() }
                 return noErr
             }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &handler)
         }
-        let id = EventHotKeyID(signature: OSType(0x5346_504C), id: 1)  // "SFPL"
+        let id = EventHotKeyID(signature: OSType(0x5346_504C), id: hotKeyID)  // "SFPL"
         let status = RegisterEventHotKey(registration.keyCode, registration.carbonModifiers, id,
                                          GetApplicationEventTarget(), 0, &hotKey)
         if status != noErr {

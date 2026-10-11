@@ -97,6 +97,9 @@ public struct Config: Codable {
     // Optional global shortcut that inserts the most recent dictation again. nil = none.
     public var pasteLastHotkey: HotkeyConfig? = nil
 
+    // Optional global shortcut that inserts the most recently cancelled dictation. nil = none.
+    public var recoverDiscardedHotkey: HotkeyConfig? = nil
+
     // Legacy simultaneous-transcript-comparison flag; retained only for config round-trip.
     // Nothing reads it. The current coordinator's built-in pre-listening + preferred-mic
     // handover is controlled by inputDeviceUID/preBuffer, independently of this old flag.
