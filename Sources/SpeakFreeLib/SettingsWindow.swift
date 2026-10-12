@@ -671,6 +671,7 @@ struct SettingsView: View {
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
                             GridRow(alignment: .firstTextBaseline) {
                                 Text("Hotkey").frame(width: labelWidth, alignment: .leading).gridColumnAlignment(.leading)
+                                VStack(alignment: .leading, spacing: 2) {
                                 HStack(spacing: 8) {
                                     Picker("Hotkey", selection: $hotkeyPickerSelection) {
                                         if isCustomHotkey {
@@ -699,6 +700,13 @@ struct SettingsView: View {
                                     .controlSize(.regular)
                                     .labelsHidden()
                                     .frame(width: viewModel.keyMode == .edit ? 260 : 150)
+                                }
+                                if HotkeyManager.registrationRefused {
+                                    Text("macOS would not reserve this shortcut, probably because another app uses it. It still works, but stops while a password field is active.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
                                 }
                             }
 
