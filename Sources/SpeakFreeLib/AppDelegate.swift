@@ -23,6 +23,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var isReady = false
     public var lastTranscription: String?
     private var recordingOverlay = RecordingOverlay()
+    /// Opens the microphone when the dictation shortcut's first key goes down
+    /// (PrelistenMode.onShortcut).
+    private lazy var shortcutArming = ShortcutArming { [weak self] open in
+        self?.recorder.preBufferEnabled = open
+    }
     private var settingsViewModel: SettingsViewModel?
     private var localAPIServer: LocalAPIServer?
     private var recordingStyleMode: TextPostProcessor.StyleMode = .none
@@ -556,10 +561,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // starts the engine immediately; doing that first briefly opens the system
         // default route and then races the route-triggered rebuild at launch.
         let inputDeviceUID = config.inputDeviceUID
-        let preBufferEnabled = config.preBuffer?.value ?? true
         DispatchQueue.main.async { [weak self] in
             self?.recorder.setPinnedInputDevice(uid: inputDeviceUID)
-            self?.recorder.preBufferEnabled = preBufferEnabled
+            self?.applyPrelistenMode()
         }
 
         // Configure model persistence
@@ -1058,11 +1062,28 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Open the microphone ahead of dictation the way the user chose.
+    private func applyPrelistenMode() {
+        switch config.effectivePrelistenMode {
+        case .always:
+            shortcutArming.stop()
+            recorder.preBufferEnabled = true
+        case .off:
+            shortcutArming.stop()
+            recorder.preBufferEnabled = false
+        case .onShortcut:
+            shortcutArming.required = config.hotkey.modifierFlags
+            shortcutArming.reset()
+            recorder.preBufferEnabled = false
+            shortcutArming.start()
+        }
+    }
+
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
     private func reloadHotkeyAndSettings() {
         // Routing must be settled before pre-buffer can start an absent engine.
         recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
-        recorder.preBufferEnabled = config.preBuffer?.value ?? true
+        applyPrelistenMode()
 
         // Update spoken punctuation on existing transcriber
         transcriber?.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)

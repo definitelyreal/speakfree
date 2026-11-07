@@ -1084,7 +1084,7 @@ struct SettingsView: View {
         }
         .onChange(of: viewModel.punctuationMode) { _ in viewModel.save() }
         .onChange(of: viewModel.maxRecordings) { _ in viewModel.save() }
-        .onChange(of: viewModel.preBuffer) { _ in viewModel.save() }
+        .onChange(of: viewModel.prelistenMode) { _ in viewModel.save() }
         .onChange(of: viewModel.keepModelLoaded) { _ in viewModel.save() }
         .onChange(of: viewModel.streamingEnabled) { _ in viewModel.save() }
     }
@@ -1281,14 +1281,35 @@ struct SettingsView: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text("Pre-listening").frame(width: labelWidth, alignment: .leading)
             VStack(alignment: .leading, spacing: 4) {
-            Toggle("Pre-listening", isOn: $viewModel.preBuffer)
-                .labelsHidden()
-                .toggleStyle(.checkbox)
-            Text("Keeps the previous half-second of audio. The built-in microphone protects the beginning of your thought while AirPods connect.")
+            Picker("Pre-listening", selection: $viewModel.prelistenMode) {
+                Text("Always").tag(PrelistenMode.always)
+                Text("When the shortcut starts").tag(PrelistenMode.onShortcut)
+                Text("Off").tag(PrelistenMode.off)
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            Text(prelistenHelp)
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var prelistenHelp: String {
+        switch viewModel.prelistenMode {
+        case .always:
+            return "Keeps the last half-second of audio, so the start of your thought is never lost. macOS shows its microphone indicator all the time."
+        case .onShortcut:
+            let canArm = ShortcutArming.canArm(
+                required: HotkeyConfig(keyCode: viewModel.hotkeyKeyCode,
+                                       modifiers: viewModel.hotkeyModifiers).modifierFlags)
+            return canArm
+                ? "Opens the microphone when you press the first key of your dictation shortcut. The indicator appears only then, and whenever you hold that key for something else."
+                : "Your dictation shortcut is a single key, so there is no first key to react to. This behaves like Off until the shortcut has a modifier, such as \u{2325} Space."
+        case .off:
+            return "Opens the microphone when a dictation starts. The first syllable may be clipped."
         }
     }
 
