@@ -13,6 +13,9 @@ public enum TextPipeline {
         public let glossaryWords: String?
         /// Curated exact garble→correct overrides (lowercased key → replacement).
         public let overrides: [String: String]
+        /// The same rules prepared for matching. When empty, `overrides` is prepared on
+        /// the fly; the app passes the cached `Config.loadReplacements()` instead.
+        public let replacements: Replacements
         /// Recording length. Chunk-seam artifacts (duplicate recapitalized words) only
         /// exist when FluidAudio actually chunked (>~14.9s), so the seam-dedup pass is
         /// skipped for short dictations — where "mark Mark" is far more likely a real
@@ -29,6 +32,7 @@ public enum TextPipeline {
                     styleMode: TextPostProcessor.StyleMode = .none,
                     glossaryWords: String? = nil,
                     overrides: [String: String] = [:],
+                    replacements: Replacements = .none,
                     audioDurationSeconds: Double? = nil) {
             self.raw = raw
             self.cursorContextText = cursorContextText
@@ -37,6 +41,7 @@ public enum TextPipeline {
             self.styleMode = styleMode
             self.glossaryWords = glossaryWords
             self.overrides = overrides
+            self.replacements = replacements
             self.audioDurationSeconds = audioDurationSeconds
         }
     }
@@ -190,10 +195,19 @@ public enum TextPipeline {
         // Glossary correction: fix near-miss misspellings of curated proper nouns
         // (makes custom names work on Parakeet, which ignores the glossary prompt).
         // Runs before case-adjust so corrected names feed the keep-capitalized logic.
-        var corrected = GlossaryCorrector.correct(styled,
-                                                  glossary: glossaryTerms(input.glossaryWords),
-                                                  overrides: input.overrides,
-                                                  isRealWord: isRealWord)
+        //
+        // The user's replacements go first and are final: the vocabulary corrector only
+        // sees the text between them, so it can never rewrite what a rule produced.
+        let replacements = input.replacements.isEmpty
+            ? Replacements(input.overrides) : input.replacements
+        let terms = glossaryTerms(input.glossaryWords)
+        let segments = replacements.segments(of: styled)
+        let leadsWithExactReplacement = segments.first.map { $0.isReplacement && $0.isVerbatim } ?? false
+        var corrected = segments.map {
+            $0.isReplacement
+                ? $0.text
+                : GlossaryCorrector.correct($0.text, glossary: terms, isRealWord: isRealWord)
+        }.joined()
         // Screen-aware name correction (2026-07-25): when the screen visibly shows a
         // proper noun ("Kris" in the chat being replied to), its spelling beats the
         // ASR's homophone default ("Chris"). Conservative guards live in the
@@ -216,9 +230,12 @@ public enum TextPipeline {
         // Whisper sentence-cases every utterance; when the cursor context shows we're
         // continuing a sentence, undo that leading capital — glossary names, "I",
         // all-caps, and internal-caps words keep their case.
-        let final = adjustCaseForInsertion(corrected,
-                                           contextBefore: input.cursorContextText,
-                                           glossaryWords: input.glossaryWords)
+        // A replacement written with its own capitals is exact, wherever the cursor is.
+        let final = leadsWithExactReplacement
+            ? corrected
+            : adjustCaseForInsertion(corrected,
+                                     contextBefore: input.cursorContextText,
+                                     glossaryWords: input.glossaryWords)
         return Result(promptHints: prompt, processedText: processed, finalText: final)
     }
 

@@ -23,6 +23,32 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var isReady = false
     public var lastTranscription: String?
     private var recordingOverlay = RecordingOverlay()
+    /// Opens the microphone when the dictation shortcut's first key goes down
+    /// (PrelistenMode.onShortcut).
+    private lazy var shortcutArming = ShortcutArming { [weak self] open in
+        self?.recorder.preBufferEnabled = open
+    }
+    private let escapeCancelTap = EscapeCancelTap()
+    private let pasteLastDictation = PasteLastDictation()
+    private let recoverDiscardedDictation = PasteLastDictation(kind: .recoverDiscarded)
+    /// The take that most recently went to transcription. Cancelling marks it discarded:
+    /// it still finishes transcribing, but its text goes to `lastDiscardedTranscription`
+    /// instead of the cursor.
+    private var inFlightTake: DictationTake?
+    /// The most recently cancelled dictation. In memory only; each cancel replaces it.
+    private var lastDiscardedTranscription: String?
+    /// The Replacements window is recording a word; dictation must not start over it.
+    var replacementCaptureActive = false
+    /// True when nothing else is using the microphone or the transcriber.
+    var canCaptureReplacement: Bool {
+        !isPressed && postBufferTimer == nil && !replacementCaptureActive && transcriber != nil
+    }
+    /// Cancelled after the key came up but before the take reached transcription.
+    private var cancelUpcomingTake = false
+    /// The recover shortcut was pressed while the cancelled take was still transcribing.
+    private var recoverDiscardedWhenReady = false
+    /// The app that was frontmost when the current dictation started.
+    private var dictationStartBundleID: String?
     private var settingsViewModel: SettingsViewModel?
     private var localAPIServer: LocalAPIServer?
     private var recordingStyleMode: TextPostProcessor.StyleMode = .none
@@ -166,6 +192,22 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // anywhere (insert path, RecordingOverlay, menu focus queries) can stall us into a
         // beachball waiting on an unresponsive frontmost app (AX-A).
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
+
+        // Escape discards the current dictation; the tap only listens while the overlay is up.
+        escapeCancelTap.onEscape = { [weak self] in self?.handleEscapeCancel() }
+        recordingOverlay.onVisibilityChanged = { [weak self] visible in
+            self?.escapeCancelTap.setActive(visible)
+        }
+        pasteLastDictation.onTrigger = { [weak self] in self?.insertLastDictation() }
+        pasteLastDictation.apply(Config.load().pasteLastHotkey)
+        recoverDiscardedDictation.onTrigger = { [weak self] in self?.insertDiscardedDictation() }
+        recoverDiscardedDictation.apply(Config.load().recoverDiscardedHotkey)
+        recordingOverlay.onPillAction = { [weak self] action in
+            switch action {
+            case .finish: self?.handleRecordingStop()
+            case .cancel: self?.handleEscapeCancel()
+            }
+        }
 
         statusBar = StatusBarController()
         recorder = AudioRecorder()
@@ -556,10 +598,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // starts the engine immediately; doing that first briefly opens the system
         // default route and then races the route-triggered rebuild at launch.
         let inputDeviceUID = config.inputDeviceUID
-        let preBufferEnabled = config.preBuffer?.value ?? true
         DispatchQueue.main.async { [weak self] in
             self?.recorder.setPinnedInputDevice(uid: inputDeviceUID)
-            self?.recorder.preBufferEnabled = preBufferEnabled
+            self?.applyPrelistenMode()
         }
 
         // Configure model persistence
@@ -570,6 +611,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async {
             self.statusBar.reprocessHandler = { [weak self] url in
                 self?.reprocess(audioURL: url)
+            }
+            self.statusBar.discardedDictationProvider = { [weak self] in
+                PasteLastDictation.textToPaste(last: self?.lastDiscardedTranscription)
+            }
+            self.statusBar.recoverDiscardedHandler = { [weak self] in
+                // The menu has just closed; give focus a beat to return to the user's app.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    self?.insertDiscardedDictation()
+                }
             }
             self.statusBar.buildMenu()
         }
@@ -925,6 +975,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 case .rechecking:
                     self.recordingOverlay.updateStreamingText(status.message)
                 case .failed:
+                    guard self.inFlightTake?.isDiscarded != true else { return }
                     self.recordingOverlay.lingerWithMessageThenHide(status.message)
                 }
             }
@@ -1058,11 +1109,30 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Open the microphone ahead of dictation the way the user chose.
+    private func applyPrelistenMode() {
+        switch config.effectivePrelistenMode {
+        case .always:
+            shortcutArming.stop()
+            recorder.preBufferEnabled = true
+        case .off:
+            shortcutArming.stop()
+            recorder.preBufferEnabled = false
+        case .onShortcut:
+            shortcutArming.required = config.hotkey.modifierFlags
+            shortcutArming.reset()
+            recorder.preBufferEnabled = false
+            shortcutArming.start()
+        }
+    }
+
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
     private func reloadHotkeyAndSettings() {
+        pasteLastDictation.apply(config.pasteLastHotkey)
+        recoverDiscardedDictation.apply(config.recoverDiscardedHotkey)
         // Routing must be settled before pre-buffer can start an absent engine.
         recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
-        recorder.preBufferEnabled = config.preBuffer?.value ?? true
+        applyPrelistenMode()
 
         // Update spoken punctuation on existing transcriber
         transcriber?.suppressAutoPunctuation = (config.spokenPunctuation == .spoken)
@@ -1560,8 +1630,73 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
-    func handleRecordingStart() {
+    /// The paste-last shortcut: insert the most recent dictation at the cursor again.
+    func insertLastDictation() {
         guard !isPressed else { return }
+        guard let text = PasteLastDictation.textToPaste(last: lastTranscription) else {
+            recordingOverlay.show(state: .error("No dictation to paste yet"))
+            return
+        }
+        insertRemembered(text, label: "Paste last dictation")
+    }
+
+    /// The recover shortcut: insert the most recently cancelled dictation at the cursor.
+    func insertDiscardedDictation() {
+        guard !isPressed else { return }
+        if inFlightTake?.isDiscarded == true {
+            // Cancelled a moment ago and still transcribing: insert it as soon as it lands.
+            recoverDiscardedWhenReady = true
+            return
+        }
+        guard let text = PasteLastDictation.textToPaste(last: lastDiscardedTranscription) else {
+            recordingOverlay.show(state: .error("No cancelled dictation to recover"))
+            return
+        }
+        insertRemembered(text, label: "Recover cancelled dictation")
+    }
+
+    private func insertRemembered(_ text: String, label: String) {
+        // Give the shortcut's own modifiers up to a second to come up before inserting.
+        var attemptsLeft = 40
+        func attempt() {
+            let flags = CGEventSource.flagsState(.combinedSessionState)
+            if PasteLastDictation.modifiersReleased(flags) || attemptsLeft == 0 {
+                DiagnosticLogger.shared.log("\(label): \(text.count) chars")
+                _ = inserter.insert(text: text)
+                return
+            }
+            attemptsLeft -= 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { attempt() }
+        }
+        attempt()
+    }
+
+    /// Escape while the overlay is up: cancel the recording, or the take that is already
+    /// transcribing. Either way the text is kept for the recover shortcut, not inserted.
+    func handleEscapeCancel() {
+        switch EscapeCancelTap.action(isRecording: isPressed,
+                                      overlayVisible: recordingOverlay.isVisible) {
+        case .abortRecording:
+            DiagnosticLogger.shared.log("Escape: recording discarded")
+            handleRecordingCancel()
+        case .discardPendingText:
+            DiagnosticLogger.shared.log("Escape: pending dictation discarded")
+            if postBufferTimer != nil {
+                cancelUpcomingTake = true
+            } else {
+                inFlightTake?.discard()
+            }
+            statusBar.state = .idle
+            recordingOverlay.hide()
+            statusBar.buildMenu()
+        case .ignore:
+            break
+        }
+    }
+
+    func handleRecordingStart() {
+        guard !isPressed, !replacementCaptureActive else { return }
+        cancelUpcomingTake = false
         if let timer = postBufferTimer {
             // Capture is still running during the post-buffer. Continue this take without
             // creating another WAV/sentinel or replacing the original insertion context.
@@ -1596,6 +1731,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // (tune-corpus) correlates dictations with where the text landed.
         let frontApp = NSWorkspace.shared.frontmostApplication
         let frontBundleID = frontApp?.bundleIdentifier
+        dictationStartBundleID = frontBundleID
         let avoidLiveWindowContext = TextInserter.shouldAvoidLiveWindowContext(
             bundleID: frontBundleID, bundleURL: frontApp?.bundleURL)
         recordingTargetBundleID = frontBundleID
@@ -1639,7 +1775,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusBar.state = .recording
-        recordingOverlay.style = min(5, max(1, config.overlayStyle ?? 5))
+        recordingOverlay.style = TargetAppPill.resolvedStyle(configured: config.overlayStyle)
         recordingOverlay.show(state: .recording, recorder: recorder)
         let overlayFinishedAt = CFAbsoluteTimeGetCurrent()
         startRecordingWatchdog()
@@ -1787,6 +1923,19 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         performPendingConfigReloadIfNeeded()
     }
 
+    /// The user cancelled a recording in progress. The pill goes away at once and nothing
+    /// is inserted, but the take is still transcribed, off screen, so the recover shortcut
+    /// can bring it back.
+    func handleRecordingCancel() {
+        guard isPressed else { return }
+        isPressed = false
+        continuedReleasedTake = false
+        stopRecordingWatchdog()
+        stopStreamingTimer()
+        resetRecordingUIAfterAbort()
+        finalizeTake(DictationTake(discarded: true), keyReleaseTime: CFAbsoluteTimeGetCurrent())
+    }
+
     func resetRecordingUIAfterAbort() {
         statusBar.state = .idle
         recordingOverlay.hide()
@@ -1869,7 +2018,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // are NEVER worse than the old flat wait. The wait DECISION is the pure PostBufferPolicy
         // (unit-tested over RMS windows); this loop only feeds it the live trailing samples.
         let samplesAtRelease = recorder.currentSampleCount()
-        runAdaptivePostBuffer(samplesAtRelease: samplesAtRelease) { [weak self] in
+        // Settings > Microphone > When I stop. The room level is measured once, here, over at
+        // most the last 10 s before the press, so the 30 ms poll below stays as cheap as before.
+        let mode = config.effectiveStopDetection
+        let roomSamples = mode == .room ? recorder.samples(after: samplesAtRelease - 10 * 16_000) : []
+        guard let levels = PostBufferPolicy.stopLevels(for: mode, quietLevel: config.effectiveStopQuietLevel,
+                                                       recordedSoFar: roomSamples) else {
+            finalizeRecording(keyReleaseTime: keyReleaseTime)
+            return
+        }
+        runAdaptivePostBuffer(samplesAtRelease: samplesAtRelease, levels: levels) { [weak self] in
             self?.finalizeRecording(keyReleaseTime: keyReleaseTime)
         }
     }
@@ -1879,7 +2037,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// `finalize` on the main queue. `samplesAtRelease` marks the sample count at key-release so
     /// only audio captured AFTER the key lifted is scored as "trailing". The decision is the pure
     /// policy; this only feeds it the live trailing samples.
-    private func runAdaptivePostBuffer(samplesAtRelease: Int, finalize: @escaping () -> Void) {
+    private func runAdaptivePostBuffer(samplesAtRelease: Int, levels: PostBufferPolicy.StopLevels,
+                                       finalize: @escaping () -> Void) {
         let windowMs = postBufferWindowMs
         // Hard deadline = the EXTENDED cap (2026-07-25): the policy's decided wait stays ≤220ms
         // for quiet releases and only exceeds it when trailing speech energy shows the speaker
@@ -1907,7 +2066,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // R3: copy only the trailing slice, not the full (growing) sample array each tick.
             let trailing = self.recorder.samples(after: samplesAtRelease)
             // Ask the pure policy how long it wants given the trailing audio seen so far.
-            let decided = PostBufferPolicy.decideWaitMs(trailingSamples: trailing, windowMs: windowMs)
+            let decided = PostBufferPolicy.decideWaitMs(trailingSamples: trailing, windowMs: windowMs,
+                                                        levels: levels)
 
             // Stop once the decided wait has elapsed, or the monotonic cap deadline is reached.
             if PostBufferPolicy.postBufferShouldFinalize(elapsedMs: elapsedMs, decidedMs: decided, capMs: capMs) {
@@ -1919,6 +2079,15 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func finalizeRecording(keyReleaseTime: Double = CFAbsoluteTimeGetCurrent()) {
+        finalizeTake(DictationTake(), keyReleaseTime: keyReleaseTime)
+    }
+
+    private func finalizeTake(_ take: DictationTake, keyReleaseTime: Double) {
+        if cancelUpcomingTake {
+            cancelUpcomingTake = false
+            take.discard()
+        }
+        inFlightTake = take
         let activityLease = recordingActivityLease
         recordingActivityLease = nil
         // Retain on every synchronous early-return path, then transfer into Task below.
@@ -1955,6 +2124,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             memorySamples: recording.samples,
             readWav: { try? ProcessCommand.loadSamples(from: audioURL) }
         )
+        if let failure = gate.failure, take.isDiscarded {
+            // A cancelled take with nothing usable in it: clean up without a word.
+            switch failure {
+            case .captureFailed, .silent: recorder.recoverFailedCapture()
+            default: break
+            }
+            try? FileManager.default.removeItem(at: audioURL)
+            RecordingStore.clearSentinel(recordingURL: audioURL)
+            focusCapture.reset()
+            screenContextText = nil
+            screenCaptureGeneration = UUID()
+            statusBar.state = .idle
+            return
+        }
         if let failure = gate.failure {
             if case .captureFailed = failure {
                 DiagnosticLogger.shared.log(
@@ -2047,7 +2230,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let samples = gate.samples
 
         statusBar.state = .transcribing
-        recordingOverlay.update(state: .transcribing)
+        if !take.isDiscarded {
+            recordingOverlay.update(state: .transcribing)
+        }
 
         // R1: consume the off-main focus capture. In the normal case it published while the
         // user was still speaking, so this returns immediately; only if the AX read is still
@@ -2084,7 +2269,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // ProcessCommand) now reads. Do not reintroduce a site-local `??` default.
         let mode = config.effectivePunctuationMode
         let glossary = Config.loadVocabulary()
-        let overrides = Config.loadOverrides()
+        let replacements = Config.loadReplacements()
         let capturedStyleMode = recordingStyleMode
         // Provenance snapshot for the .meta.json sidecar — engine/model from the ACTIVE
         // transcriber (not config, which can disagree after a model fallback).
@@ -2159,7 +2344,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                         screenContextText: capturedScreenText,
                         styleMode: capturedStyleMode,
                         glossaryWords: glossary,
-                        overrides: overrides,
+                        replacements: replacements,
                         audioDurationSeconds: Double(sampleCount) / 16000.0
                     )
                 }
@@ -2198,7 +2383,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     transcriptionDiagnostics: transcriber.lastDiagnostics
                 )
                 let retentionConfig = Config.load()
-                let keepRecording = DevMode.effectiveSaveRecordings(retentionConfig)
+                let keepRecording = DiscardedDictation.keepsRecording(
+                    savingEnabled: DevMode.effectiveSaveRecordings(retentionConfig),
+                    discarded: take.isDiscarded)
                 let maxRecordings = (DevMode.isActive || !keepRecording || retentionConfig.preserveAllRecordings?.value == true)
                     ? 0 : Config.effectiveMaxRecordings(retentionConfig.maxRecordings)
                 RecordingStore.finishRecording(
@@ -2231,7 +2418,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                             stopTime: stopTime,
                             prependSpace: capturedPrependSpace,
                             contextBefore: capturedInputText,
-                            element: capturedElement
+                            element: capturedElement,
+                            take: take
                         )
                     }
                 }
@@ -2241,7 +2429,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                 // — the deletion the user consented to — is never reached when inference
                 // throws, and the wav would silently persist against the setting.
                 let retentionConfig = Config.load()
-                let keepRecording = DevMode.effectiveSaveRecordings(retentionConfig)
+                let keepRecording = DiscardedDictation.keepsRecording(
+                    savingEnabled: DevMode.effectiveSaveRecordings(retentionConfig),
+                    discarded: take.isDiscarded)
                 let maxRecordings = (DevMode.isActive || !keepRecording || retentionConfig.preserveAllRecordings?.value == true)
                     ? 0 : Config.effectiveMaxRecordings(retentionConfig.maxRecordings)
                 if !keepRecording {
@@ -2260,6 +2450,18 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
                     isModelMissing = false
                 }
                 DispatchQueue.main.async {
+                    if take.isDiscarded {
+                        // Nobody is waiting on a cancelled take; fail without an alert.
+                        if self.inFlightTake === take {
+                            self.inFlightTake = nil
+                            self.recoverDiscardedWhenReady = false
+                        }
+                        if !self.isPressed {
+                            self.statusBar.state = .idle
+                            self.statusBar.buildMenu()
+                        }
+                        return
+                    }
                     self.recordingOverlay.hide()
                     if isModelMissing {
                         let message = "Parakeet model not downloaded — open Settings to download."
@@ -2315,9 +2517,38 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         stopTime: Double,
         prependSpace: Bool,
         contextBefore: String?,
-        element: AXUIElement?
+        element: AXUIElement?,
+        take: DictationTake
     ) {
+        let isLatestTake = inFlightTake === take
+        if isLatestTake { inFlightTake = nil }
+        if take.isDiscarded {
+            // A newer take may own the pill by now; only the latest one may hide it.
+            if isLatestTake && !isPressed { recordingOverlay.hide() }
+            lastDiscardedTranscription = DiscardedDictation.remembering(
+                text, over: lastDiscardedTranscription)
+            DiagnosticLogger.shared.log("Cancelled dictation kept for recovery: \(text.count) chars")
+            if !isPressed {
+                statusBar.state = .idle
+                statusBar.buildMenu()
+            }
+            if recoverDiscardedWhenReady {
+                recoverDiscardedWhenReady = false
+                insertDiscardedDictation()
+            }
+            return
+        }
         recordingOverlay.hide()
+        let plan = FinalizePipeline.insertionPlan(
+            startedIn: dictationStartBundleID,
+            finishingIn: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            prependSpace: prependSpace)
+        let prependSpace = plan.prependSpace
+        let element = plan.returnsToOriginalElement ? element : nil
+        let contextBefore = plan.returnsToOriginalElement ? contextBefore : nil
+        if !plan.returnsToOriginalElement {
+            DiagnosticLogger.shared.log("Finalize: frontmost app changed during the take; inserting at the current cursor")
+        }
         if !text.isEmpty {
             let insertText = FinalizePipeline.composeInsertText(
                 text, prependSpace: prependSpace)

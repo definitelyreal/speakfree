@@ -1,9 +1,21 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
+// Pinned whisper.cpp + ggml binaries live in the repo (scripts/vendor), so the
+// package builds from a fresh clone with no Homebrew install. See
+// scripts/vendor/dylibs/README.md.
+let vendorLib = "\(Context.packageDirectory)/scripts/vendor/lib"
+
 let package = Package(
     name: "speakfree",
     platforms: [.macOS(.v14)],
+    products: [
+        .executable(name: "speakfree", targets: ["speakfree"]),
+        .executable(name: "perf-harness", targets: ["perf-harness"]),
+        .executable(name: "vocab-eval", targets: ["vocab-eval"]),
+        // Consumed by the app target in speakfree.xcodeproj.
+        .library(name: "SpeakFreeLib", targets: ["SpeakFreeLib"]),
+    ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.5.0"),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.1"),
@@ -16,10 +28,17 @@ let package = Package(
             publicHeadersPath: "include",
             linkerSettings: [
                 .unsafeFlags([
-                    "-L/opt/homebrew/lib",
+                    "-L\(vendorLib)",
                     "-lwhisper",
                     "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
                 ]),
+                // Debug builds (swift run, swift test, Xcode previews) load the pinned
+                // dylibs straight from the checkout. Release binaries carry only the
+                // bundle-relative rpath above, so they never look outside the app.
+                .unsafeFlags(
+                    ["-Xlinker", "-rpath", "-Xlinker", vendorLib],
+                    .when(configuration: .debug)
+                ),
             ]
         ),
         // Tiny Objective-C bridge so Swift can catch NSException from AVAudioEngine
