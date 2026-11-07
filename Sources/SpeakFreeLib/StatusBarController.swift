@@ -376,7 +376,9 @@ class StatusBarController: NSObject, NSMenuDelegate {
         transcribeItem.keyEquivalentModifierMask = .command
         menu.addItem(transcribeItem)
 
-        let replacementTarget = MenuItemTarget { ReplacementsWindowController.show() }
+        let replacementTarget = MenuItemTarget {
+            (NSApplication.shared.delegate as? AppDelegate)?.showSettings(tab: .words)
+        }
         menuItemTargets.append(replacementTarget)
         let replacementItem = NSMenuItem(title: "Add Replacement\u{2026}",
                                          action: #selector(MenuItemTarget.invoke), keyEquivalent: "")

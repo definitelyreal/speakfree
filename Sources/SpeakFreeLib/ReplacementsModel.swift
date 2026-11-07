@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// State behind the Replacements window: the saved rules, and the one being written.
@@ -26,6 +27,18 @@ final class ReplacementsModel: ObservableObject {
         self.rules = ReplacementRules.grouped(overrides)
         self.capture = capture
         self.persist = persist
+    }
+
+    /// Pick up rules changed elsewhere (the file edited by hand, another window).
+    func reload(overrides: [String: String]) {
+        rules = ReplacementRules.grouped(overrides)
+        if let editing, !rules.contains(editing) { self.editing = nil }
+    }
+
+    /// The model behind the Settings pane: the real rules file and the app's microphone.
+    static func forSettings() -> ReplacementsModel {
+        let capture = (NSApp?.delegate as? AppDelegate).map { ReplacementCapture(app: $0) }
+        return ReplacementsModel(overrides: [:], capture: capture) { try Config.saveOverrides($0) }
     }
 
     var canSave: Bool {

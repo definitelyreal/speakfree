@@ -35,53 +35,41 @@ struct EnginePickerView: View {
     private let requiredFreeBytes: Int64 = 1_500_000_000
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
-                GridRow(alignment: .firstTextBaseline) {
-                    Text("Engine")
-                        .frame(width: SettingsLayout.labelWidth, alignment: .leading)
-                        .gridColumnAlignment(.leading)
-                    Picker("Transcription engine", selection: $viewModel.engine) {
-                        ForEach(EngineCatalog.engines, id: \.id) { engine in
-                            Text(engine.displayName).tag(engine.id)
+        VStack(alignment: .leading, spacing: 0) {
+            SettingRow("Engine") {
+                Picker("Transcription engine", selection: $viewModel.engine) {
+                    ForEach(EngineCatalog.engines, id: \.id) { engine in
+                        Text(engine.displayName).tag(engine.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+            }
+
+            if viewModel.engine == "parakeet" {
+                SettingsRowDivider()
+                SettingRow("Parakeet model") {
+                    Picker("Parakeet model", selection: $viewModel.parakeetModel) {
+                        ForEach(EngineCatalog.parakeetModels, id: \.id) { model in
+                            // Un-downloaded models are greyed and labeled, so
+                            // picking one is a knowing "this will download"
+                            // choice (Michael 2026-08-19).
+                            let downloaded = ParakeetModelManager.shared.isModelDownloaded(model.id)
+                            Text(model.displayName
+                                 + (downloaded ? "" : " · Download needed"))
+                                .foregroundColor(downloaded ? .primary : .secondary)
+                                .tag(model.id)
                         }
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
-                    .controlSize(.regular)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .frame(minWidth: 360, maxWidth: .infinity, alignment: .leading)
+                    .fixedSize()
                 }
-
-                if viewModel.engine == "parakeet" {
-                    GridRow(alignment: .firstTextBaseline) {
-                        Text("Parakeet Model")
-                            .frame(width: SettingsLayout.labelWidth, alignment: .leading)
-                        VStack(alignment: .leading, spacing: 5) {
-                            Picker("Parakeet model", selection: $viewModel.parakeetModel) {
-                                ForEach(EngineCatalog.parakeetModels, id: \.id) { model in
-                                    // Un-downloaded models are greyed and labeled, so
-                                    // picking one is a knowing "this will download"
-                                    // choice (Michael 2026-08-19).
-                                    let downloaded = ParakeetModelManager.shared.isModelDownloaded(model.id)
-                                    Text(model.displayName
-                                         + (downloaded ? "" : " · Download needed"))
-                                        .foregroundColor(downloaded ? .primary : .secondary)
-                                        .tag(model.id)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
-                            .controlSize(.regular)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .frame(minWidth: 360, maxWidth: .infinity, alignment: .leading)
-
-                            parakeetDownloadBanner
-                        }
-                    }
-                }
+                parakeetDownloadBanner
+                    .padding(.horizontal, SettingsStyle.rowInset)
+                    .padding(.bottom, 11)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onChange(of: viewModel.engine) { _ in
             viewModel.save()

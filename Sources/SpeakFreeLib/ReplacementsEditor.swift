@@ -46,27 +46,21 @@ final class CaptureMeter: ObservableObject {
     }
 }
 
-/// The Replacements window: teach speakfree what to write when it hears a word wrong.
-struct ReplacementsView: View {
+/// The Replacements editor shown in Settings: record or type what a word is heard as,
+/// say what to write instead, and manage the saved rules.
+struct ReplacementsEditor: View {
     @ObservedObject var model: ReplacementsModel
-    let onDone: () -> Void
     @StateObject private var meter = CaptureMeter()
 
-    private let labelWidth: CGFloat = 76
+    private let labelWidth: CGFloat = 96
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Replacements").font(.title2.weight(.semibold))
-                Text("Teach speakfree a name, a term, or any word it keeps getting wrong.")
-                    .foregroundColor(.secondary)
-            }
-
             CaptureStrip(state: model.captureState, canRecord: model.canRecord,
                          heights: meter.heights, onToggle: model.toggleRecording)
 
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: SettingsLayout.controlSpacing) {
                     Text("Heard as").frame(width: labelWidth, alignment: .leading)
                     VStack(alignment: .leading, spacing: 8) {
                         if !model.triggers.isEmpty {
@@ -88,7 +82,7 @@ struct ReplacementsView: View {
                         }
                     }
                 }
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: SettingsLayout.controlSpacing) {
                     Text("Write").frame(width: labelWidth, alignment: .leading)
                     TextField("What it should write", text: $model.replacement)
                         .textFieldStyle(.roundedBorder)
@@ -99,37 +93,31 @@ struct ReplacementsView: View {
                         Button(model.editing == nil ? "Clear" : "Cancel") { model.startNew() }
                     }
                     Button(model.editing == nil ? "Add Replacement" : "Save Changes") { model.save() }
-                        .keyboardShortcut(.defaultAction)
                         .disabled(!canSubmit)
                 }
             }
-
-            Divider()
+            .padding(SettingsStyle.rowInset)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous).fill(SettingsStyle.panelFill))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(SettingsStyle.panelEdge, lineWidth: 1))
 
             if model.rules.isEmpty {
                 Text("Nothing saved yet. Your replacements will be listed here.")
                     .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(model.rules) { rule in
-                            SavedRuleRow(rule: rule, isEditing: model.editing == rule,
-                                         onEdit: { model.edit(rule) },
-                                         onDelete: { model.delete(rule) })
-                            Divider().opacity(0.5)
-                        }
+                VStack(spacing: 0) {
+                    Divider().opacity(0.5)
+                    ForEach(model.rules) { rule in
+                        SavedRuleRow(rule: rule, isEditing: model.editing == rule,
+                                     onEdit: { model.edit(rule) },
+                                     onDelete: { model.delete(rule) })
+                        Divider().opacity(0.5)
                     }
                 }
             }
-
-            HStack {
-                Spacer()
-                Button("Done") { onDone() }
-            }
         }
-        .padding(20)
-        .frame(width: 560, height: 600)
         .onChange(of: model.isListening) { listening in
             if listening {
                 meter.start { [weak model] in model?.level }
@@ -334,40 +322,5 @@ private struct FlowLayout: Layout {
             widest = max(widest, x - spacing)
         }
         return (origins, widest, y + rowHeight)
-    }
-}
-
-final class ReplacementsWindowController: NSWindowController, NSWindowDelegate {
-    private static var shared: ReplacementsWindowController?
-    private var model: ReplacementsModel?
-
-    static func show() {
-        if let existing = shared?.window {
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let controller = ReplacementsWindowController(window: nil)
-        let capture = (NSApp.delegate as? AppDelegate).map { ReplacementCapture(app: $0) }
-        let model = ReplacementsModel(overrides: Config.loadOverrides(), capture: capture) {
-            try Config.saveOverrides($0)
-        }
-        let view = ReplacementsView(model: model) { [weak controller] in controller?.close() }
-        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
-        window.title = "Replacements"
-        window.styleMask = [.titled, .closable]
-        window.isReleasedWhenClosed = false
-        window.delegate = controller
-        controller.window = window
-        controller.model = model
-        shared = controller
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        model?.close()
-        Self.shared = nil
     }
 }

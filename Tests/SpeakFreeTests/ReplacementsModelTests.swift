@@ -145,3 +145,42 @@ final class ReplacementsModelTests: XCTestCase {
         XCTAssertEqual(saved, ["kama": "Karma"])
     }
 }
+
+final class SettingsChromeTests: XCTestCase {
+    func testShortcutsAreDrawnAsModifierSymbolsThenTheKey() {
+        XCTAssertEqual(ShortcutSymbols.parts(keyCode: 49, modifiers: ["cmd", "option", "shift"]),
+                       ["\u{2325}", "\u{21E7}", "\u{2318}", "Space"])
+        XCTAssertEqual(ShortcutSymbols.parts(keyCode: 9, modifiers: ["ctrl"]), ["\u{2303}", "V"])
+        XCTAssertEqual(ShortcutSymbols.parts(keyCode: 49, modifiers: []), ["Space"])
+        // A modifier used alone as the dictation key names its side.
+        XCTAssertEqual(ShortcutSymbols.parts(keyCode: 63, modifiers: []), ["fn"])
+        XCTAssertEqual(ShortcutSymbols.parts(keyCode: 61, modifiers: []), ["Right \u{2325}"])
+    }
+
+    func testEveryPaneHasATitleAnIconAndASummary() {
+        XCTAssertEqual(SettingsTab.allCases.map(\.title),
+                       ["General", "Shortcuts", "Microphone", "Transcription", "Words", "Recordings", "Advanced"])
+        for tab in SettingsTab.allCases {
+            XCTAssertFalse(tab.symbol.isEmpty)
+            XCTAssertTrue(tab.summary.hasSuffix("."))
+        }
+    }
+
+    func testSettingsCanBeOpenedStraightToAPane() {
+        let navigation = SettingsNavigation()
+        XCTAssertEqual(navigation.tab, .general)
+        navigation.tab = .words
+        XCTAssertEqual(navigation.tab, .words)
+    }
+
+    func testTheReplacementsListReloadsFromDisk() {
+        let model = ReplacementsModel(overrides: [:], capture: nil) { _ in }
+        model.reload(overrides: ["kama": "Karma"])
+        XCTAssertEqual(model.rules.map(\.replacement), ["Karma"])
+        // A rule being written is not thrown away by a reload.
+        model.replacement = "wagwan"
+        model.reload(overrides: [:])
+        XCTAssertEqual(model.rules, [])
+        XCTAssertEqual(model.replacement, "wagwan")
+    }
+}

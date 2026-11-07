@@ -23,11 +23,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     var isReady = false
     public var lastTranscription: String?
     private var recordingOverlay = RecordingOverlay()
-    /// Opens the microphone when the dictation shortcut's first key goes down
-    /// (PrelistenMode.onShortcut).
-    private lazy var shortcutArming = ShortcutArming { [weak self] open in
-        self?.recorder.preBufferEnabled = open
-    }
     private let escapeCancelTap = EscapeCancelTap()
     private let pasteLastDictation = PasteLastDictation()
     private let recoverDiscardedDictation = PasteLastDictation(kind: .recoverDiscarded)
@@ -42,6 +37,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// True when nothing else is using the microphone or the transcriber.
     var canCaptureReplacement: Bool {
         !isPressed && postBufferTimer == nil && !replacementCaptureActive && transcriber != nil
+    }
+    /// Opens the microphone when the dictation shortcut's first key goes down
+    /// (PrelistenMode.onShortcut).
+    private lazy var shortcutArming = ShortcutArming { [weak self] open in
+        self?.recorder.preBufferEnabled = open
     }
     /// Cancelled after the key came up but before the take reached transcription.
     private var cancelUpcomingTake = false
@@ -1262,14 +1262,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    public func showSettings() {
+    public func showSettings() { showSettings(tab: nil) }
+
+    func showSettings(tab: SettingsTab?) {
         if settingsViewModel == nil {
             settingsViewModel = SettingsViewModel()
             settingsViewModel?.onSave = { [weak self] in
                 self?.reloadConfig()
             }
         }
-        SettingsWindowController.show(viewModel: settingsViewModel!)
+        SettingsWindowController.show(viewModel: settingsViewModel!, tab: tab)
     }
 
     /// Present the recordings notice. Main-only. A dismissal without a
