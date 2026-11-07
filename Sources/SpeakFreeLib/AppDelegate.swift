@@ -28,6 +28,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var shortcutArming = ShortcutArming { [weak self] open in
         self?.recorder.preBufferEnabled = open
     }
+    private let escapeCancelTap = EscapeCancelTap()
+    private let pasteLastDictation = PasteLastDictation()
+    /// Set by Escape after recording has stopped: the take still finishes transcribing,
+    /// but its text is dropped instead of inserted. Cleared when the next take starts.
+    private var discardInFlightDictation = false
     private var settingsViewModel: SettingsViewModel?
     private var localAPIServer: LocalAPIServer?
     private var recordingStyleMode: TextPostProcessor.StyleMode = .none
@@ -171,6 +176,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // anywhere (insert path, RecordingOverlay, menu focus queries) can stall us into a
         // beachball waiting on an unresponsive frontmost app (AX-A).
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
+
+        // Escape discards the current dictation; the tap only listens while the overlay is up.
+        escapeCancelTap.onEscape = { [weak self] in self?.handleEscapeCancel() }
+        recordingOverlay.onVisibilityChanged = { [weak self] visible in
+            self?.escapeCancelTap.setActive(visible)
+        }
+        pasteLastDictation.onTrigger = { [weak self] in self?.insertLastDictation() }
+        pasteLastDictation.apply(Config.load().pasteLastHotkey)
 
         statusBar = StatusBarController()
         recorder = AudioRecorder()
@@ -1081,6 +1094,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Reload hotkey, pre-buffer, and menu without changing the transcriber/model.
     private func reloadHotkeyAndSettings() {
+        pasteLastDictation.apply(config.pasteLastHotkey)
         // Routing must be settled before pre-buffer can start an absent engine.
         recorder.setPinnedInputDevice(uid: config.inputDeviceUID)
         applyPrelistenMode()
@@ -1581,8 +1595,50 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
+    /// The paste-last shortcut: insert the most recent dictation at the cursor again.
+    func insertLastDictation() {
+        guard !isPressed else { return }
+        guard let text = PasteLastDictation.textToPaste(last: lastTranscription) else {
+            recordingOverlay.show(state: .error("No dictation to paste yet"))
+            return
+        }
+        // Give the shortcut's own modifiers up to a second to come up before inserting.
+        var attemptsLeft = 40
+        func attempt() {
+            let flags = CGEventSource.flagsState(.combinedSessionState)
+            if PasteLastDictation.modifiersReleased(flags) || attemptsLeft == 0 {
+                DiagnosticLogger.shared.log("Paste last dictation: \(text.count) chars")
+                _ = inserter.insert(text: text)
+                return
+            }
+            attemptsLeft -= 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { attempt() }
+        }
+        attempt()
+    }
+
+    /// Escape while the overlay is up: abandon the recording, or drop the text of a take
+    /// that is already transcribing.
+    func handleEscapeCancel() {
+        switch EscapeCancelTap.action(isRecording: isPressed,
+                                      overlayVisible: recordingOverlay.isVisible) {
+        case .abortRecording:
+            DiagnosticLogger.shared.log("Escape: recording discarded")
+            handleRecordingAbort()
+        case .discardPendingText:
+            DiagnosticLogger.shared.log("Escape: pending dictation discarded")
+            discardInFlightDictation = true
+            statusBar.state = .idle
+            recordingOverlay.hide()
+            statusBar.buildMenu()
+        case .ignore:
+            break
+        }
+    }
+
     func handleRecordingStart() {
         guard !isPressed else { return }
+        discardInFlightDictation = false
         if let timer = postBufferTimer {
             // Capture is still running during the post-buffer. Continue this take without
             // creating another WAV/sentinel or replacing the original insertion context.
@@ -2079,7 +2135,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         let samples = gate.samples
 
         statusBar.state = .transcribing
-        recordingOverlay.update(state: .transcribing)
+        if !discardInFlightDictation {
+            recordingOverlay.update(state: .transcribing)
+        }
 
         // R1: consume the off-main focus capture. In the normal case it published while the
         // user was still speaking, so this returns immediately; only if the AX read is still
@@ -2350,6 +2408,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         element: AXUIElement?
     ) {
         recordingOverlay.hide()
+        if discardInFlightDictation {
+            discardInFlightDictation = false
+            statusBar.state = .idle
+            statusBar.buildMenu()
+            return
+        }
         if !text.isEmpty {
             let insertText = FinalizePipeline.composeInsertText(
                 text, prependSpace: prependSpace)

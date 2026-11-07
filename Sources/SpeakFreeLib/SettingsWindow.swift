@@ -397,6 +397,7 @@ struct SettingsView: View {
     /// Rendering fixtures never touch login items, mic routing, or the user's corpus.
     var isReview = false
     @State private var isRecordingHotkey = false
+    @State private var isRecordingPasteHotkey = false
     @State private var isHoveringGitHub = false
     @State private var pendingModelDownload: String? = nil
     @StateObject private var downloadManager = InlineDownloadManager()
@@ -711,6 +712,25 @@ struct SettingsView: View {
                             }
 
                             GridRow(alignment: .firstTextBaseline) {
+                                Text("Paste last")
+                                HStack(spacing: 8) {
+                                    if let shortcut = viewModel.pasteLastHotkey {
+                                        Text(KeyCodes.describe(keyCode: shortcut.keyCode,
+                                                               modifiers: shortcut.modifiers))
+                                        Button("Change\u{2026}") { isRecordingPasteHotkey = true }
+                                        Button("Clear") {
+                                            viewModel.pasteLastHotkey = nil
+                                            viewModel.save()
+                                        }
+                                    } else {
+                                        Text("No shortcut").foregroundColor(.secondary)
+                                        Button("Set Shortcut\u{2026}") { isRecordingPasteHotkey = true }
+                                    }
+                                }
+                                .help("Inserts your most recent dictation at the cursor without using the clipboard. Needs a key plus ⌘, ⌃ or ⌥.")
+                            }
+
+                            GridRow(alignment: .firstTextBaseline) {
                                 Text("Microphone")
                                 VStack(alignment: .leading, spacing: 2) {
                                     Picker("Microphone", selection: $micSelection) {
@@ -1022,6 +1042,21 @@ struct SettingsView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)
             } // end ScrollView
+
+            if isRecordingPasteHotkey {
+                KeyRecorderOverlay(
+                    onCapture: { keyCode, modifiers in
+                        // Keep listening through bare keys and lone modifiers: a paste
+                        // shortcut needs a key plus ⌘, ⌃ or ⌥.
+                        let candidate = HotkeyConfig(keyCode: keyCode, modifiers: modifiers)
+                        guard PasteLastDictation.isUsable(candidate) else { return }
+                        viewModel.pasteLastHotkey = candidate
+                        viewModel.save()
+                        isRecordingPasteHotkey = false
+                    },
+                    onCancel: { isRecordingPasteHotkey = false }
+                )
+            }
 
             if isRecordingHotkey {
                 KeyRecorderOverlay(

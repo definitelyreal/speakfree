@@ -147,6 +147,9 @@ class RecordingOverlay {
     private var window: NSWindow?
     private var animationTimer: Timer?
     private var contentView: OverlayContentView?
+    /// Fired with true when the overlay goes up and false when it comes down.
+    var onVisibilityChanged: ((Bool) -> Void)?
+    var isVisible: Bool { window != nil }
     private weak var recorder: AudioRecorder?
     private var isLingeringMessage = false
 
@@ -416,6 +419,7 @@ class RecordingOverlay {
         win.orderFrontRegardless()
         window = win
         contentView = view
+        onVisibilityChanged?(true)
 
         startAnimation()
 
@@ -606,6 +610,7 @@ class RecordingOverlay {
         // changed while the overlay was hidden).
         screenResolved = false
         cachedScreen = nil
+        onVisibilityChanged?(false)
         guard let win = window, let view = contentView else { return }
 
         // Immediately detach references so show() won't see a stale window

@@ -10,6 +10,7 @@ public class SettingsViewModel: ObservableObject {
 
     @Published public var hotkeyKeyCode: UInt16
     @Published public var hotkeyModifiers: [String]
+    @Published public var pasteLastHotkey: HotkeyConfig?
     /// Legacy Hold/Toggle boolean, kept for back-compat readers and the round-trip tests. The
     /// three-way `keyMode` below is the authoritative field the picker binds to; `toConfig` derives
     /// `toggleMode` from it for downgrade safety.
@@ -56,6 +57,7 @@ public class SettingsViewModel: ObservableObject {
 
         self.hotkeyKeyCode = c.hotkey.keyCode
         self.hotkeyModifiers = c.hotkey.modifiers
+        self.pasteLastHotkey = c.pasteLastHotkey
         self.toggleMode = c.toggleMode?.value ?? false
         self.keyMode = c.effectiveKeyMode
         self.modelSize = c.modelSize
@@ -94,6 +96,7 @@ public class SettingsViewModel: ObservableObject {
         self.baseConfig = c
         self.hotkeyKeyCode = c.hotkey.keyCode
         self.hotkeyModifiers = c.hotkey.modifiers
+        self.pasteLastHotkey = c.pasteLastHotkey
         self.toggleMode = c.toggleMode?.value ?? false
         self.keyMode = c.effectiveKeyMode
         self.modelSize = c.modelSize
@@ -129,6 +132,7 @@ public class SettingsViewModel: ObservableObject {
     public func toConfig() -> Config {
         var config = baseConfig
         config.hotkey = HotkeyConfig(keyCode: hotkeyKeyCode, modifiers: hotkeyModifiers)
+        config.pasteLastHotkey = pasteLastHotkey
         config.modelSize = modelSize
         config.language = language
         config.spokenPunctuation = punctuationMode
