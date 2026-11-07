@@ -1890,7 +1890,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // are NEVER worse than the old flat wait. The wait DECISION is the pure PostBufferPolicy
         // (unit-tested over RMS windows); this loop only feeds it the live trailing samples.
         let samplesAtRelease = recorder.currentSampleCount()
-        runAdaptivePostBuffer(samplesAtRelease: samplesAtRelease) { [weak self] in
+        // Settings > Microphone > When I stop. The room level is measured once, here, over at
+        // most the last 10 s before the press, so the 30 ms poll below stays as cheap as before.
+        let mode = config.effectiveStopDetection
+        let roomSamples = mode == .room ? recorder.samples(after: samplesAtRelease - 10 * 16_000) : []
+        guard let levels = PostBufferPolicy.stopLevels(for: mode, quietLevel: config.effectiveStopQuietLevel,
+                                                       recordedSoFar: roomSamples) else {
+            finalizeRecording(keyReleaseTime: keyReleaseTime)
+            return
+        }
+        runAdaptivePostBuffer(samplesAtRelease: samplesAtRelease, levels: levels) { [weak self] in
             self?.finalizeRecording(keyReleaseTime: keyReleaseTime)
         }
     }
@@ -1900,7 +1909,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     /// `finalize` on the main queue. `samplesAtRelease` marks the sample count at key-release so
     /// only audio captured AFTER the key lifted is scored as "trailing". The decision is the pure
     /// policy; this only feeds it the live trailing samples.
-    private func runAdaptivePostBuffer(samplesAtRelease: Int, finalize: @escaping () -> Void) {
+    private func runAdaptivePostBuffer(samplesAtRelease: Int, levels: PostBufferPolicy.StopLevels,
+                                       finalize: @escaping () -> Void) {
         let windowMs = postBufferWindowMs
         // Hard deadline = the EXTENDED cap (2026-07-25): the policy's decided wait stays ≤220ms
         // for quiet releases and only exceeds it when trailing speech energy shows the speaker
@@ -1928,7 +1938,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             // R3: copy only the trailing slice, not the full (growing) sample array each tick.
             let trailing = self.recorder.samples(after: samplesAtRelease)
             // Ask the pure policy how long it wants given the trailing audio seen so far.
-            let decided = PostBufferPolicy.decideWaitMs(trailingSamples: trailing, windowMs: windowMs)
+            let decided = PostBufferPolicy.decideWaitMs(trailingSamples: trailing, windowMs: windowMs,
+                                                        levels: levels)
 
             // Stop once the decided wait has elapsed, or the monotonic cap deadline is reached.
             if PostBufferPolicy.postBufferShouldFinalize(elapsedMs: elapsedMs, decidedMs: decided, capMs: capMs) {

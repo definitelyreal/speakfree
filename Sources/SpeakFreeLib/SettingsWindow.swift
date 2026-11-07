@@ -923,6 +923,10 @@ struct SettingsView: View {
                 GroupBox("Performance") {
                     VStack(alignment: .leading, spacing: 14) {
                         preBufferRow
+                        stopDetectionRow
+                        if viewModel.stopDetection == .fixed {
+                            stopQuietLevelRow
+                        }
 
                         if viewModel.engine == "whisper" {
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
@@ -1085,6 +1089,7 @@ struct SettingsView: View {
         .onChange(of: viewModel.punctuationMode) { _ in viewModel.save() }
         .onChange(of: viewModel.maxRecordings) { _ in viewModel.save() }
         .onChange(of: viewModel.prelistenMode) { _ in viewModel.save() }
+        .onChange(of: viewModel.stopDetection) { _ in viewModel.save() }
         .onChange(of: viewModel.keepModelLoaded) { _ in viewModel.save() }
         .onChange(of: viewModel.streamingEnabled) { _ in viewModel.save() }
     }
@@ -1290,6 +1295,59 @@ struct SettingsView: View {
             .labelsHidden()
             .fixedSize()
             Text(prelistenHelp)
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: - When I Stop Row
+
+    private var stopDetectionRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("When I stop").frame(width: labelWidth, alignment: .leading)
+            VStack(alignment: .leading, spacing: 4) {
+            Picker("When I stop", selection: $viewModel.stopDetection) {
+                Text("Stop instantly").tag(StopDetection.instant)
+                Text("After a quiet moment").tag(StopDetection.fixed)
+                Text("After a quiet moment, matched to the room").tag(StopDetection.room)
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            Text(stopDetectionHelp)
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var stopDetectionHelp: String {
+        switch viewModel.stopDetection {
+        case .instant:
+            return "Ends the recording the moment you press stop. Fastest, but a word you are still finishing can lose its last sound."
+        case .fixed:
+            return "Keeps listening until a short quiet moment, so your last word is not cut off. In a noisy room it can wait up to 1.2 seconds; raise the quiet level below, or match the room."
+        case .room:
+            return "Keeps listening until a short quiet moment, judged against the background noise of each recording. A quiet room behaves as before; a noisy one no longer holds every dictation open."
+        }
+    }
+
+    private var stopQuietLevelRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("Quiet level").frame(width: labelWidth, alignment: .leading)
+            VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text("Quiet room").font(.callout).foregroundColor(.secondary)
+                Slider(value: $viewModel.stopQuietLevel, in: PostBufferPolicy.quietLevelRange) { editing in
+                    if !editing { viewModel.save() }
+                }
+                .frame(width: 160)
+                Text("Noisy room").font(.callout).foregroundColor(.secondary)
+            }
+            Text("How quiet counts as finished. Move it towards Noisy room if dictations wait before pasting.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
