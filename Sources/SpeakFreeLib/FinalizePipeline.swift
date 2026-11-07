@@ -105,6 +105,16 @@ public enum FinalizePipeline {
         prependSpace ? " " + text : text
     }
 
+    /// Where a finished dictation goes. In the app it started in, it returns to the
+    /// original cursor with the spacing worked out there. If the user has moved to another
+    /// app, it goes wherever their cursor is now, and the old spacing no longer applies.
+    public static func insertionPlan(
+        startedIn: String?, finishingIn: String?, prependSpace: Bool
+    ) -> (returnsToOriginalElement: Bool, prependSpace: Bool) {
+        let sameApp = startedIn != nil && startedIn == finishingIn
+        return (sameApp, sameApp && prependSpace)
+    }
+
     /// Cursor-context fallback for AX-opaque editors (2026-07-15). Electron apps
     /// (VS Code) expose no AXValue, so the mid-sentence-lowercase and prepend-space
     /// features silently died there. When AX yields nothing but the user is still in

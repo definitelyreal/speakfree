@@ -152,7 +152,7 @@ public struct Config: Codable {
         language: "en",
         spokenPunctuation: .hybrid,
         maxRecordings: nil,
-        toggleMode: FlexBool(false),
+        toggleMode: FlexBool(true),
         engine: Config.defaultEngine,
         parakeetModel: Config.defaultParakeetModel
     )

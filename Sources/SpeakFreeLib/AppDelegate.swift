@@ -41,6 +41,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancelUpcomingTake = false
     /// The recover shortcut was pressed while the cancelled take was still transcribing.
     private var recoverDiscardedWhenReady = false
+    /// The app that was frontmost when the current dictation started.
+    private var dictationStartBundleID: String?
     private var settingsViewModel: SettingsViewModel?
     private var localAPIServer: LocalAPIServer?
     private var recordingStyleMode: TextPostProcessor.StyleMode = .none
@@ -194,6 +196,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         pasteLastDictation.apply(Config.load().pasteLastHotkey)
         recoverDiscardedDictation.onTrigger = { [weak self] in self?.insertDiscardedDictation() }
         recoverDiscardedDictation.apply(Config.load().recoverDiscardedHotkey)
+        recordingOverlay.onPillAction = { [weak self] action in
+            switch action {
+            case .finish: self?.handleRecordingStop()
+            case .cancel: self?.handleEscapeCancel()
+            }
+        }
 
         statusBar = StatusBarController()
         recorder = AudioRecorder()
@@ -1717,6 +1725,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // (tune-corpus) correlates dictations with where the text landed.
         let frontApp = NSWorkspace.shared.frontmostApplication
         let frontBundleID = frontApp?.bundleIdentifier
+        dictationStartBundleID = frontBundleID
         let avoidLiveWindowContext = TextInserter.shouldAvoidLiveWindowContext(
             bundleID: frontBundleID, bundleURL: frontApp?.bundleURL)
         recordingTargetBundleID = frontBundleID
@@ -1760,7 +1769,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusBar.state = .recording
-        recordingOverlay.style = min(5, max(1, config.overlayStyle ?? 5))
+        recordingOverlay.style = TargetAppPill.resolvedStyle(configured: config.overlayStyle)
         recordingOverlay.show(state: .recording, recorder: recorder)
         let overlayFinishedAt = CFAbsoluteTimeGetCurrent()
         startRecordingWatchdog()
@@ -2524,6 +2533,16 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         recordingOverlay.hide()
+        let plan = FinalizePipeline.insertionPlan(
+            startedIn: dictationStartBundleID,
+            finishingIn: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            prependSpace: prependSpace)
+        let prependSpace = plan.prependSpace
+        let element = plan.returnsToOriginalElement ? element : nil
+        let contextBefore = plan.returnsToOriginalElement ? contextBefore : nil
+        if !plan.returnsToOriginalElement {
+            DiagnosticLogger.shared.log("Finalize: frontmost app changed during the take; inserting at the current cursor")
+        }
         if !text.isEmpty {
             let insertText = FinalizePipeline.composeInsertText(
                 text, prependSpace: prependSpace)

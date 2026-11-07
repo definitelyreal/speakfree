@@ -550,18 +550,20 @@ class StatusBarController: NSObject, NSMenuDelegate {
         delegate.reloadConfig()
     }
 
+    /// Recording and processing are shown by the on-screen overlay, so the menu bar icon
+    /// neither animates nor recolours for them: it stays exactly as it is when idle.
+    static func keepsIdleIcon(for state: State) -> Bool {
+        state == .idle || state == .recording || state == .transcribing
+    }
+
     private func updateIcon() {
         stopAnimation()
 
         switch state {
-        case .idle:
+        case .idle, .recording, .transcribing:
             setIcon(StatusBarController.drawLogo(active: false))
         case .ready:
             setIcon(StatusBarController.drawGreenLogo())
-        case .recording:
-            startRecordingAnimation()
-        case .transcribing:
-            startTranscribingAnimation()
         case .downloading:
             startDownloadingAnimation()
         case .waitingForPermission:

@@ -147,14 +147,19 @@ class RecordingOverlay {
     private var window: NSWindow?
     private var animationTimer: Timer?
     private var contentView: OverlayContentView?
-    /// Fired with true when the overlay goes up and false when it comes down.
+    /// Set instead of `contentView` when the target-app pill style is showing.
+    private var pillView: TargetAppPillView?
+    /// Fired with true when an overlay goes up and false when it comes down.
     var onVisibilityChanged: ((Bool) -> Void)?
     var isVisible: Bool { window != nil }
+    private var frontAppObserver: NSObjectProtocol?
+    /// A hover control on the pill was clicked.
+    var onPillAction: ((TargetAppPill.HoverAction) -> Void)?
     private weak var recorder: AudioRecorder?
     private var isLingeringMessage = false
 
-    /// Visual variant for the prominent banner (config overlayStyle 1-5).
-    var style: Int = 1
+    /// Visual variant: 1-5 are the banner variants, `TargetAppPill.style` the pill.
+    var style: Int = TargetAppPill.style
 
     /// Diagnostic-only: `SPEAKFREE_OVERLAY_LEVELS=1` prints the recalibrated mic
     /// levels each tick so the trigger can be re-verified on a live mic. Off by
@@ -236,6 +241,12 @@ class RecordingOverlay {
                 let resolved = screens[idx]
                 if resolved !== self.cachedScreen {
                     self.cachedScreen = resolved
+                    if self.pillView != nil {
+                        win.setFrame(TargetAppPill.windowFrame(screenFrame: resolved.frame,
+                                                               visibleFrame: resolved.visibleFrame),
+                                     display: true)
+                        return
+                    }
                     let size = win.frame.size
                     win.setFrame(NSRect(x: resolved.frame.midX - size.width / 2,
                                         y: resolved.frame.midY - size.height / 2,
@@ -342,6 +353,9 @@ class RecordingOverlay {
         window?.orderOut(nil)
         window = nil
         contentView = nil
+        pillView?.stopAnimating()
+        pillView = nil
+        stopFollowingFrontApp()
         self.recorder = recorder
 
         // Instant screen pick (no AX IPC on the show path); precise resolution
@@ -354,6 +368,10 @@ class RecordingOverlay {
             bundleID: frontApp?.bundleIdentifier, bundleURL: frontApp?.bundleURL)
         if !avoidsLiveWindowContext {
             refineScreenAsync(for: showGeneration)
+        }
+        if TargetAppPill.usesPill(style: style) {
+            showPill(state: state, screen: screen, target: frontApp, autoHideError: autoHideError)
+            return
         }
 
         // Record-start and errors open as a LARGE CENTER-SCREEN banner (Michael
@@ -469,7 +487,102 @@ class RecordingOverlay {
         // for the whole recording; the movement was distracting.)
     }
 
+    /// The target-app pill: appears at once at the bottom of the screen, in its final
+    /// shape, naming the app the text will be inserted into.
+    private func showPill(state: OverlayState, screen: NSScreen, target: NSRunningApplication?,
+                          autoHideError: Bool) {
+        let frame = TargetAppPill.windowFrame(screenFrame: screen.frame,
+                                              visibleFrame: screen.visibleFrame)
+        // A non-activating panel: the pill takes clicks on its hover controls without
+        // pulling focus away from the app being dictated into.
+        let win = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
+                          backing: .buffered, defer: false)
+        win.level = .floating
+        win.isOpaque = false
+        win.backgroundColor = .clear
+        // The view draws its own shadow and glow inside the window's transparent margin.
+        win.hasShadow = false
+        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+
+        let view = TargetAppPillView(frame: NSRect(origin: .zero, size: frame.size))
+        view.overlayState = state
+        view.appName = target?.localizedName
+        view.appIcon = target?.icon
+        view.onHoverAction = { [weak self] action in self?.onPillAction?(action) }
+        // Frosted glass: blur whatever is behind the pill, then let the view tint it dark.
+        let container = NSView(frame: view.frame)
+        let glass = NSVisualEffectView(
+            frame: view.bounds.insetBy(dx: TargetAppPill.glowMargin, dy: TargetAppPill.glowMargin))
+        glass.material = .hudWindow
+        glass.blendingMode = .behindWindow
+        glass.state = .active
+        glass.appearance = NSAppearance(named: .darkAqua)
+        glass.maskImage = Self.roundedMask(radius: TargetAppPill.cornerRadius)
+        container.addSubview(glass)
+        container.addSubview(view)
+        view.bodyAlpha = 0.28
+        win.contentView = container
+        win.alphaValue = 0
+        win.orderFrontRegardless()
+        window = win
+        pillView = view
+        onVisibilityChanged?(true)
+
+        view.levelSource = { [weak self] in self?.recorder.map { CGFloat($0.currentRMS) } }
+        view.startAnimating()
+        stopFollowingFrontApp()
+        frontAppObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let pill = self?.pillView,
+                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  TargetAppPill.adoptsTarget(bundleID: app.bundleIdentifier,
+                                             ownBundleID: Bundle.main.bundleIdentifier) else { return }
+            pill.appName = app.localizedName
+            pill.appIcon = app.icon
+            pill.needsDisplay = true
+        }
+
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.08
+            win.animator().alphaValue = 1.0
+        }
+
+        if case .error = state, autoHideError {
+            let generation = showGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                guard let self = self, self.showGeneration == generation else { return }
+                if case .error = self.pillView?.overlayState { self.hide() }
+            }
+        }
+    }
+
+    private func stopFollowingFrontApp() {
+        if let frontAppObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(frontAppObserver)
+        }
+        frontAppObserver = nil
+    }
+
+    /// A stretchable rounded-rectangle mask for the pill's blur view.
+    private static func roundedMask(radius: CGFloat) -> NSImage {
+        let edge = radius * 2 + 1
+        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
+    }
+
     func update(state: OverlayState) {
+        if let pill = pillView {
+            pill.overlayState = state
+            pill.needsDisplay = true
+            return
+        }
         guard let view = contentView, let win = window, let screen = resolvedTargetScreen() else {
             show(state: state)
             return
@@ -500,6 +613,11 @@ class RecordingOverlay {
     /// Update the overlay with streaming transcription text.
     /// Called from the main thread during recording as partial results arrive.
     func updateStreamingText(_ text: String) {
+        if let pill = pillView {
+            pill.message = text
+            pill.needsDisplay = true
+            return
+        }
         guard let view = contentView, let win = window, let screen = resolvedTargetScreen() else { return }
 
         // DEFECT 2 (2026-08-12): streaming updates must NEVER resize/reposition the
@@ -548,6 +666,19 @@ class RecordingOverlay {
 
     func lingerWithMessageThenHide(_ message: String, duration: TimeInterval = 2.5) {
         updateStreamingText(message)
+        if let pill = pillView {
+            isLingeringMessage = true
+            pill.isLingering = true
+            pill.needsDisplay = true
+            let generation = showGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+                guard let self = self, self.showGeneration == generation,
+                      self.isLingeringMessage else { return }
+                self.isLingeringMessage = false
+                self.hide()
+            }
+            return
+        }
         guard let view = contentView else { return }
         isLingeringMessage = true
         view.showsTranscribingSpinner = false
@@ -563,6 +694,8 @@ class RecordingOverlay {
 
     /// Clear streaming text (called when recording stops).
     func clearStreamingText() {
+        pillView?.message = ""
+        pillView?.needsDisplay = true
         contentView?.streamingText = ""
         contentView?.needsDisplay = true
     }
@@ -611,6 +744,21 @@ class RecordingOverlay {
         screenResolved = false
         cachedScreen = nil
         onVisibilityChanged?(false)
+        if let pill = pillView, let win = window {
+            stopFollowingFrontApp()
+            window = nil
+            pillView = nil
+            recorder = nil
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.1
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                win.animator().alphaValue = 0
+            }, completionHandler: {
+                pill.stopAnimating()
+                win.orderOut(nil)
+            })
+            return
+        }
         guard let win = window, let view = contentView else { return }
 
         // Immediately detach references so show() won't see a stale window
