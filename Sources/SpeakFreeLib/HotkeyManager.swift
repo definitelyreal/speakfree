@@ -8,6 +8,11 @@ class HotkeyManager {
     private var runLoopSource: CFRunLoopSource?
     private var eventTapRunLoop: CFRunLoop?
     private var globalMonitor: Any?
+    /// The dictation key as a combination registered with macOS (see RegisteredHotKey).
+    private let registeredHotKey = RegisteredHotKey(id: 3)
+    /// True when macOS refused the dictation combination and the keyboard monitor is
+    /// standing in for it. Read by Settings to explain the weaker behaviour.
+    private(set) static var registrationRefused = false
     private var keyDownMonitor: Any?
     private var interactionMonitor: Any?
     private let keyCode: UInt16
@@ -47,9 +52,42 @@ class HotkeyManager {
 
         // For modifier-only keys (like Fn), use a CGEventTap so we can suppress
         // the default system action (e.g. the emoji drawer that Fn normally opens).
-        if isModifierOnlyKey(keyCode) {
+        Self.registrationRefused = false
+        switch Self.listening(keyCode: keyCode, modifiers: requiredModifiers) {
+        case .modifierTap:
             startEventTap()
-        } else {
+        case .registered:
+            startRegisteredHotKey()
+        case .keyboardMonitor:
+            startGlobalMonitor()
+        }
+    }
+
+    enum Listening: Equatable { case modifierTap, registered, keyboardMonitor }
+
+    /// How the dictation key is heard. A combination is registered with macOS, which keeps
+    /// working under Secure Input and never shows the app any other typing. The keyboard
+    /// monitor is left for keys that must not be registered (a plain character key).
+    static func listening(keyCode: UInt16, modifiers: UInt64) -> Listening {
+        if [54, 55, 56, 58, 59, 60, 61, 62, 63].contains(keyCode) { return .modifierTap }
+        return RegisteredHotKey.combination(keyCode: keyCode, modifierFlags: modifiers) != nil
+            ? .registered : .keyboardMonitor
+    }
+
+    private func startRegisteredHotKey() {
+        guard let combination = RegisteredHotKey.combination(keyCode: keyCode,
+                                                             modifierFlags: requiredModifiers) else {
+            startGlobalMonitor()
+            return
+        }
+        let registered = registeredHotKey.register(
+            combination,
+            onPressed: { [weak self] in self?.onKeyDown?() },
+            onReleased: { [weak self] in self?.onKeyUp?() })
+        if !registered {
+            // Another app owns the combination. Fall back to watching for it, which works
+            // except while Secure Input is on.
+            Self.registrationRefused = true
             startGlobalMonitor()
         }
     }
@@ -74,6 +112,7 @@ class HotkeyManager {
         }
         stopLifecycleObservers()
         tearDownEventTap()
+        registeredHotKey.unregister()
         if let monitor = globalMonitor {
             NSEvent.removeMonitor(monitor)
             globalMonitor = nil

@@ -150,4 +150,8 @@ final class KeyModeTests: XCTestCase {
         XCTAssertEqual(reloaded.effectiveKeyMode, .edit)
         XCTAssertEqual(reloaded.keyMode, .edit)
     }
+
+    func testNewInstallsDefaultToToggle() {
+        XCTAssertEqual(Config.defaultConfig.effectiveKeyMode, .toggle)
+    }
 }

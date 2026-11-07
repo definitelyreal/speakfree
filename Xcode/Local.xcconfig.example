@@ -1,0 +1,13 @@
+// Copy to Local.xcconfig (git-ignored) and edit. Everything here is optional.
+
+// Sign with your own team, so macOS keeps Microphone and Accessibility grants
+// between builds. Ad-hoc builds are re-asked after every rebuild.
+// CODE_SIGN_STYLE = Automatic
+// CODE_SIGN_IDENTITY = Apple Development
+// DEVELOPMENT_TEAM = ABCDE12345
+// Needed for notarization (Product > Archive > Distribute App > Direct Distribution).
+// ENABLE_HARDENED_RUNTIME = YES
+
+// Use your own bundle ID, so your build does not share permissions, settings or
+// the login item with an installed copy of the published app.
+// SPEAKFREE_BUNDLE_ID = com.example.speakfree

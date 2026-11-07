@@ -134,9 +134,9 @@ final class ConfigTests: XCTestCase {
         XCTAssertNil(config.toggleMode)
     }
 
-    func testConfigDefaultToggleModeIsFalse() {
+    func testConfigDefaultToggleModeIsTrue() {
         let config = Config.defaultConfig
-        XCTAssertEqual(config.toggleMode?.value, false)
+        XCTAssertEqual(config.toggleMode?.value, true)
     }
 
     // MARK: - HotkeyConfig modifier flags

@@ -389,7 +389,7 @@ public enum HelpContent {
                     + "nothing at all, even when you say exactly that word, because rewriting real "
                     + "words corrupts ordinary sentences (\"I will send it\" turning into \"I Will "
                     + "send it\" is why the guard exists). If you genuinely need a real word "
-                    + "respelled, the separate overrides file is the deliberate way to force it."),
+                    + "respelled, a replacement (Settings, Manage Replacements) is the deliberate way to force it."),
             .spacer,
             .paragraph("Edit it under Settings → Vocabulary & Context, or open it directly:"),
             .action("Open Vocabulary File", .openVocabularyFile),
