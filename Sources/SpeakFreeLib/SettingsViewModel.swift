@@ -21,6 +21,9 @@ public class SettingsViewModel: ObservableObject {
     @Published public var maxRecordings: Int
     @Published public var screenContext: Bool
     @Published public var preBuffer: Bool
+    @Published public var prelistenMode: PrelistenMode
+    @Published public var stopDetection: StopDetection
+    @Published public var stopQuietLevel: Float
     @Published public var keepModelLoaded: String
     @Published public var diagnosticLogging: Bool
     @Published public var streamingEnabled: Bool
@@ -61,6 +64,9 @@ public class SettingsViewModel: ObservableObject {
         self.maxRecordings = c.preserveAllRecordings?.value == true ? 0 : (c.maxRecordings ?? 0)
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
+        self.prelistenMode = c.effectivePrelistenMode
+        self.stopDetection = c.effectiveStopDetection
+        self.stopQuietLevel = c.effectiveStopQuietLevel
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
@@ -96,6 +102,9 @@ public class SettingsViewModel: ObservableObject {
         self.maxRecordings = c.preserveAllRecordings?.value == true ? 0 : (c.maxRecordings ?? 0)
         self.screenContext = c.screenContext?.value ?? false
         self.preBuffer = c.preBuffer?.value ?? true
+        self.prelistenMode = c.effectivePrelistenMode
+        self.stopDetection = c.effectiveStopDetection
+        self.stopQuietLevel = c.effectiveStopQuietLevel
         self.keepModelLoaded = c.keepModelLoaded ?? "auto"
         let isBeta = Bundle.main.bundleIdentifier?.hasSuffix(".beta") == true
         self.diagnosticLogging = c.diagnosticLogging?.value ?? isBeta
@@ -137,7 +146,15 @@ public class SettingsViewModel: ObservableObject {
         config.keyMode = keyMode
         config.toggleMode = FlexBool(keyMode == .toggle)
         config.screenContext = FlexBool(screenContext)
-        config.preBuffer = FlexBool(preBuffer)
+        config.preBuffer = FlexBool(prelistenMode == .always)
+        // Leave the key out until the user picks the mode the old switch cannot express.
+        config.preBufferMode = (prelistenMode == .onShortcut || config.preBufferMode != nil)
+            ? prelistenMode.rawValue : nil
+        // Same rule: absent until the user picks something other than today's behaviour.
+        config.stopDetection = (stopDetection != .fixed || config.stopDetection != nil)
+            ? stopDetection.rawValue : nil
+        config.stopQuietLevel = (stopQuietLevel != PostBufferPolicy.defaultSilenceThreshold
+                                 || config.stopQuietLevel != nil) ? Double(stopQuietLevel) : nil
         config.keepModelLoaded = keepModelLoaded
         config.diagnosticLogging = FlexBool(diagnosticLogging)
         config.streamingEnabled = FlexBool(streamingEnabled)

@@ -34,6 +34,27 @@ public struct Config: Codable {
     // maxRecordings cap.
     public var preserveAllRecordings: FlexBool?
     public var preBuffer: FlexBool?  // nil = default (on)
+    // When the microphone opens ahead of a dictation: "always", "shortcut" or "off".
+    // nil = follow `preBuffer`. Written alongside it so older builds still read a sensible value.
+    public var preBufferMode: String?
+
+    public var effectivePrelistenMode: PrelistenMode {
+        if let raw = preBufferMode, let mode = PrelistenMode(rawValue: raw) { return mode }
+        return (preBuffer?.value ?? true) ? .always : .off
+    }
+    // How a dictation ends after the stop press: "instant", "fixed" or "room". nil = "fixed".
+    public var stopDetection: String?
+    // The quiet level for "fixed". nil = PostBufferPolicy.defaultSilenceThreshold.
+    public var stopQuietLevel: Double?
+
+    public var effectiveStopDetection: StopDetection {
+        stopDetection.flatMap(StopDetection.init(rawValue:)) ?? .fixed
+    }
+    public var effectiveStopQuietLevel: Float {
+        let range = PostBufferPolicy.quietLevelRange
+        let level = stopQuietLevel.map(Float.init) ?? PostBufferPolicy.defaultSilenceThreshold
+        return min(max(level, range.lowerBound), range.upperBound)
+    }
     public var keepModelLoaded: String?  // "auto", "always", "off" — nil = "auto"
     public var diagnosticLogging: FlexBool?  // nil = default (off for production, on for beta)
     public var streamingEnabled: FlexBool?  // nil = default (true) — show live preview while recording

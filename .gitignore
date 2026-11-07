@@ -7,6 +7,10 @@ ios/.packages/
 build/
 *.log
 *.xcodeproj
+# The Mac app's Xcode project is committed; per-user state and settings are not.
+!/speakfree.xcodeproj
+xcuserdata/
+/Xcode/Local.xcconfig
 *.app
 .DS_Store
 .beads
